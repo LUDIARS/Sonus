@@ -37,6 +37,9 @@ else()
 endif()
 
 function(snd_apply_options target)
+  # Determinism (design.md 2.5): no implicit FMA contraction by the compiler.
+  # Explicit FMA intrinsics (snd/platform/simd.hpp AVX2+FMA / NEON) are unaffected.
+  target_compile_options(${target} PRIVATE -ffp-contract=off)
   target_compile_options(${target} PRIVATE
     $<$<COMPILE_LANGUAGE:C>:${SND_C_WARNINGS}>
     $<$<COMPILE_LANGUAGE:CXX>:${SND_CXX_WARNINGS}>
