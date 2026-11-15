@@ -11,3 +11,10 @@ snd_add_test(integration_build_pipeline_test
   LINK sonus_buildtool sonus_bank sonus_codec sonus_dsp sonus_io sonus_jobs sonus_platform sonus_base sonus_mocks)
 target_include_directories(integration_build_pipeline_test PRIVATE ${PROJECT_SOURCE_DIR}/buildtool/test)
 target_compile_definitions(integration_build_pipeline_test PRIVATE SND_SPEC_DIR="${PROJECT_SOURCE_DIR}/spec")
+
+# Stage 1.5: end to end (buildtool -> memory FS -> IoScheduler -> BankManager ->
+# codec -> dsp resampler -> bus effects), golden + analytic checks.
+snd_add_test(integration_end_to_end_test
+  SOURCES end_to_end_test.cpp
+  LINK sonus_buildtool sonus_bank sonus_codec sonus_dsp sonus_io sonus_jobs sonus_platform sonus_base sonus_mocks)
+target_include_directories(integration_end_to_end_test PRIVATE ${PROJECT_SOURCE_DIR}/buildtool/test)
