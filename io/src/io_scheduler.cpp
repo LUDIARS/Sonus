@@ -29,6 +29,7 @@ struct Node {
   std::uint32_t cprev = kNil, cnext = kNil;  // channel order list (stream nodes)
   std::uint32_t file = kNil;                 // file table entry, kNil = unresolved (fails)
   std::uint64_t enqueueNs = 0;
+  std::uint64_t seq = 0;  // acceptance order (aging tie-break)
   std::uint64_t token = 0;
   // stream
   std::uint32_t slot = 0, epoch = 0, tag = 0, chunk = kInvalidChunk, bytes = 0, resultBytes = 0;
@@ -131,6 +132,7 @@ struct IoScheduler::Impl {
   bool windowInit = false;
   bool windowWaited = false;
   std::uint64_t nextToken = 0;
+  std::uint64_t nextSeq = 0;
 
   // --- statistics -----------------------------------------------------------------
   Counter readsIssued, bytesIssued, readsCompleted, bytesCompleted, readErrors, openFailures;
@@ -302,6 +304,7 @@ struct IoScheduler::Impl {
       n.kind = NodeKind::Stream;
       n.cls = ClassOfPriority(q.req.priority);
       n.enqueueNs = now;
+      n.seq = ++nextSeq;
       n.slot = q.req.streamSlot;
       n.epoch = q.epoch;
       n.tag = q.req.chunkIndex;
@@ -342,6 +345,7 @@ struct IoScheduler::Impl {
       n.kind = NodeKind::File;
       n.cls = req->ioClass < IoClass::Count ? req->ioClass : IoClass::Bank;
       n.enqueueNs = now;
+      n.seq = ++nextSeq;
       n.req = req;
       n.file = file;
       PushBack(idx);
@@ -588,22 +592,56 @@ struct IoScheduler::Impl {
     }
   }
 
+  // A node can be issued now: file requests always; stream requests if they
+  // already own a chunk or the pool may still have one (streamsBlocked = an
+  // Acquire failed during this IssueLoop).
+  bool Eligible(const Node& n, bool streamsBlocked) const noexcept {
+    return n.kind != NodeKind::Stream || n.chunk != kInvalidChunk || !streamsBlocked;
+  }
+  bool Aged(const Node& n, std::uint64_t now) const noexcept {
+    return n.enqueueNs <= now && now - n.enqueueNs >= cfg.agingNs;
+  }
+  // Selection (6.1):
+  //  1. among ELIGIBLE nodes that waited agingNs: the longest waiting; ties:
+  //     better class rank, then acceptance order (seq);
+  //  2. otherwise the first eligible node of the best-ranked class that has one.
+  // Every pending node is looked at, not only the class heads. The previous
+  // version only looked at heads and skipped a whole class when its head had
+  // no chunk and the pool was empty, so requests that DID own a chunk (caller
+  // chunks, or a chunk kept after a refused ReadAsync) behind such a head were
+  // never issued; when they held the last free chunks nothing ever completed
+  // (IoDefect.QueuedCallerChunksBehindChunklessHeadDeadlock). Now an eligible
+  // node is found wherever it is, so: whenever at least one pending request
+  // can be issued, Select returns one (progress). Delivery order inside a
+  // channel is unaffected (the channel list, Deliver()).
   std::uint32_t Select(std::uint64_t now, bool streamsBlocked, bool* aged) const noexcept {
     std::uint32_t best = kNil;
     std::uint32_t bestRank = 0;
     std::uint32_t oldest = kNil;
     for (std::uint32_t c = 0; c < kIoClassCount; ++c) {
-      const std::uint32_t i = head[c];
-      if (i == kNil) continue;
-      const Node& n = nodes[i];
-      if (streamsBlocked && n.kind == NodeKind::Stream && n.chunk == kInvalidChunk) continue;
-      if (now - n.enqueueNs >= cfg.agingNs && n.enqueueNs <= now) {
-        if (oldest == kNil || n.enqueueNs < nodes[oldest].enqueueNs) oldest = i;
-      }
       const std::uint32_t rank = cfg.classRank[c];
-      if (best == kNil || rank < bestRank) {
-        best = i;
-        bestRank = rank;
+      bool firstTaken = false;
+      for (std::uint32_t i = head[c]; i != kNil; i = nodes[i].next) {
+        const Node& n = nodes[i];
+        if (!Eligible(n, streamsBlocked)) continue;
+        if (!firstTaken) {
+          firstTaken = true;
+          if (best == kNil || rank < bestRank) {
+            best = i;
+            bestRank = rank;
+          }
+        }
+        if (Aged(n, now)) {
+          if (oldest == kNil) {
+            oldest = i;
+          } else {
+            const Node& o = nodes[oldest];
+            const std::uint32_t orank = cfg.classRank[static_cast<std::uint32_t>(o.cls)];
+            if (n.enqueueNs < o.enqueueNs || (n.enqueueNs == o.enqueueNs && (rank < orank || (rank == orank && n.seq < o.seq)))) {
+              oldest = i;
+            }
+          }
+        }
       }
     }
     if (oldest != kNil) {
@@ -623,7 +661,8 @@ struct IoScheduler::Impl {
       const std::uint32_t i = Select(now, streamsBlocked, &aged);
       if (i == kNil) return false;
       const std::uint32_t cost = Cost(nodes[i]);
-      if (cfg.bytesPerWindow != 0u && windowUsed > 0u && windowUsed + cost > cfg.bytesPerWindow) {
+      // Cost-0 work (size queries, finished file requests) never waits for bandwidth.
+      if (cost != 0u && cfg.bytesPerWindow != 0u && windowUsed > 0u && windowUsed + cost > cfg.bytesPerWindow) {
         if (!windowWaited) {
           windowWaited = true;
           budgetWaits.Add();
