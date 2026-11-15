@@ -55,7 +55,7 @@ SND_TEST(IoAdvStress, ThreeThreadsConserveChunksOrderAndEpochs) {
   fs.SetFailEvery(37);
   fs.SetMaxInFlight(5);
   snd::io::StreamPool pool;
-  SND_REQUIRE(pool.Init(alloc, 20u * kC, kC, 4));
+  SND_REQUIRE(pool.Init(alloc, 10u * kC, kC, 4));  // fewer chunks than 4 channels x 4 requests: starvation
   snd::io::IoScheduler io;
   snd::io::IoSchedulerConfig cfg;
   cfg.maxStreams = 4;
@@ -95,16 +95,20 @@ SND_TEST(IoAdvStress, ThreeThreadsConserveChunksOrderAndEpochs) {
             planners[s].Seek(0);
             break;
           }
-          // Slots 0/1: the IO thread borrows (music/voice). Slots 2/3: caller chunks (ambience),
-          // a class the dst=nullptr streams never use (see IoDefect.QueuedCallerChunksBehindChunklessHeadDeadlock).
+          // Slots 0/1: the IO thread borrows. Slots 2/3: caller chunks. Both kinds share a class
+          // (0 and 2 music, 1 and 3 voice); each channel keeps one kind and one class, which is the
+          // caller duty of io_scheduler.hpp (formerly IoDefect.QueuedCallerChunksBehindChunklessHeadDeadlock).
           void* dst = nullptr;
           std::uint32_t c = kInvalidChunk;
           if (s >= 2u) {
             c = pool.Acquire(s);
-            if (c == kInvalidChunk) break;
+            if (c == kInvalidChunk) {
+              planners[s].Seek(r.offset);  // not posted: read it next time
+              break;
+            }
             dst = pool.Data(c);
           }
-          const IoClass cls = s == 0 ? IoClass::Music : (s == 1 ? IoClass::Voice : IoClass::Ambience);
+          const IoClass cls = (s % 2u) == 0u ? IoClass::Music : IoClass::Voice;
           if (!io.Post(StreamReq(s, kP[s], r.offset, r.bytes, cls, static_cast<std::uint32_t>(r.offset / kC), dst))) {
             if (c != kInvalidChunk) {
               if (!pool.IsBorrowed(c) || pool.OwnerOf(c) != s) badRefused.fetch_add(1);

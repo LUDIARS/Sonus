@@ -72,7 +72,8 @@ struct TestChunk {
 struct ModelRun {
   std::uint32_t seed;
   std::string failure;  // first failure (empty = ok)
-  bool chunkDeadlock = false;  // pool exhausted by queued caller chunks (see IoDefect test)
+  bool chunkDeadlock = false;  // the drain stopped making progress (pool exhausted by stuck requests)
+  std::uint32_t mode = 0;
   void Fail(const char* what, std::uint32_t step) {
     if (!failure.empty()) return;
     char buf[256];
@@ -92,7 +93,13 @@ void RunModel(ModelRun& run, std::uint32_t steps, bool allowShutdown) {
   Rng rng{0x9E3779B97F4A7C15ull ^ (static_cast<std::uint64_t>(run.seed) * 0x100000001B3ull)};
   for (int i = 0; i < 4; ++i) rng.Next();
   const std::uint32_t poolChunks = 3u + rng.Below(14);
-  const std::uint32_t dstMode = run.seed % 3u;
+  // dstMode 0: dst = nullptr only, class random per request (a stream may change class);
+  //         1: caller chunks only, class random per request;
+  //         2: both kinds mixed inside a channel, class random (ignores the caller duty in io_scheduler.hpp);
+  //         3: both kinds in ONE class, but each channel uses one kind and one class (keeps the duty).
+  const std::uint32_t dstMode = run.seed % 4u;
+  run.mode = dstMode;
+  const auto runClass = static_cast<IoClass>(run.seed / 4u % 3u);
   ScriptRig rig(poolChunks, kMChunk);
   rig.cfg.maxStreams = kSlots;
   rig.cfg.ringChunks = 1u + rng.Below(8);
@@ -219,19 +226,19 @@ void RunModel(ModelRun& run, std::uint32_t steps, bool allowShutdown) {
         void* dst = nullptr;
         std::uint32_t myChunk = kInvalidChunk;
         std::uint32_t myOwner = slot;
-        // dstMode 0: always dst = nullptr; 1: always a caller chunk (when one is free); 2: mixed.
-        if (dstMode == 1u || (dstMode == 2u && rng.Below(2) == 0u)) {
+        const bool callerChunk = dstMode == 1u || (dstMode == 2u && rng.Below(2) == 0u) || (dstMode == 3u && slot >= 2u);
+        if (callerChunk) {
           myOwner = rng.Below(3) == 0u ? snd::io::kNoOwner : slot;
           myChunk = pool.Acquire(myOwner);
           if (myChunk != kInvalidChunk) {
             dst = pool.Data(myChunk);
             mine.push_back(TestChunk{myChunk, myOwner});
-          } else if (dstMode == 1u) {
+          } else if (dstMode == 1u || dstMode == 3u) {
             break;  // caller-chunk-only run: no chunk, no post
           }
         }
         const std::uint32_t tag = nextTag++;
-        const bool ok = io.Post(StreamReq(slot, kMPaths[file], offset, bytes, static_cast<IoClass>(rng.Below(3)), tag, dst));
+        const bool ok = io.Post(StreamReq(slot, kMPaths[file], offset, bytes, dstMode == 3u ? runClass : static_cast<IoClass>(rng.Below(3)), tag, dst));
         if (shut && ok) run.Fail("Post accepted after Shutdown", step);
         if (ok) {
           expected[slot].push_back(Expected{tag, offset, bytes, epoch[slot], file});
@@ -372,16 +379,15 @@ void RunModel(ModelRun& run, std::uint32_t steps, bool allowShutdown) {
     if (shut) break;
     {
       const snd::io::IoStats st = io.Stats();
-      if (more && dstMode == 2u && st.inFlight == 0u && st.pending != 0u && pool.Used() == pool.ChunkCount() &&
-          it > 200u) {
+      if (more && st.inFlight == 0u && st.pending != 0u && pool.Used() == pool.ChunkCount() && it > 200u) {
         run.chunkDeadlock = true;  // nothing can be issued, nothing will come back
-        return;
+        break;
       }
     }
     rig.clock.AdvanceMs(100);
   }
   if (!run.failure.empty()) return;
-  if (!shut) {
+  if (!shut && !run.chunkDeadlock) {
     for (std::uint32_t s = 0; s < kSlots; ++s) {
       if (!expected[s].empty()) {
         const snd::io::IoStats st = io.Stats();
@@ -424,38 +430,38 @@ void RunModel(ModelRun& run, std::uint32_t steps, bool allowShutdown) {
 
 SND_TEST(IoModel, RandomOperationSequencesKeepChunksAndOrder) {
   std::uint32_t failures = 0;
-  std::uint32_t deadlocks = 0;
-  for (std::uint32_t seed = 1; seed <= 300; ++seed) {
+  std::uint32_t deadlocks[4] = {};
+  for (std::uint32_t seed = 1; seed <= 400; ++seed) {
     ModelRun run{seed, {}};
     RunModel(run, 1500, false);
-    if (run.chunkDeadlock) ++deadlocks;
+    if (run.chunkDeadlock) ++deadlocks[run.mode];
     if (!run.failure.empty()) {
       if (++failures <= 5) SND_CHECK_MSG(run.failure.empty(), "%s", run.failure.c_str());
     }
   }
-  SND_CHECK_EQ(failures, 0u);
-  // Mixed dst modes can wedge the scheduler (defect reproduced minimally in
-  // IoDefect.QueuedCallerChunksBehindChunklessHeadDeadlock); counted, not failed here.
-  snd::test::Note("runs ending in the queued-caller-chunk deadlock: %u; records checked %llu (ok %llu, error %llu)",
-                  deadlocks, static_cast<unsigned long long>(gRecordsChecked),
+  SND_CHECK_EQ(failures, 0u);  // also: a stuck run is never corrupted (books, Cancel + Reclaim clean)
+  // Runs that keep the caller duty must never get stuck.
+  SND_CHECK_EQ(deadlocks[1], 0u);
+  SND_CHECK_EQ(deadlocks[3], 0u);
+  snd::test::Note("stuck runs per mode: null-only %u, caller-only %u, mixed-in-channel %u, mixed-one-class %u; "
+                  "records checked %llu (ok %llu, error %llu)",
+                  deadlocks[0], deadlocks[1], deadlocks[2], deadlocks[3], static_cast<unsigned long long>(gRecordsChecked),
                   static_cast<unsigned long long>(gOkRecords), static_cast<unsigned long long>(gErrorRecords));
 }
 
 SND_TEST(IoModel, RandomSequencesWithShutdownInTheMiddle) {
   std::uint32_t failures = 0;
-  std::uint32_t deadlocks = 0;
-  for (std::uint32_t seed = 1001; seed <= 1200; ++seed) {
+  std::uint32_t deadlocks[4] = {};
+  for (std::uint32_t seed = 1001; seed <= 1240; ++seed) {
     ModelRun run{seed, {}};
     RunModel(run, 1200, true);
-    if (run.chunkDeadlock) ++deadlocks;
+    if (run.chunkDeadlock) ++deadlocks[run.mode];
     if (!run.failure.empty()) {
       if (++failures <= 5) SND_CHECK_MSG(run.failure.empty(), "%s", run.failure.c_str());
     }
   }
   SND_CHECK_EQ(failures, 0u);
-  // Mixed dst modes can wedge the scheduler (defect reproduced minimally in
-  // IoDefect.QueuedCallerChunksBehindChunklessHeadDeadlock); counted, not failed here.
-  snd::test::Note("runs ending in the queued-caller-chunk deadlock: %u; records checked %llu (ok %llu, error %llu)",
-                  deadlocks, static_cast<unsigned long long>(gRecordsChecked),
-                  static_cast<unsigned long long>(gOkRecords), static_cast<unsigned long long>(gErrorRecords));
+  SND_CHECK_EQ(deadlocks[1], 0u);
+  SND_CHECK_EQ(deadlocks[3], 0u);
+  snd::test::Note("stuck runs per mode: %u %u %u %u", deadlocks[0], deadlocks[1], deadlocks[2], deadlocks[3]);
 }

@@ -1117,3 +1117,218 @@ SND_TEST(IoEdge, RtSideApiIsRtSafeWithTheThreadRunning) {
   io.Destroy();
   SND_CHECK_EQ(pool.Used(), 0u);
 }
+
+// ===========================================================================
+// Re-check of the fixes (a932ba2 .. 0f28a04)
+// ===========================================================================
+
+// Caller duty violated (io_scheduler.hpp): inside ONE channel a dst=nullptr
+// request is queued in front of the request that carries the pool's last chunk.
+// The later read completes but cannot be delivered before the earlier one,
+// which never gets a chunk: the channel stops. It must only stop (books
+// intact), and Cancel must recover every chunk.
+SND_TEST(IoEdge, DutyViolationInOneChannelOnlyStallsAndCancelRecovers) {
+  ScriptRig rig(1, kChunk);
+  SND_REQUIRE(rig.Init());
+  AddStd(rig);
+  SND_REQUIRE(rig.io.Post(StreamReq(0, "a.bin", 0, kChunk, IoClass::Music, 1)));
+  const std::uint32_t c = rig.pool.Acquire(0);
+  SND_REQUIRE(rig.io.Post(StreamReq(0, "a.bin", kChunk, kChunk, IoClass::Music, 2, rig.pool.Data(c))));
+  for (int i = 0; i < 50; ++i) {
+    rig.io.RunOnce();
+    rig.clock.AdvanceMs(10);
+  }
+  SND_CHECK_EQ(rig.io.Channel(0).Ready(), 0u);
+  SND_CHECK_EQ(rig.pool.Used(), 1u);
+  SND_CHECK_EQ(rig.HeldSum(), 1u);
+  SND_CHECK_EQ(rig.io.Channel(0).Outstanding(), 2u);
+  rig.io.Channel(0).Cancel();
+  rig.Run();
+  SND_CHECK(rig.io.Channel(0).Reclaim());
+  SND_CHECK_EQ(rig.pool.Used(), 0u);
+  SND_CHECK_EQ(rig.pool.Stats().badReleases, 0u);
+  // The chunk is usable again as a caller chunk.
+  const std::uint32_t d = rig.pool.Acquire(0);
+  SND_CHECK(rig.io.Post(StreamReq(0, "a.bin", 0, kChunk, IoClass::Music, 3, rig.pool.Data(d))));
+  rig.Run();
+  SND_CHECK_EQ(Drain(rig, 0).size(), 1u);
+  SND_CHECK_EQ(rig.pool.Used(), 0u);
+}
+
+// dst = nullptr only, no caller chunks at all: a stream whose class changes
+// (an earlier ambience request, a later music request) has its LATER request
+// issued first; it takes the last chunk, completes, and waits for delivery
+// behind the earlier request, which can never get a chunk. The caller duty in
+// io_scheduler.hpp only speaks of requests that CARRY a chunk, so this caller
+// keeps it, yet the channel deadlocks (pool of N chunks: N such channels).
+SND_TEST(IoDefect, ClassChangeInsideAChannelDeadlocksWithoutCallerChunks) {
+  ScriptRig rig(1, kChunk);
+  SND_REQUIRE(rig.Init());
+  AddStd(rig);
+  SND_REQUIRE(rig.io.Post(StreamReq(0, "a.bin", 0, kChunk, IoClass::Ambience, 1)));
+  SND_REQUIRE(rig.io.Post(StreamReq(0, "a.bin", kChunk, kChunk, IoClass::Music, 2)));
+  for (int i = 0; i < 50; ++i) {
+    rig.io.RunOnce();
+    rig.clock.AdvanceMs(10);
+  }
+  const std::vector<std::uint32_t> tags = Drain(rig, 0);
+  SND_CHECK_EQ(tags.size(), 2u);
+  snd::test::Note("delivered %zu of 2; pool used %u/%u; reads issued %llu", tags.size(), rig.pool.Used(),
+                  rig.pool.ChunkCount(), static_cast<unsigned long long>(rig.io.Stats().readsIssued));
+}
+
+// The "held by the scheduler" flag of a caller chunk (decision d) must be
+// cleared on every way out, or the chunk can never be posted again. Pool of
+// one chunk, so Acquire always returns the same chunk.
+SND_TEST(IoEdge, CallerChunkHeldFlagIsClearedOnEveryExit) {
+  ScriptRig rig(1, kChunk);
+  rig.cfg.ringChunks = 2;
+  SND_REQUIRE(rig.Init());
+  AddStd(rig);
+  rig.fs.AddFile("noopen.bin", MakePattern(5, 100));
+  rig.fs.FailOpen("noopen.bin");
+  std::string longPath(2000, 'q');
+  auto acquirePost = [&](const char* path, std::uint32_t tag) {
+    const std::uint32_t c = rig.pool.Acquire(0);
+    if (c == kInvalidChunk) return false;
+    if (rig.io.Post(StreamReq(0, path, 0, 100, IoClass::Music, tag, rig.pool.Data(c)))) return true;
+    rig.pool.Release(c);
+    return false;
+  };
+  auto settle = [&] {
+    rig.Run();
+    Drain(rig, 0);
+    rig.Run();
+    return rig.pool.Used() == 0u && rig.io.Channel(0).Outstanding() == 0u;
+  };
+  // 1. delivered Ok, released by the consumer.
+  SND_REQUIRE(acquirePost("a.bin", 1));
+  SND_CHECK(!rig.io.Post(StreamReq(0, "a.bin", 0, 100, IoClass::Music, 99, rig.pool.Data(0))));  // double Post
+  SND_CHECK(settle());
+  // 2. read error.
+  rig.fs.FailNextReads(1);
+  SND_CHECK(acquirePost("a.bin", 2));
+  SND_CHECK(settle());
+  // 3. open failure at issue; 4. path too long (fails at intake).
+  SND_CHECK(acquirePost("noopen.bin", 3));
+  SND_CHECK(settle());
+  SND_CHECK(acquirePost(longPath.c_str(), 4));
+  SND_CHECK(settle());
+  // 5. stale before issue; 6. stale while in flight.
+  SND_CHECK(acquirePost("a.bin", 5));
+  rig.io.Channel(0).Cancel();
+  SND_CHECK(settle());
+  rig.fs.SetLatency(3);
+  SND_CHECK(acquirePost("a.bin", 6));
+  rig.io.RunOnce();
+  rig.io.Channel(0).Cancel();
+  SND_CHECK(settle());
+  rig.fs.SetLatency(0);
+  // 7. refused because the channel is full: the caller keeps it and may post it later.
+  SND_REQUIRE(rig.io.Post(StreamReq(0, "b.bin", 0, 10, IoClass::Voice, 7)));
+  SND_REQUIRE(rig.io.Post(StreamReq(0, "b.bin", 10, 10, IoClass::Voice, 8)));
+  const std::uint32_t c = rig.pool.Acquire(0);
+  SND_REQUIRE(c != kInvalidChunk);
+  SND_CHECK(!rig.io.Post(StreamReq(0, "a.bin", 0, 100, IoClass::Music, 9, rig.pool.Data(c))));
+  rig.io.Channel(0).Cancel();
+  rig.Run();  // drops the two stale queued requests
+  SND_CHECK(rig.io.Channel(0).Reclaim());
+  SND_CHECK(rig.io.Post(StreamReq(0, "a.bin", 0, 100, IoClass::Music, 10, rig.pool.Data(c))));
+  SND_CHECK(settle());
+  // 8. a kNoOwner chunk is accepted on any slot, an owned one only on its slot.
+  const std::uint32_t u = rig.pool.Acquire(snd::io::kNoOwner);
+  SND_CHECK(rig.io.Post(StreamReq(5, "a.bin", 0, 100, IoClass::Music, 11, rig.pool.Data(u))));
+  rig.Run();
+  SND_CHECK_EQ(Drain(rig, 5).size(), 1u);
+  const std::uint32_t o = rig.pool.Acquire(3);
+  SND_CHECK(!rig.io.Post(StreamReq(4, "a.bin", 0, 100, IoClass::Music, 12, rig.pool.Data(o))));
+  rig.pool.Release(o);
+  SND_CHECK_EQ(rig.pool.Used(), 0u);
+  SND_CHECK_EQ(rig.pool.Stats().badReleases, 0u);
+}
+
+// ReadPos: kNoReadPos after a Cancel, and the documented aliasing of the 16-bit
+// epoch tag: after exactly 65536 Cancel()s without a delivery the old position
+// comes back (documented); after 65535 or 65537 it does not.
+SND_TEST(IoEdge, ReadPosEpochTagWrapsAfter65536Cancels) {
+  ScriptRig rig;
+  SND_REQUIRE(rig.Init());
+  AddStd(rig);
+  SND_CHECK_EQ(rig.io.Channel(0).ReadPos(), snd::io::StreamChannel::kNoReadPos);
+  SND_REQUIRE(rig.io.Post(StreamReq(0, "a.bin", 1000, 500, IoClass::Music, 0)));
+  rig.Run();
+  Drain(rig, 0);
+  SND_CHECK_EQ(rig.io.Channel(0).ReadPos(), 1500u);
+  std::uint32_t n = 0;
+  rig.io.Channel(0).Cancel();
+  ++n;
+  SND_CHECK_EQ(rig.io.Channel(0).ReadPos(), snd::io::StreamChannel::kNoReadPos);
+  bool before = false, at = false, after = false;
+  for (; n < 65537u; ) {
+    rig.io.Channel(0).Cancel();
+    ++n;
+    if (n == 65535u) before = rig.io.Channel(0).ReadPos() != snd::io::StreamChannel::kNoReadPos;
+    if (n == 65536u) at = rig.io.Channel(0).ReadPos() == 1500u;
+  }
+  after = rig.io.Channel(0).ReadPos() != snd::io::StreamChannel::kNoReadPos;
+  SND_CHECK(!before);
+  SND_CHECK(at);  // the documented exception
+  SND_CHECK(!after);
+  snd::test::Note("ReadPos after 65536 Cancels without delivery: %s", at ? "old position (aliased, as documented)" : "none");
+  // Nothing else is confused by the 32-bit epoch: a new request is delivered normally.
+  SND_REQUIRE(rig.io.Post(StreamReq(0, "a.bin", 0, 10, IoClass::Music, 1)));
+  rig.Run();
+  SND_CHECK_EQ(Drain(rig, 0).size(), 1u);
+  SND_CHECK_EQ(rig.io.Channel(0).ReadPos(), 10u);
+}
+
+// Select now scans every pending request: with many requests queued the order
+// rules still hold (class order, FIFO inside a class, request order in a
+// channel), and the cost stays linear in the queue length.
+SND_TEST(IoEdge, FullScanSelectionKeepsOrderWithAFullQueue) {
+  ScriptRig rig(512, 1024);
+  rig.cfg.maxStreams = 32;
+  rig.cfg.ringChunks = 8;
+  rig.cfg.maxInFlight = 1;
+  rig.cfg.requestQueueCapacity = 512;
+  SND_REQUIRE(rig.Init());
+  rig.fs.AddFile("f.bin", MakePattern(1, 1u << 20));
+  // 32 channels x 8 requests, class by channel; posted round-robin.
+  for (std::uint32_t k = 0; k < 8; ++k) {
+    for (std::uint32_t s = 0; s < 32; ++s) {
+      SND_REQUIRE(rig.io.Post(StreamReq(s, "f.bin", (s * 8u + k) * 1024u, 1024, static_cast<IoClass>(s % 3u), k)));
+    }
+  }
+  const std::uint64_t t0 = snd::platform::MonotonicNanoseconds();
+  rig.Run(5000);
+  const std::uint64_t dt = snd::platform::MonotonicNanoseconds() - t0;
+  const std::vector<ScriptFs::Issue> issues = rig.fs.Issues();
+  SND_REQUIRE_EQ(issues.size(), 256u);
+  // Class order: all music (s%3==2) first, then voice, then ambience; FIFO by post order inside each.
+  std::uint32_t lastClassRank = 0;
+  std::uint32_t prevPostIndex[3] = {0, 0, 0};
+  bool firstOfClass[3] = {true, true, true};
+  bool ok = true;
+  for (const ScriptFs::Issue& is : issues) {
+    const std::uint32_t idx = static_cast<std::uint32_t>(is.offset / 1024u);
+    const std::uint32_t s = idx / 8u, k = idx % 8u;
+    const std::uint32_t cls = s % 3u;
+    const std::uint32_t rank = rig.cfg.classRank[cls];
+    if (rank < lastClassRank) ok = false;
+    lastClassRank = rank;
+    const std::uint32_t postIndex = k * 32u + s;
+    if (!firstOfClass[cls] && postIndex < prevPostIndex[cls]) ok = false;
+    firstOfClass[cls] = false;
+    prevPostIndex[cls] = postIndex;
+  }
+  SND_CHECK(ok);
+  bool inOrder = true;
+  for (std::uint32_t s = 0; s < 32; ++s) {
+    std::vector<ChunkRecord> recs;
+    Drain(rig, s, &recs);
+    for (std::uint32_t k = 0; k < recs.size(); ++k) inOrder = inOrder && recs[k].tag == k;
+    inOrder = inOrder && recs.size() == 8u;
+  }
+  SND_CHECK(inOrder);
+  snd::test::Note("256 queued requests served in %.2f ms of RunOnce time", static_cast<double>(dt) / 1e6);
+}
