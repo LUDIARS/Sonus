@@ -202,9 +202,10 @@ SND_TEST(BuildReadback, EveryDocumentedFieldComesBack) {
                v.Chunk(ch::EFBL).data[Cell<col::EFFX_blobOffset>(v, fx)] == 0x5C,
            "effects[].blob");
     expect(Cell<col::EFFX_flags>(v, fx) == 5, "effects[].flags");
-    expect(Cell<col::EFFX_stateBytes>(v, fx) > 0, "EFFX.stateBytes");
+    // Stage 1.5 (A1-11): unknown (non-standard, no plugin) types are not sized.
+    expect(Cell<col::EFFX_stateBytes>(v, fx) == 0, "EFFX.stateBytes");
   }
-  expect(v.DspNeed().instanceCount == 2, "DSPN.instanceCount");
+  expect(v.DspNeed().instanceCount == 0, "DSPN.instanceCount");
   // Categories.
   const std::uint32_t cat = v.FindRow<col::CATG_id>(HashId("Cat"));
   const std::uint32_t catp = v.FindRow<col::CATG_id>(HashId("CatP"));

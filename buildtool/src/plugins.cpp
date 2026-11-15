@@ -1,57 +1,92 @@
 #include "snd/buildtool/plugins.hpp"
 
-#include <cmath>
-#include <cstring>
+#include <vector>
 
+#include "snd/codec/codec.hpp"
+#include "snd/codec/encode.hpp"
 #include "snd/ext.h"
 
 namespace snd::buildtool {
 namespace {
 
-void PcmSeek(const EncodeInput& in, std::uint32_t frameBytes, EncodedAsset* out) {
-  if (in.seekIntervalFrames == 0) return;
-  for (std::uint64_t f = 0; f < in.frames; f += in.seekIntervalFrames) {
-    out->seek.push_back(SeekPoint{f, f * frameBytes});
-  }
-}
+// Encoding through the codec module (A1-11): the bytes are exactly what the
+// runtime's built-in decoders read (bank-format.md §6.5, codec/README.md).
+static_assert(kAdpcmBlockBytesPerChannel <= kMaxAdpcmBlockBytesPerChannel);
+static_assert(kAdpcmBlockBytesPerChannel == codec::encode::kDefaultAdpcmBlockBytesPerChannel);
 
-// PCMF: interleaved little-endian float32, one frame per packet.
-bool EncodePcmF32(const EncodeInput& in, EncodedAsset* out, std::string*) {
-  out->codec = SND_CODEC_PCM_F32;
-  out->data.resize(static_cast<std::size_t>(in.frames * in.channels * 4));
-  if (!out->data.empty()) std::memcpy(out->data.data(), in.samples, out->data.size());
-  out->framesPerPacket = 1;
-  out->blockAlign = in.channels * 4;
-  out->totalFrames = in.frames;
-  PcmSeek(in, out->blockAlign, out);
+bool EncodeWithCodec(const EncodeInput& in, std::uint32_t fourcc, EncodedAsset* out, std::string* error) {
+  namespace ce = codec::encode;
+  const CodecHeader h = fourcc == SND_CODEC_ADPCM
+                            ? ce::MakeAdpcmHeader(in.channels, in.sampleRate, in.frames, kAdpcmBlockBytesPerChannel)
+                            : ce::MakePcmHeader(fourcc, in.channels, in.sampleRate, in.frames);
+  if (const codec::HeaderError he = codec::ValidateHeader(h); he != codec::HeaderError::None) {
+    *error = std::string("codec header rejected: ") + codec::HeaderErrorName(he);
+    return false;
+  }
+  // The codec encoders take non-interleaved channels.
+  std::vector<std::vector<float>> planar(in.channels, std::vector<float>(static_cast<std::size_t>(in.frames)));
+  std::vector<const float*> ptr(in.channels);
+  for (std::uint32_t c = 0; c < in.channels; ++c) {
+    for (std::uint64_t f = 0; f < in.frames; ++f) {
+      planar[c][static_cast<std::size_t>(f)] = in.samples[f * in.channels + c];
+    }
+    ptr[c] = planar[c].data();
+  }
+  out->codec = fourcc;
+  out->data.assign(static_cast<std::size_t>(ce::EncodedBytes(h)), 0);
+  std::uint64_t written = 0;
+  const ce::EncodeStatus st = ce::Encode(h, ptr.data(), in.frames, out->data.data(), out->data.size(), &written);
+  if (st != ce::EncodeStatus::Ok) {
+    *error = std::string("encoding failed: ") + ce::EncodeStatusName(st);
+    return false;
+  }
+  out->data.resize(static_cast<std::size_t>(written));
+  out->framesPerPacket = h.frames_per_packet;
+  out->blockAlign = h.block_align;
+  out->preSkip = h.pre_skip;
+  out->preRoll = h.pre_roll;
+  out->totalFrames = h.total_frames;
+  out->seek.clear();
+  if (in.seekIntervalFrames != 0) {  // 0: no seek points needed (resident, no seeking)
+    const std::uint32_t n = ce::BuildSeekTable(h, in.seekIntervalFrames, nullptr, nullptr, 0);
+    std::vector<std::uint64_t> frames(n), offsets(n);
+    ce::BuildSeekTable(h, in.seekIntervalFrames, frames.data(), offsets.data(), n);
+    for (std::uint32_t i = 0; i < n; ++i) out->seek.push_back(SeekPoint{frames[i], offsets[i]});
+  }
   return true;
 }
 
-// PC16: interleaved little-endian int16 (round to nearest, clamped).
-bool EncodePcmS16(const EncodeInput& in, EncodedAsset* out, std::string*) {
-  out->codec = SND_CODEC_PCM_S16;
-  const std::uint64_t n = in.frames * in.channels;
-  out->data.resize(static_cast<std::size_t>(n * 2));
-  for (std::uint64_t i = 0; i < n; ++i) {
-    float v = in.samples[i];
-    v = v < -1.0f ? -1.0f : (v > 1.0f ? 1.0f : v);
-    const long s = std::lround(static_cast<double>(v) * 32767.0);
-    const auto u = static_cast<std::uint16_t>(static_cast<std::int16_t>(s));
-    out->data[static_cast<std::size_t>(i * 2)] = static_cast<std::uint8_t>(u);
-    out->data[static_cast<std::size_t>(i * 2 + 1)] = static_cast<std::uint8_t>(u >> 8);
-  }
-  out->framesPerPacket = 1;
-  out->blockAlign = in.channels * 2;
-  out->totalFrames = in.frames;
-  PcmSeek(in, out->blockAlign, out);
-  return true;
+bool EncodePcmF32(const EncodeInput& in, EncodedAsset* out, std::string* error) {
+  return EncodeWithCodec(in, SND_CODEC_PCM_F32, out, error);
+}
+bool EncodePcmS16(const EncodeInput& in, EncodedAsset* out, std::string* error) {
+  return EncodeWithCodec(in, SND_CODEC_PCM_S16, out, error);
+}
+bool EncodeAdpcm(const EncodeInput& in, EncodedAsset* out, std::string* error) {
+  return EncodeWithCodec(in, SND_CODEC_ADPCM, out, error);
 }
 
 }  // namespace
 
 EncoderRegistry::EncoderRegistry() {
-  encoders_.push_back(Encoder{SND_CODEC_PCM_F32, "PCMF", 1, &EncodePcmF32});
-  encoders_.push_back(Encoder{SND_CODEC_PCM_S16, "PC16", 1, &EncodePcmS16});
+  // Versions are part of the differential-build cache key: 2 = codec module encoders.
+  encoders_.push_back(Encoder{SND_CODEC_PCM_F32, "PCMF", 2, &EncodePcmF32});
+  encoders_.push_back(Encoder{SND_CODEC_PCM_S16, "PC16", 2, &EncodePcmS16});
+}
+
+void RegisterCodecEncoders(EncoderRegistry& registry) {
+  registry.Register(Encoder{SND_CODEC_PCM_F32, "PCMF", 2, &EncodePcmF32});
+  registry.Register(Encoder{SND_CODEC_PCM_S16, "PC16", 2, &EncodePcmS16});
+  registry.Register(Encoder{SND_CODEC_ADPCM, "ADPC", 2, &EncodeAdpcm});
+}
+
+const EncoderRegistry& CodecEncoders() {
+  static const EncoderRegistry registry = [] {
+    EncoderRegistry r;
+    RegisterCodecEncoders(r);
+    return r;
+  }();
+  return registry;
 }
 
 void EncoderRegistry::Register(const Encoder& e) {

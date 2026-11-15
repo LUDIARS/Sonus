@@ -19,14 +19,17 @@ sonus-build --project game/audio --out build/banks [--platform LNX_] [--release]
 | `--ids-header <rel>` | ゲーム用ヘッダの出力先（`--out` からの相対、既定 `sonus_ids.h`、空で出さない） |
 | `--quiet` | 診断だけを出す |
 | `--werror` | 警告をエラーとして扱う（何も書かない） |
+| `--dsp-sample-rate <hz>` | `EFFX.stateBytes` / `DSPN` を見積もるレート（ランタイムの `Config.sampleRate`、既定 48000） |
+| `--dsp-block <frames>` | 見積もりのブロック長（`Config.blockSize`、既定 256） |
 
 終了コード: 0 成功、1 ビルドエラー（何も書かない）、2 引数の誤り。
 
 診断は `ファイル:行:列: error: 理由` / `warning:` の形で標準エラーに出る（ファイルはプロジェクトからの相対パス。
 列は**バイト単位**で、UTF-8 の多バイト文字は 2〜4 列に数える）。
 エラーの例: 参照の解決失敗、ID の衝突（プロジェクト全体）、入れ子 Event の循環、バスグラフの循環、バンク依存の循環、
-依存していないバンクのオブジェクトの使用、エンコーダの無いコーデック、WAV の不備。警告の例: 一致しえない遷移ルール行（8.5）、
-未知のメンバ、DSP の状態サイズの算出関数が無い（暫定値を使う）。
+依存していないバンクのオブジェクトの使用、エンコーダの無いコーデック、WAV の不備、標準エフェクトのパラメータが多すぎる。
+警告の例: 一致しえない遷移ルール行（8.5）、未知のメンバ、未知のエフェクト種別（標準でもプラグインでもない）、
+標準エフェクトのパラメータが範囲外（ランタイムは範囲に切り詰める）。
 
 ## 出力の書き方（途中で失敗したとき）
 
@@ -52,10 +55,17 @@ sonus-build --project game/audio --out build/banks [--platform LNX_] [--release]
 
 `snd/buildtool/build.hpp` の `snd::buildtool::Build(options, diagnostics, &result)`。差し込み口は `snd/buildtool/plugins.hpp`:
 
-- `EncoderRegistry`: コーデックの fourcc → エンコーダ。組み込みは `PCMF`（float32）と `PC16`（int16）。ADPCM / Opus は codec
-  モジュールのエンコーダを `Register()` する。登録の無いコーデックはビルドエラー。エンコーダの `version` は差分ビルドのキーに入る。
-- `DspSizer`: エフェクト 1 個の状態サイズ（`EFFX.stateBytes`、`DSPN` の合計）。dsp モジュールが提供する。無ければ 1 個
-  16 KiB の暫定値で、警告を 1 回出す。
+- `EncoderRegistry`: コーデックの fourcc → エンコーダ。エンコーダはすべて codec モジュールのもの（統合 A1-11）。
+  既定構築（と `BuildOptions::encoders == nullptr`）は `PCMF`（float32）と `PC16`（int16）。`CodecEncoders()` /
+  `RegisterCodecEncoders()` は IMA ADPCM（`ADPC`、1 チャンネルあたり 512 バイトのブロック。bank-format.md §6.5 の上限は 1024）も持つ。
+  **`sonus-build` は既定で `CodecEncoders()` を使う。** Opus などは `Register()` する。登録の無いコーデックはビルドエラー。
+  エンコーダの `version` は差分ビルドのキーに入る（codec のエンコーダに替えたので 2）。シーク表は `codec::encode::BuildSeekTable`。
+- `DspSizer`: エフェクト 1 個の状態サイズ（`EFFX.stateBytes`、`DSPN` の合計）。既定（`stateBytes == nullptr`）は dsp の
+  `EffectInstanceBytes`（ランタイムの `dsp::ComputeDspPoolNeed` と同じ関数）で、`BuildOptions::dspSampleRate` /
+  `dspMaxFrames`、バスのチャンネル数（0 なら親をたどり、根まで 0 なら 2 = `Config.outputChannels` の既定）を使う。
+  プラグインのエフェクトは `BuildOptions::pluginEffects`（`Config.plugins.effects` と同じ表）で見積もる。
+  標準エフェクトは dsp の表（`GetEffectInfo` / `FindEffect`、bank-format.md §6.4）で検査する: パラメータが多すぎればエラー、
+  範囲外の値は警告。未知の種別は警告し、`stateBytes = 0`、`DSPN` に数えない。
 
 ## 変換の範囲（段階1）
 
@@ -64,4 +74,4 @@ sonus-build --project game/audio --out build/banks [--platform LNX_] [--release]
 - 数値の読み取りはロケールに依存しない（`std::from_chars`）。
 - サンプルレート変換は線形補間（決定論的。音質は段階1相当で、帯域制限なし）。
 - チャンネル変換: 同数はそのまま、1 → N は複製、N → 1 は平均、N → M（M < N）は先頭 M、M > N は残りを無音。
-- コーデック: `PCMF`, `PC16` のみ組み込み。
+- コーデック: codec モジュールのエンコーダ（`PCMF`, `PC16`, `ADPC`）。バイト配置は bank-format.md §6.5。

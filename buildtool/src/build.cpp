@@ -20,6 +20,7 @@
 #include "self_check.hpp"
 #include "snd/buildtool/bank_writer.hpp"
 #include "snd/buildtool/json.hpp"
+#include "snd/dsp/effects.hpp"
 #include "snd/ext.h"
 
 namespace snd::buildtool {
@@ -187,6 +188,12 @@ class Builder {
   std::uint32_t EmitCurve(BankTables& t, const Object& o, const Value& curve, bool distance, std::uint32_t target,
                           std::set<const Object*>* params);
   bool ConvertAsset(const Object& asset, const std::string& language, Converted* out);
+  // Channels an effect of bus `b` runs at: the bus's, else the nearest parent's, else 2 (Config.outputChannels).
+  std::uint32_t BusChannels(const Object& b);
+  // dsp sizing + validation of one bus effect (diagnostics only when `report`).
+  std::uint32_t DefaultEffectStateBytes(const Object& bus, const Value& at, const std::string& type, std::uint32_t typeId,
+                                        const std::vector<float>& params, std::uint32_t channels, bool report,
+                                        std::uint64_t blobBytes, const std::uint8_t* blob);
   void EmitAsset(BankTables& t, const Object& asset, const std::string& language, const std::string& bankName);
 
   // --- outputs ----------------------------------------------------------------------------
@@ -205,7 +212,8 @@ class Builder {
   std::vector<std::string> languages_;
   const Value* platformDefaults_ = nullptr;  // project.platforms["default"]
   const Value* platformSettings_ = nullptr;  // project.platforms[<platform>]
-  bool dspWarned_ = false;
+  std::set<std::pair<const Object*, std::size_t>> effectChecked_;  // (bus, effect index) diagnosed
+  Diagnostics quiet_;  // lookups whose errors are reported elsewhere
   std::map<std::string, std::vector<std::string>> bankDeps_;  // bank -> direct deps
   std::map<std::string, std::uint64_t> bankHash_;            // bank name -> contentHash
   std::map<std::string, bool> bankIsLanguage_;
@@ -664,6 +672,73 @@ std::uint32_t Builder::EmitCurve(BankTables& t, const Object& o, const Value& cu
 
 // Conversion settings: project platforms.default < platforms[<platform>] <
 // asset.convert.default < asset.convert[<platform>].
+std::uint32_t Builder::BusChannels(const Object& b) {
+  const Object* cur = &b;
+  for (int depth = 0; cur != nullptr && depth < 256; ++depth) {  // bus cycles are reported elsewhere
+    const std::uint64_t ch = p_.U64(*cur, cur->doc, "channels", 0, quiet_);
+    if (ch != 0 && ch <= SND_MAX_CHANNELS) return static_cast<std::uint32_t>(ch);
+    const Value* pv = cur->doc.Find("parent");
+    cur = (pv != nullptr && !pv->IsNull()) ? p_.Resolve(*cur, *pv, Kind::Bus, quiet_) : nullptr;
+  }
+  return 2u;
+}
+
+std::uint32_t Builder::DefaultEffectStateBytes(const Object& bus, const Value& at, const std::string& type,
+                                               std::uint32_t typeId, const std::vector<float>& params,
+                                               std::uint32_t channels, bool report, std::uint64_t blobBytes,
+                                               const std::uint8_t* blob) {
+  const dsp::EffectInfo* info = dsp::FindEffect(typeId);
+  const snd_dsp_effect* plugin = nullptr;
+  for (const snd_dsp_effect& pe : opt_.pluginEffects) {
+    if (pe.effect_type == typeId) plugin = &pe;  // registration overrides a standard id (D-31)
+  }
+  if (info == nullptr && plugin == nullptr) {
+    if (report) {
+      p_.WarnAt(bus, at,
+                "unknown effect type '" + type +
+                    "': not a standard effect (bank-format.md 6.4) and no plugin given to the build; "
+                    "EFFX.stateBytes = 0 and the effect is not in DSPN",
+                d_);
+    }
+    return 0;
+  }
+  if (info != nullptr && plugin == nullptr && report) {
+    if (params.size() > info->paramCount) {
+      p_.ErrorAt(bus, at,
+                 "effect '" + type + "' takes " + std::to_string(info->paramCount) + " parameters, " +
+                     std::to_string(params.size()) + " given",
+                 d_);
+    }
+    for (std::size_t i = 0; i < params.size() && i < info->paramCount; ++i) {
+      const dsp::EffectParamInfo& pi = info->params[i];
+      if (!(params[i] >= pi.minValue && params[i] <= pi.maxValue)) {
+        char range[96];
+        std::snprintf(range, sizeof(range), "%g is outside %g..%g", static_cast<double>(params[i]),
+                      static_cast<double>(pi.minValue), static_cast<double>(pi.maxValue));
+        p_.WarnAt(bus, at,
+                  "effect '" + type + "' parameter " + std::to_string(i) + " (" + pi.name + "): " + range +
+                      " (the runtime clamps it)",
+                  d_);
+      }
+    }
+  }
+  snd::EffectDesc desc{};
+  desc.effect_type = typeId;
+  desc.channels = channels;
+  desc.max_frames = opt_.dspMaxFrames;
+  desc.param_count = static_cast<std::uint32_t>(params.size());
+  desc.initial_params = params.empty() ? nullptr : params.data();
+  desc.blob = blob;
+  desc.blob_bytes = blobBytes;
+  desc.sample_rate = opt_.dspSampleRate;
+  const std::uint32_t bytes = dsp::EffectInstanceBytes(desc, opt_.dspSampleRate, opt_.pluginEffects.data(),
+                                                       static_cast<std::uint32_t>(opt_.pluginEffects.size()));
+  if (bytes == 0 && report) {
+    p_.ErrorAt(bus, at, "effect '" + type + "' cannot be sized (channels " + std::to_string(channels) + ")", d_);
+  }
+  return bytes;
+}
+
 bool Builder::ConvertAsset(const Object& a, const std::string& language, Converted* out) {
   detail::ConvertSettings s;
   std::string codec = "PC16";
@@ -691,7 +766,7 @@ bool Builder::ConvertAsset(const Object& a, const std::string& language, Convert
   if (encoder == nullptr) {
     p_.ErrorAt(a, a.doc,
                "asset '" + a.name + "': no encoder for codec '" + codec +
-                   "' in this build (built in: PCMF, PC16; ADPCM / Opus need the codec module's encoders)",
+                   "' in this build (built in: PCMF, PC16, ADPC; Opus / custom codecs need an encoder registered with EncoderRegistry::Register)",
                d_);
     return false;
   }
@@ -1061,6 +1136,7 @@ void Builder::BuildBank(const Object& bank, const std::string& language) {
           t.effx.U32(col::EFFX_paramCount, er, static_cast<std::uint32_t>(params.size()));
           for (float v : params) t.efpv.F32(col::EFPV_value, t.efpv.AddRow(), v);
         }
+        std::uint64_t blobBytes = 0;
         if (const Value* blob = e.Find("blob"); blob != nullptr) {
           std::vector<std::uint8_t> bytes;
           if (!blob->IsString() || !ReadBinary(fs::path(p_.root()) / blob->text, &bytes)) {
@@ -1070,24 +1146,30 @@ void Builder::BuildBank(const Object& bank, const std::string& language) {
             t.effx.U64(col::EFFX_blobOffset, er, t.efbl.size());
             t.effx.U64(col::EFFX_blobBytes, er, bytes.size());
             t.efbl.insert(t.efbl.end(), bytes.begin(), bytes.end());
+            blobBytes = bytes.size();
           }
         }
-        std::uint32_t state = kProvisionalEffectStateBytes;
+        // EFFX.stateBytes / DSPN (3.3): the dsp module's sizing, the same function the
+        // runtime's dsp::ComputeDspPoolNeed uses (A1-11). Standard effects are
+        // checked against dsp's table (A1-6, bank-format.md §6.4).
+        const std::uint32_t fxType = HashId(type);
+        const std::uint32_t fxChannels = BusChannels(*b);
+        std::uint32_t state = 0;
+        const auto fxIndex = static_cast<std::size_t>(&e - fx->items.data());
+        const bool firstTime = effectChecked_.insert({b, fxIndex}).second;  // banks share buses: report once
         if (opt_.dsp.stateBytes != nullptr) {
-          state = opt_.dsp.stateBytes(opt_.dsp.user, HashId(type), params.data(),
-                                      static_cast<std::uint32_t>(params.size()),
-                                      chans != 0 ? static_cast<std::uint32_t>(chans) : 2u);
-        } else if (!dspWarned_) {
-          dspWarned_ = true;
-          p_.WarnAt(*b, e,
-                    "no DSP state size provider installed: EFFX.stateBytes uses the provisional " +
-                        std::to_string(kProvisionalEffectStateBytes) + " bytes per effect",
-                    d_);
+          state = opt_.dsp.stateBytes(opt_.dsp.user, fxType, params.data(), static_cast<std::uint32_t>(params.size()),
+                                      fxChannels);
+        } else {
+          state = DefaultEffectStateBytes(*b, e, type, fxType, params, fxChannels, firstTime,
+                                          blobBytes, blobBytes != 0 ? t.efbl.data() + (t.efbl.size() - blobBytes) : nullptr);
         }
         t.effx.U32(col::EFFX_stateBytes, er, state);
         t.effx.U32(col::EFFX_flags, er, static_cast<std::uint32_t>(p_.U64(*b, e, "flags", 0, d_)));
-        t.dspBytes += Align64(state);
-        ++t.dspCount;
+        if (state != 0) {  // unsized (unknown) types are not in DSPN, as in dsp::ComputeDspPoolNeed
+          t.dspBytes += Align64(state);
+          ++t.dspCount;
+        }
       }
     }
     if (t.effx.rows() > fxFirst) {

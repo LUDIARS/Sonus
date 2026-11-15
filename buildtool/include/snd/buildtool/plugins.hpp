@@ -1,11 +1,14 @@
 // Plug-in points of the build (design.md 10.3, 3.3):
-//   - EncoderRegistry: waveform encoders by codec fourcc. PCM float32 (PCMF)
-//     and PCM s16 (PC16) are built in; ADPCM / Opus come from the codec
-//     module's encoders (stage 1, other team) through Register(). A codec
-//     without an encoder is a build error naming the codec.
-//   - DspSizer: per-effect instance state size for EFFX.stateBytes / DSPN
-//     (the dsp module will provide it). Without one, a provisional fixed size
-//     is used and the build warns once.
+//   - EncoderRegistry: waveform encoders by codec fourcc, all from the codec
+//     module (A1-11). A default-constructed registry (and BuildOptions with
+//     encoders == nullptr) has PCM float32 (PCMF) and PCM s16 (PC16);
+//     CodecEncoders() / RegisterCodecEncoders() add IMA ADPCM (ADPC,
+//     kAdpcmBlockBytesPerChannel bytes per channel and block). sonus-build
+//     uses CodecEncoders() by default. Opus / custom codecs come through
+//     Register(). A codec without an encoder is a build error naming the codec.
+//   - DspSizer: per-effect instance state size for EFFX.stateBytes / DSPN.
+//     The default is the dsp module's sizing (dsp::EffectInstanceBytes, the
+//     same function the runtime's ComputeDspPoolNeed uses).
 #ifndef SND_BUILDTOOL_PLUGINS_HPP
 #define SND_BUILDTOOL_PLUGINS_HPP
 
@@ -50,9 +53,15 @@ struct Encoder {
   bool (*encode)(const EncodeInput& in, EncodedAsset* out, std::string* error) = nullptr;
 };
 
+// ADPCM block size the build writes: 512 bytes per channel (1017 frames).
+// bank-format.md §6.5: at most 1024 bytes per channel, so that the decoder
+// state fits the default Config.memory.decoderSlotBytes (32 KiB) up to 8 ch.
+inline constexpr std::uint32_t kAdpcmBlockBytesPerChannel = 512;
+inline constexpr std::uint32_t kMaxAdpcmBlockBytesPerChannel = 1024;
+
 class EncoderRegistry {
  public:
-  // With the built-in PCMF and PC16 encoders.
+  // With the codec module's PCMF and PC16 encoders.
   EncoderRegistry();
   void Register(const Encoder& e);  // replaces an encoder of the same codec
   const Encoder* Find(std::uint32_t codec) const;
@@ -61,13 +70,17 @@ class EncoderRegistry {
   std::vector<Encoder> encoders_;
 };
 
+// Registers the codec module's PCMF, PC16 and ADPC encoders (replacing those codecs).
+void RegisterCodecEncoders(EncoderRegistry& registry);
+// A registry with every codec module encoder (sonus-build's default).
+const EncoderRegistry& CodecEncoders();
+
 struct DspSizer {
   void* user = nullptr;
   // Instance state bytes of one effect (EFFX.stateBytes).
   std::uint32_t (*stateBytes)(void* user, std::uint32_t effectType, const float* params,
                               std::uint32_t paramCount, std::uint32_t channels) = nullptr;
 };
-inline constexpr std::uint32_t kProvisionalEffectStateBytes = 16384;
 
 // Codec name <-> fourcc ("PCMF", "PC16", "ADPC", "OPUS" or any 4 characters).
 bool ParseCodec(const std::string& name, std::uint32_t* fourcc);

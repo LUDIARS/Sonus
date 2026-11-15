@@ -211,7 +211,7 @@ SND_TEST(BuildtoolBuild, SampleProject) {
   SND_CHECK_EQ(r.banks.size(), 4u);  // Common, Level1, Voice.ja, Voice.en (dependencies first)
   SND_CHECK(r.banks[0].path == "Common.sndb");
   SND_CHECK(d.Contains("can never match"));  // Battle -> Explore after "* -> *"
-  SND_CHECK(d.Contains("DSP state size provider"));
+  SND_CHECK(d.Contains("unknown effect type 'Convolution'"));  // stage 1.5: dsp sizing (A1-11)
   SND_CHECK(!d.Contains("entry preload"));  // seg asset: stream with entryFrame 0 -> representable
   const fs::path out = o.outDir;
   Bank common(sample::ReadFile(out / "Common.sndb"));
@@ -287,8 +287,15 @@ SND_TEST(BuildtoolBuild, SampleProject) {
   SND_CHECK_EQ(common.Rows(bf::chunk::EFFX), 2u);
   bf::DspPoolNeed need;
   std::memcpy(&need, common.chunks[bf::chunk::DSPN].p, sizeof(need));
-  SND_CHECK_EQ(need.instanceCount, 2u);
-  SND_CHECK_EQ(need.instanceBytes, 2u * bt::kProvisionalEffectStateBytes);
+  // Stage 1.5 (A1-11): sized by dsp. SFX's snd.fx.lowpass is standard; Reverb's
+  // "Convolution" is unknown (warning, stateBytes 0, not in DSPN).
+  SND_CHECK_EQ(need.instanceCount, 1u);
+  std::uint64_t sized = 0;
+  for (std::uint32_t fxRow = 0; fxRow < common.Rows(bf::chunk::EFFX); ++fxRow) {
+    sized += (common.Cell(bf::chunk::EFFX, bf::col::EFFX_stateBytes, fxRow) + 63u) / 64u * 64u;
+  }
+  SND_CHECK(sized > 0u);
+  SND_CHECK_EQ(need.instanceBytes, sized);
   SND_CHECK_EQ(common.Rows(bf::chunk::SNPV), 3u);
   SND_CHECK_EQ(common.Rows(bf::chunk::DUCK), 1u);
   // PHYS: pair (wood, metal) stored at min*N+max.

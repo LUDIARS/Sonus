@@ -129,7 +129,7 @@ SND_TEST(BankRoundTrip, BuildtoolOutputValidatesAndReads) {
   SND_CHECK(v.Guid(HashId("SE/Explosion"), &lo, &hi));
   SND_CHECK_EQ(hi, 0x5a0e000000004000ull);
   // DSP need in the bus bank.
-  SND_CHECK_EQ(common.view.DspNeed().instanceCount, 2u);
+  SND_CHECK_EQ(common.view.DspNeed().instanceCount, 1u);  // stage 1.5: only snd.fx.lowpass is sized (A1-11)
   // Language banks.
   SND_CHECK_EQ(ja.view.languageId(), HashId("ja"));
   SND_CHECK_EQ(en.view.bankId(), HashId("Voice"));

@@ -23,6 +23,7 @@
 
 #include "snd/buildtool/diagnostics.hpp"
 #include "snd/buildtool/plugins.hpp"
+#include "snd/ext.h"
 #include "snd/format/bank_format.hpp"
 
 namespace snd::buildtool {
@@ -36,8 +37,16 @@ struct BuildOptions {
   bool stripStrings = false;       // drop STRS / NAME (release)
   bool warningsAsErrors = false;   // any warning fails the build (nothing written)
   std::string idsHeader = "sonus_ids.h";  // relative to outDir ("" = none)
-  const EncoderRegistry* encoders = nullptr;  // nullptr = built-ins only
-  DspSizer dsp;                    // stateBytes == nullptr: provisional size + warning
+  const EncoderRegistry* encoders = nullptr;  // nullptr = PCMF + PC16 (sonus-build: CodecEncoders())
+  // EFFX.stateBytes / DSPN. stateBytes == nullptr (default): the dsp module's
+  // sizing (dsp::EffectInstanceBytes, as dsp::ComputeDspPoolNeed at runtime) for
+  // dspSampleRate / dspMaxFrames, with pluginEffects for plugin types. Standard
+  // effects are checked against dsp's table (too many parameters: error; a value
+  // outside the range: warning). Unknown types: warning, stateBytes 0, not in DSPN.
+  DspSizer dsp;
+  std::uint32_t dspSampleRate = 48000;  // = Config.sampleRate of the runtime (default 48000)
+  std::uint32_t dspMaxFrames = 256;     // = Config.blockSize (default 256)
+  std::vector<snd_dsp_effect> pluginEffects;  // = Config.plugins.effects (sizing only)
 };
 
 struct BuiltBank {

@@ -1,6 +1,7 @@
 // sonus-build: project (JSON, one object per file) -> banks (design.md 10).
 // Usage: see buildtool/README.md or `sonus-build --help`.
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <string>
 
@@ -19,6 +20,8 @@ void Usage(FILE* f) {
                "  --ids-header <rel>  game header path inside --out (default sonus_ids.h, '' = none)\n"
                "  --quiet             only print diagnostics\n"
                "  --werror            treat warnings as errors (nothing is written)\n"
+               "  --dsp-sample-rate <hz>  rate EFFX.stateBytes / DSPN are sized for (= Config.sampleRate, default 48000)\n"
+               "  --dsp-block <frames>    block size for the sizing (= Config.blockSize, default 256)\n"
                "bank format %u.%u\n",
                snd::bank_format::kFormatMajor, snd::bank_format::kFormatMinor);
 }
@@ -27,6 +30,7 @@ void Usage(FILE* f) {
 
 int main(int argc, char** argv) {
   snd::buildtool::BuildOptions o;
+  o.encoders = &snd::buildtool::CodecEncoders();  // PCMF, PC16, ADPC from the codec module (A1-11)
   bool quiet = false;
   for (int i = 1; i < argc; ++i) {
     const std::string a = argv[i];
@@ -59,6 +63,15 @@ int main(int argc, char** argv) {
         std::fprintf(stderr, "sonus-build: unknown platform '%s'\n", v);
         return 2;
       }
+    } else if (a == "--dsp-sample-rate" || a == "--dsp-block") {
+      if ((v = value(a.c_str())) == nullptr) return 2;
+      char* end = nullptr;
+      const unsigned long n = std::strtoul(v, &end, 10);
+      if (end == v || *end != '\0' || n == 0 || n > 384000) {
+        std::fprintf(stderr, "sonus-build: bad value '%s' for %s\n", v, a.c_str());
+        return 2;
+      }
+      (a == "--dsp-sample-rate" ? o.dspSampleRate : o.dspMaxFrames) = static_cast<std::uint32_t>(n);
     } else if (a == "--release") {
       o.devBuild = false;
     } else if (a == "--strip-strings") {
