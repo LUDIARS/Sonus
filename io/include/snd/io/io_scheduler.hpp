@@ -19,11 +19,26 @@
 // window (default 100 ms) are limited to bytesPerWindow
 // (Config.tuning.ioBytesPer100ms); a read that does not fit waits for the next
 // window. Reads are never skipped to fill the remaining budget with a smaller
-// lower-ranked read (the order stays the priority order).
+// lower-ranked read (the order stays the priority order). Windows are FIXED
+// (back to back from the first IO iteration), so any 100 ms interval that
+// straddles two windows may see up to ~2x the budget. Unused budget is not
+// carried over. A single read larger than the whole budget is issued alone in
+// an empty window. Work that costs no bandwidth (size queries) never waits.
+// If the clock goes back (an IoClock contract violation) a new window starts
+// at that point instead of stalling.
+// An eligible request is one that can be issued now: any FileRequest, and a
+// stream request that owns a chunk or for which the pool may have one. Every
+// pending request is considered (not only the head of each class), so while at
+// least one eligible request exists one is issued (no deadlock when queued
+// requests hold the last chunks). Issue order may differ from request order;
+// delivery inside a channel is always in request order. Caller's duty: within
+// ONE channel, do not queue dst=nullptr requests in front of requests carrying
+// the pool's last free chunks (their data can only be delivered after the
+// earlier request, which can never get a chunk).
 //
 // Starvation policy (aging): a request that has waited agingNs (default 300 ms
 // = 3 windows) is served before any younger request, oldest first, whatever
-// its class. So a lower class is delayed by higher classes at most ~agingNs
+// its class (equal waits: better class rank first, then acceptance order). So a lower class is delayed by higher classes at most ~agingNs
 // plus the time to serve the requests that aged before it; it never starves.
 //
 // Cancel / seek (6.3): each StreamChannel has an epoch. StreamChannel::Cancel()
@@ -109,7 +124,8 @@ struct IoSchedulerConfig {
   std::uint32_t requestQueueCapacity = 256;   // postIo queue (MPMC)
   std::uint32_t fileQueueCapacity = 32;       // FileRequests outstanding at once
   std::uint32_t maxInFlight = 8;              // reads handed to the IFileSystem at once
-  std::uint32_t maxOpenFiles = 0;             // 0 = maxStreams + 16
+  std::uint32_t maxOpenFiles = 0;             // 0 = maxStreams + 16; must not exceed the
+                                              // IFileSystem's own open-file limit
   std::uint32_t bytesPerWindow = 4u << 20;    // Config.tuning.ioBytesPer100ms; 0 = unlimited
   std::uint64_t windowNs = 100000000ull;      // 100 ms
   std::uint32_t filePieceBytes = 256u << 10;  // FileRequest piece size (clamped to bytesPerWindow)
@@ -157,12 +173,16 @@ class StreamChannel {
   // Makes every request posted so far stale (stop, virtualise, seek) and wakes
   // the IO thread so queued reads are dropped and their reservations returned.
   // Must not race with Post() for the same slot (same thread, as in RunEventLogic).
+  // The epoch is 32 bits and wraps after 2^32 Cancel()s; only equality is used.
   void Cancel() noexcept;
   std::uint32_t Epoch() const noexcept { return epoch_.value.load(std::memory_order_acquire); }
 
   // --- consumer (one decode job at a time, or the audio thread when no job runs) ---
   // RT-safe. Next current record in request order; stale records are released
   // and skipped. false when nothing is ready. The chunk stays borrowed until Release.
+  // If Cancel() runs on another thread at the same time, the record returned may
+  // have become stale in that instant: a consumer that cares compares
+  // record.epoch with Epoch() (and treats a mismatch like a skipped record).
   bool Pop(ChunkRecord& out) noexcept;
   // RT-safe. Oldest current record without removing it (stale ones are released first).
   const ChunkRecord* Peek() noexcept;
@@ -182,9 +202,18 @@ class StreamChannel {
   std::uint32_t Capacity() const noexcept { return capacity_; }
   // Records waiting in the ring (approximate).
   std::uint32_t Ready() const noexcept { return ring_.SizeApprox(); }
-  // End offset (offset + bytes) of the last record delivered in the current
-  // epoch; this is the value meant for the schema column Stream.readPos.
-  std::uint64_t ReadPos() const noexcept { return readPos_.load(std::memory_order_acquire); }
+  // End offset (offset + bytes) of the last Ok record delivered in the CURRENT
+  // epoch (the value meant for the schema column Stream.readPos), or
+  // kNoReadPos when nothing has been delivered since the last Cancel() (or
+  // ever). Epoch and position are one atomic word: 16 low bits of the epoch +
+  // 48 bits of offset, so a position from an older epoch is never returned
+  // (unless exactly a multiple of 65536 Cancel()s happen without a delivery).
+  static constexpr std::uint64_t kNoReadPos = UINT64_MAX;
+  std::uint64_t ReadPos() const noexcept {
+    const std::uint64_t v = readPos_.load(std::memory_order_acquire);
+    if ((v & kPosMask) == kPosMask || (v >> 48) != (Epoch() & 0xFFFFu)) return kNoReadPos;
+    return v & kPosMask;
+  }
   std::uint32_t Delivered() const noexcept { return delivered_.load(std::memory_order_relaxed); }
   std::uint32_t Errors() const noexcept { return errors_.load(std::memory_order_relaxed); }
   // A current request has been outstanding longer than IoSchedulerConfig::stallNs.
@@ -194,11 +223,16 @@ class StreamChannel {
  private:
   friend class IoScheduler;
   void Unreserve() noexcept { reserved_.value.fetch_sub(1u, std::memory_order_acq_rel); }
+  static constexpr std::uint64_t kPosMask = (1ull << 48) - 1u;
+  static std::uint64_t PackReadPos(std::uint32_t epoch, std::uint64_t pos) noexcept {
+    if (pos >= kPosMask) pos = kPosMask - 1u;
+    return (static_cast<std::uint64_t>(epoch & 0xFFFFu) << 48) | pos;
+  }
 
   base::CachePadded<std::atomic<std::uint32_t>> epoch_;     // written by the audio thread
   base::CachePadded<std::atomic<std::uint32_t>> reserved_;  // Post +1, release / drop -1
   base::SpscRing<ChunkRecord> ring_;                        // IO thread -> consumer
-  std::atomic<std::uint64_t> readPos_{0};                   // IO thread
+  std::atomic<std::uint64_t> readPos_{UINT64_MAX};          // IO thread; PackReadPos or "none"
   std::atomic<std::uint32_t> delivered_{0};                 // IO thread
   std::atomic<std::uint32_t> errors_{0};                    // IO thread
   std::atomic<std::uint32_t> stalled_{0};                   // IO thread
@@ -236,7 +270,7 @@ using FileCallback = void (*)(void* user, const FileResult& result) noexcept;
 // until Finished() is true. dst must stay valid until then too.
 struct FileRequest {
   // --- inputs ---
-  const char* path = nullptr;      // relative to the file system root; read only until Finished()
+  const char* path = nullptr;      // relative to the FS root, < kMaxIoPathBytes; read until Finished()
   std::uint64_t offset = 0;        // first byte to read
   std::uint64_t bytes = 0;         // bytes to read into dst; the read stops early at end of file
   void* dst = nullptr;             // nullptr: size query only (fileSize, no read, no bandwidth)
@@ -317,7 +351,10 @@ class IoScheduler {
   // false (nothing queued; the caller keeps ownership of req.dst) when:
   // the queue or the channel is full (retry later), after Shutdown, or the
   // request is invalid (streamSlot >= maxStreams, bytes == 0 or > chunk size,
-  // dst neither nullptr nor the start of a borrowed StreamPool chunk).
+  // dst neither nullptr nor the start of a borrowed StreamPool chunk, dst a
+  // chunk borrowed for ANOTHER stream slot (an unattributed kNoOwner chunk is
+  // accepted), or dst a chunk the scheduler already holds: a second Post of the
+  // same dst before its record was delivered or dropped). All checks are atomics.
   // dst == nullptr: the IO thread borrows a chunk for the slot when it issues
   // the read. On success ownership of a dst chunk passes to the scheduler.
   bool Post(const source::IoReadRequest& req) noexcept;

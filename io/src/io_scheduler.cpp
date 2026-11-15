@@ -142,6 +142,23 @@ struct IoScheduler::Impl {
   std::atomic<std::uint32_t> pendingStat{0};
 
   std::uint64_t Now() const noexcept { return cfg.clock.nowNs(cfg.clock.user); }
+
+  // Per pool chunk: 1 while a caller chunk accepted by Post is in the
+  // scheduler's hands (decision d: a second Post of the same dst is refused).
+  // Cleared BEFORE the chunk leaves the scheduler (delivered to the ring or
+  // released to the pool), so the next owner can post it again.
+  std::atomic<std::uint8_t>* held = nullptr;
+  std::uint32_t heldCount = 0;
+  void Unhold(std::uint32_t chunk) noexcept {
+    if (chunk < heldCount) held[chunk].store(0u, std::memory_order_release);
+  }
+  void ReleaseChunk(std::uint32_t chunk) noexcept {
+    Unhold(chunk);
+    pool->Release(chunk);
+  }
+
+  // Post / Submit calls between their `accepting` check and their queue push.
+  std::atomic<std::uint32_t> inPost{0};
   StreamChannel& Ch(std::uint32_t slot) noexcept { return self->channels_[slot]; }
 
   // --- lists ----------------------------------------------------------------------------
@@ -259,7 +276,7 @@ struct IoScheduler::Impl {
     Node& n = nodes[i];
     if (n.state == NodeState::Pending) Unlink(i);
     ChUnlink(i);
-    if (n.chunk != kInvalidChunk) pool->Release(n.chunk);
+    if (n.chunk != kInvalidChunk) ReleaseChunk(n.chunk);
     ReleaseFile(n.file);
     Ch(n.slot).Unreserve();
     FreeNode(i);
@@ -294,7 +311,7 @@ struct IoScheduler::Impl {
       const std::uint32_t chunk = q.req.dst != nullptr ? pool->IndexOf(q.req.dst) : kInvalidChunk;
       const std::uint32_t idx = (cancelAll || q.epoch != ch.Epoch()) ? kNil : freeNodes.Pop();
       if (idx == base::kInvalidIndex || idx == kNil) {
-        if (chunk != kInvalidChunk) pool->Release(chunk);
+        if (chunk != kInvalidChunk) ReleaseChunk(chunk);
         ch.Unreserve();
         staleDropped.Add();
         continue;
@@ -318,7 +335,7 @@ struct IoScheduler::Impl {
         n.result = ChunkStatus::OpenFailed;
         openFailures.Add();
         if (n.chunk != kInvalidChunk) {
-          pool->Release(n.chunk);
+          ReleaseChunk(n.chunk);
           n.chunk = kInvalidChunk;
         }
       } else {
@@ -393,18 +410,19 @@ struct IoScheduler::Impl {
       rec.tag = n.tag;
       rec.epoch = n.epoch;
       rec.status = n.result;
-      if (n.result != ChunkStatus::Ok && n.chunk != kInvalidChunk) pool->Release(n.chunk);
+      if (n.result != ChunkStatus::Ok && n.chunk != kInvalidChunk) ReleaseChunk(n.chunk);
       ChUnlink(i);
       ReleaseFile(n.file);
       FreeNode(i);
       if (rec.status == ChunkStatus::Ok) {
-        ch.readPos_.store(rec.offset + rec.bytes, std::memory_order_release);
+        ch.readPos_.store(StreamChannel::PackReadPos(rec.epoch, rec.offset + rec.bytes), std::memory_order_release);
       } else {
         ch.errors_.fetch_add(1u, std::memory_order_relaxed);
       }
+      if (rec.chunk != kInvalidChunk) Unhold(rec.chunk);  // ownership passes to the consumer
       if (!ch.ring_.TryPush(rec)) {
         // Cannot happen (reservations bound the ring); keep the books balanced anyway.
-        if (rec.chunk != kInvalidChunk) pool->Release(rec.chunk);
+        if (rec.chunk != kInvalidChunk) ReleaseChunk(rec.chunk);
         ch.Unreserve();
       } else {
         ch.delivered_.fetch_add(1u, std::memory_order_release);
@@ -585,7 +603,15 @@ struct IoScheduler::Impl {
       return;
     }
     const std::uint64_t w = cfg.windowNs == 0u ? 1u : cfg.windowNs;
-    if (now >= windowStart + w) {
+    if (now < windowStart) {
+      // The clock went back (IoClock contract violation): restart the windows here
+      // instead of waiting until the clock is past the old window again.
+      windowStart = now;
+      windowUsed = 0;
+      windowWaited = false;
+      return;
+    }
+    if (now - windowStart >= w) {
       windowStart += ((now - windowStart) / w) * w;
       windowUsed = 0;
       windowWaited = false;
@@ -720,7 +746,19 @@ struct IoScheduler::Impl {
 
   // One loop iteration. Returns true if work remains.
   bool Step() noexcept {
-    wakePending.value.store(0u, std::memory_order_seq_cst);
+    // Lost-wakeup argument. Producer (Post/Submit/Cancel/FS notify): push to a
+    // queue (or write the epoch), THEN Wake(): wakePending.exchange(1, acq_rel),
+    // semaphore Post only if it read 0. IO thread: exchange(0, acq_rel) HERE,
+    // then drain. Both are RMWs on one atomic, so they are totally ordered and
+    // each reads the value written by the one before it:
+    //  - producer's exchange first: ours reads its 1 and synchronises with it
+    //    (release -> acquire), so the push is visible to the drain below;
+    //  - ours first: the producer's exchange reads our 0 and posts the
+    //    semaphore, so the next Wait/WaitFor returns and we drain again.
+    // (The previous plain store(0) did not synchronise with the producer: a
+    // store does not read, so the push could be invisible to this drain while
+    // the producer saw the flag still 1 and did not post: a formal lost wakeup.)
+    wakePending.value.exchange(0u, std::memory_order_acq_rel);
     const std::uint64_t now = Now();
     DrainInputs(now, false);
     SweepCancelledFiles();
@@ -891,6 +929,11 @@ bool IoScheduler::Init(IAllocator& allocator, IFileSystem& fs, StreamPool& pool,
     im.files = base::AllocateArray<FileEntry>(allocator, im.fileCount, MemTag::Misc);
     ok = im.inflight != nullptr && im.chHead != nullptr && im.chTail != nullptr && im.files != nullptr;
   }
+  if (ok) {
+    im.heldCount = pool.ChunkCount();
+    im.held = base::AllocateArray<std::atomic<std::uint8_t>>(allocator, im.heldCount, MemTag::Misc);
+    ok = im.held != nullptr;
+  }
   ok = ok && im.streamQueue.Init(allocator, im.cfg.requestQueueCapacity, MemTag::Misc) &&
        im.fileQueue.Init(allocator, im.cfg.fileQueueCapacity, MemTag::Misc);
   if (!ok) {
@@ -919,7 +962,19 @@ bool IoScheduler::Running() const noexcept { return impl_ != nullptr && impl_->s
 void IoScheduler::Shutdown() noexcept {
   if (impl_ == nullptr || impl_->shutDown) return;
   Impl& im = *impl_;
+  // Post/Submit: inPost++ (seq_cst), load accepting (seq_cst), push, inPost--.
+  // Here: store accepting = 0 (seq_cst), then wait for inPost == 0, and only
+  // then let FinalDrain run. In the single total order of the seq_cst
+  // operations either the call's load comes after our store (it sees 0 and
+  // refuses), or its increment comes before our loads of inPost, which then
+  // wait until its push is done (the decrement is a release, our load an
+  // acquire): the request is in the queue before FinalDrain drains it. So a
+  // request for which Post/Submit returned true always reaches a final state.
+  // The previous code checked `accepting` and pushed later without this
+  // handshake: Shutdown + FinalDrain could run in between, leaving an accepted
+  // request in the queue until Destroy (IoDefect.ShutdownRacingWithPostAndSubmitStrandsNothing).
   im.accepting.store(0u, std::memory_order_seq_cst);
+  while (im.inPost.load(std::memory_order_seq_cst) != 0u) platform::YieldThread();
   if (!im.ready) {
     im.shutDown = true;
     return;
@@ -947,6 +1002,7 @@ void IoScheduler::Destroy() noexcept {
     base::FreeArray(a, im.chHead, channelCount_, MemTag::Misc);
     base::FreeArray(a, im.chTail, channelCount_, MemTag::Misc);
     base::FreeArray(a, im.files, im.fileCount, MemTag::Misc);
+    base::FreeArray(a, im.held, im.heldCount, MemTag::Misc);
     im.freeNodes.Destroy();
     im.streamQueue.Destroy();
     im.fileQueue.Destroy();
@@ -962,17 +1018,42 @@ void IoScheduler::Destroy() noexcept {
   alloc_ = nullptr;
 }
 
+namespace {
+// Marks a Post/Submit call in progress for Shutdown (see Shutdown()).
+class PostGuard {
+ public:
+  explicit PostGuard(std::atomic<std::uint32_t>& c) noexcept : c_(c) { c_.fetch_add(1u, std::memory_order_seq_cst); }
+  ~PostGuard() { c_.fetch_sub(1u, std::memory_order_release); }
+  PostGuard(const PostGuard&) = delete;
+  PostGuard& operator=(const PostGuard&) = delete;
+
+ private:
+  std::atomic<std::uint32_t>& c_;
+};
+}  // namespace
+
 bool IoScheduler::Post(const source::IoReadRequest& req) noexcept {
   Impl* im = impl_;
   if (im == nullptr) return false;
-  if (im->accepting.load(std::memory_order_acquire) == 0u || req.streamSlot >= channelCount_ || req.bytes == 0u ||
+  PostGuard guard(im->inPost);
+  // seq_cst load after the seq_cst increment of inPost (Dekker with Shutdown).
+  if (im->accepting.load(std::memory_order_seq_cst) == 0u || req.streamSlot >= channelCount_ || req.bytes == 0u ||
       req.bytes > im->pool->ChunkBytes()) {
     im->streamRejected.Add();
     return false;
   }
+  std::uint32_t chunk = kInvalidChunk;
   if (req.dst != nullptr) {
-    const std::uint32_t chunk = im->pool->IndexOf(req.dst);
-    if (chunk == kInvalidChunk || !im->pool->IsBorrowed(chunk)) {
+    // Decision d: the chunk must be borrowed, belong to this stream slot (or be
+    // unattributed, kNoOwner) and not already be in the scheduler's hands.
+    chunk = im->pool->IndexOf(req.dst);
+    if (chunk == kInvalidChunk || !im->pool->IsBorrowed(chunk) || chunk >= im->heldCount) {
+      im->streamRejected.Add();
+      return false;
+    }
+    const std::uint32_t owner = im->pool->OwnerOf(chunk);
+    if ((owner != req.streamSlot && owner != kNoOwner) ||
+        im->held[chunk].exchange(1u, std::memory_order_acq_rel) != 0u) {
       im->streamRejected.Add();
       return false;
     }
@@ -980,12 +1061,14 @@ bool IoScheduler::Post(const source::IoReadRequest& req) noexcept {
   StreamChannel& ch = channels_[req.streamSlot];
   if (ch.reserved_.value.fetch_add(1u, std::memory_order_acq_rel) >= ch.capacity_) {
     ch.Unreserve();
+    im->Unhold(chunk);
     im->streamRejected.Add();
     return false;
   }
   QueuedRead q{req, ch.Epoch(), 0u};
   if (!im->streamQueue.TryPush(q)) {
     ch.Unreserve();
+    im->Unhold(chunk);
     im->streamRejected.Add();
     return false;
   }
@@ -1001,7 +1084,7 @@ bool IoScheduler::PostIo(void* ctx, const source::IoReadRequest& req) noexcept {
 void IoScheduler::Wake() noexcept {
   Impl* im = impl_;
   if (im == nullptr) return;
-  if (im->wakePending.value.exchange(1u, std::memory_order_seq_cst) == 0u) im->wake.Post();
+  if (im->wakePending.value.exchange(1u, std::memory_order_acq_rel) == 0u) im->wake.Post();
 }
 
 void IoScheduler::WakeThunk(void* ctx) noexcept {
@@ -1010,7 +1093,9 @@ void IoScheduler::WakeThunk(void* ctx) noexcept {
 
 bool IoScheduler::Submit(FileRequest& request) noexcept {
   Impl* im = impl_;
-  if (im == nullptr || im->accepting.load(std::memory_order_acquire) == 0u) return false;
+  if (im == nullptr) return false;
+  PostGuard guard(im->inPost);
+  if (im->accepting.load(std::memory_order_seq_cst) == 0u) return false;
   if (request.path == nullptr || (request.dst != nullptr && request.bytes == 0u)) return false;
   std::uint32_t s = request.state.load(std::memory_order_acquire);
   if (s == static_cast<std::uint32_t>(FileState::Queued)) return false;
