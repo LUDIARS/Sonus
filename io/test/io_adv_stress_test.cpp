@@ -68,7 +68,7 @@ SND_TEST(IoAdvStress, ThreeThreadsConserveChunksOrderAndEpochs) {
   SND_REQUIRE(io.Start());
 
   std::atomic<bool> stopAudio{false}, stopDecode{false};
-  std::atomic<std::uint32_t> bad{0}, badOrder{0}, staleEpoch{0}, badData{0};
+  std::atomic<std::uint32_t> badPeek{0}, badOwner{0}, badErrChunk{0}, badRefused{0}, badOrder{0}, staleEpoch{0}, badData{0};
   std::atomic<std::uint64_t> consumed{0}, posted{0};
   // Epochs written by the audio thread after each Cancel (decode reads them).
   std::atomic<std::uint32_t> audioEpoch[4] = {};
@@ -107,7 +107,7 @@ SND_TEST(IoAdvStress, ThreeThreadsConserveChunksOrderAndEpochs) {
           const IoClass cls = s == 0 ? IoClass::Music : (s == 1 ? IoClass::Voice : IoClass::Ambience);
           if (!io.Post(StreamReq(s, kP[s], r.offset, r.bytes, cls, static_cast<std::uint32_t>(r.offset / kC), dst))) {
             if (c != kInvalidChunk) {
-              if (!pool.IsBorrowed(c) || pool.OwnerOf(c) != s) bad.fetch_add(1);
+              if (!pool.IsBorrowed(c) || pool.OwnerOf(c) != s) badRefused.fetch_add(1);
               pool.Release(c);
             }
             planners[s].Seek(r.offset);
@@ -133,9 +133,11 @@ SND_TEST(IoAdvStress, ThreeThreadsConserveChunksOrderAndEpochs) {
         const std::uint32_t cancelledUpTo = audioEpoch[s].load(std::memory_order_acquire);
         const ChunkRecord* peek = ch.Peek();
         std::uint32_t peekTag = peek != nullptr ? peek->tag : 0xFFFFFFFFu;
+        const std::uint32_t peekEpoch = peek != nullptr ? peek->epoch : 0u;
         ChunkRecord rec{};
         while (ch.Pop(rec)) {
-          if (peekTag != 0xFFFFFFFFu && peekTag != rec.tag) bad.fetch_add(1);  // Peek showed the record Pop returns
+          // Peek showed the record Pop returns (unless a Cancel in between made it stale).
+          if (peekTag != 0xFFFFFFFFu && peekEpoch == rec.epoch && peekTag != rec.tag) badPeek.fetch_add(1);
           peekTag = 0xFFFFFFFFu;
           // Epochs only move forward: a record older than one already seen is stale data.
           if (rec.epoch < maxEpoch[s]) staleEpoch.fetch_add(1);
@@ -145,9 +147,9 @@ SND_TEST(IoAdvStress, ThreeThreadsConserveChunksOrderAndEpochs) {
           if (rec.epoch > maxEpoch[s]) maxEpoch[s] = rec.epoch;
           if (rec.status == ChunkStatus::Ok) {
             if (!MatchesPattern(s + 1u, rec.offset, pool.Data(rec.chunk), rec.bytes)) badData.fetch_add(1);
-            if (pool.OwnerOf(rec.chunk) != s) bad.fetch_add(1);
+            if (pool.OwnerOf(rec.chunk) != s) badOwner.fetch_add(1);
           } else if (rec.chunk != kInvalidChunk) {
-            bad.fetch_add(1);
+            badErrChunk.fetch_add(1);
           }
           if (have[s] && rec.epoch == lastEpoch[s] && rec.offset != nextOffset[s]) {
             // Request order: next offset, or the loop start after the loop end on slot 1.
@@ -184,7 +186,10 @@ SND_TEST(IoAdvStress, ThreeThreadsConserveChunksOrderAndEpochs) {
                   static_cast<unsigned long long>(st.readErrors), static_cast<unsigned long long>(st.fsRejects),
                   static_cast<unsigned long long>(st.poolStarved));
   SND_CHECK(consumed.load() > 200u);
-  SND_CHECK_EQ(bad.load(), 0u);
+  SND_CHECK_EQ(badPeek.load(), 0u);
+  SND_CHECK_EQ(badOwner.load(), 0u);
+  SND_CHECK_EQ(badErrChunk.load(), 0u);
+  SND_CHECK_EQ(badRefused.load(), 0u);
   SND_CHECK_EQ(badOrder.load(), 0u);
   SND_CHECK_EQ(staleEpoch.load(), 0u);
   SND_CHECK_EQ(badData.load(), 0u);
