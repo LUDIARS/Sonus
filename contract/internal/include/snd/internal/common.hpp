@@ -211,13 +211,14 @@ struct VoiceRenderStatus {
 static_assert(sizeof(VoiceRenderStatus) == 8);
 
 // 1.1 (D-43): the voice belonged to a chunk that missed the deadline and whose
-// worker may still be running. Written by Render; SelectVoices, BuildRenderList
-// (and RunEventLogic, which destroys voices) read the previous block's value.
-// While held != 0 no system reads or writes the voice's render state and the
-// voice is not put into the render list; its output was faded to silence from
-// the end of the previous block. Render clears it once the worker is quiescent
-// (RtWorkerPool::StragglersInFlight() == 0); the render state is then the value
-// the late chunk wrote.
+// worker may still be running. Written by Render (serial part); SelectVoices,
+// BuildRenderList (and RunEventLogic, which destroys voices) read the previous
+// block's value. While held != 0 no system reads or writes the voice's render
+// state (its RealVoice row and the real-slot pools) and the voice is not put
+// into the render list; its output was faded to silence from the end of the
+// previous block. Render clears it once RtWorkerPool::IsQuiescent() is true
+// (StragglersInFlight() is for statistics only); the render state is then the
+// value the late chunk wrote.
 struct VoiceRenderHold {
   std::uint8_t held;            // 1 = held (do not touch the render state)
   std::uint8_t reserved[3];
@@ -235,8 +236,8 @@ struct RealVoiceAssign {
 static_assert(sizeof(RealVoiceAssign) == 12);
 
 // 1.1 (D-44): the former 64-byte RealVoice.resamplerState column is gone. The
-// resampler state of real voice slot r lives in core's resampler pool at index
-// r: (maxRealVoices + fadeReserveVoices) slots of
+// resampler state of real voice slot r (RealVoice is a Direct table, D-43)
+// lives in core's resampler pool at index r: (maxRealVoices + fadeReserveVoices) slots of
 // dsp::ResamplerStateBytes(Sinc, Config.maxVoiceChannels, Config.maxPitchRatio)
 // bytes, 64-byte aligned (MemTag Tables). Pitch ratios are clamped to
 // Config.maxPitchRatio.

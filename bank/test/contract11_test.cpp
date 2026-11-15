@@ -3,6 +3,7 @@
 #include <string>
 
 #include "snd/bank/bank_manager.hpp"
+#include "snd/id.hpp"
 #include "snd/mocks/deterministic_job_system.hpp"
 #include "snd/mocks/memory_file_system.hpp"
 #include "snd/test/test.hpp"
@@ -67,4 +68,14 @@ SND_TEST(BankContract11, SlotGenerationsStayBelow2Pow31) {
     SND_CHECK_EQ(e.m->BeginUnload(h, SND_UNLOAD_STOP_AND_UNLOAD, false), SND_OK);
     e.m->Update();
   }
+}
+
+// D-50 (acceptance decision G): a name whose id equals another declared name's.
+SND_TEST(BankContract11, DeclareLanguageHashCollisionFails) {
+  Env e;
+  SND_REQUIRE(e.m != nullptr);
+  static_assert(snd::HashId("glbvs") == snd::HashId("yacxa"));  // FNV-1a 32 collision
+  SND_CHECK_EQ(e.m->DeclareLanguage("glbvs"), SND_OK);
+  SND_CHECK_EQ(e.m->DeclareLanguage("yacxa"), SND_ERR_INVALID_ARGUMENT);
+  SND_CHECK_EQ(e.m->DeclareLanguage("glbvs"), SND_OK);  // the same name again: fine
 }

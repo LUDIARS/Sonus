@@ -41,18 +41,18 @@
 //      cover batches started after the call (a worker may already be running
 //      a chunk of a later Run(); IsQuiescent() then returns false).
 //
-//    StragglersInFlight() == 0 (audio thread, after Run()) gives the same
-//    guarantee (a) and (b) for all generations OLDER than the current one,
-//    while chunks of the current generation may still run. It is meant for
-//    double-buffering by generation: reuse the buffers of generation G-1 once
-//    StragglersInFlight() is 0. Both functions are conservative: a worker that
-//    is about to discover there is nothing to run may make them report
-//    "busy" for a moment, never the opposite.
-//  - Core's rules on top of this (contract 1.1, CONTRACTS.md D-43): two sets of
-//    render lists / chunk accumulators alternating per block, the previous set
-//    reused only after StragglersInFlight() == 0, serial rendering on the audio
-//    thread while that cannot be confirmed, and voices of a Late chunk held
-//    (schema Voice.renderHold) until the worker is quiescent.
+//    StragglersInFlight() (audio thread, after Run()) counts workers that run a
+//    chunk of a generation OLDER than the last Run's; a late chunk of the last
+//    Run itself is not counted. It is for statistics / diagnostics only: core
+//    decides with IsQuiescent() (contract 1.1, CONTRACTS.md D-43). Both
+//    functions are conservative: a worker that is about to discover there is
+//    nothing to run may make them report "busy" for a moment, never the opposite.
+//  - Core's rules on top of this (D-43): two sets of render lists / chunk
+//    accumulators; a block is rendered in parallel only when IsQuiescent() is
+//    true at its start (both sets free), otherwise serially on the audio thread
+//    into the set the last parallel block did not use (at most one set is in
+//    use by a late chunk). Voices of a Late chunk stay held (schema
+//    Voice.renderHold) and their set is reused only once IsQuiescent() is true.
 //  - Stack: workers get at least platform::kRtThreadMinStackBytes (256 KiB,
 //    D-47; RtWorkerConfig::minStackBytes).
 //  - scratch is the calling thread's arena (Config.memory.threadArenaBytes),
@@ -131,11 +131,12 @@ class RtWorkerPool {
   std::uint32_t Workers() const noexcept { return workerCount_; }
   std::uint32_t MaxChunks() const noexcept { return maxChunks_; }
   // Audio thread, after Run(): workers that may be executing (or about to
-  // start) a chunk of a generation older than the last Run's. RT-safe. See the
-  // SAFE POINT rules above.
+  // start) a chunk of a generation older than the last Run's. RT-safe.
+  // Statistics / diagnostics only (D-43 uses IsQuiescent()).
   std::uint32_t StragglersInFlight() const noexcept;
-  // Any thread: true when no worker executes or is about to start a chunk.
-  // RT-safe. See the SAFE POINT rules above for what it guarantees.
+  // Any thread: true when no worker executes or is about to start a chunk
+  // (of any generation, the last Run's included). RT-safe. The predicate of
+  // D-43 (parallel block, hold release, set reuse); see SAFE POINT above.
   bool IsQuiescent() const noexcept;
   platform::PriorityResult WorkerPriority(std::uint32_t worker) const noexcept;
 

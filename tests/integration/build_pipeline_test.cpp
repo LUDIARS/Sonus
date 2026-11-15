@@ -346,3 +346,80 @@ SND_TEST(BuildPipeline, BankFormatEffectTableMatchesDsp) {
   }
   SND_CHECK_EQ(found, kinds);
 }
+
+// D-54: the bank manager reserves the RUNTIME's need (hook = dsp::ComputeDspPoolNeed
+// with the runtime Config), not the bank's DSPN; a difference is not an error.
+namespace {
+bool ComputeHook(void*, const snd_effect_desc* descs, std::uint32_t count, std::uint32_t rate, bf::DspPoolNeed* out) {
+  std::uint32_t unknown = 0;
+  *out = snd::dsp::ComputeDspPoolNeed(descs, count, rate, nullptr, 0, &unknown);
+  return true;
+}
+}  // namespace
+
+SND_TEST(BuildPipeline, BankManagerReservesTheRuntimeNeed) {
+  mini::Project proj("dsp-runtime");
+  EffectProject(proj);
+  // Master is 0 channels up to the root: the runtime's output channel count decides.
+  bt::Diagnostics d;
+  SND_REQUIRE_MSG(proj.Build(proj.Options(), &d), "%s", mini::Dump(d).c_str());  // built for 48 kHz
+  const std::vector<std::uint8_t> bytes = mini::ReadBytes(proj.out() / "Main.sndb");
+  pipeline::ReadBank bank(bytes);
+  SND_REQUIRE(bank.ok);
+  struct Case {
+    std::uint32_t rate, block, outputChannels;
+  };
+  for (const Case c : {Case{48000, 256, 2}, Case{96000, 512, 2}, Case{48000, 256, 8}}) {
+    // Expected: the descs as the runtime builds them.
+    std::vector<snd::EffectDesc> descs;
+    std::vector<std::vector<float>> params;
+    params.reserve(64);
+    for (std::uint32_t b = 0; b < bank.view.Rows(bf::chunk::BUSS); ++b) {
+      std::uint32_t ch = BusChannels(bank.view, b);
+      // BusChannels() falls back to 2 (the build's rule); the runtime uses outputChannels.
+      std::uint32_t at = b, own = 0;
+      for (int k = 0; k < 64 && at != bf::kNone; ++k) {
+        own = bank.view.Column<bk::col::BUSS_channels>()[at];
+        if (own != 0) break;
+        at = bank.view.Column<bk::col::BUSS_parent>()[at];
+      }
+      if (own == 0) ch = c.outputChannels;
+      const std::vector<snd::EffectDesc> fx = pipeline::BusEffectDescs(bank.view, b, ch, c.rate, c.block, &params);
+      descs.insert(descs.end(), fx.begin(), fx.end());
+    }
+    const bf::DspPoolNeed want = snd::dsp::ComputeDspPoolNeed(descs.data(), static_cast<std::uint32_t>(descs.size()),
+                                                              c.rate, nullptr, 0);
+    snd::mock::MemoryFileSystem fs;
+    snd::mock::DeterministicJobSystem jobs;
+    fs.AddFile("Main.sndb", bytes);
+    Reserve pool;
+    bk::BankManagerDesc md;
+    md.allocator = &snd::base::DefaultAllocator();
+    md.fileSystem = &fs;
+    md.ioMode = bk::BankIoMode::DirectFileSystem;
+    md.jobs = &jobs;
+    md.dsp.user = &pool;
+    md.dsp.reserve = &ReserveHook;
+    md.dsp.release = &ReleaseHook;
+    md.dsp.compute = &ComputeHook;
+    md.sampleRate = c.rate;
+    md.blockSize = c.block;
+    md.outputChannels = c.outputChannels;
+    bk::BankManager* m = nullptr;
+    SND_REQUIRE_EQ(bk::BankManager::Create(md, &m), SND_OK);
+    const snd::HandleRef h = m->RequestLoad("Main.sndb");
+    for (int i = 0; i < 16; ++i) {
+      m->Update();
+      jobs.RunAll();
+    }
+    m->Update();
+    SND_CHECK_MSG(m->Result(h) == SND_OK, "%s", m->FailureReason(h));
+    SND_CHECK_EQ(pool.bytes, want.instanceBytes);
+    SND_CHECK_EQ(pool.count, want.instanceCount);
+    const bk::PreparedBank* pb = m->Prepared(h);
+    SND_REQUIRE(pb != nullptr);
+    SND_CHECK_EQ(pb->builtDspNeed.instanceBytes, bank.view.DspNeed().instanceBytes);  // kept for reference
+    if (c.rate != 48000 || c.outputChannels != 2) SND_CHECK(pb->dspNeed.instanceBytes != pb->builtDspNeed.instanceBytes);
+    bk::BankManager::Destroy(m);
+  }
+}

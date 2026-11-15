@@ -253,9 +253,10 @@ bool EffectSlotIsTailDone(const EffectSlot& slot) noexcept;
 std::uint32_t PluginStateBytes(const snd_dsp_effect& plugin, const EffectDesc& desc) noexcept;
 
 // --- DSP instance pool sizing (3.3; buildtool -> DSPN, bank load) ---
-// Bytes of one instance, rounded up to 64 (EFFX.stateBytes). Standard effects
-// use EffectStateBytes; other ids are looked up in `plugins` (may be null).
-// 0 if the type is unknown.
+// Bytes of one instance, rounded up to 64 (EFFX.stateBytes). A plugin in
+// `plugins` (may be null) with the type id wins over a standard effect of the
+// same id (D-31: registration overrides built-ins, as for codecs); otherwise
+// standard effects use EffectStateBytes. 0 if the type is unknown.
 std::uint32_t EffectInstanceBytes(const EffectDesc& desc, std::uint32_t sampleRate,
                                   const snd_dsp_effect* plugins, std::uint32_t pluginCount) noexcept;
 // Sum over descs (each rounded to 64) = bank_format::DspPoolNeed. `unknown`

@@ -61,7 +61,8 @@ struct PreparedBank {
   Id bankId = 0;
   std::uint32_t languageId = 0;  // 0 = not a language bank
   BankView view;                 // validated tables and blobs
-  bank_format::DspPoolNeed dspNeed{};
+  bank_format::DspPoolNeed dspNeed{};       // what is reserved: the runtime's (D-54) or DSPN
+  bank_format::DspPoolNeed builtDspNeed{};  // the bank's DSPN (build-time estimate, reference only)
   DevOverlay overlay;
   // Resolved dependency slots, in the bank's dependency order (filled by
   // BankManager when it decides to register; dependencyCount entries).

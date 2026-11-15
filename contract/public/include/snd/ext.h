@@ -184,7 +184,9 @@ typedef struct snd_effect_desc {
   /* 1.1 (A1-4): rate the instance runs at (Config.sampleRate at runtime, the
    * build's DSP sizing rate in the build tool). Filled in by the runtime / build
    * tool before state_bytes and init are called; init's sample_rate argument
-   * always equals this value. Plugins built against 1.0 never read it. */
+   * always equals this value. Plugins built against 1.0 never read it. The
+   * struct has no version field: a plugin reads sample_rate only after
+   * snd_contract_version() returned 1.1 or later (a 1.0 runtime does not pass it). */
   uint32_t sample_rate;
   uint32_t reserved;           /* 0 */
 } snd_effect_desc;

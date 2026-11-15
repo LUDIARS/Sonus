@@ -48,6 +48,7 @@ struct BankManager::Impl {
     detail::FileRead read;           // DirectFileSystem mode
     detail::SchedulerRead sched;     // Scheduler mode
     bool cancel = false;
+    std::uint64_t requestSeq = 0;    // RequestLoad acceptance order (duplicates, D-50)
     // validation job (job writes prepared/jobResult/jobError; manager reads after jobCounter == 0)
     JobCtx ctx{};
     std::uint32_t jobCounter = 0;
@@ -78,6 +79,7 @@ struct BankManager::Impl {
   Language languages[kMaxLanguages] = {};
   std::uint32_t languageCount = 0;
   Id currentLanguage = 0;
+  std::uint64_t nextRequestSeq = 0;
 
   // --- helpers (mutex held) -------------------------------------------------------------
   Slot* Get(HandleRef h) noexcept {
@@ -175,6 +177,7 @@ struct BankManager::Impl {
   }
   void StartLoad(Slot& s) noexcept {
     s.stage = Stage::Open;
+    s.requestSeq = ++nextRequestSeq;
     s.cancel = false;
     s.result = SND_OK;
     s.reason[0] = '\0';
@@ -202,7 +205,10 @@ struct BankManager::Impl {
   }
   snd_result AddLanguage(const char* name, std::size_t n) noexcept {
     const Id id = HashId(std::string_view(name, n));
-    if (LanguageName(id) != nullptr) return SND_OK;
+    if (const char* known = LanguageName(id); known != nullptr) {
+      // Same name: nothing to do. Another name with the same id: hash collision (D-50).
+      return std::strlen(known) == n && std::memcmp(known, name, n) == 0 ? SND_OK : SND_ERR_INVALID_ARGUMENT;
+    }
     if (languageCount == kMaxLanguages) return SND_ERR_LIMIT_REACHED;
     char* copy = Dup(name, n);
     if (copy == nullptr) return SND_ERR_OUT_OF_BUDGET;
@@ -284,10 +290,82 @@ struct BankManager::Impl {
     Slot& s = impl->slots[c->index];
     s.jobError = ParseError{};
     s.jobResult = PrepareBank(s.image, s.imageBytes, impl->desc.prepare, *impl->alloc, &s.prepared, &s.jobError);
+    if (s.jobResult == SND_OK && impl->desc.dsp.compute != nullptr) {
+      s.jobResult = impl->RuntimeDspNeed(*s.prepared, &s.jobError);
+      if (s.jobResult != SND_OK) {
+        DestroyPrepared(s.prepared, *impl->alloc);
+        s.prepared = nullptr;
+      }
+    }
+  }
+
+  // D-54: the runtime's DSP pool need, from the bank's effect rows and the
+  // runtime Config (normal worker, in the validation job).
+  snd_result RuntimeDspNeed(PreparedBank& pb, ParseError* err) noexcept {
+    const BankView& v = pb.view;
+    const std::uint32_t fxRows = v.Rows(bf::chunk::EFFX);
+    if (fxRows == 0) {
+      pb.dspNeed = bf::DspPoolNeed{0u, 0u, 0u};
+      return SND_OK;
+    }
+    auto* descs = static_cast<snd_effect_desc*>(alloc->Allocate(sizeof(snd_effect_desc) * fxRows, 16, MemTag::Misc));
+    if (descs == nullptr) {
+      std::snprintf(err->message, sizeof(err->message), "cannot allocate %u effect descriptions", fxRows);
+      return SND_ERR_OUT_OF_BUDGET;
+    }
+    const auto busParent = v.Column<col::BUSS_parent>();
+    const auto busChannels = v.Column<col::BUSS_channels>();
+    const auto busFirst = v.Column<col::BUSS_effectFirst>();
+    const auto busCount = v.Column<col::BUSS_effectCount>();
+    const auto type = v.Column<col::EFFX_effectType>();
+    const auto paramFirst = v.Column<col::EFFX_paramFirst>();
+    const auto paramCount = v.Column<col::EFFX_paramCount>();
+    const auto blobOffset = v.Column<col::EFFX_blobOffset>();
+    const auto blobBytes = v.Column<col::EFFX_blobBytes>();
+    const auto values = v.Column<col::EFPV_value>();
+    const ByteSpan efbl = v.Chunk(bf::chunk::EFBL);
+    for (std::uint32_t r = 0; r < fxRows; ++r) {
+      snd_effect_desc& d = descs[r];
+      d = snd_effect_desc{};
+      d.effect_type = type[r];
+      d.channels = desc.outputChannels;  // an effect of no bus
+      d.max_frames = desc.blockSize;
+      d.param_count = paramCount[r];
+      d.initial_params = d.param_count != 0 && values.data() != nullptr ? values.data() + paramFirst[r] : nullptr;
+      if (d.initial_params == nullptr) d.param_count = 0;
+      d.blob_bytes = blobBytes[r];
+      d.blob = d.blob_bytes != 0 ? efbl.data + blobOffset[r] : nullptr;
+      d.sample_rate = desc.sampleRate;
+    }
+    // Bus channels: the bus's, else the nearest parent's, else the output's (validated: parents after the bus).
+    for (std::uint32_t b = 0; b < v.Rows(bf::chunk::BUSS); ++b) {
+      std::uint32_t ch = 0;
+      std::uint32_t at = b;
+      for (std::uint32_t depth = 0; at != bf::kNone && at < busChannels.rows() && depth < 4096u; ++depth) {
+        ch = busChannels[at];
+        if (ch != 0u) break;
+        at = busParent[at];
+      }
+      if (ch == 0u) ch = desc.outputChannels;
+      for (std::uint32_t k = 0; k < busCount[b]; ++k) {
+        const std::uint32_t fx = busFirst[b] + k;
+        if (fx < fxRows) descs[fx].channels = ch;
+      }
+    }
+    bf::DspPoolNeed need{0u, 0u, 0u};
+    const bool ok = desc.dsp.compute(desc.dsp.user, descs, fxRows, desc.sampleRate, &need);
+    alloc->Free(descs, MemTag::Misc);
+    if (!ok) {
+      std::snprintf(err->message, sizeof(err->message), "the DSP sizing hook refused the bank's %u effects", fxRows);
+      return SND_ERR_INVALID_ARGUMENT;
+    }
+    pb.dspNeed = need;  // reserved; the bank's DSPN stays in builtDspNeed
+    return SND_OK;
   }
 
   void PumpIoLocked() noexcept;
   void PumpSchedulerLocked() noexcept;
+  snd_result CheckUnloadLocked(HandleRef bank, std::uint32_t mode, bool referencedByPlaybacks) const noexcept;
   // Checks the size and allocates the image (fails the slot otherwise).
   bool AllocateImage(Slot& s, std::uint64_t size) noexcept;
   // Reading done: validation and preparation on a normal worker (10.3).
@@ -660,17 +738,27 @@ bool Impl::PumpLocked() noexcept {
 // Dependencies (10.3) and the DSP pool (3.3). true if the slot left Validated.
 bool Impl::Decide(Slot& s) noexcept {
   PreparedBank& pb = *s.prepared;
-  // The same bank (bankId + language) from another path: the first one wins.
+  // The same bank (bankId + language) twice: the request order decides (D-50).
   for (std::uint32_t i = 0; i < desc.maxBanks; ++i) {
     const Slot& o = slots[i];
+    if (&o == &s || o.cancel) continue;
+    const bool earlier = o.requestSeq < s.requestSeq;
+    // An earlier request whose identity is not known yet (reading / validating):
+    // wait for its result. These stages always end without waiting for others.
+    if (earlier && (o.stage == Stage::Open || o.stage == Stage::Reading || o.stage == Stage::Validating)) {
+      return false;
+    }
     // Only stages whose `prepared` is settled (a Validating slot's job may still write it).
-    const bool earlier = o.stage == Stage::Ready || o.stage == Stage::Registered || o.stage == Stage::Unloading ||
-                         (o.stage == Stage::Validated && &o < &s);
-    if (&o == &s || o.cancel || !earlier || o.prepared == nullptr) continue;
+    const bool settled = o.stage == Stage::Ready || o.stage == Stage::Registered || o.stage == Stage::Unloading ||
+                         o.stage == Stage::Validated;
+    if (!settled || o.prepared == nullptr) continue;
     if (o.prepared->bankId == pb.bankId && o.prepared->languageId == pb.languageId) {
-      // The first one is still deciding (e.g. waiting for its dependencies): wait
-      // for its outcome so that the reason given here is the real one.
-      if (o.stage == Stage::Validated) return false;
+      // The old copy is being unloaded: register once it is released, never fail for it.
+      if (o.stage == Stage::Unloading) return false;
+      if (o.stage == Stage::Validated) {
+        if (earlier) return false;  // the earlier request is still deciding: wait for its outcome
+        continue;                   // a later request: this one decides first
+      }
       char why[192];
       std::snprintf(why, sizeof(why), "bank %08x is already loaded or loading from '%.120s'", pb.bankId,
                     o.path != nullptr ? o.path : "?");
@@ -784,7 +872,11 @@ std::uint32_t BankManager::MaxBanks() const noexcept { return impl_->desc.maxBan
 // ---------------------------------------------------------------------------
 snd_result BankManager::CheckUnload(HandleRef bank, std::uint32_t mode, bool referencedByPlaybacks) const noexcept {
   base::LockGuard lock(impl_->mutex);
-  const Impl::Slot* s = impl_->Get(bank);
+  return impl_->CheckUnloadLocked(bank, mode, referencedByPlaybacks);
+}
+
+snd_result Impl::CheckUnloadLocked(HandleRef bank, std::uint32_t mode, bool referencedByPlaybacks) const noexcept {
+  const Slot* s = Get(bank);
   if (s == nullptr || s->cancel) return SND_ERR_INVALID_HANDLE;
   if (mode != SND_UNLOAD_STOP_AND_UNLOAD && mode != SND_UNLOAD_IF_UNUSED) return SND_ERR_INVALID_ARGUMENT;
   if (s->dependents > 0) return SND_ERR_BANK_IN_USE;
@@ -793,9 +885,10 @@ snd_result BankManager::CheckUnload(HandleRef bank, std::uint32_t mode, bool ref
 }
 
 snd_result BankManager::BeginUnload(HandleRef bank, std::uint32_t mode, bool referencedByPlaybacks) noexcept {
-  const snd_result r = CheckUnload(bank, mode, referencedByPlaybacks);
-  if (r != SND_OK) return r;
+  // Check and change under one lock: no dependant can register in between.
   base::LockGuard lock(impl_->mutex);
+  const snd_result r = impl_->CheckUnloadLocked(bank, mode, referencedByPlaybacks);
+  if (r != SND_OK) return r;
   Impl::Slot* s = impl_->Get(bank);
   if (s == nullptr) return SND_ERR_INVALID_HANDLE;
   switch (s->stage) {

@@ -119,6 +119,7 @@ snd_result PrepareBank(const void* image, std::uint64_t bytes, const PrepareOpti
     pb->bankId = pb->view.bankId();
     pb->languageId = pb->view.languageId();
     pb->dspNeed = pb->view.DspNeed();
+    pb->builtDspNeed = pb->dspNeed;
     pb->dependencyCount = pb->view.dependencyCount();
     if (pb->dependencyCount > 0) {
       void* deps = allocator.Allocate(sizeof(HandleRef) * pb->dependencyCount, 16, MemTag::Bank);

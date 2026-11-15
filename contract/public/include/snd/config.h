@@ -72,6 +72,7 @@ SND_EXTERN_C_BEGIN
   X(max_voice_channels, maxVoiceChannels, uint32_t, uint32_t, 8u)                                 \
   /* largest rate ratio a voice is resampled at (source frames per output frame, including the */ \
   /* source/internal rate ratio), 1.0..SND_MAX_PITCH_RATIO; larger ratios are clamped to it.    */ \
+  /* NaN, infinities, values below 1 or above the bound: snd_create SND_ERR_INVALID_ARGUMENT.  */ \
   /* Sizes core's resampler pool (D-44); ratios above 4 use ~32 KiB of stack (D-47).           */ \
   X(max_pitch_ratio, maxPitchRatio, float, float, 4.0f)
 

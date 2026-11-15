@@ -56,7 +56,8 @@ static_assert(IdHasher().Append("foo").Append("bar").Finish() == snd::HashId("fo
 // (U64) and then the bytes, so ("ab","c") and ("a","bc") differ. Not an Id.
 class Fnv1a64 {
  public:
-  constexpr Fnv1a64& Bytes(const void* p, std::size_t n) noexcept {
+  // Not constexpr (reads through a void pointer); U64 / Str are.
+  Fnv1a64& Bytes(const void* p, std::size_t n) noexcept {
     const auto* b = static_cast<const unsigned char*>(p);
     for (std::size_t i = 0; i < n; ++i) {
       h_ ^= b[i];

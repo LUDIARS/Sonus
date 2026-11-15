@@ -44,6 +44,19 @@
 //    IoScheduler::Destroy(). Destroy() with a request still in flight cancels
 //    it and, if the scheduler's IO thread is running, waits for it to finish;
 //    without a running IO thread such slots are leaked (as with a running job).
+//    By design Destroy() waits for as long as the file system takes to finish
+//    the read in flight: an IFileSystem that never completes a read makes it
+//    wait forever (the image may not be freed under the read).
+//
+// The same bank twice (bankId + language, D-50): the request order decides
+// (RequestLoad's acceptance sequence; a retry in place is a new request). A
+// load waits before registering while an EARLIER request has not produced its
+// result: still reading / validating (its identity is not known yet), or the
+// same bank validated and waiting itself. The earlier one succeeding fails the
+// later with SND_ERR_BANK_ALREADY_LOADED; the earlier one failing or being
+// cancelled lets the later register. While an old slot of the same bank is
+// UNLOADING (same path or not), a new load is read and validated but waits
+// for the old slot's Release() before it registers (never fails for it).
 //
 // Threads: every member function is safe to call from any non-RT thread (an
 // internal mutex serialises them; the validation job does not take it). In
@@ -56,6 +69,7 @@
 #include <cstdint>
 
 #include "snd/bank/prepared.hpp"
+#include "snd/ext.h"
 #include "snd/ext/allocator.hpp"
 #include "snd/ext/file_system.hpp"
 #include "snd/ext/job_system.hpp"
@@ -76,12 +90,26 @@ enum class BankIoMode : std::uint8_t {
   DirectFileSystem = 1,  // IFileSystem calls from PumpIo (tests, single-threaded hosts)
 };
 
-// DSP instance pool hook (3.3): core / dsp reserve the bank's DSPN need from
-// the pool. Returning false fails the load with SND_ERR_OUT_OF_BUDGET.
+// DSP instance pool hook (3.3): core / dsp reserve the bank's need from the
+// pool. Returning false fails the load with SND_ERR_OUT_OF_BUDGET.
+//
+// Contract 1.1 D-54: the need is the RUNTIME's. When `compute` is set, the
+// validation job builds one snd_effect_desc per EFFX row (effect type, EFPV
+// values, EFBL blob, max_frames = BankManagerDesc::blockSize, sample_rate =
+// BankManagerDesc::sampleRate, channels = the bus's, else the nearest parent's,
+// else BankManagerDesc::outputChannels; an EFFX row of no bus uses
+// outputChannels) and calls compute(); the composition root passes
+// dsp::ComputeDspPoolNeed with Config.plugins.effects (bank cannot depend on
+// dsp, 12.1). The result goes to PreparedBank::dspNeed and is what reserve()
+// gets; the bank's DSPN stays in PreparedBank::builtDspNeed as a reference
+// (a difference is not an error). compute == nullptr: the bank's DSPN is used.
+// compute returning false fails the load with SND_ERR_INVALID_ARGUMENT.
 struct DspPoolHooks {
   void* user = nullptr;
   bool (*reserve)(void* user, const bank_format::DspPoolNeed& need) = nullptr;
   void (*release)(void* user, const bank_format::DspPoolNeed& need) = nullptr;
+  bool (*compute)(void* user, const snd_effect_desc* descs, std::uint32_t count, std::uint32_t sampleRate,
+                  bank_format::DspPoolNeed* out) = nullptr;
 };
 
 struct BankManagerDesc {
@@ -98,6 +126,12 @@ struct BankManagerDesc {
   // nullptr: the manager allocates its own (MemTag::Notify).
   notify::BankSlotState* slotStates = nullptr;
   DspPoolHooks dsp;
+  // Runtime values the effect descs are built with (D-54): Config.sampleRate,
+  // Config.blockSize, and the channel count of the output (master) bus used for
+  // buses that are 0 up to the root.
+  std::uint32_t sampleRate = 48000;
+  std::uint32_t blockSize = 256;
+  std::uint32_t outputChannels = 2;
 };
 
 // One step of a language switch (10.4): unload `oldBank` once `newPath` is
@@ -155,7 +189,8 @@ class BankManager {
   // SND_ERR_BANK_IN_USE when a loaded bank depends on it (both modes) or, for
   // IF_UNUSED, when `referencedByPlaybacks`. SND_ERR_INVALID_HANDLE if stale.
   snd_result CheckUnload(HandleRef bank, std::uint32_t mode, bool referencedByPlaybacks) const noexcept;
-  // CheckUnload, then: loaded -> UNLOADING (core records cmd::BankUnload);
+  // CheckUnload, then (under the same lock, no gap between the check and the
+  // change): loaded -> UNLOADING (core records cmd::BankUnload);
   // loading / failed / not yet popped -> cancelled and freed by Pump.
   snd_result BeginUnload(HandleRef bank, std::uint32_t mode, bool referencedByPlaybacks) noexcept;
   // The audio side refused the unload (IF_UNUSED found references): back to LOADED.
@@ -168,6 +203,8 @@ class BankManager {
   // Language bank files are named "<base>.<language>.sndb" (buildtool). The
   // manager knows a language's name from DeclareLanguage or from the path of
   // a loaded language bank whose segment hashes to its languageId.
+  // DeclareLanguage (D-50): same name again -> SND_OK; a different name with
+  // the same id (hash collision) -> SND_ERR_INVALID_ARGUMENT.
   snd_result DeclareLanguage(const char* name) noexcept;
   // Fills `out` with one entry per loaded/loading language bank of another
   // language: the bank to drop and the path of its `language` counterpart.

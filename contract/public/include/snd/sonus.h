@@ -23,10 +23,12 @@
  *  - Handle-returning functions allocate the slot on the calling thread and
  *    return the handle at once (2.1). They return an invalid handle (value 0)
  *    only when no slot is free or the thread is not registered.
- *    1.1 (D-46): slots come from a lock-free allocator shared by all
- *    registered threads (base::HandleAllocator); a slot goes back to it only
- *    in the owner's snd_update(), when the end / release flag of the slot is
- *    consumed. Issued generations are below 2^31 (see snd/types.h).
+ *    1.1 (D-46): playback / emitter / transport / user-buffer slots come from
+ *    a lock-free allocator shared by all registered threads
+ *    (base::HandleAllocator); a slot goes back to it only in the owner's
+ *    snd_update(), when the end / release flag of the slot is consumed. Bank
+ *    slots are issued by the bank module under a mutex. Issued generations
+ *    are below 2^31 (see snd/types.h).
  *  - snd_play() of an event that is not loaded still returns a valid handle;
  *    the playback ends with SND_END_NOT_LOADED at a later Update (13.1).
  *  - Asynchronous outcomes (end, load complete, errors) arrive through
@@ -131,10 +133,14 @@ SND_API snd_bank_state SND_CALL snd_get_bank_state(const snd_system* sys, snd_ba
 /* 1.1: tell the runtime a language name (10.4). Language banks are files named
  * "<base>.<name>.sndb"; the id passed to snd_set_language is snd_hash_id(name).
  * name: 1..SND_MAX_LANGUAGE_NAME_BYTES-1 bytes of UTF-8, no '/', '.' or '\\'.
- * Declaring the same name again is SND_OK. Thread: registered. Recorded as a
- * must-deliver command (the name is copied).
- * Errors: SND_ERR_INVALID_ARGUMENT (null / empty / too long / bad character),
- * SND_ERR_LIMIT_REACHED (SND_MAX_LANGUAGES names already declared). */
+ * The system keeps one table of declared names: this call adds the name to it
+ * synchronously on the calling thread (it may lock), then records a
+ * must-deliver command (the name is copied). snd_set_language checks that
+ * table, so it sees every name declared earlier on the same thread.
+ * Declaring the same name again is SND_OK and does nothing. Thread: registered.
+ * Errors: SND_ERR_INVALID_ARGUMENT (null / empty / too long / bad character, or
+ * the name hashes to the id of another declared name), SND_ERR_LIMIT_REACHED
+ * (SND_MAX_LANGUAGES names already declared). */
 SND_API snd_result SND_CALL snd_declare_language(snd_system* sys, const char* name);
 
 /* Switch the voice-language bank set (10.4). Playing voices keep their language. Thread: registered.

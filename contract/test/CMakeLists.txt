@@ -8,6 +8,7 @@ snd_add_test(contract_test
     format_test.cpp
     contract11_test.cpp
     contract11_internal_test.cpp
+    contract11_mixed_test.cpp
   LINK sonus_contract)
 
 # The C file must really be compiled as C11 with all warnings.

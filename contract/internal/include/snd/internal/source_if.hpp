@@ -29,20 +29,25 @@
 //     the serial part; a chunk never reads table columns directly),
 //   - the chunk's per-bus accumulators (out buffers),
 //   - the calling thread's arena (RenderBatch::scratch),
-//   - the render state of the voices of its chunk: their RealVoice columns,
-//     the per-voice state of the resampler / filters / source instance, and the
-//     playhead.
-// No other shared memory, no source-wide mutable state that another chunk or
-// the audio thread reads in the same block without synchronisation.
+//   - the render state of the voices of its chunk, addressed by RealVoice slot
+//     (RenderItem::realSlot): their RealVoice columns (RealVoice is a Direct
+//     table: rows never move; playhead and renderStatus live there) and the
+//     pools indexed by the real slot (resampler, filters, source instance).
+// No Voice row (Sparse, rows move), no other shared memory, no source-wide
+// mutable state that another chunk or the audio thread reads in the same
+// block without synchronisation.
 // Core keeps two sets of render lists + chunk accumulators and alternates per
-// block; the previous set is reused only after RtWorkerPool::StragglersInFlight()
-// == 0. When that cannot be confirmed, the block is rendered serially on the
-// audio thread alone into the free set (and stays serial while both sets are
-// in use). Voices of a late chunk are HELD (schema Voice.renderHold) until the
-// worker is quiescent: no system reads or writes their render state, they are
-// not in the render list, their output fades to silence from the end of the
-// previous block (D-15 short fade). After the hold the render state is what
-// the late chunk wrote and the voice continues from the next block.
+// block. A block is rendered in parallel (RtWorkerPool::Run) only when
+// RtWorkerPool::IsQuiescent() is true at its start: then every earlier chunk
+// has finished and both sets are free. Otherwise the block is rendered
+// serially on the audio thread alone into the set the last parallel block did
+// not use; at most one set is ever in use by a late chunk, so that set always
+// exists. Voices of a late chunk are HELD (schema Voice.renderHold) until
+// IsQuiescent() is true: no system reads or writes their render state, they
+// are not in the render list, their output fades to silence from the end of
+// the previous block (D-15 short fade). After the hold the render state is
+// what the late chunk wrote and the voice continues from the next block.
+// StragglersInFlight() is for statistics / diagnostics only.
 #ifndef SND_INTERNAL_SOURCE_IF_HPP
 #define SND_INTERNAL_SOURCE_IF_HPP
 
@@ -217,7 +222,7 @@ struct RenderItem {
   std::uint32_t channels;         // channels of `out`
   Ramp pitch;                     // output-rate kinds only: rate ratio at block start/end,
                                   // already clamped to Config.maxPitchRatio (D-44)
-  Playhead* playhead;             // Voice.playhead (Render owns): read and advance
+  Playhead* playhead;             // RealVoice.playhead[realSlot] (Render owns, 1.1): read and advance
   float* const* out;              // non-interleaved, 64-byte aligned, zeroed; frameOffset+frames fit
 };
 

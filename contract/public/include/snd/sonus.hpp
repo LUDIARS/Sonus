@@ -128,7 +128,7 @@ enum class WhenKind : std::uint8_t {
   Grid = SND_WHEN_GRID,
   NextMarker = SND_WHEN_NEXT_MARKER,
   SegmentEnd = SND_WHEN_SEGMENT_END,
-  ClockSample = SND_WHEN_CLOCK_SAMPLE,
+  AtClockSample = SND_WHEN_CLOCK_SAMPLE,  // 1.1 (D-55): was ClockSample (shadowed snd::ClockSample)
   DelayMicroseconds = SND_WHEN_DELAY_US,
 };
 
@@ -201,7 +201,7 @@ class When {
     return Make(WhenKind::SegmentEnd, t, 0, 0, 0);
   }
   static constexpr When AtClockSample(std::uint64_t clockSample) noexcept {
-    return Make(WhenKind::ClockSample, TransportHandle{}, clockSample, 0, 0);
+    return Make(WhenKind::AtClockSample, TransportHandle{}, clockSample, 0, 0);
   }
   static constexpr When AfterMicroseconds(std::uint64_t us) noexcept {
     return Make(WhenKind::DelayMicroseconds, TransportHandle{}, us, 0, 0);

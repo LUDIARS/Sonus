@@ -59,12 +59,15 @@ typedef int32_t snd_result;
 /* Generation 0 is never issued, so the all-zero value is "invalid".          */
 /*                                                                            */
 /* Issue and return (2.1, CONTRACTS.md D-05 / D-46):                          */
-/*  - Playback, Emitter, Transport (standalone), UserBuffer and Bank slots    */
-/*    are issued by a lock-free slot allocator (base::HandleAllocator) on the */
+/*  - Playback, Emitter, Transport (standalone) and UserBuffer slots are      */
+/*    issued by a lock-free slot allocator (base::HandleAllocator) on the     */
 /*    calling registered thread; any registered thread may issue at the same  */
-/*    time and gets the handle at once.                                       */
-/*  - A slot is returned only by the owner thread's snd_update(), when it     */
-/*    consumes the audio side's end / release flag of that slot (notify).     */
+/*    time and gets the handle at once. A slot is returned only by the owner  */
+/*    thread's snd_update(), when it consumes the audio side's end / release  */
+/*    flag of that slot (notify).                                             */
+/*  - Bank slots are issued and returned by the bank module under a mutex     */
+/*    (the same path returns the existing handle; registered threads are not */
+/*    real-time, so they may lock).                                           */
 /*  - Generations stay below 2^31 (bit 31 of the generation is never set in   */
 /*    an issued handle); after 2^31 - 1 reuses of a slot they wrap to 1.      */
 /* ------------------------------------------------------------------------- */

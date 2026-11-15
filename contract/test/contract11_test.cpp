@@ -1,7 +1,6 @@
 // Contract 1.1 (CONTRACTS.md D-43 .. D-52), public layer: the additions are
 // present, keep the 1.0 layouts as prefixes and agree between C and C++.
-// (snd/sonus.hpp and snd/internal/* are not included together: WhenKind::ClockSample
-// shadows snd::ClockSample under -Wshadow, see the stage-1.5 report.)
+// The public and internal layers in one translation unit: contract11_mixed_test.cpp (D-55).
 #include <cstddef>
 #include <cstdint>
 #include <type_traits>

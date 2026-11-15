@@ -81,7 +81,7 @@ constexpr const char* SystemName(SystemId s) noexcept {
 enum class Temperature : std::uint8_t { Hot = 0, Cold = 1 };
 enum class Indexing : std::uint8_t {
   Sparse = 0,  // dense array + sparse slot index, swap-remove (3.1)
-  Direct = 1,  // slot == position (fixed-shape tables: Listener, Spatial; Stream since 1.1)
+  Direct = 1,  // slot == position (fixed-shape tables: Listener, Spatial; Stream and RealVoice since 1.1)
 };
 enum class ReadTiming : std::uint8_t { Current = 0, Previous = 1, Async = 2 };
 
@@ -97,7 +97,7 @@ using F32 = float;
 #define SND_SCHEMA_TABLES(T)                                                                    \
   T(Playback, Sparse, ApplyCommands, RunEventLogic, "Config.maxPlaybacks")                      \
   T(Voice, Sparse, RunEventLogic, RunEventLogic, "Config.maxVirtualVoices")                     \
-  T(RealVoice, Sparse, SelectVoices, SelectVoices, "maxRealVoices + fadeReserveVoices")         \
+  T(RealVoice, Direct, SelectVoices, SelectVoices, "maxRealVoices + fadeReserveVoices; slot = position (D-43)") \
   T(Emitter, Sparse, ApplyCommands, ApplyCommands, "Config.maxEmitters")                        \
   T(Listener, Direct, ApplyCommands, ApplyCommands, "Config.maxListeners (<= 4)")               \
   T(Spatial, Direct, Compute3D, Compute3D, "maxEmitters * maxListeners; slot = e*L + l")        \
@@ -149,12 +149,23 @@ using F32 = float;
   C(Voice, clipRef, ClipRef, Cold, RunEventLogic)                              \
   C(Voice, createdBlock, BlockIndex, Cold, RunEventLogic)
 
+// RealVoice (1.1, D-43 / D-44): Indexing::Direct, slot == row position, rows
+// never move (the real-voice limit is fixed). It holds the render state a
+// chunk writes: a chunk writes ONLY RealVoice columns of its voices' real slots
+// (playhead, renderStatus, filterState, panMatrix, appliedGain) and the pools
+// indexed by the real slot (resampler state, D-44; per-voice source / effect
+// state). RenderItem refers to the voice by RealVoice slot. Voice rows (Sparse,
+// they move) are never written from a chunk: Voice.playhead / renderStatus are
+// written by Render's serial part only (copied from RealVoice once the chunk
+// is done, or held voices once IsQuiescent(); virtual voices advanced there).
 #define SND_COLS_RealVoice(C)                                                  \
   C(RealVoice, voiceSlot, SlotIndex, Hot, SelectVoices)                        \
   C(RealVoice, assign, RealVoiceAssign, Hot, SelectVoices)                     \
   C(RealVoice, filterState, FilterState, Hot, Render)                          \
   C(RealVoice, panMatrix, PanMatrix, Hot, Render)                              \
-  C(RealVoice, appliedGain, F32, Hot, Render)
+  C(RealVoice, appliedGain, F32, Hot, Render)                                  \
+  C(RealVoice, playhead, Playhead, Hot, Render)    /* 1.1: written by chunks */ \
+  C(RealVoice, renderStatus, VoiceRenderStatus, Hot, Render) /* 1.1: by chunks */
 
 #define SND_COLS_Emitter(C)                                                    \
   C(Emitter, position, Vec3, Hot, ApplyCommands)                               \
