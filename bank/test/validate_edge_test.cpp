@@ -264,3 +264,29 @@ SND_TEST(BankValidateEdge, CyclesPassValidation) {
   const snd_result r = Parse(b.Build());
   snd::test::Note("self-nesting event + category parent cycle: %s", r == SND_OK ? "accepted by ParseBank" : "rejected");
 }
+
+// ALIS (2.0) holds ids only, so ParseBank has no row reference to check.
+// Probe odd contents: oldId 0, oldId == id, one oldId mapped to two ids,
+// an alias chain (A -> B, B -> C). Accepted or not, ResolveAlias is one step
+// and never loops; report what is accepted (spec gap: §6 sets no rule).
+SND_TEST(BankValidateEdge, AliasTableOddContents) {
+  Bank b = Small();
+  b.Table(ch::ALIS, 5,
+          {fixture::U32(c::ALIS_oldId, {0, 5, 7, 7, 8}), fixture::U32(c::ALIS_id, {1, 5, 1, 2, 7}),
+           fixture::U32(c::ALIS_kind, {0, 0, 0, 1, 99})});
+  BankView v;
+  Image* img = nullptr;
+  const snd_result r = Parse(b.Build(), &v, &img);
+  if (r == SND_OK) {
+    SND_CHECK_EQ(v.ResolveAlias(8), 7u);  // one step only: 8 -> 7, not 7 -> 1
+    SND_CHECK_EQ(v.ResolveAlias(7), 1u);  // first row wins
+    SND_CHECK_EQ(v.ResolveAlias(12345), 0u);
+  }
+  snd::test::Note("ALIS with oldId 0 / self alias / duplicate oldId / chain / unknown kind: %s",
+                  r == SND_OK ? "accepted" : "rejected");
+  delete img;
+  // Missing required ALIS column: rejected like any table.
+  Bank m = Small();
+  m.Table(ch::ALIS, 1, {fixture::U32(c::ALIS_oldId, {3})});
+  SND_CHECK_EQ(Parse(m.Build()), SND_ERR_CORRUPT);
+}
