@@ -1,0 +1,23 @@
+{
+  "type": "bus",
+  "guid": "5a0e0000-0000-4000-8000-000000000006",
+  "name": "SFX",
+  "bank": "Common",
+  "parent": "Master",
+  "volumeDb": -3,
+  "sends": [
+    {
+      "bus": "Reverb",
+      "levelDb": -6
+    }
+  ],
+  "effects": [
+    {
+      "type": "Lowpass",
+      "params": [
+        8000,
+        0.7
+      ]
+    }
+  ]
+}

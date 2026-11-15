@@ -1,0 +1,13 @@
+{
+  "type": "parameter",
+  "guid": "5a0e0000-0000-4000-8000-00000000000a",
+  "name": "Speed",
+  "min": 0,
+  "max": 10,
+  "default": 1,
+  "rampRate": 5,
+  "scope": [
+    "global",
+    "emitter"
+  ]
+}

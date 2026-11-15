@@ -1,0 +1,16 @@
+{
+  "type": "event",
+  "guid": "5a0e0000-0000-4000-8000-000000000015",
+  "name": "SE/Sting",
+  "bank": "Level1",
+  "stinger": true,
+  "tracks": [
+    {
+      "clips": [
+        {
+          "asset": "wav/boom"
+        }
+      ]
+    }
+  ]
+}

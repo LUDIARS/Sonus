@@ -1,0 +1,13 @@
+{
+  "type": "playlist",
+  "guid": "5a0e0000-0000-4000-8000-000000000019",
+  "name": "PL/Explore",
+  "mode": "shuffle",
+  "entries": [
+    {
+      "segment": "Seg/A",
+      "weight": 1,
+      "repeat": 2
+    }
+  ]
+}

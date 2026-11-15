@@ -1,0 +1,49 @@
+{
+  "type": "event",
+  "guid": "5a0e0000-0000-4000-8000-000000000016",
+  "name": "Music/Main",
+  "bank": "Level1",
+  "priority": 250,
+  "music": {
+    "initialState": "Explore",
+    "states": [
+      {
+        "name": "Explore",
+        "playlist": "PL/Explore"
+      },
+      {
+        "name": "Battle",
+        "playlist": "PL/Explore"
+      }
+    ],
+    "transitions": [
+      {
+        "from": "Explore",
+        "to": "Battle",
+        "timing": "nextBeat",
+        "fadeOutBeats": 0.5,
+        "late": "nextGrid"
+      },
+      {
+        "from": "*",
+        "to": "*",
+        "timing": "nextBar",
+        "fadeOutBeats": 1,
+        "fadeInBeats": 1
+      },
+      {
+        "from": "Battle",
+        "to": "Explore",
+        "timing": "nextBar",
+        "start": "lastPosition"
+      }
+    ],
+    "stingers": [
+      {
+        "name": "Sting/Hit",
+        "event": "SE/Sting",
+        "timing": "nextBeat"
+      }
+    ]
+  }
+}

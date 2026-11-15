@@ -1,0 +1,48 @@
+{
+  "type": "segment",
+  "guid": "5a0e0000-0000-4000-8000-000000000018",
+  "name": "Seg/A",
+  "asset": "wav/seg",
+  "bars": 2,
+  "tempo": [
+    {
+      "tick": 0,
+      "bpm": 120,
+      "beatsPerBar": 4,
+      "beatUnit": 4
+    }
+  ],
+  "entryPreload": true,
+  "markers": [
+    {
+      "name": "Entry",
+      "frame": 0,
+      "kind": "entry"
+    },
+    {
+      "name": "Exit",
+      "frame": 3000,
+      "kind": "exit"
+    }
+  ],
+  "stems": [
+    {
+      "channelFirst": 0,
+      "channelCount": 2,
+      "volumeCurve": {
+        "parameter": "Speed",
+        "target": "volume",
+        "points": [
+          [
+            0,
+            -60
+          ],
+          [
+            10,
+            0
+          ]
+        ]
+      }
+    }
+  ]
+}
