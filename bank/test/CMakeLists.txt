@@ -119,3 +119,8 @@ snd_add_test(bank_dep_unloading_test SOURCES dep_unloading_test.cpp fixture_bank
 snd_add_test(bank_indep_willcome11_test SOURCES indep_bank_willcome11_test.cpp fixture_bank.cpp LINK sonus_bank sonus_io sonus_mocks)
 # Fails on purpose: the missing-dependency victim is chosen in slot order (a dependant fails although its dependency registers).
 snd_add_test(Defect_bank_victim_order_test SOURCES defect_bank_victim_order_test.cpp fixture_bank.cpp LINK sonus_bank sonus_io sonus_mocks)
+# Unload -> immediate reload + dependants with real threads (a228470); decided-outcome phase. TSan x20.
+snd_add_test(bank_indep_reload11_thread_test SOURCES indep_bank_reload11_thread_test.cpp fixture_bank.cpp
+  LINK sonus_bank sonus_io sonus_jobs sonus_mocks)
+target_link_libraries(bank_indep_reload11_thread_test PRIVATE Threads::Threads)
+set_tests_properties(bank_indep_reload11_thread_test PROPERTIES TIMEOUT 600)
