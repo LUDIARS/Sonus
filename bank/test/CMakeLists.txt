@@ -106,3 +106,8 @@ set_tests_properties(bank_indep_check11_test PROPERTIES TIMEOUT 600)
 # Was a defect; fixed in c65fd9a (decision D: wait for the old slot's Release).
 snd_add_test(bank_indep_reload_unloading_test SOURCES indep_bank_reload_unloading_test.cpp fixture_bank.cpp
   LINK sonus_bank sonus_io sonus_mocks)
+# Re-check of c65fd9a: request order (C), waiting for UNLOADING copies (D), BeginUnload under one lock (E).
+snd_add_test(bank_indep_order11_test SOURCES indep_bank_order11_test.cpp fixture_bank.cpp LINK sonus_bank sonus_io sonus_mocks)
+snd_add_test(bank_indep_order11_thread_test SOURCES indep_bank_order11_thread_test.cpp fixture_bank.cpp
+  LINK sonus_bank sonus_io sonus_jobs sonus_mocks)
+target_link_libraries(bank_indep_order11_thread_test PRIVATE Threads::Threads)
