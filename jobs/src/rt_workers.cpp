@@ -43,7 +43,6 @@ bool RtWorkerPool::Init(IAllocator& allocator, const RtWorkerConfig& config) noe
   for (std::uint32_t i = 0; i < maxChunks_; ++i) chunkState_[i].store(Word(0, kLate), std::memory_order_relaxed);
   cursor_.value.store(0, std::memory_order_relaxed);
   count_.store(0, std::memory_order_relaxed);
-  remaining_.value.store(0, std::memory_order_relaxed);
   generation_ = 0;
   stop_.store(false, std::memory_order_relaxed);
 
@@ -130,10 +129,23 @@ std::uint32_t RtWorkerPool::Participate(std::uint32_t threadIndex, std::uint32_t
     if (!cursor_.value.compare_exchange_weak(c, c + 1u, std::memory_order_acq_rel, std::memory_order_acquire)) {
       continue;  // c reloaded
     }
+    // Announce "this worker may touch a chunk of `gen`" BEFORE the claim can
+    // succeed. Ordering argument (IsQuiescent / StragglersInFlight):
+    //   worker: busy = gen (seq_cst)  ->  CAS Pending->Taken (acq_rel, release)
+    //   audio:  deadline CAS Taken->Late (acq_rel, reads the worker's Taken)
+    //           ->  IsQuiescent loads busy (acquire)
+    // If the claim succeeded, the audio thread's Late CAS read the Taken
+    // value written by that release, so the earlier busy store happens-before
+    // the IsQuiescent load: it sees `gen` (or the 0 stored after the chunk
+    // function returned). If the deadline won (Pending->Late first), the claim
+    // fails and the chunk function never runs. Either way IsQuiescent cannot
+    // return true while a chunk function of a finished batch runs or is about to.
+    if (self != nullptr) self->busyGeneration.store(gen, std::memory_order_seq_cst);
     std::atomic<std::uint64_t>& state = chunkState_[next];
     std::uint64_t expected = Word(gen, kPending);
     if (!state.compare_exchange_strong(expected, Word(gen, kTaken), std::memory_order_acq_rel,
                                        std::memory_order_relaxed)) {
+      if (self != nullptr) self->busyGeneration.store(0u, std::memory_order_release);
       c = cursor_.value.load(std::memory_order_acquire);
       continue;  // the deadline already marked it Late
     }
@@ -141,17 +153,19 @@ std::uint32_t RtWorkerPool::Participate(std::uint32_t threadIndex, std::uint32_t
       scratch_[threadIndex].used = 0;
       lastGeneration = gen;
     }
-    if (self != nullptr) self->busyGeneration.store(gen, std::memory_order_relaxed);
     const RtChunkContext rc{next, gen, threadIndex, 0u, &scratch_[threadIndex]};
     fn(ctx, rc);
     expected = Word(gen, kTaken);
+    // Done is the only completion signal; the audio thread counts Done chunks
+    // from the chunk words of ITS generation, so a delayed worker can never
+    // affect the accounting of a later batch (no shared counter).
     if (state.compare_exchange_strong(expected, Word(gen, kDone), std::memory_order_acq_rel,
                                       std::memory_order_relaxed)) {
-      remaining_.value.fetch_sub(1u, std::memory_order_acq_rel);
       ++ran;
     } else {
       discarded_.fetch_add(1u, std::memory_order_relaxed);  // late result, generation moved on
     }
+    // Release: the chunk function's writes happen-before an IsQuiescent() that sees 0.
     if (self != nullptr) self->busyGeneration.store(0u, std::memory_order_release);
     c = cursor_.value.load(std::memory_order_acquire);
   }
@@ -176,7 +190,6 @@ RtRunResult RtWorkerPool::Run(std::uint32_t chunkCount, RtChunkFn fn, void* ctx)
   chunks_.fetch_add(chunkCount, std::memory_order_relaxed);
 
   for (std::uint32_t i = 0; i < chunkCount; ++i) chunkState_[i].store(Word(gen, kPending), std::memory_order_relaxed);
-  remaining_.value.store(chunkCount, std::memory_order_relaxed);
   fn_.store(fn, std::memory_order_relaxed);
   ctx_.store(ctx, std::memory_order_relaxed);
   count_.store(chunkCount, std::memory_order_relaxed);
@@ -188,11 +201,20 @@ RtRunResult RtWorkerPool::Run(std::uint32_t chunkCount, RtChunkFn fn, void* ctx)
   r.byCaller = Participate(0u, callerLastGeneration_);
 
   // No Pending chunk is left: spin for the ones in flight, bounded (2.3).
-  if (remaining_.value.load(std::memory_order_acquire) != 0u) {
+  // "All done" is read from this generation's chunk words (Done is final for
+  // the generation), scanning forward from the first chunk not yet seen Done.
+  std::uint32_t firstOpen = 0;
+  auto allDone = [&]() noexcept {
+    while (firstOpen < chunkCount && chunkState_[firstOpen].load(std::memory_order_acquire) == Word(gen, kDone)) {
+      ++firstOpen;
+    }
+    return firstOpen == chunkCount;
+  };
+  if (!allDone()) {
     const std::uint64_t start = platform::MonotonicNanoseconds();
     const std::uint64_t limit = static_cast<std::uint64_t>(config_.spinMicroseconds) * 1000u;
     std::uint64_t now = start;
-    while (remaining_.value.load(std::memory_order_acquire) != 0u && now - start < limit) {
+    while (!allDone() && now - start < limit) {
       for (int k = 0; k < 16; ++k) base::CpuRelax();
       now = platform::MonotonicNanoseconds();
     }

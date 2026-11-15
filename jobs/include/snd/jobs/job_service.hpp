@@ -96,7 +96,8 @@ class JobPump {
 
   std::uint64_t Posted() const noexcept { return posted_.load(std::memory_order_relaxed); }
   std::uint64_t Rejected() const noexcept { return rejected_.load(std::memory_order_relaxed); }
-  std::uint64_t Forwarded() const noexcept { return forwarded_.load(std::memory_order_relaxed); }
+  // Jobs handed to the target (counted just before each Submit).
+  std::uint64_t Forwarded() const noexcept { return forwarded_.load(std::memory_order_acquire); }
 
  private:
   struct PostedJob {
