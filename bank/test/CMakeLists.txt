@@ -115,3 +115,7 @@ target_link_libraries(bank_indep_order11_thread_test PRIVATE Threads::Threads)
 # Regression: a dependant of a bank that waits for its old copy's Release (D-50).
 snd_add_test(bank_dep_unloading_test SOURCES dep_unloading_test.cpp fixture_bank.cpp
   LINK sonus_bank sonus_io sonus_mocks)
+# Re-check of a228470: ComputeWillCome (chains, diamonds, missing, cycles, copies, cancel, Shutdown, Abort).
+snd_add_test(bank_indep_willcome11_test SOURCES indep_bank_willcome11_test.cpp fixture_bank.cpp LINK sonus_bank sonus_io sonus_mocks)
+# Fails on purpose: the missing-dependency victim is chosen in slot order (a dependant fails although its dependency registers).
+snd_add_test(Defect_bank_victim_order_test SOURCES defect_bank_victim_order_test.cpp fixture_bank.cpp LINK sonus_bank sonus_io sonus_mocks)
