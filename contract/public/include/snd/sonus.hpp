@@ -49,6 +49,7 @@ enum class Result : std::int32_t {
   Unsupported = SND_ERR_UNSUPPORTED,
   NotImplemented = SND_ERR_NOT_IMPLEMENTED,
   NotReady = SND_ERR_NOT_READY,
+  BankAlreadyLoaded = SND_ERR_BANK_ALREADY_LOADED,  // 1.1
 };
 
 enum class PlaybackState : std::uint32_t {
@@ -272,6 +273,7 @@ inline constexpr std::uint32_t kMaxPluginsPerKind = 32;  // C++ wrapper limit pe
 
 struct Config {
   SND_CONFIG_TOP(SND_CONFIG_CPP_FIELD)
+  SND_CONFIG_TOP_1_1(SND_CONFIG_CPP_FIELD)  // contract 1.1 (maxVoiceChannels, maxPitchRatio)
   MemoryConfig memory;
   CommandsConfig commands;
   JobsConfig jobs;
@@ -295,6 +297,7 @@ inline void ToC(const Config& in, snd_config* out) noexcept {
 #define SND_TO_C_DEV(c, cpp, ct, cppt, d) out->dev_reserve.c = static_cast<ct>(in.devReserve.cpp);
 #define SND_TO_C_LL(c, cpp, ct, cppt, d) out->livelink.c = static_cast<ct>(in.liveLink.cpp);
   SND_CONFIG_TOP(SND_TO_C_TOP)
+  SND_CONFIG_TOP_1_1(SND_TO_C_TOP)
   SND_CONFIG_MEMORY(SND_TO_C_MEMORY)
   SND_CONFIG_COMMANDS(SND_TO_C_COMMANDS)
   SND_CONFIG_JOBS(SND_TO_C_JOBS)
@@ -380,6 +383,10 @@ inline Result UnloadBank(System* sys, BankHandle bank,
 }
 inline BankState GetBankState(const System* sys, BankHandle bank) noexcept {
   return static_cast<BankState>(snd_get_bank_state(sys, bank.ToC()));
+}
+// 1.1: language name -> runtime (SetLanguage takes HashId(name)).
+inline Result DeclareLanguage(System* sys, const char* name) noexcept {
+  return detail::R(snd_declare_language(sys, name));
 }
 inline Result SetLanguage(System* sys, Id language) noexcept {
   return detail::R(snd_set_language(sys, language));

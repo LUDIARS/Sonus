@@ -61,7 +61,7 @@ set(SND_MODULE_DEPS_music     "core")
 set(SND_MODULE_DEPS_api       "core;music")
 set(SND_MODULE_DEPS_physics   "api")
 set(SND_MODULE_DEPS_livelink  "core")
-set(SND_MODULE_DEPS_buildtool "codec")
+set(SND_MODULE_DEPS_buildtool "codec;dsp")  # dsp: contract 1.1 (A1-5, ComputeDspPoolNeed)
 set(SND_MODULE_DEPS_tool      "buildtool;dsp;core;livelink")
 # Which contract layer each module may include. "public" = include/snd/*.h,
 # snd/ext/*; "full" = public + snd/internal/* + snd/format/*.

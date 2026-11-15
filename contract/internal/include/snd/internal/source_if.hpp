@@ -17,6 +17,32 @@
 // resamples with dsp (source does not depend on dsp, 12.1). Synthesising kinds
 // (Oscillator, Noise, Patch, Callback) render at the internal rate and apply
 // pitch themselves. ISourceKind::RendersAtOutputRate() tells which.
+// Pitch / rate ratios are clamped to Config.maxPitchRatio (1.1, D-44), the
+// value core's resampler pool is sized for.
+//
+// Late chunks (1.1, D-43; design 2.3). A chunk that misses the deadline is not
+// added to the output, but its worker may keep running after Run() returned
+// and even into the next block. Therefore RenderBatch (and anything core runs
+// inside a chunk) may touch ONLY:
+//   - the RenderItem array of its chunk (core copies every per-block input the
+//     chunk needs - pitch, gain, filter target, pan, ... - into the items in
+//     the serial part; a chunk never reads table columns directly),
+//   - the chunk's per-bus accumulators (out buffers),
+//   - the calling thread's arena (RenderBatch::scratch),
+//   - the render state of the voices of its chunk: their RealVoice columns,
+//     the per-voice state of the resampler / filters / source instance, and the
+//     playhead.
+// No other shared memory, no source-wide mutable state that another chunk or
+// the audio thread reads in the same block without synchronisation.
+// Core keeps two sets of render lists + chunk accumulators and alternates per
+// block; the previous set is reused only after RtWorkerPool::StragglersInFlight()
+// == 0. When that cannot be confirmed, the block is rendered serially on the
+// audio thread alone into the free set (and stays serial while both sets are
+// in use). Voices of a late chunk are HELD (schema Voice.renderHold) until the
+// worker is quiescent: no system reads or writes their render state, they are
+// not in the render list, their output fades to silence from the end of the
+// previous block (D-15 short fade). After the hold the render state is what
+// the late chunk wrote and the voice continues from the next block.
 #ifndef SND_INTERNAL_SOURCE_IF_HPP
 #define SND_INTERNAL_SOURCE_IF_HPP
 
@@ -189,7 +215,8 @@ struct RenderItem {
   std::uint32_t frameOffset;
   std::uint32_t framesRequested;
   std::uint32_t channels;         // channels of `out`
-  Ramp pitch;                     // output-rate kinds only: rate ratio at block start/end
+  Ramp pitch;                     // output-rate kinds only: rate ratio at block start/end,
+                                  // already clamped to Config.maxPitchRatio (D-44)
   Playhead* playhead;             // Voice.playhead (Render owns): read and advance
   float* const* out;              // non-interleaved, 64-byte aligned, zeroed; frameOffset+frames fit
 };

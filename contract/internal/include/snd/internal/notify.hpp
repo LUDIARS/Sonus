@@ -25,6 +25,11 @@
 //    the state "as of the latest Update()". Readers on any thread use the
 //    per-buffer seqlock (even = stable) and copy with relaxed atomic 8-byte
 //    loads; every snapshot struct is therefore a multiple of 8 bytes.
+//    1.1: writes into a frame go through base::notify::SnapshotStore /
+//    SetFrameHeader (relaxed atomic 8-byte stores that pair with the readers'
+//    loads; a plain store would be a data race). SnapshotFrame::reserved is
+//    used by base: it holds the seq the frame had when it became front, so a
+//    reader can tell a frame that was recycled while it copied.
 #ifndef SND_INTERNAL_NOTIFY_HPP
 #define SND_INTERNAL_NOTIFY_HPP
 

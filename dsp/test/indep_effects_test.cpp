@@ -505,7 +505,7 @@ SND_TEST(EffectsIndep, ChainOrderBypassAndPlugins) {
   rec.offset = 0.25f;
   const snd::Id pid = snd::HashId("indep.mock");
   snd_dsp_effect plug{&rec, pid, 0, &MockStateBytes, &MockInit, &MockProcess, &MockTail};
-  snd::EffectDesc pd{pid, 2, 256, 0, nullptr, nullptr, 0};
+  snd::EffectDesc pd{pid, 2, 256, 0, nullptr, nullptr, 0, 0, 0};
   const std::uint32_t pbytes = PluginStateBytes(plug, pd);
   SND_CHECK_EQ(pbytes, 64u);
   dsptest::AlignedMem pmem(pbytes);
@@ -578,13 +578,13 @@ SND_TEST(EffectsIndep, PoolNeedMatchesPackedInstances) {
       EffectDefaultParams(static_cast<EffectKind>(k), params.back().data());
       for (std::uint32_t p = 0; p < info.paramCount; ++p)
         if (info.params[p].flags & kParamInitOnly) params.back()[p] = info.params[p].maxValue;
-      descs.push_back(snd::EffectDesc{info.typeId, ch, 200, info.paramCount, nullptr, nullptr, 0});
+      descs.push_back(snd::EffectDesc{info.typeId, ch, 200, info.paramCount, nullptr, nullptr, 0, 0, 0});
     }
   }
   for (std::size_t i = 0; i < descs.size(); ++i) descs[i].initial_params = params[i].data();
-  descs.push_back(snd::EffectDesc{pid, 3, 200, 0, nullptr, nullptr, 0});
-  descs.push_back(snd::EffectDesc{snd::HashId("nobody"), 3, 200, 0, nullptr, nullptr, 0});
-  descs.push_back(snd::EffectDesc{kEffectReverb, 0, 200, 0, nullptr, nullptr, 0});  // invalid
+  descs.push_back(snd::EffectDesc{pid, 3, 200, 0, nullptr, nullptr, 0, 0, 0});
+  descs.push_back(snd::EffectDesc{snd::HashId("nobody"), 3, 200, 0, nullptr, nullptr, 0, 0, 0});
+  descs.push_back(snd::EffectDesc{kEffectReverb, 0, 200, 0, nullptr, nullptr, 0, 0, 0});  // invalid
   std::uint32_t unknown = 0;
   const auto need = ComputeDspPoolNeed(descs.data(), static_cast<std::uint32_t>(descs.size()), 96000, plugs, 2, &unknown);
   SND_CHECK_EQ(unknown, 2u);

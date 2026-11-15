@@ -196,6 +196,8 @@ struct EffectSidechain {
 // Bytes for the instance (multiple of 64), 0 if the type is not a standard
 // effect or desc is invalid (channels 0 or > kMaxChannels, max_frames 0).
 // Rate-dependent buffers are sized for `sampleRate` (the bank's target rate).
+// Contract 1.1 (D-48): the rate argument is kept as the rate; desc.sample_rate
+// must be 0 (unset) or equal to it, otherwise these functions fail (0 / false).
 std::uint32_t EffectStateBytes(const EffectDesc& desc, std::uint32_t sampleRate) noexcept;
 // Normal worker (bank load). `bytes` = memory available (>= EffectStateBytes).
 // If sampleRate is higher than the one used for sizing, delay capacities are
@@ -246,6 +248,8 @@ void ProcessEffectChain(const EffectSlot* slots, std::uint32_t count, float* con
 bool EffectSlotIsTailDone(const EffectSlot& slot) noexcept;
 
 // Plugin helpers (normal worker): size and init through the plugin table.
+// PluginStateBytes passes `desc` as is (set desc.sample_rate first, D-48);
+// EffectInstanceBytes / ComputeDspPoolNeed fill it from their rate argument.
 std::uint32_t PluginStateBytes(const snd_dsp_effect& plugin, const EffectDesc& desc) noexcept;
 
 // --- DSP instance pool sizing (3.3; buildtool -> DSPN, bank load) ---

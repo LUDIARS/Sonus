@@ -171,7 +171,20 @@ bool Thread::Start(const ThreadDesc& desc, ThreadFn fn, void* user) noexcept {
     const bool realtime = desc.priority == ThreadPriority::Realtime && attempt == 0;
     pthread_attr_t attr;
     pthread_attr_init(&attr);
-    if (desc.stackBytes != 0u) pthread_attr_setstacksize(&attr, desc.stackBytes);
+    std::size_t stack = desc.stackBytes;
+    if (stack == 0u && desc.minStackBytes != 0u) {
+      std::size_t osDefault = 0;
+      if (pthread_attr_getstacksize(&attr, &osDefault) != 0) osDefault = 0;
+      if (osDefault < desc.minStackBytes) stack = desc.minStackBytes;
+    } else if (stack != 0u && stack < desc.minStackBytes) {
+      stack = desc.minStackBytes;
+    }
+    // A refused size is ignored as before unless a minimum was asked for (D-47).
+    if (stack != 0u && pthread_attr_setstacksize(&attr, stack) != 0 && desc.minStackBytes != 0u) {
+      pthread_attr_destroy(&attr);
+      rc = EINVAL;
+      break;
+    }
 #if defined(__linux__)
     if (realtime) {
       const int lo = sched_get_priority_min(SCHED_FIFO);

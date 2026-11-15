@@ -120,7 +120,7 @@ ASST の列との対応: `codec, channels, sampleRate, totalFrames, preSkip, pre
 - ユーザー側どうしの fourcc の重複、fourcc 0、関数ポインタ NULL は `Init` が失敗を返す（`DuplicateFourcc` / `InvalidEntry`）。
   失敗したら組み込みだけが残る。構成ルートはこれを `snd_create` の失敗（`SND_ERR_INVALID_ARG` 相当）にすることを想定。
 - `snd::ToC(ICodec&)` で作った表（C++ API 経由のプラグイン）は元の `ICodec*` に戻して登録する（二重の間接を避ける、D-06）。
-  ただの C の表は内部のアダプタ（`detail::TableCodec`）越し。
+  ただの C の表は契約の `snd::CCodec`（1.1 で既定構築可、D-52）越し。
 - `Find` は固定配列の線形探索で、どのスレッドからでも呼べる。`SourceServices::findCodec` には `&CodecRegistry::FindForSource`、
   `codecCtx` に登録表を渡す。
 - `SND_CODEC_OPUS` はプラグインが無ければ `nullptr` と `LookupFailure::OpusUnavailable` を返す。
@@ -179,7 +179,6 @@ ASST の列との対応: `codec, channels, sampleRate, totalFrames, preSkip, pre
 | `detail::AlignUp` | `src/detail.hpp` | 2 の冪への切り上げ |
 | `detail::LoadLE16/32`, `StoreLE16/32` | `src/detail.hpp` | エンディアン非依存のリトルエンディアン読み書き |
 | タグ付き Treiber スタック | `src/decoder_pool.cpp`（`DecoderPool::Acquire/Release` 内） | 添字の MPMC ロックフリー空きリスト（`atomic<u64>` の頭＋`atomic<u32>` のリンク）。base の固定ブロックプールが同じ性質（任意スレッド・ロックフリー）を持てば置き換える |
-| `detail::TableCodec` | `snd/codec/registry.hpp` | 既定構築できる `snd::CCodec`。契約の `CCodec` が既定構築できれば不要 |
 
 ## テスト
 

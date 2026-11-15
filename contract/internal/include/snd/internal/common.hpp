@@ -210,6 +210,21 @@ struct VoiceRenderStatus {
 };
 static_assert(sizeof(VoiceRenderStatus) == 8);
 
+// 1.1 (D-43): the voice belonged to a chunk that missed the deadline and whose
+// worker may still be running. Written by Render; SelectVoices, BuildRenderList
+// (and RunEventLogic, which destroys voices) read the previous block's value.
+// While held != 0 no system reads or writes the voice's render state and the
+// voice is not put into the render list; its output was faded to silence from
+// the end of the previous block. Render clears it once the worker is quiescent
+// (RtWorkerPool::StragglersInFlight() == 0); the render state is then the value
+// the late chunk wrote.
+struct VoiceRenderHold {
+  std::uint8_t held;            // 1 = held (do not touch the render state)
+  std::uint8_t reserved[3];
+  std::uint32_t lateGeneration; // RtWorkerPool batch generation of the late chunk
+};
+static_assert(sizeof(VoiceRenderHold) == 8);
+
 struct RealVoiceAssign {
   std::uint32_t assignSeq;    // bumps on (re)assignment; late chunk results compare it (2.3)
   std::uint8_t fadeReserve;   // slot is one of the fade reserve slots (4.4)
@@ -219,10 +234,12 @@ struct RealVoiceAssign {
 };
 static_assert(sizeof(RealVoiceAssign) == 12);
 
-struct alignas(16) ResamplerState {
-  float data[16];
-};
-static_assert(sizeof(ResamplerState) == 64);
+// 1.1 (D-44): the former 64-byte RealVoice.resamplerState column is gone. The
+// resampler state of real voice slot r lives in core's resampler pool at index
+// r: (maxRealVoices + fadeReserveVoices) slots of
+// dsp::ResamplerStateBytes(Sinc, Config.maxVoiceChannels, Config.maxPitchRatio)
+// bytes, 64-byte aligned (MemTag Tables). Pitch ratios are clamped to
+// Config.maxPitchRatio.
 
 struct alignas(16) FilterState {
   float data[64];  // 2 filters x 4 state x kMaxChannels

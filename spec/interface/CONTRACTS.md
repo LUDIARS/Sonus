@@ -3,7 +3,7 @@
 設計書 `spec/architecture/design.md`（版 0.2）の 12.2 で凍結すると決めた 7 項目を、このリポジトリのどのファイルが表すか、
 どう変えるか、段階0で何を決めたかをまとめる。段階1以降の並列実装はこの文書と下記のファイルだけを入力にする。
 
-- 契約の版: **1.0**（`SND_CONTRACT_VERSION_MAJOR = 1`, `SND_CONTRACT_VERSION_MINOR = 0`、`contract/public/include/snd/version.h`）
+- 契約の版: **1.1**（`SND_CONTRACT_VERSION_MAJOR = 1`, `SND_CONTRACT_VERSION_MINOR = 1`、`contract/public/include/snd/version.h`）。1.1 の変更は 3 節の D-43〜D-52 と 7 節
 - バンク形式: **2.0**（`snd::bank_format::kFormatMajor/Minor`）
 - ライブリンク: **1.0**（`snd::livelink::kProtocolMajor/Minor`）
 
@@ -62,7 +62,7 @@ minor（追加のみ）として扱ってよいもの: 新しい関数、列挙�
 | # | 決定 | 理由 |
 | --- | --- | --- |
 | D-01 | 凍結ヘッダはすべて `contract/` に置き、公開層（`public/`）と内部層（`internal/`）に分ける。モジュールのディレクトリには契約を置かない | 担当者が自分のディレクトリだけを触れば済み、凍結範囲がディレクトリで判る。physics に内部層を見せない |
-| D-02 | モジュール依存は 12.1 の表をルート `CMakeLists.txt` に 1 か所だけ書き、`snd_add_module()` が読む。`base` と `platform` は PUBLIC（推移的に見える）、他は PRIVATE。よってモジュールの公開ヘッダに出せる型は契約・base・platform のものだけ。buildtool の依存は codec と契約のバンク形式定義（bank のランタイムには依存しない） | 依存方向をビルドで強制する。12.1 の「bankの形式定義」は契約側にあるため |
+| D-02 | モジュール依存は 12.1 の表をルート `CMakeLists.txt` に 1 か所だけ書き、`snd_add_module()` が読む。`base` と `platform` は PUBLIC（推移的に見える）、他は PRIVATE。よってモジュールの公開ヘッダに出せる型は契約・base・platform のものだけ。buildtool の依存は codec と契約のバンク形式定義（bank のランタイムには依存しない）。1.1 で buildtool の依存に dsp を加えた（`dsp::ComputeDspPoolNeed` と標準エフェクトの表を使うため。A1-5）。dsp は base / platform に依存するので、buildtool からは base / platform も見える | 依存方向をビルドで強制する。12.1 の「bankの形式定義」は契約側にあるため |
 | D-03 | 構成ルート: 全モジュールを束ねるライブラリ `sonus` を `api/compose/` に置く。`sonus_api` 自身は 12.1 どおり core と music だけに依存し、source のソース種別・music の `IMusicSystem`・io の既定ファイルシステム・platform の既定デバイス・livelink は構成ルートが契約の IF 越しに渡す | 12.1 では api が source / io / platform / livelink に依存しないのに、`Create` はそれらを必要とする（G-03） |
 | D-04 | ID ハッシュは 32bit FNV-1a（オフセット 2166136261、素数 16777619）を UTF-8 のバイト列にそのまま掛ける。大文字小文字・区切り文字は正規化しない。結果が 0 なら 1。0 は「ID なし」 | 単純で constexpr にでき、buildtool と一致させやすい。衝突はプロジェクト全体でビルドエラーにする（10.1） |
 
@@ -70,12 +70,12 @@ minor（追加のみ）として扱ってよいもの: 新しい関数、列挙�
 
 | # | 決定 | 理由 |
 | --- | --- | --- |
-| D-05 | ハンドルは 64bit = 世代（上位 32）＋スロット（下位 32）。世代 0 は発行しないので値 0 が無効ハンドル。Bank と UserBuffer も同じ形。音楽 Playback が所有するトランスポートのハンドルは `slot = 0x80000000 \| playbackSlot, generation = playback の世代` で往復なしに導ける（`snd_get_playback_transport`） | 3.1。13.2 の例の `musicTransport` をゲームが得る手段が無かった（G-12） |
+| D-05 | ハンドルは 64bit = 世代（上位 32）＋スロット（下位 32）。世代 0 は発行しないので値 0 が無効ハンドル。Bank と UserBuffer も同じ形。払い出しと返却の方式は D-46。音楽 Playback が所有するトランスポートのハンドルは `slot = 0x80000000 \| playbackSlot, generation = playback の世代` で往復なしに導ける（`snd_get_playback_transport`） | 3.1。13.2 の例の `musicTransport` をゲームが得る手段が無かった（G-12） |
 | D-06 | C API が ABI の正本。C++ API はヘッダだけの薄いラッパーで、POD は C 構造体の別名か同じレイアウトの型、列挙は C の値を持つ `enum class`。拡張点（12.3 の 6 IF）は C の関数表（`snd/ext.h`）と C++ の抽象クラス（`snd/ext/*.hpp`）の両方を持ち、相互の橋渡し（`snd::ToC`, `snd::C*` アダプタ）を契約に含める。`snd_create` は関数表を値でコピーする | 13.1「C APIはPODとハンドルだけ、C++はその薄いラッパー」。C++ 利用時の二重間接は許容（api が後で特別扱いしてよい） |
 | D-07 | `Config` のスカラー項目は X マクロ（`snd/config.h`）1 か所で定義し、C 構造体（snake_case）、`snd_config_init`、C++ の `snd::Config`（camelCase、既定値付き）、C++→C 変換を生成する。先頭に `struct_size` と `contract_version`。音量は線形ゲイン | C と C++ で項目がずれない。本文中の上限と「仮」の値をすべて項目にした（下表） |
 | D-08 | オーディオスレッドと RT ワーカーは `IJobSystem::Submit` も `IFileSystem` も呼ばない。有界のロックフリーキュー（`SourceServices::postJob` / `postIo`）に積み、非 RT スレッドが受けて投入する | 12.3 の「Submit はどのスレッドから呼ばれてもよい」をホストの実装に任せると原則 1 を破りうる（G-15） |
 | D-13 | `Update()` が公開するのは所有スレッドのアリーナだけ。他の登録スレッドは `snd_flush()`（追加）でフレームごとに公開し、`snd_unregister_thread()`（追加）で抜ける | 他スレッドのアリーナを所有スレッドが公開すると書き込み中と競合する |
-| D-28 | 13.1 に無い関数を足した: `snd_flush`, `snd_unregister_thread`, `snd_contract_version`, `snd_config_init`, `snd_get_bank_chunk`, `snd_get_playback_transport`, `snd_destroy_transport`, `snd_set_transport_state`, `snd_get_transport_position`, `snd_destroy_user_buffer`, `snd_get_user_buffer_released`, `snd_play_user_buffer`, `SetSwitch` の 3 スコープ、physics の `create/destroy/desc_init`。`Resume` は C で `snd_resume`（システム）と `snd_resume_playback` に分ける。`PlayAt` と `PlayOneShot` はハンドルを返さず `snd_result` を返す | G-05, G-09, G-10 |
+| D-28 | 13.1 に無い関数を足した: `snd_flush`, `snd_unregister_thread`, `snd_contract_version`, `snd_config_init`, `snd_get_bank_chunk`, `snd_get_playback_transport`, `snd_destroy_transport`, `snd_set_transport_state`, `snd_get_transport_position`, `snd_destroy_user_buffer`, `snd_get_user_buffer_released`, `snd_play_user_buffer`, `SetSwitch` の 3 スコープ、physics の `create/destroy/desc_init`。1.1 で `snd_declare_language` を追加（D-50）。`Resume` は C で `snd_resume`（システム）と `snd_resume_playback` に分ける。`PlayAt` と `PlayOneShot` はハンドルを返さず `snd_result` を返す | G-05, G-09, G-10 |
 | D-29 | 無効ハンドル: 記録時に古いと判れば（値 0、またはゲーム側スロット表と世代不一致）何も記録せず `SND_ERR_INVALID_HANDLE`。記録後に古くなったものは適用時に世代不一致で無視。どちらも「何もしない」（13） | 呼び出し側が分岐しなくてよく、デバッグ時には理由が分かる |
 | D-30 | カテゴリ ID `SND_ID_NONE` は「全カテゴリ」（全体のポーズ・音量、7 章）。ポーズ無視カテゴリは除外 | 全体ポーズ用の関数を増やさない |
 | D-31 | プラグインの登録は `Config.plugins`（コーデックは fourcc、エフェクトは種別 ID）。同じ fourcc のコーデックは組み込みより優先 | 13.1 に `ICodec` / `IDspEffect` を登録する手段が無かった |
@@ -104,7 +104,7 @@ minor（追加のみ）として扱ってよいもの: 新しい関数、列挙�
 | D-18 | 所有者の決定: `Voice.audibility` と `Bus.gainTarget` は EvaluateDspParams。`Bus.gain`・`Bus.peak`（ダッキング込みの実際の値）と `RealVoice.panMatrix`（Spatial から計算）は Render。Transport の状態列はすべて UpdateTransport（即時の `SetTempo` / シーク / 状態変更も「今」で予約に入れる）。予約の要求時刻（ApplyCommands）と解決後の時刻 `Reservation.resolved`（UpdateTransport）を分ける。Emitter の遮蔽値は EvaluateLogicParams（Parameter のランプを通す）。行の生成・破棄: Playback は ApplyCommands が作り RunEventLogic が消す、Voice と Stream は RunEventLogic（ソースの `Start` は RunEventLogic の中で動く）、RealVoice は SelectVoices、Transport と Reservation は ApplyCommands が作り UpdateTransport が消す、ParamPlayback は Playback と一緒に RunEventLogic が消す。仮想ボイスの位置送りは Render が行う | 3.2 の「1 列 1 システム」を守る |
 | D-19 | `eventId` はコールド列、ホット列には解決済みの `eventRef`（バンクスロット＋行）を置く | 3.1 の表（ホット）と本文（コールド）が矛盾（G-01） |
 | D-35 | 所有者の食い違いはコンパイル時に検出する: 書き込みは `WriteColumn<System, Column>`、読み出しは `ReadColumn<System, Column>` を通し、所有者でない書き込み・宣言のない読み出しは `static_assert` で失敗する。読み出しの時点（同じブロック / 前ブロック / 非同期）も `ValidateReads()` が検査する。`contract_schema_violation_rejected` などのテストがコンパイル失敗を確認する | 12.2-3「所有者の食い違いを検出できる仕組み」 |
-| — | オーディオスレッド以外の書き手（`ExternalIo`, `ExternalDecode`）を持てるのは `std::atomic` の列だけ（`Stream.readPos`, `Stream.ringWrite`）。他のシステムからは `Async` 読み出しとして宣言する | 3.2 に Stream の書き手が無い |
+| — | オーディオスレッド以外の書き手（`ExternalIo`, `ExternalDecode`）を持てるのは `std::atomic` の列だけ（`Stream.readPos`, `Stream.ringWrite`）。他のシステムからは `Async` 読み出しとして宣言する。1.1: Stream は Direct 表で、これらの列はスロット番号で直接添字する（D-45） | 3.2 に Stream の書き手が無い |
 
 ### core ⇄ source / music と拡張 IF
 
@@ -131,6 +131,21 @@ minor（追加のみ）として扱ってよいもの: 新しい関数、列挙�
 | D-37 | ゴールデン音声は `.sndg`（32 バイトのヘッダ＋チャンネル順の float32）。置き場所はテスト対象モジュールの `test/golden/`。更新は `--update-golden` か `SND_UPDATE_GOLDEN=1`。許容差は最大絶対誤差・RMS・超過サンプル数 | 14 章 |
 | D-38 | モックは `snd::mock`。決定論ジョブは優先度を無視した投入順（FIFO）で、ジョブ内からの投入も投入順に実行。メモリ FS の遅延は「Poll の回数」で数える | 再現性 |
 
+### 契約 1.1 での決定（段階1の持ち越し A1-1〜A1-10 の解消）
+
+| # | 決定 | 理由 |
+| --- | --- | --- |
+| D-43 | 締切に遅れたチャンク（2.3）とメモリの再利用。(1) チャンクが触ってよいメモリは、そのチャンクのレンダー項目の配列、そのチャンクのバス別アキュムレータ、実行スレッドのスレッド別アリーナ、そのチャンクに属するボイスの描画状態（RealVoice の列、リサンプラ・フィルタ・ソースのボイス別状態、playhead）だけ。チャンクがテーブルの列を直接読むことはなく、ブロックごとの入力は直列区間でレンダー項目に写す。(2) レンダーリストとチャンク別アキュムレータは 2 組を持ち、ブロックごとに交互に使う。前の組を再利用できるのは `RtWorkerPool::StragglersInFlight() == 0` を確認したときだけ。確認できないブロックは並列描画をせず、オーディオスレッドだけで使用中でない組に描く。2 組とも使用中（遅れが 2 ブロック続けて残る）の間はこの直列描画を続ける。(3) 遅れたチャンクのボイスは「保留」（`Voice.renderHold`、Render が書き、SelectVoices / BuildRenderList / RunEventLogic が前ブロック値として読む）。保留中はどのシステムもそのボイスの描画状態を読み書きせず、レンダーリストに入れず、破棄もしない。出力は前ブロック末尾から短いフェード（D-15）で無音。ワーカーが静止したら（`StragglersInFlight() == 0`）保留を解き、描画状態は「遅れたチャンクが書き終えた値」として次のブロックから通常どおり鳴らす。ソースのバッチ描画の約束は `source_if.hpp` の冒頭 | 遅れたワーカーは `Run` が返った後も次のブロックに入っても前のブロックの入出力に触る（A1-1、`rt_workers.hpp` の SAFE POINT）。世代で結果を捨てるだけでは、入力の書き換えと状態の二重更新を防げない |
+| D-44 | リサンプラの状態は列にしない。`RealVoice.resamplerState`（64 バイト）を廃止し、core が持つ固定スロットのプールに置く。スロット数は `maxRealVoices + fadeReserveVoices`、スロットの大きさは `dsp::ResamplerStateBytes(Sinc, Config.maxVoiceChannels, Config.maxPitchRatio)`（64 バイト境界、`MemTag::Tables`）。プールの添字は RealVoice のスロット番号そのもの（列は不要）。`Config` に `maxVoiceChannels`（既定 8、1〜8）と `maxPitchRatio`（既定 4.0、1.0〜32.0 = `SND_MAX_PITCH_RATIO`）を足した（C 構造体では 1.0 の配置を保つため末尾）。ピッチ比（ソースのレート比込み）はこの上限で頭打ち | sinc リサンプラの状態は 8ch・比率 4 で 64 バイトを大きく超える（A1-2）。スロット番号で引けば行の移動と無関係 |
+| D-45 | Stream テーブルは `Indexing::Direct`（スロット番号 = 行の位置。行は動かない）。オーディオスレッド以外の書き手（`ExternalIo` の `readPos`、`ExternalDecode` の `ringWrite`）を持つアトミック列は、スロット番号で直接添字する。Direct 表の行はハンドルで参照しない（`base/sparse_set.hpp` の注意）。io の `StreamChannel` のスロット単位のアトミック（`ReadPos()` など）との対応付けは段階2の Stream ソースが選ぶ: IO 側の公開値を source が Stream の列へ写すか、列の実体として io のチャンネルの値を参照するか | 密配列の行は詰めると動くので、IO スレッドとデコードジョブが位置を持って書けない（A1-3） |
+| D-46 | ハンドルの払い出し: Playback / Emitter / Transport（単独）/ UserBuffer / Bank のスロットは `base::HandleAllocator`（ロックフリー）で、ゲーム側の登録スレッドのどれからでも払い出す。返却は所有スレッドの `Update()` が終了・解放フラグ（notify）を消費したときに行う。発行する世代は 2^31 未満（最上位ビットは使わない。2^31−1 の次は 1） | A0-1。共有の空きリストを排他なしで使える。最上位ビットは allocator が「使用中」の印に使う |
+| D-47 | オーディオスレッドと RT ワーカーのスタックは 256 KiB 以上を保証する（`platform::kRtThreadMinStackBytes`、`ThreadDesc::minStackBytes`。OS の既定がそれより大きければ既定のまま）。プラグイン（`IDspEffect`、合成コールバック）が使ってよいスタックの目安は 64 KiB（`ext.h`） | sinc リサンプラは比率 4 超で約 32 KiB をスタックに置く。エフェクトとソースの一時領域も見込む（A1-10） |
+| D-48 | `snd_effect_desc` の末尾に `sample_rate`（＋予約 `reserved`）を足した。ランタイム・ビルドツールが `state_bytes` / `init` の前に埋め、`init` の `sample_rate` 引数は常にこの値に等しい。dsp の `EffectStateBytes(desc, sampleRate)` などはレートの引数を残し、`desc.sample_rate` は 0（未設定）か引数と同じ値でなければならない（違えば失敗）。プラグインに渡す desc には dsp が引数のレートを入れる | プラグインが状態サイズを見積もれなかった（A1-4）。標準エフェクトの既存の呼び出しを変えずに済む |
+| D-49 | bank-format.md に標準エフェクトの種別 ID 表と組み込みコーデックのバイト配置（PCM f32 / s16、IMA ADPCM、ADPCM のブロックは 1 チャンネルあたり 1024 バイト以下）を追記した。バンク形式の版は 2.0 のまま（文書の追記のみ） | A1-6。buildtool と codec / dsp の実装の一致を文書で確かめられるようにする |
+| D-50 | `snd_result` に `SND_ERR_BANK_ALREADY_LOADED`（-18）を末尾追加: 同じバンク（bankId＋言語）が別のパスからロード済み・ロード中のとき、後のロードはこの結果で失敗する。`snd_declare_language(sys, name)` を追加: 言語名をランタイムに伝える（登録スレッド、必達コマンド `DeclareLanguage`、名前はコマンドに複製。1〜31 バイト、`/` `.` `\` を含まない、最大 `SND_MAX_LANGUAGES` = 32 個）。`snd_set_language` の ID は `snd_hash_id(name)`。言語別バンクのファイル名は `<base>.<name>.sndb`。未宣言の ID を `snd_set_language` に渡すと記録せず `SND_ERR_NOT_FOUND` | A1-7。二重読み込みを引数の誤りと区別する。言語名が無いと言語別バンクのパスを作れない |
+| D-51 | `snd_codec.decode` の約束を明記: `src == NULL` の吐き出しは終端を意味しない（終端は `total_frames`）、保持できる未消費データには上限がある（組み込みは 16 KiB ＋ 1 パケット、超えると `SND_DECODE_ERROR`）、`max_frames` が返ったら未満が返るまで吐き出してから次を渡す | A1-8。codec の実装で決めたことを契約の正にする |
+| D-52 | `notify.hpp`: トリプルバッファのフレームへの書き込みは `base::notify::SnapshotStore` / `SetFrameHeader` を通す。`SnapshotFrame::reserved` は base が「front になったときの seq」に使う。`snd::CCodec` を既定構築できるようにした（`Assign` / `Table`）。codec の登録表はこれを使う | 読み手の relaxed アトミックな読み出しと対になる書き込みが必要。codec が独自のアダプタを持たずに済む |
+
 ### `Config` の項目（13.2 と本文の上限・「仮」の値）
 
 | 項目 | 既定 | 出典 |
@@ -150,6 +165,7 @@ minor（追加のみ）として扱ってよいもの: 新しい関数、列挙�
 | `devReserve.buses`, `effects`, `events`, `bytes` | 16, 32, 64, 1 MiB | 11.2 |
 | `liveLink.enabled`, `port`, `meterHz`, `sendBufferBytes`, `recordCommands` | 0, 27460, 30, 256 KiB, 0 | 11.2, 11.3 |
 | `output.device`, `output.deviceIndex`, `plugins.*` | 既定デバイス, 0, なし | 2.6, D-31 |
+| `maxVoiceChannels`, `maxPitchRatio`（1.1、C 構造体では末尾） | 8, 4.0 | D-44 |
 
 ## 4. モックとテスト枠組みの約束
 
@@ -166,7 +182,7 @@ minor（追加のみ）として扱ってよいもの: 新しい関数、列挙�
 | # | 箇所 | 内容 | 契約での扱い |
 | --- | --- | --- | --- |
 | G-01 | 3.1 | Playback の `eventId` を表ではホット列、本文ではコールド列としている | D-19 |
-| G-02 | 3.1, 3.2 | Stream の列の書き手（IO スレッドとデコードジョブ）、バスゲイン（スナップショット・ダッキング・カテゴリ）、`Voice.audibility`、`RealVoice.panMatrix`、Emitter の補間状態、カテゴリとスナップショットの状態の置き場所が表に無い | D-17, D-18 |
+| G-02 | 3.1, 3.2 | Stream の列の書き手（IO スレッドとデコードジョブ）、バスゲイン（スナップショット・ダッキング・カテゴリ）、`Voice.audibility`、`RealVoice.panMatrix`、Emitter の補間状態、カテゴリとスナップショットの状態の置き場所が表に無い | D-17, D-18。Stream の外部の書き手は 1.1 の D-45 で解消（行が動かない Direct 表、スロットで添字） |
 | G-03 | 12.1, 13 | api の依存先が core と music だけだが、`Create` はソース種別・既定 FS（io）・既定デバイス（platform）・livelink を必要とする | D-03 |
 | G-04 | 12.1, 4 | source は dsp に依存しないが、4 章の「リサンプル」をどこでするかが無い | D-22 |
 | G-05 | 13.1 | UserBuffer を鳴らす関数、トランスポート・UserBuffer の破棄、単独トランスポートの開始・停止、非所有スレッドの公開と登録解除、`ICodec`/`IDspEffect` の登録、物理モジュールがバンクのマテリアル表を読む手段、`SetSwitch` のスコープが無い | D-28, D-31 |
@@ -231,3 +247,4 @@ bank / buildtool:
 | --- | --- | --- |
 | 1.0 | 2026-11-15 | 段階0で凍結 |
 | 1.0（バンク形式 2.0） | 2026-11-15 | バンク形式 2.0: headerChecksum をヘッダ全体に、予約バイト 0 を検証、`ALIS` チャンク、行の並びの規則、`loopEnd`/`SEEK`/ストリームファイル/エンディアン/`fileBytes` の明文化（bank-format.md §7） |
+| 1.1 | 2026-11-15 | 段階1の持ち越し A1-1〜A1-10 を反映（D-43〜D-52）: 遅れたチャンクの規則と `Voice.renderHold`、`RealVoice.resamplerState` の廃止と `Config.maxVoiceChannels` / `maxPitchRatio`、Stream を Direct 表に、`snd_effect_desc.sample_rate`、依存表の buildtool に dsp、bank-format.md の追記（形式 2.0 のまま）、`SND_ERR_BANK_ALREADY_LOADED` と `snd_declare_language`（コマンド `DeclareLanguage`）、`decode` の約束、ハンドルの払い出し、RT スレッドのスタック、`notify.hpp` の注記、`CCodec` の既定構築。列の削除と Stream の索引方式の変更は厳密には追加ではないが、段階0以降にそれらを使う実装が無いため minor として扱った |

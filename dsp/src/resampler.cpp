@@ -248,7 +248,7 @@ std::size_t ResamplerStateBytes(ResamplerQuality q, std::uint32_t channels, floa
 }
 
 bool ResamplerFitsInline(ResamplerQuality q, std::uint32_t channels, float maxRatio) noexcept {
-  return ResamplerStateBytes(q, channels, maxRatio) <= sizeof(ResamplerState);
+  return ResamplerStateBytes(q, channels, maxRatio) <= 64u;  // the 1.0 RealVoice.resamplerState column size (removed in 1.1, D-44)
 }
 
 void ResamplerInit(void* state, ResamplerQuality q, std::uint32_t channels, float maxRatio) noexcept {

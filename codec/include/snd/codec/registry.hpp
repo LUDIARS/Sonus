@@ -22,26 +22,6 @@
 
 namespace snd::codec {
 
-namespace detail {
-// ICodec over a copied snd_codec function table (like snd::CCodec, but default
-// constructible so that the registry can keep a fixed array of them).
-class TableCodec final : public ICodec {
- public:
-  TableCodec() noexcept = default;
-  void Assign(const snd_codec& c) noexcept { c_ = c; }
-  std::uint32_t StateBytes(const CodecHeader& h) const override { return c_.state_bytes(c_.user, &h); }
-  void Init(void* s, const CodecHeader& h) override { c_.init(c_.user, s, &h); }
-  std::uint32_t Decode(void* s, const std::uint8_t* src, std::uint32_t n, float* const* dst,
-                       std::uint32_t max) override {
-    return c_.decode(c_.user, s, src, n, dst, max);
-  }
-  void Seek(void* s, std::uint64_t f) override { c_.seek(c_.user, s, f); }
-
- private:
-  snd_codec c_{};
-};
-}  // namespace detail
-
 enum class RegistryStatus : std::uint32_t {
   Ok = 0,
   TooManyCodecs = 1,    // count > kMaxUserCodecs
@@ -78,7 +58,7 @@ class CodecRegistry {
   static ICodec* FindForSource(void* ctx, std::uint32_t fourcc) noexcept;
 
  private:
-  detail::TableCodec adapters_[kMaxUserCodecs];
+  CCodec adapters_[kMaxUserCodecs];  // contract 1.1: default constructible (D-52)
   ICodec* user_[kMaxUserCodecs] = {};
   std::uint32_t fourcc_[kMaxUserCodecs] = {};
   std::uint32_t count_ = 0;

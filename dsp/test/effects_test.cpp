@@ -494,10 +494,10 @@ SND_TEST(Effects, PoolSizing) {
   float rp[14];
   EffectDefaultParams(EffectKind::Reverb, rp);
   snd::EffectDesc descs[4] = {};
-  descs[0] = {kEffectReverb, 2, 256, 14, rp, nullptr, 0};
-  descs[1] = {kEffectEcho, 2, 256, 0, nullptr, nullptr, 0};
-  descs[2] = {pluginId, 2, 256, 0, nullptr, nullptr, 0};
-  descs[3] = {snd::HashId("unknown.fx"), 2, 256, 0, nullptr, nullptr, 0};
+  descs[0] = {kEffectReverb, 2, 256, 14, rp, nullptr, 0, 0, 0};
+  descs[1] = {kEffectEcho, 2, 256, 0, nullptr, nullptr, 0, 0, 0};
+  descs[2] = {pluginId, 2, 256, 0, nullptr, nullptr, 0, 0, 0};
+  descs[3] = {snd::HashId("unknown.fx"), 2, 256, 0, nullptr, nullptr, 0, 0, 0};
   std::uint32_t unknown = 0;
   const auto need = ComputeDspPoolNeed(descs, 4, kRate, &table, 1, &unknown);
   SND_CHECK_EQ(unknown, 1u);
@@ -508,7 +508,7 @@ SND_TEST(Effects, PoolSizing) {
   SND_CHECK_EQ(EffectInstanceBytes(descs[2], kRate, nullptr, 0), 0u);
   // An echo with a longer MaxDelay needs more memory.
   float ep[5] = {500, 0.5f, 1, 1, 4000};
-  snd::EffectDesc longEcho{kEffectEcho, 2, 256, 5, ep, nullptr, 0};
+  snd::EffectDesc longEcho{kEffectEcho, 2, 256, 5, ep, nullptr, 0, 0, 0};
   SND_CHECK(EffectStateBytes(longEcho, kRate) > EffectStateBytes(descs[1], kRate));
   // Sized for 48 kHz, run at 96 kHz: init succeeds with clamped capacity.
   dsptest::AlignedMem mem(EffectStateBytes(longEcho, kRate), dsptest::kDirty);
@@ -655,7 +655,7 @@ SND_TEST(Effects, ReportedLatencyIsExactAtAllRates) {
       float params[kMaxEffectParams];
       EffectDefaultParams(cs.kind, params);
       for (std::uint32_t i = 0; i < cs.count; ++i) params[i] = cs.ov[i];
-      snd::EffectDesc d{GetEffectInfo(cs.kind).typeId, 1, kBlock, GetEffectInfo(cs.kind).paramCount, params, nullptr, 0};
+      snd::EffectDesc d{GetEffectInfo(cs.kind).typeId, 1, kBlock, GetEffectInfo(cs.kind).paramCount, params, nullptr, 0, 0, 0};
       dsptest::AlignedMem mem(EffectStateBytes(d, rate), dsptest::kDirty);
       SND_REQUIRE(EffectInit(mem.get(), mem.size(), d, rate));
       const std::uint32_t lat = EffectLatencyFrames(mem.get());

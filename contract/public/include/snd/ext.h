@@ -143,7 +143,20 @@ typedef struct snd_codec {
    * at most max_frames frames per channel into dst (non-interleaved). Frames that
    * do not fit are kept in state and returned by later calls; call with
    * src == NULL, src_bytes == 0 to drain. Returns frames written or SND_DECODE_ERROR.
-   * pre_skip is applied by the codec on the first packet after init. */
+   * pre_skip is applied by the codec on the first packet after init.
+   *
+   * Contract 1.1 (A1-8):
+   *  - Draining (src == NULL) only returns what the state holds. It does NOT mean
+   *    end of stream: the end is fixed by header.total_frames (input past the end
+   *    is consumed and dropped).
+   *  - The unconsumed data a state may hold is bounded. The built-in codecs hold
+   *    at most 16 KiB + one packet of undecoded input; a call that would leave
+   *    more returns SND_DECODE_ERROR (until the next init / seek). Other codecs
+   *    define their own bound, which state_bytes() covers.
+   *  - Caller's duty: when decode returns max_frames (the output was full), drain
+   *    with src == NULL until it returns fewer than max_frames before passing the
+   *    next input. With the built-in codecs, pass at most 16 KiB per call unless
+   *    the output has room for all of it (then nothing is held). */
   uint32_t (SND_CALL *decode)(void* user, void* state, const uint8_t* src, uint32_t src_bytes,
                               float* const* dst, uint32_t max_frames);
   /* Reset for decoding from a packet boundary whose first frame is `frame`.
@@ -155,6 +168,10 @@ typedef struct snd_codec {
 /* ========================================================================= */
 /* IDspEffect: plugin effects, called from RT workers and the audio thread.   */
 /* Must follow principle 1 (no allocation, locks, IO, formatted logging).     */
+/* Stack (CONTRACTS.md D-47): the audio thread and RT workers have at least   */
+/* 256 KiB of stack. Plugin code called there - process / is_tail_done and   */
+/* the synthesis callbacks (snd_synth_callback, 5.2) - should use at most     */
+/* about 64 KiB of it; larger scratch belongs in the state.                   */
 /* ========================================================================= */
 typedef struct snd_effect_desc {
   uint32_t effect_type;        /* id of the effect kind (matches snd_dsp_effect.effect_type) */
@@ -164,6 +181,12 @@ typedef struct snd_effect_desc {
   const float* initial_params; /* param_count values */
   const void* blob;            /* bank data, read-only (e.g. impulse response) */
   uint64_t blob_bytes;
+  /* 1.1 (A1-4): rate the instance runs at (Config.sampleRate at runtime, the
+   * build's DSP sizing rate in the build tool). Filled in by the runtime / build
+   * tool before state_bytes and init are called; init's sample_rate argument
+   * always equals this value. Plugins built against 1.0 never read it. */
+  uint32_t sample_rate;
+  uint32_t reserved;           /* 0 */
 } snd_effect_desc;
 
 typedef struct snd_param_block {
@@ -178,9 +201,11 @@ typedef struct snd_dsp_effect {
   void* user;
   uint32_t effect_type;
   uint32_t reserved;
-  /* Called on a normal worker at bank load (DSP instance pool sizing). Pure. */
+  /* Called on a normal worker at bank load (DSP instance pool sizing) and by the
+   * build tool. Pure. desc->sample_rate is set (1.1). */
   uint32_t (SND_CALL *state_bytes)(void* user, const snd_effect_desc* desc);
-  /* Called on a normal worker at bank load; state is 64-byte aligned. */
+  /* Called on a normal worker at bank load; state is 64-byte aligned.
+   * sample_rate == desc->sample_rate (1.1). */
   void (SND_CALL *init)(void* user, void* state, const snd_effect_desc* desc, uint32_t sample_rate);
   /* in and out may alias (in-place). frames <= max_frames. */
   void (SND_CALL *process)(void* user, void* state, const float* const* in, float* const* out,

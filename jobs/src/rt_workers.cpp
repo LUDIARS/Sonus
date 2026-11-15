@@ -60,6 +60,8 @@ bool RtWorkerPool::Init(IAllocator& allocator, const RtWorkerConfig& config) noe
       td.name = "snd-rt-worker";
       td.priority = config.realtimePriority ? platform::ThreadPriority::Realtime : platform::ThreadPriority::Normal;
       td.realtimePriority = config.realtimePriorityLevel;
+      td.minStackBytes = config.minStackBytes > platform::kRtThreadMinStackBytes ? config.minStackBytes
+                                                                                : platform::kRtThreadMinStackBytes;
       if (!wk.thread.Start(td, &RtWorkerPool::WorkerMain, &wk)) {
         workerCount_ = w;  // the ones already running are stopped by Shutdown
         Shutdown();

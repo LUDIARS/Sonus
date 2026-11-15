@@ -459,7 +459,7 @@ SND_TEST(BankManager, SameBankFromAnotherPathFails) {
   env.Settle(2);
   SND_CHECK_EQ(env.m->State(a), SND_BANK_STATE_LOADED);
   SND_CHECK_EQ(env.m->State(b), SND_BANK_STATE_FAILED);
-  SND_CHECK_EQ(env.m->Result(b), SND_ERR_INVALID_ARGUMENT);
+  SND_CHECK_EQ(env.m->Result(b), SND_ERR_BANK_ALREADY_LOADED);  // contract 1.1
   SND_CHECK(std::strstr(env.m->FailureReason(b), "already loaded") != nullptr);
 }
 

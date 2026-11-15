@@ -228,7 +228,7 @@ SND_TEST(BankManagerFix, DuplicateBankCheck) {
   e.Settle();
   SND_CHECK_EQ(e.m->State(a), SND_BANK_STATE_LOADED);
   SND_CHECK_EQ(e.m->State(b), SND_BANK_STATE_FAILED);
-  SND_CHECK_EQ(e.m->Result(b), SND_ERR_INVALID_ARGUMENT);
+  SND_CHECK_EQ(e.m->Result(b), SND_ERR_BANK_ALREADY_LOADED);  // contract 1.1
   SND_CHECK_EQ(e.m->BeginUnload(a, SND_UNLOAD_STOP_AND_UNLOAD, false), SND_OK);
   // While the first is UNLOADING, the copy still counts as a duplicate.
   e.m->RequestLoad("copy/dup.sndb");

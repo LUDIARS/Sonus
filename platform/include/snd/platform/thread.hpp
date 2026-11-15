@@ -32,11 +32,21 @@ enum class PriorityResult : std::uint8_t {
 
 const char* PriorityResultName(PriorityResult r) noexcept;
 
+// Stack guaranteed to the audio thread and the RT workers (CONTRACTS.md D-47):
+// the sinc resampler uses ~32 KiB above ratio 4, plus effect / source scratch;
+// plugin code may use about 64 KiB of it (snd/ext.h).
+inline constexpr std::size_t kRtThreadMinStackBytes = 256u * 1024u;
+
 struct ThreadDesc {
   const char* name = "snd";  // shown in debuggers (Linux: first 15 bytes)
   ThreadPriority priority = ThreadPriority::Normal;
   int realtimePriority = 80;  // SCHED_FIFO 1..99 when priority == Realtime
   std::size_t stackBytes = 0;  // 0 = OS default
+  // Lower bound of the stack (0 = none). With stackBytes == 0 the OS default is
+  // kept when it is at least this large, otherwise this size is requested; with
+  // stackBytes != 0 the larger of the two is requested. Start fails if the OS
+  // refuses the size.
+  std::size_t minStackBytes = 0;
 };
 
 using ThreadFn = void (*)(void* user);

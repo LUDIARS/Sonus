@@ -290,6 +290,14 @@ struct LiveOverride {
 };
 struct LiveClearOverrides {};
 
+// 1.1: snd_declare_language (10.4). The name is copied into the command
+// (NUL-terminated, < SND_MAX_LANGUAGE_NAME_BYTES); language = snd_hash_id(name).
+struct DeclareLanguage {
+  Id language;
+  std::uint32_t nameBytes;  // strlen(name)
+  char name[SND_MAX_LANGUAGE_NAME_BYTES];
+};
+
 // ---------------------------------------------------------------------------
 // Command table: X(Type, PayloadStruct, Delivery, Origin)
 // Append-only (minor version). Values are wire-stable for replay files.
@@ -331,7 +339,9 @@ struct LiveClearOverrides {};
   X(LiveReplaceChunk, LiveReplaceChunk, MustDeliver, LiveLink)   \
   X(LiveAudition, LiveAudition, Droppable, LiveLink)             \
   X(LiveOverride, LiveOverride, MustDeliver, LiveLink)           \
-  X(LiveClearOverrides, LiveClearOverrides, MustDeliver, LiveLink)
+  X(LiveClearOverrides, LiveClearOverrides, MustDeliver, LiveLink) \
+  /* contract 1.1 */                                             \
+  X(DeclareLanguage, DeclareLanguage, MustDeliver, Game)
 
 enum class CommandType : std::uint16_t {
   Invalid = 0,
@@ -410,6 +420,7 @@ static_assert(kWireSize<SeekTransport> == 64);
 static_assert(kWireSize<CreateUserBuffer> == 48);
 static_assert(kWireSize<LiveSetValue> == 32);
 static_assert(kWireSize<LiveOverride> == 32);
+static_assert(kWireSize<DeclareLanguage> == 48);  // 1.1
 #endif
 
 // ---------------------------------------------------------------------------

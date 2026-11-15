@@ -62,8 +62,9 @@
 // known) to keep the state small.
 //
 // State: ResamplerStateBytes(q, channels, maxRatio) bytes, 16-byte aligned,
-// owned by the caller (RealVoice.resamplerState when ResamplerFitsInline(),
-// otherwise a side pool, see the contract proposal in the dsp report).
+// owned by the caller: core's resampler pool, one slot per real voice slot of
+// ResamplerStateBytes(Sinc, Config.maxVoiceChannels, Config.maxPitchRatio)
+// bytes (contract 1.1, D-44; the former RealVoice.resamplerState column is gone).
 // Init writes every byte; the memory may hold anything before.
 #ifndef SND_DSP_RESAMPLER_HPP
 #define SND_DSP_RESAMPLER_HPP
@@ -98,7 +99,8 @@ std::uint32_t ResamplerPadFrames(ResamplerQuality q, float maxRatio = kResampler
 // State bytes for `channels` (1..kMaxChannels).
 std::size_t ResamplerStateBytes(ResamplerQuality q, std::uint32_t channels,
                                 float maxRatio = kResamplerMaxRatio) noexcept;
-// True if the state fits the 64-byte RealVoice.resamplerState column
+// True if the state fits 64 bytes (the size of the RealVoice.resamplerState
+// column of contract 1.0, removed in 1.1; kept for callers with small inline state)
 // (Linear <= 6 channels, Cubic <= 3, Sinc never).
 bool ResamplerFitsInline(ResamplerQuality q, std::uint32_t channels,
                          float maxRatio = kResamplerMaxRatio) noexcept;

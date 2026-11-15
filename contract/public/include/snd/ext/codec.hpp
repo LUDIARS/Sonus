@@ -55,9 +55,14 @@ inline snd_codec ToC(ICodec& c, std::uint32_t fourcc) noexcept {
                    &bridge::CodecSeek};
 }
 
+// ICodec over a copied snd_codec table. 1.1: default constructible (an empty
+// table; Assign() before use) so that registries can keep fixed arrays of them.
 class CCodec final : public ICodec {
  public:
+  CCodec() noexcept : c_{} {}
   explicit CCodec(const snd_codec& c) noexcept : c_(c) {}
+  void Assign(const snd_codec& c) noexcept { c_ = c; }
+  const snd_codec& Table() const noexcept { return c_; }
   std::uint32_t StateBytes(const CodecHeader& h) const override { return c_.state_bytes(c_.user, &h); }
   void Init(void* s, const CodecHeader& h) override { c_.init(c_.user, s, &h); }
   std::uint32_t Decode(void* s, const std::uint8_t* src, std::uint32_t n, float* const* dst,

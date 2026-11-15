@@ -27,6 +27,8 @@ SND_EXTERN_C_BEGIN
 #define SND_MAX_CHANNELS 8u        /* max channels of a voice, bus or device */
 #define SND_MAX_LISTENERS 4u       /* 3.1: Listener table max 4 */
 #define SND_TICKS_PER_BEAT 960u    /* 8.1 */
+#define SND_MAX_LANGUAGE_NAME_BYTES 32u /* 1.1: snd_declare_language, incl. the NUL */
+#define SND_MAX_LANGUAGES 32u           /* 1.1: declared language names per system */
 
 /* ------------------------------------------------------------------------- */
 /* Results                                                                    */
@@ -50,10 +52,21 @@ typedef int32_t snd_result;
 #define SND_ERR_UNSUPPORTED          -15
 #define SND_ERR_NOT_IMPLEMENTED      -16  /* stage-0 stubs */
 #define SND_ERR_NOT_READY            -17  /* no published snapshot yet (before the first Update) */
+#define SND_ERR_BANK_ALREADY_LOADED  -18  /* 1.1: the same bank (bankId + language) is loaded or loading from another path */
 
 /* ------------------------------------------------------------------------- */
 /* Handles (3.1): 64 bit = generation (high 32) | slot (low 32).              */
 /* Generation 0 is never issued, so the all-zero value is "invalid".          */
+/*                                                                            */
+/* Issue and return (2.1, CONTRACTS.md D-05 / D-46):                          */
+/*  - Playback, Emitter, Transport (standalone), UserBuffer and Bank slots    */
+/*    are issued by a lock-free slot allocator (base::HandleAllocator) on the */
+/*    calling registered thread; any registered thread may issue at the same  */
+/*    time and gets the handle at once.                                       */
+/*  - A slot is returned only by the owner thread's snd_update(), when it     */
+/*    consumes the audio side's end / release flag of that slot (notify).     */
+/*  - Generations stay below 2^31 (bit 31 of the generation is never set in   */
+/*    an issued handle); after 2^31 - 1 reuses of a slot they wrap to 1.      */
 /* ------------------------------------------------------------------------- */
 typedef struct snd_playback_handle { uint64_t value; } snd_playback_handle;
 typedef struct snd_emitter_handle { uint64_t value; } snd_emitter_handle;

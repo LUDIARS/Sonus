@@ -31,3 +31,6 @@ target_compile_definitions(dsp_test_scalar PRIVATE SND_SIMD_FORCE_SCALAR=1)
 # The dsp tests run minutes of audio (tails, extreme parameters); under
 # ThreadSanitizer they exceed the default 120 s.
 set_tests_properties(dsp_test dsp_test_scalar PROPERTIES TIMEOUT 1200)
+
+# Contract 1.1 D-48 (stage 1.5 integration).
+snd_add_test(dsp_effect_rate_test SOURCES effect_rate_test.cpp LINK sonus_dsp)

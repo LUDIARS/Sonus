@@ -35,6 +35,7 @@ snd_bank_handle snd_load_bank_async(snd_system*, const char*) { return snd_bank_
 snd_result snd_unload_bank(snd_system*, snd_bank_handle, snd_unload_mode) { return kNI; }
 snd_bank_state snd_get_bank_state(const snd_system*, snd_bank_handle) { return SND_BANK_STATE_UNLOADED; }
 snd_result snd_set_language(snd_system*, snd_id) { return kNI; }
+snd_result snd_declare_language(snd_system*, const char*) { return kNI; }
 snd_result snd_get_bank_chunk(const snd_system*, snd_bank_handle, uint32_t, const void** data,
                               uint64_t* bytes) {
   if (data != nullptr) *data = nullptr;

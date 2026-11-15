@@ -61,6 +61,20 @@ SND_EXTERN_C_BEGIN
   /* base seed; playback seeds derive from it and the playback sequence (2.5) */                  \
   X(seed, seed, uint32_t, uint32_t, 0x5EED5EEDu)
 
+/* Top level, added in contract 1.1. Stored at the END of snd_config (after
+ * `plugins`) so that the 1.0 layout is a prefix (struct_size, CONTRACTS.md §2):
+ * snd_create treats a config whose struct_size ends before these fields as
+ * having the defaults. In the C++ snd::Config they sit with the other
+ * top-level fields. Out-of-range values make snd_create fail with
+ * SND_ERR_INVALID_ARGUMENT. ------------------------------------------------ */
+#define SND_CONFIG_TOP_1_1(X)                                                                     \
+  /* largest channel count of a voice, 1..SND_MAX_CHANNELS; sizes core's resampler pool (D-44) */ \
+  X(max_voice_channels, maxVoiceChannels, uint32_t, uint32_t, 8u)                                 \
+  /* largest rate ratio a voice is resampled at (source frames per output frame, including the */ \
+  /* source/internal rate ratio), 1.0..SND_MAX_PITCH_RATIO; larger ratios are clamped to it.    */ \
+  /* Sizes core's resampler pool (D-44); ratios above 4 use ~32 KiB of stack (D-47).           */ \
+  X(max_pitch_ratio, maxPitchRatio, float, float, 4.0f)
+
 /* Memory budgets (3.3) ----------------------------------------------------- */
 #define SND_CONFIG_MEMORY(X)                                                                      \
   X(stream_pool_bytes, streamPoolBytes, uint64_t, uint64_t, (8ull << 20))                         \
@@ -184,7 +198,12 @@ typedef struct snd_config {
   snd_livelink_config livelink;
   snd_output_config output;
   snd_plugin_config plugins;
+  /* --- contract 1.1 --- */
+  SND_CONFIG_TOP_1_1(SND_CONFIG_C_FIELD)
 } snd_config;
+
+/* Upper bound of max_pitch_ratio (= dsp kResamplerMaxRatio). */
+#define SND_MAX_PITCH_RATIO 32.0f
 
 /* Fill `cfg` with defaults. Thread: any. Always call before setting fields. */
 static inline void snd_config_init(snd_config* cfg) {
@@ -199,6 +218,7 @@ static inline void snd_config_init(snd_config* cfg) {
   cfg->struct_size = (uint32_t)sizeof(snd_config);
   cfg->contract_version = (uint32_t)SND_CONTRACT_VERSION;
   SND_CONFIG_TOP(SND_CONFIG_INIT_TOP)
+  SND_CONFIG_TOP_1_1(SND_CONFIG_INIT_TOP)
   SND_CONFIG_MEMORY(SND_CONFIG_INIT_MEMORY)
   SND_CONFIG_COMMANDS(SND_CONFIG_INIT_COMMANDS)
   SND_CONFIG_JOBS(SND_CONFIG_INIT_JOBS)

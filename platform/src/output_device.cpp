@@ -48,6 +48,7 @@ bool TimerOutputDevice::Start() {
   ThreadDesc td;
   td.name = "snd-device";
   td.priority = config_.realtimeThread ? ThreadPriority::Realtime : ThreadPriority::Normal;
+  td.minStackBytes = kRtThreadMinStackBytes;  // D-47: RT-priority thread like the audio thread
   if (!thread_.Start(td, &TimerOutputDevice::ThreadMain, this)) {
     running_.store(false, std::memory_order_relaxed);
     return false;

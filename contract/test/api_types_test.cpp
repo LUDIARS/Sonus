@@ -28,6 +28,7 @@ SND_TEST(ApiTypes, ConfigDefaultsMatchBetweenCAndCpp) {
 #define SND_CMP_DEV(cn, pn, ct, pt, d) SND_CHECK(static_cast<ct>(cpp.devReserve.pn) == c.dev_reserve.cn);
 #define SND_CMP_LL(cn, pn, ct, pt, d) SND_CHECK(static_cast<ct>(cpp.liveLink.pn) == c.livelink.cn);
   SND_CONFIG_TOP(SND_CMP_TOP)
+  SND_CONFIG_TOP_1_1(SND_CMP_TOP)  // contract 1.1
   SND_CONFIG_MEMORY(SND_CMP_MEM)
   SND_CONFIG_COMMANDS(SND_CMP_CMD)
   SND_CONFIG_JOBS(SND_CMP_JOB)

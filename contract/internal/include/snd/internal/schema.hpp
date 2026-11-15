@@ -81,7 +81,7 @@ constexpr const char* SystemName(SystemId s) noexcept {
 enum class Temperature : std::uint8_t { Hot = 0, Cold = 1 };
 enum class Indexing : std::uint8_t {
   Sparse = 0,  // dense array + sparse slot index, swap-remove (3.1)
-  Direct = 1,  // slot == position (fixed-shape tables: Listener, Spatial)
+  Direct = 1,  // slot == position (fixed-shape tables: Listener, Spatial; Stream since 1.1)
 };
 enum class ReadTiming : std::uint8_t { Current = 0, Previous = 1, Async = 2 };
 
@@ -107,7 +107,7 @@ using F32 = float;
   T(ParamPlayback, Sparse, ApplyCommands, RunEventLogic,                                        \
     "maxPlaybacks*8 inline + paramOverflowBlocks*16 shared")                                    \
   T(Bus, Sparse, ApplyCommands, ApplyCommands, "sum over loaded banks + devReserve.buses")      \
-  T(Stream, Sparse, RunEventLogic, RunEventLogic, "Config.maxStreams")                          \
+  T(Stream, Direct, RunEventLogic, RunEventLogic, "Config.maxStreams; slot = position (D-45)")  \
   T(Transport, Sparse, ApplyCommands, UpdateTransport, "Config.maxTransports")                  \
   T(Reservation, Sparse, ApplyCommands, UpdateTransport, "Config.maxReservations")              \
   T(Category, Sparse, ApplyCommands, ApplyCommands, "sum over loaded banks")                    \
@@ -145,13 +145,13 @@ using F32 = float;
   C(Voice, realSlot, SlotIndex, Hot, SelectVoices)                             \
   C(Voice, playhead, Playhead, Hot, Render)                                    \
   C(Voice, renderStatus, VoiceRenderStatus, Hot, Render)                       \
+  C(Voice, renderHold, VoiceRenderHold, Hot, Render)                           \
   C(Voice, clipRef, ClipRef, Cold, RunEventLogic)                              \
   C(Voice, createdBlock, BlockIndex, Cold, RunEventLogic)
 
 #define SND_COLS_RealVoice(C)                                                  \
   C(RealVoice, voiceSlot, SlotIndex, Hot, SelectVoices)                        \
   C(RealVoice, assign, RealVoiceAssign, Hot, SelectVoices)                     \
-  C(RealVoice, resamplerState, ResamplerState, Hot, Render)                    \
   C(RealVoice, filterState, FilterState, Hot, Render)                          \
   C(RealVoice, panMatrix, PanMatrix, Hot, Render)                              \
   C(RealVoice, appliedGain, F32, Hot, Render)
@@ -204,6 +204,14 @@ using F32 = float;
   C(Bus, peak, BusPeak, Hot, Render)                                           \
   C(Bus, busId, Id, Cold, ApplyCommands)
 
+// Stream (1.1, D-45): Indexing::Direct, slot == row position, rows never move.
+// The columns with non-audio-thread writers (readPos: ExternalIo, ringWrite:
+// ExternalDecode) are indexed by the stream SLOT directly (the IO thread and the
+// decode jobs hold the slot, never a dense position). Direct rows are never
+// referred to by handle (base/sparse_set.hpp): liveness is per slot only.
+// How io's per-slot StreamChannel atomics (ReadPos() ...) relate to these
+// columns is the Stream source's choice (stage 2): either the source copies the
+// IO-side value into the column, or the column's storage IS the channel's value.
 #define SND_COLS_Stream(C)                                                     \
   C(Stream, fileId, FileId, Hot, RunEventLogic)                                \
   C(Stream, syncGroup, U32, Hot, RunEventLogic)                                \
@@ -308,6 +316,7 @@ using F32 = float;
   R(RunEventLogic, Voice_renderStatus, Previous)                               \
   R(RunEventLogic, Voice_playhead, Previous)                                   \
   R(RunEventLogic, Voice_realSlot, Previous)                                   \
+  R(RunEventLogic, Voice_renderHold, Previous) /* 1.1: no destroy while held */ \
   R(RunEventLogic, Stream_readPos, Async)                                      \
   R(RunEventLogic, Stream_ringWrite, Async)                                    \
   /* 5 Compute3D: Emitter (extrapolated/interpolated), Listener */             \
@@ -362,6 +371,7 @@ using F32 = float;
   R(SelectVoices, Voice_sourceKind, Current)                                   \
   R(SelectVoices, Voice_playhead, Previous)                                    \
   R(SelectVoices, Bus_gain, Previous)                                          \
+  R(SelectVoices, Voice_renderHold, Previous)  /* 1.1 D-43 */                  \
   /* 8 BuildRenderList: RealVoice, Voice */                                    \
   R(BuildRenderList, RealVoice_voiceSlot, Current)                             \
   R(BuildRenderList, RealVoice_assign, Current)                                \
@@ -371,6 +381,7 @@ using F32 = float;
   R(BuildRenderList, Voice_realSlot, Current)                                  \
   R(BuildRenderList, Voice_lifecycle, Current)                                 \
   R(BuildRenderList, Bus_graphOrder, Current)                                  \
+  R(BuildRenderList, Voice_renderHold, Previous)  /* 1.1 D-43 */               \
   /* 9 Render: render list, sources, DSP state */                              \
   R(Render, Voice_sourceKind, Current)                                         \
   R(Render, Voice_sourceSlot, Current)                                         \
@@ -419,8 +430,8 @@ using F32 = float;
 #define SND_SCHEMA_FRAME_DATA(F)                                                  \
   F(FireList, UpdateTransport, "reservations that fire this block (music_if.hpp)") \
   F(MusicVoiceRequests, RunEventLogic, "voice start/stop requests from music logic") \
-  F(RenderList, BuildRenderList, "sorted by bus, then source kind (source_if.hpp)") \
-  F(ChunkAccumulators, Render, "per-chunk per-bus sums, added in chunk order (3.4)") \
+  F(RenderList, BuildRenderList, "sorted by bus, then source kind (source_if.hpp); 2 sets, alternating per block (D-43)") \
+  F(ChunkAccumulators, Render, "per-chunk per-bus sums, added in chunk order (3.4); 2 sets with the render list (D-43)") \
   F(TripleBuffer, Publish, "game-visible snapshot (notify.hpp)")                   \
   F(EndFlags, Publish, "per-playback end flags (notify.hpp)")                      \
   F(EventRing, Publish, "beats, markers, logs (notify.hpp)")

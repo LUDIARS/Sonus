@@ -13,7 +13,7 @@
 namespace snd::bank {
 namespace {
 
-constexpr std::uint32_t kMaxLanguages = 32;
+constexpr std::uint32_t kMaxLanguages = SND_MAX_LANGUAGES;  // contract 1.1
 
 enum class Stage : std::uint8_t {
   Free = 0,
@@ -157,7 +157,8 @@ struct BankManager::Impl {
     s.result = SND_OK;
     s.reason[0] = '\0';
     s.stage = Stage::Free;
-    s.generation = s.generation + 1u == 0u ? 1u : s.generation + 1u;
+    // D-46: issued generations stay below 2^31 (2^31 - 1 wraps to 1).
+    s.generation = s.generation + 1u >= 0x80000000u ? 1u : s.generation + 1u;
     notify::BankSlotState& ns = states[&s - slots];
     ns.generation.store(s.generation, std::memory_order_relaxed);
     SetState(s, SND_BANK_STATE_UNLOADED, SND_OK);
@@ -578,7 +579,7 @@ bool Impl::Decide(Slot& s) noexcept {
       char why[192];
       std::snprintf(why, sizeof(why), "bank %08x is already loaded or loading from '%.120s'", pb.bankId,
                     o.path != nullptr ? o.path : "?");
-      Fail(s, SND_ERR_INVALID_ARGUMENT, why);
+      Fail(s, SND_ERR_BANK_ALREADY_LOADED, why);  // contract 1.1 (D-50)
       return true;
     }
   }
@@ -753,9 +754,16 @@ snd_result BankManager::Release(HandleRef bank) noexcept {
 // Languages (10.4)
 // ---------------------------------------------------------------------------
 snd_result BankManager::DeclareLanguage(const char* name) noexcept {
+  // Contract 1.1 (D-50, snd_declare_language): 1..SND_MAX_LANGUAGE_NAME_BYTES-1
+  // bytes, no '/', '.' or '\\' (the name is one segment of "<base>.<name>.sndb").
   if (name == nullptr || name[0] == '\0') return SND_ERR_INVALID_ARGUMENT;
+  const std::size_t n = std::strlen(name);
+  if (n >= SND_MAX_LANGUAGE_NAME_BYTES) return SND_ERR_INVALID_ARGUMENT;
+  for (std::size_t i = 0; i < n; ++i) {
+    if (name[i] == '/' || name[i] == '.' || name[i] == '\\') return SND_ERR_INVALID_ARGUMENT;
+  }
   detail::LockGuard lock(impl_->mutex);
-  return impl_->AddLanguage(name, std::strlen(name));
+  return impl_->AddLanguage(name, n);
 }
 
 Id BankManager::CurrentLanguage() const noexcept {

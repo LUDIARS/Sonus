@@ -20,3 +20,6 @@ snd_add_test(jobs_adv_worker_pool_test SOURCES adv_worker_pool_test.cpp LINK son
 snd_add_test(jobs_defect_rt_quiescent_test SOURCES defect_rt_quiescent_test.cpp LINK sonus_jobs sonus_mocks)
 # Reproduces a defect (fails intermittently): remaining_ decremented after the Done CAS.
 snd_add_test(jobs_defect_rt_remaining_test SOURCES defect_rt_remaining_test.cpp LINK sonus_jobs sonus_mocks)
+
+# Contract 1.1 D-47: RT worker stack (stage 1.5 integration).
+snd_add_test(jobs_rt_stack_test SOURCES rt_stack_test.cpp LINK sonus_jobs sonus_mocks)

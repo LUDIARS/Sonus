@@ -85,6 +85,9 @@ struct RtWorkerConfig {
   bool realtimePriority = true;           // workers ask for SCHED_FIFO (fallback reported)
   int realtimePriorityLevel = 80;
   bool flushDenormals = true;             // FTZ/DAZ on workers (2.4)
+  // Lower bound of each worker's stack (D-47). Values below
+  // platform::kRtThreadMinStackBytes are raised to it.
+  std::size_t minStackBytes = 256u << 10;
 };
 
 struct RtRunResult {

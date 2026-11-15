@@ -610,6 +610,50 @@ fileBytes     終端
 ヘッダの後は `dataOffset` まで 0 で埋め、データの後もファイル長が `sectorAlign` の倍数になるまで 0 で埋める
 （`STRM.fileBytes` は埋めた後の長さ）。`SEEK.byteOffset` と `PREL` のプリロードはデータ先頭（`dataOffset`）から数える。
 
+### 6.4 標準エフェクトの種別 ID（契約 1.1 で追記）
+
+`EFFX.effectType` は種別名の `snd_hash_id`（D-04）。標準エフェクトの種別は dsp が定める次の 14 種
+（`dsp/include/snd/dsp/effects.hpp` の `kEffect*` と一致する。一致は統合テストが確認する）。
+これ以外の ID はプラグイン（`Config.plugins.effects`、D-31）として扱う。
+各パラメータの番号・単位・範囲・既定値（`EFPV` の並び）は `effects.hpp` の冒頭の表が正。
+範囲外の値はランタイムが範囲に切り詰める（NaN は既定値）。ビルドツールは範囲外の既定値を警告、パラメータの数の超過をエラーにする。
+
+| 種別名 | ID | dsp の定数 | パラメータ数 | 内容 |
+| --- | --- | --- | --- | --- |
+| `snd.fx.reverb` | `0x542529D2` | `kEffectReverb` | 14 | アルゴリズムリバーブ（8 本の FDN、I3DL2 / Unity SFX Reverb の項目） |
+| `snd.fx.echo` | `0x3D8A2D0F` | `kEffectEcho` | 5 | エコー（Unity Echo） |
+| `snd.fx.delay` | `0x46D3ABA1` | `kEffectDelay` | 7 | 減衰・ピンポン付きのフィードバックディレイ |
+| `snd.fx.chorus` | `0x1E3C9EA8` | `kEffectChorus` | 6 | コーラス（Unity Chorus） |
+| `snd.fx.flanger` | `0x0C99B3D3` | `kEffectFlanger` | 6 | フランジャー（Unity Flange） |
+| `snd.fx.distortion` | `0x1C3DACE1` | `kEffectDistortion` | 4 | ソフトクリップのディストーション |
+| `snd.fx.compressor` | `0xE20BFE6B` | `kEffectCompressor` | 8 | コンプレッサー（サイドチェーン入力あり、4.6 のダッキング） |
+| `snd.fx.limiter` | `0x9D417A6E` | `kEffectLimiter` | 4 | 先読みのリミッター |
+| `snd.fx.parameq` | `0x1F6C15FD` | `kEffectParamEq` | 16 | 4 バンドのパラメトリック EQ |
+| `snd.fx.lowpass` | `0x596CFAAD` | `kEffectLowpass` | 2 | 12 dB/oct のローパス |
+| `snd.fx.highpass` | `0x7E5CD7BF` | `kEffectHighpass` | 2 | 12 dB/oct のハイパス |
+| `snd.fx.pitchshift` | `0x6AE27268` | `kEffectPitchShifter` | 3 | 2 タップのピッチシフター |
+| `snd.fx.normalize` | `0xFBDFA555` | `kEffectNormalize` | 3 | ノーマライズ（Unity Normalize） |
+| `snd.fx.surround` | `0x2072E34C` | `kEffectSurround` | 5 | 疑似サラウンド・ステレオ拡幅 |
+
+### 6.5 組み込みコーデックのバイト配置（契約 1.1 で追記）
+
+`ASST.codec` が組み込みコーデックのとき、`WAVE`（常駐）・ストリームファイルのデータ（6.3）は次の配置。
+`ASST` の `codec, channels, sampleRate, totalFrames, preSkip, preRoll, framesPerPacket, blockAlign` は `snd_codec_header` の同名フィールドで、
+組み込みコーデックは `extra` を使わない（`extraBytes = 0`）。codec モジュールの実装（`codec/README.md`）と一致する。
+
+| fourcc | 1 パケット | 内容 |
+| --- | --- | --- |
+| `PCMF` | 1 フレーム（`4 × ch` バイト） | float32 リトルエンディアン、インターリーブ。有限値はそのまま（±1 を超えても切らない）。デコーダは NaN / ±Inf を 0 にする |
+| `PC16` | 1 フレーム（`2 × ch` バイト） | int16 リトルエンディアン、インターリーブ。`x / 32768` で展開。エンコーダは最近接丸めで `[-32768, 32767]` に切る |
+| `ADPC` | 1 ブロック（`blockAlign` バイト） | WAV の IMA ADPCM と同じ配置。チャンネルごとに 4 バイトのヘッダ `{s16 予測値, u8 ステップ添字 0..88, u8 0}`、続いて 4 バイト × ch の組を繰り返す（各組がそのチャンネルの 8 サンプル、下位ニブルが先）。1 ブロックのフレーム数は `1 + (blockAlign − 4ch) / (4ch) × 8`。最後のブロックは詰め物で満たし、`totalFrames` で切る |
+
+- PCM: `framesPerPacket` は 1（0 は指定なし）、`blockAlign` はフレームの大きさ（0 は指定なし）。
+- ADPCM: `blockAlign` は `4ch × (1 + k)`（k ≥ 1）。**1 チャンネルあたり 1024 バイト以下**（`blockAlign ≤ 1024 × ch`）。
+  これを超えるとデコーダの状態が既定の `decoderSlotBytes`（32 KiB）を 8ch で超え、再生が `DECODER_POOL_FULL` で拒否されうる。
+  既定は 512 バイト／ch（1017 フレーム、48 kHz で 21 ms）。`framesPerPacket` は 0 か計算値。ブロックは独立なので `preRoll` は 0。
+- `SEEK`: `frame` は再生フレーム（プリスキップ後）、`byteOffset` はデータ先頭から。先頭は `{0, 0}`。PCM はフレーム、ADPCM はブロックの境界。
+- プリスキップ（`preSkip`）の後の最初のフレームが再生フレーム 0。組み込みコーデックのエンコーダは `preSkip = 0` を書く。
+
 ## 7. 版と互換性
 
 | 変更 | 扱い |
@@ -625,6 +669,7 @@ fileBytes     終端
 | --- | --- |
 | 1.0 | 段階0で凍結 |
 | 2.0 | headerChecksum をヘッダ全体（自身の欄は 0 とみなす）に拡大、予約バイト 0 の検証、`ALIS` チャンク追加、行の並びの規則（6.0: 入れ子 Event・カテゴリの親・シーク表）、`loopEnd`・`SEEK.byteOffset`・ストリームファイル（6.3）・エンディアン・`fileBytes` の明文化 |
+| 2.0（契約 1.1） | 文書の追記のみ（版は 2.0 のまま）: 6.4 標準エフェクトの種別 ID、6.5 組み込みコーデックのバイト配置 |
 
 ## 8. 読み込み時の検証（bank モジュールの完了条件）
 

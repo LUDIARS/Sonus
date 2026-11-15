@@ -193,6 +193,8 @@ bool MakeConfig(const EffectInfo& info, const EffectDesc& desc, std::uint32_t si
                 std::uint32_t sampleRate, FxConfig* cfg) noexcept {
   if (desc.channels == 0 || desc.channels > kMaxChannels || desc.max_frames == 0) return false;
   if (sizingRate == 0 || sampleRate == 0) return false;
+  // D-48: desc.sample_rate is unset (0) or the same rate as the argument.
+  if (desc.sample_rate != 0u && desc.sample_rate != sampleRate) return false;
   cfg->channels = desc.channels;
   cfg->sizingRate = sizingRate;
   cfg->sampleRate = sampleRate;
@@ -492,7 +494,13 @@ std::uint32_t EffectInstanceBytes(const EffectDesc& desc, std::uint32_t sampleRa
                                   std::uint32_t pluginCount) noexcept {
   // Plugins with the id of a standard effect take precedence (D-31: registration overrides).
   for (std::uint32_t i = 0; plugins != nullptr && i < pluginCount; ++i) {
-    if (plugins[i].effect_type == desc.effect_type) return PluginStateBytes(plugins[i], desc);
+    if (plugins[i].effect_type == desc.effect_type) {
+      // D-48: the plugin sees the rate in the desc.
+      if (desc.sample_rate != 0u && desc.sample_rate != sampleRate) return 0;
+      EffectDesc withRate = desc;
+      withRate.sample_rate = sampleRate;
+      return PluginStateBytes(plugins[i], withRate);
+    }
   }
   return EffectStateBytes(desc, sampleRate);
 }
