@@ -1167,12 +1167,20 @@ SND_TEST(IoDefect, ClassChangeInsideAChannelDeadlocksWithoutCallerChunks) {
   AddStd(rig);
   SND_REQUIRE(rig.io.Post(StreamReq(0, "a.bin", 0, kChunk, IoClass::Ambience, 1)));
   SND_REQUIRE(rig.io.Post(StreamReq(0, "a.bin", kChunk, kChunk, IoClass::Music, 2)));
+  // The consumer drains between steps: with a pool of one chunk the two
+  // records cannot sit in the ring at the same time, so the second read can
+  // only be issued after the first record's chunk went back to the pool.
+  std::vector<std::uint32_t> tags;
   for (int i = 0; i < 50; ++i) {
     rig.io.RunOnce();
     rig.clock.AdvanceMs(10);
+    for (std::uint32_t t : Drain(rig, 0)) tags.push_back(t);
   }
-  const std::vector<std::uint32_t> tags = Drain(rig, 0);
   SND_CHECK_EQ(tags.size(), 2u);
+  if (tags.size() == 2u) {
+    SND_CHECK_EQ(tags[0], 1u);  // request order, not issue order
+    SND_CHECK_EQ(tags[1], 2u);
+  }
   snd::test::Note("delivered %zu of 2; pool used %u/%u; reads issued %llu", tags.size(), rig.pool.Used(),
                   rig.pool.ChunkCount(), static_cast<unsigned long long>(rig.io.Stats().readsIssued));
 }
