@@ -1,4 +1,4 @@
-# バンクのバイナリ仕様（形式 1.0）
+# バンクのバイナリ仕様（形式 2.0）
 
 設計書 10.2 の「バイト単位の仕様」。**凍結対象**（`spec/interface/CONTRACTS.md`）。
 正本の構造体定義は `contract/internal/include/snd/format/bank_format.hpp`。本書と食い違う場合はヘッダが正で、
@@ -32,7 +32,7 @@ fileBytes     終端
 | offset | 型 | 名前 | 内容 |
 | --- | --- | --- | --- |
 | 0 | u32 | magic | `'SNDB'`（バイト列 `53 4E 44 42`） |
-| 4 | u16 | formatMajor | 1。不一致なら読み込み失敗（`SND_ERR_VERSION_MISMATCH`） |
+| 4 | u16 | formatMajor | 2。不一致なら読み込み失敗（`SND_ERR_VERSION_MISMATCH`） |
 | 6 | u16 | formatMinor | 0。ランタイムより新しくても読める（§7） |
 | 8 | u32 | platform | 機種タグ fourcc（`ANY_`, `WIN_`, `LNX_`, `MAC_`, `IOS_`, `AND_`）。`ANY_` 以外はランタイムの機種と一致が必要 |
 | 12 | u8 | endianness | 1 = little |
@@ -44,17 +44,20 @@ fileBytes     終端
 | 32 | u64 | projectBuildHash | プロジェクトのビルドハッシュ（ライブリンクの照合、11.2） |
 | 40 | u64 | contentHash | このバンク内容のハッシュ（差分ビルドのキャッシュキー、依存の照合、10.3） |
 | 48 | u32 | checksum | `[headerBytes, fileBytes)` の CRC-32C |
-| 52 | u32 | headerChecksum | `[0, 52)` の CRC-32C |
+| 52 | u32 | headerChecksum | ヘッダ全体 `[0, 128)` の CRC-32C。ただしこの欄自身（`[52, 56)`）は 0 とみなす（`bank_format::HeaderChecksum`、2.0） |
 | 56 | u32 | dependencyCount | |
 | 60 | u32 | chunkCount | |
 | 64 | u64 | dependencyOffset | `Dependency` 配列の位置 |
 | 72 | u64 | chunkTableOffset | `ChunkEntry` 配列の位置 |
 | 80 | u32 | languageId | 言語バンクの言語 ID（10.4）、それ以外 0 |
-| 84 | u32 | reserved0 | 0 |
-| 88 | u8[40] | reserved | 0 |
+| 84 | u32 | reserved0 | 0（0 以外は破損） |
+| 88 | u8[40] | reserved | 0（0 以外は破損） |
 
 **CRC-32C**: Castagnoli、反射、多項式 `0x82F63B78`、初期値・最終 XOR `0xFFFFFFFF`。`"123456789"` → `0xE3069283`。
 参照実装は `bank_format::Crc32c`。検証の順序は headerChecksum → magic/版/機種/エンディアン → checksum。
+ヘッダのどのバイトもいずれかのチェックサムで守られる（1.0 では `[52, 128)` が無保護だった）。
+`endianness` が 1 以外なら `SND_ERR_VERSION_MISMATCH`。`fileBytes` は読んだ長さと正確に一致すること（末尾のパディングも許さない）。
+`languageId` は言語フラグ（bit2）が無ければ 0。
 
 ### Dependency（16 バイト）
 
@@ -156,6 +159,7 @@ fileBytes     終端
 | `STRS` | Blob | kChunkStrippable | string pool, NUL-terminated UTF-8 |
 | `NAME` | Table | kChunkStrippable | id -> name (and rename aliases, 10.1) |
 | `GUID` | Table | kChunkDevOnly | id -> GUID (dev builds, 11.2) |
+| `ALIS` | Table | 0 | rename aliases: old id -> current id (10.1, not strippable, 2.0) |
 
 
 #### `EVNT`
@@ -166,7 +170,7 @@ fileBytes     終端
 | 1 | trackFirst | U32 | 必須 | — |  |
 | 2 | trackCount | U32 | 必須 | — |  |
 | 3 | sequenceKind | U32 | 必須 | — | SequenceKind |
-| 4 | priority | U32 | 必須 | — | 0..255, higher wins |
+| 4 | priority | U32 | 必須 | 128 | 0..255, higher wins（必須列だが書き手の既定は 128） |
 | 5 | bus | U32 | 必須 | — | BUSS row |
 | 6 | category | U32 | 任意 | none (0xFFFFFFFF) | CATG row |
 | 7 | limitGroup | U32 | 任意 | none (0xFFFFFFFF) | VLGR row |
@@ -367,7 +371,7 @@ fileBytes     終端
 | 10 | dataOffset | U64 | 任意 | 0 | within WAVE (resident forms) |
 | 11 | dataBytes | U64 | 任意 | 0 |  |
 | 12 | loopStart | U64 | 任意 | 0 |  |
-| 13 | loopEnd | U64 | 任意 | 0 | 0 = no loop; sample accurate (6.3) |
+| 13 | loopEnd | U64 | 任意 | 0 | ループ終端（**含まない**、再生フレーム）。0 = ループ無し。サンプル精度（6.3） |
 | 14 | preloadOffset | U64 | 任意 | 0 | within PREL |
 | 15 | preloadBytes | U32 | 任意 | 0 |  |
 | 16 | preloadFrames | U32 | 任意 | 0 |  |
@@ -383,7 +387,7 @@ fileBytes     終端
 | id | 列 | 型 | 必須 | 既定値 | 備考 |
 | --- | --- | --- | --- | --- | --- |
 | 0 | frame | U64 | 必須 | — |  |
-| 1 | byteOffset | U64 | 必須 | — | within the stream file / asset data |
+| 1 | byteOffset | U64 | 必須 | — | **データ先頭からの**位置（ストリームは `STRM.dataOffset`、常駐は `ASST.dataOffset` が 0）。`frame` は再生フレーム。各アセットの先頭行は `{0, 0}`、`frame` は狭義増加、`byteOffset` は非減少 |
 
 #### `STRM`
 
@@ -522,6 +526,31 @@ fileBytes     終端
 | 2 | guidHi | U64 | 必須 | — |  |
 | 3 | kind | U32 | 任意 | 0 |  |
 
+#### `ALIS`（2.0）
+
+| id | 列 | 型 | 必須 | 既定値 | 備考 |
+| --- | --- | --- | --- | --- | --- |
+| 0 | oldId | U32 | 必須 | — | `snd_hash_id(旧名)` |
+| 1 | id | U32 | 必須 | — | 現在のランタイム ID |
+| 2 | kind | U32 | 任意 | 0 | NameKind（対象の種類） |
+
+リネームの別名（10.1）。`NAME`/`STRS` と違って除去できないので、文字列表を外した配布ビルドでも旧 ID を実行時に解決できる。
+
+- 行は `oldId` の昇順で、`oldId` は**狭義増加**（重複なし）。確保なしに O(n) で検証でき、引くときは二分探索。
+- `oldId` ≠ 0、`id` ≠ 0、`oldId` ≠ `id`。
+- `id` は常に**現在の** ID（別名の連鎖 A→B→C は書き手が A→C に畳む）。ランタイムの解決は 1 段だけ。
+- 未知の `kind` の値は無視してよい（将来の追加のため）。
+- 違反は `SND_ERR_CORRUPT`（§8 の 5）。
+
+### 6.0 行の並びの規則（2.0）
+
+参照をたどるだけで必ず終わる（循環しない）ことを、追加の作業領域なしに O(n) で確かめられるよう、次の並びを要求する。
+
+- `BUSS`: 入力が先、出力が後。`parent` と、その行のセンドの `SEND.targetBus` は自分より**後ろ**の行。
+- `EVNT`: Event の各トラックの入れ子クリップ（`CLIP.kind` = 1）の `target` は、その Event より**後ろ**の行（自己参照も不可）。
+- `CATG`: `parent` は自分より**後ろ**の行。
+- `SEEK`: 各アセットの範囲は `{0, 0}` で始まり、`frame` 狭義増加・`byteOffset` 非減少。
+
 ### 6.1 列挙値
 
 | 列 | 値 |
@@ -549,7 +578,7 @@ fileBytes     終端
 - `WAVE`: 常駐波形とコーデック設定データ。各アセットの開始は 64 バイト境界。`ASST.dataOffset` 等は **WAVE チャンク先頭から**。
 - `PREL`: ストリームと音楽の入口のプリロードチャンク（6.1, 8.3）。`ASST.preloadOffset` は PREL 先頭から。
 - `SPTH`: ストリームファイルのパス（NUL 終端 UTF-8）。ランタイムで必要なので除去不可。`STRM.pathOffset` は SPTH 先頭から。
-  ストリーム本体は別ファイルで、パケットは `STRM.sectorAlign` 境界から置く（10.2）。
+  ストリーム本体は別ファイルで、パケットは `STRM.sectorAlign` 境界から置く（10.2）。形式は下の「ストリームファイル」。
 - `EFBL`: エフェクト用データ（IR 等）。`EFFX.blobOffset` は EFBL 先頭から。
 - `PTCH`: パッチのプログラム（段階 6 で形式を定める。minor 版で追加）。
 - `DSPN`: `DspPoolNeed { u64 instanceBytes; u32 instanceCount; u32 reserved; }`。`instanceBytes` は各 `EFFX.stateBytes` を
@@ -560,6 +589,26 @@ fileBytes     終端
   添字 min*N+max）, u64 footstepOffset（u32 EventID[N]）, u32 defaultEvent[4], u64 curveOffset（PhysCurves[N]、32 B）, u64 reserved`。
   オフセットはすべて PHYS チャンク先頭から。
 - `STRS`: 文字列プール（NUL 終端 UTF-8）。リリースで除去可。`NAME.stringOffset` は STRS 先頭から。
+
+### 6.3 ストリームファイル（`'SNDS'`、`bank_format::StreamFileHeader`）
+
+| offset | 型 | 名前 | 内容 |
+| --- | --- | --- | --- |
+| 0 | u32 | magic | `'SNDS'`（`kStreamMagic`） |
+| 4 | u32 | version | 1（`kStreamVersion`） |
+| 8 | u32 | assetId | `ASST.id` |
+| 12 | u32 | codec | fourcc（`ASST.codec`） |
+| 16 | u32 | channels | |
+| 20 | u32 | sampleRate | |
+| 24 | u64 | totalFrames | |
+| 32 | u64 | dataOffset | 最初のパケットの位置。`sectorAlign` の倍数で `STRM.dataOffset` と同じ |
+| 40 | u64 | dataBytes | 符号化データのバイト数（埋めを含まない） |
+| 48 | u32 | sectorAlign | `STRM.sectorAlign` |
+| 52 | u32 | reserved0 | 0 |
+| 56 | u64 | reserved1 | 0 |
+
+ヘッダの後は `dataOffset` まで 0 で埋め、データの後もファイル長が `sectorAlign` の倍数になるまで 0 で埋める
+（`STRM.fileBytes` は埋めた後の長さ）。`SEEK.byteOffset` と `PREL` のプリロードはデータ先頭（`dataOffset`）から数える。
 
 ## 7. 版と互換性
 
@@ -572,11 +621,18 @@ fileBytes     終端
 - 既存列を必須から任意へ変えるのは minor、任意から必須は major。
 - バンク形式の版は契約の版（`SND_CONTRACT_VERSION`）とは独立に持つ。どちらの変更も `CONTRACTS.md` の手順に従う。
 
+| 版 | 内容 |
+| --- | --- |
+| 1.0 | 段階0で凍結 |
+| 2.0 | headerChecksum をヘッダ全体（自身の欄は 0 とみなす）に拡大、予約バイト 0 の検証、`ALIS` チャンク追加、行の並びの規則（6.0: 入れ子 Event・カテゴリの親・シーク表）、`loopEnd`・`SEEK.byteOffset`・ストリームファイル（6.3）・エンディアン・`fileBytes` の明文化 |
+
 ## 8. 読み込み時の検証（bank モジュールの完了条件）
 
-1. ファイル長 ≥ 128、`headerChecksum`、`magic`、`formatMajor`、`endianness`、`alignLog2`、`headerBytes`、`platform`。
-2. `fileBytes` が実際の長さと一致、`checksum`。
+1. ファイル長 ≥ 128、`headerChecksum`（ヘッダ全体）、`magic`、`formatMajor`、`endianness`、`alignLog2`、`headerBytes`、`platform`、
+   予約バイト（`reserved0`、`reserved`）が 0、`languageId` と言語フラグの整合。
+2. `fileBytes` が実際の長さと一致（パディング不可）、`checksum`。
 3. 依存表と目次が範囲内、各チャンクが範囲内かつ 64 の倍数、チャンク同士が重ならない。
 4. テーブルチャンク: 列ディレクトリが範囲内、`elemBytes` が型と一致、各列配列が範囲内かつ 64 の倍数、必須列がある。
 5. 行参照（`kNone` 以外）が対象テーブルの行数未満、ブロブ内オフセット＋長さがチャンク内。
+   6.0 の並びの規則（バス・入れ子 Event・カテゴリの親が後ろの行、シーク表の単調性）と `ALIS` の制約（昇順・0 でない・自己参照でない）。
 6. 失敗はすべて `SND_ERR_CORRUPT`（版・機種は `SND_ERR_VERSION_MISMATCH`）。壊れた入力で落ちないことをファズで確認する（14 章）。

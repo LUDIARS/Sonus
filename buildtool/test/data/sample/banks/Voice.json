@@ -1,0 +1,9 @@
+{
+  "type": "bank",
+  "guid": "5a0e0000-0000-4000-8000-000000000004",
+  "name": "Voice",
+  "language": true,
+  "dependsOn": [
+    "Common"
+  ]
+}

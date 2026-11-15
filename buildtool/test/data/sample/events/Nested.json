@@ -1,0 +1,17 @@
+{
+  "type": "event",
+  "guid": "5a0e0000-0000-4000-8000-000000000014",
+  "name": "SE/Nested",
+  "bank": "Level1",
+  "bus": "SFX",
+  "tracks": [
+    {
+      "clips": [
+        {
+          "asset": "wav/boom",
+          "pitchCents": -100
+        }
+      ]
+    }
+  ]
+}

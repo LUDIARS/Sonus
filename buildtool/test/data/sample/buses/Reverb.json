@@ -1,0 +1,16 @@
+{
+  "type": "bus",
+  "guid": "5a0e0000-0000-4000-8000-000000000007",
+  "name": "Reverb",
+  "bank": "Common",
+  "parent": "Master",
+  "effects": [
+    {
+      "type": "Convolution",
+      "params": [
+        0.5
+      ],
+      "blob": "audio/ir.bin"
+    }
+  ]
+}

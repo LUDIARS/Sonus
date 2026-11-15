@@ -1,0 +1,40 @@
+{
+  "type": "materialTable",
+  "guid": "5a0e0000-0000-4000-8000-00000000001a",
+  "name": "Phys/Default",
+  "bank": "Level1",
+  "materials": [
+    "metal",
+    "wood"
+  ],
+  "single": {
+    "metal": {
+      "impact": "SE/Explosion"
+    },
+    "wood": {
+      "impact": "SE/Nested",
+      "slide": "SE/Nested"
+    }
+  },
+  "pairs": [
+    {
+      "a": "wood",
+      "b": "metal",
+      "event": "SE/Sting"
+    }
+  ],
+  "footsteps": {
+    "wood": "SE/Nested"
+  },
+  "defaults": {
+    "impact": "SE/Nested"
+  },
+  "curves": {
+    "metal": {
+      "massToPitchCents": [
+        0,
+        -1200
+      ]
+    }
+  }
+}

@@ -1,0 +1,26 @@
+{
+  "type": "snapshot",
+  "guid": "5a0e0000-0000-4000-8000-00000000000d",
+  "name": "Pause",
+  "bank": "Common",
+  "values": [
+    {
+      "kind": "busVolume",
+      "bus": "SFX",
+      "value": -12
+    },
+    {
+      "kind": "effectParam",
+      "bus": "SFX",
+      "effect": 0,
+      "param": 0,
+      "value": 1000
+    },
+    {
+      "kind": "sendLevel",
+      "bus": "SFX",
+      "send": 0,
+      "value": -20
+    }
+  ]
+}
