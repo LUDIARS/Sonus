@@ -27,3 +27,7 @@ snd_add_test(io_adv_test
     stream_pool_edge_test.cpp
     default_fs_edge_test.cpp
   LINK sonus_io sonus_jobs sonus_mocks)
+
+snd_add_test(io_adv_stress_test
+  SOURCES io_adv_stress_test.cpp
+  LINK sonus_io sonus_jobs sonus_mocks)
