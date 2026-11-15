@@ -17,8 +17,21 @@
 #include <unistd.h>
 
 #include <cerrno>
+#include <climits>
+#include <cstdio>
+#include <cstdlib>
+#if defined(__linux__)
+#include <sys/syscall.h>
+#if defined(SYS_openat2) && __has_include(<linux/openat2.h>)
+#include <linux/openat2.h>
+#define SND_IO_OPENAT2 1
+#endif
+#endif
 #else
 #define SND_IO_POSIX 0
+#endif
+#ifndef SND_IO_OPENAT2
+#define SND_IO_OPENAT2 0
 #endif
 
 namespace snd::io {
@@ -62,6 +75,67 @@ struct ReadSlot {
 struct DefaultFileSystem::Impl {
   char root[kMaxRootBytes] = {};
   std::uint32_t rootLen = 0;
+#if SND_IO_POSIX
+  int rootFd = -1;                 // the root directory (openat2 base)
+  char rootReal[PATH_MAX] = {};    // canonical root ("" if it could not be resolved)
+  std::size_t rootRealLen = 0;
+
+  // True if the canonical path `real` is the root or below it.
+  bool InsideRoot(const char* real) const noexcept {
+    if (rootRealLen == 0u) return false;
+    if (rootRealLen == 1u) return real[0] == '/';  // root is "/"
+    return std::strncmp(real, rootReal, rootRealLen) == 0 && (real[rootRealLen] == '/' || real[rootRealLen] == '\0');
+  }
+  // Decision b: the resolved file must lie inside the root (symlinks to files
+  // or directories outside are refused, links staying inside are fine).
+  // 1. Linux openat2(rootFd, path, RESOLVE_BENEATH): the kernel refuses any
+  //    resolution that leaves the root (EXDEV). It also refuses ABSOLUTE
+  //    symlinks even when they point inside the root, so on EXDEV, and when
+  //    openat2 is unavailable (ENOSYS, EPERM under seccomp, ...), we fall back to
+  // 2. open the joined path, then check the canonical path of the OPENED
+  //    descriptor (/proc/self/fd/N, no race with a concurrent rename of the
+  //    link) or, without /proc, realpath() of the path.
+  int OpenBeneath(const char* rel, const char* full, int flags) const noexcept {
+#if SND_IO_OPENAT2
+    if (rootFd >= 0) {
+      open_how how;
+      std::memset(&how, 0, sizeof(how));
+      how.flags = static_cast<std::uint64_t>(flags);
+      how.resolve = RESOLVE_BENEATH;
+      long r = -1;
+      do {
+        r = ::syscall(SYS_openat2, rootFd, rel, &how, sizeof(how));
+      } while (r < 0 && errno == EINTR);
+      if (r >= 0) return static_cast<int>(r);
+      if (errno != EXDEV && errno != ENOSYS && errno != EPERM && errno != E2BIG && errno != EINVAL) return -1;
+    }
+#else
+    (void)rel;
+#endif
+    int fd = -1;
+    do {
+      fd = ::open(full, flags);
+    } while (fd < 0 && errno == EINTR);
+    if (fd < 0) return -1;
+    char real[PATH_MAX];
+    bool resolved = false;
+#if defined(__linux__)
+    char proc[64];
+    std::snprintf(proc, sizeof(proc), "/proc/self/fd/%d", fd);
+    const ssize_t n = ::readlink(proc, real, sizeof(real) - 1u);
+    if (n > 0 && static_cast<std::size_t>(n) < sizeof(real) - 1u) {
+      real[n] = '\0';
+      resolved = true;
+    }
+#endif
+    if (!resolved) resolved = ::realpath(full, real) != nullptr;
+    if (!resolved || !InsideRoot(real)) {
+      ::close(fd);
+      return -1;
+    }
+    return fd;
+  }
+#endif
   DefaultFileSystemConfig cfg{};
   FileEntry* files = nullptr;
   ReadSlot* slots = nullptr;
@@ -185,6 +259,24 @@ bool DefaultFileSystem::Init(IAllocator& allocator, const DefaultFileSystemConfi
   std::memcpy(im.root, root, rootLen + 1u);
   im.rootLen = static_cast<std::uint32_t>(rootLen);
   while (im.rootLen > 1u && im.root[im.rootLen - 1u] == '/') im.root[--im.rootLen] = '\0';
+#if SND_IO_POSIX
+  {
+    int dflags = O_RDONLY;
+#if defined(O_DIRECTORY)
+    dflags |= O_DIRECTORY;
+#endif
+#if defined(O_CLOEXEC)
+    dflags |= O_CLOEXEC;
+#endif
+    im.rootFd = ::open(im.root, dflags);  // -1: a missing root makes every Open fail
+    if (::realpath(im.root, im.rootReal) != nullptr) {
+      im.rootRealLen = std::strlen(im.rootReal);
+    } else {
+      im.rootReal[0] = '\0';
+      im.rootRealLen = 0;
+    }
+  }
+#endif
   im.files = base::AllocateArray<FileEntry>(allocator, config.maxOpenFiles, MemTag::Misc);
   im.slots = base::AllocateArray<ReadSlot>(allocator, config.maxInFlight, MemTag::Misc);
   im.threads = base::AllocateArray<platform::Thread>(allocator, config.readerThreads, MemTag::Misc);
@@ -215,6 +307,10 @@ void DefaultFileSystem::Shutdown() noexcept {
       if (im.files[i].used) im.CloseEntry(im.files[i]);
     }
   }
+#if SND_IO_POSIX
+  if (im.rootFd >= 0) ::close(im.rootFd);
+  im.rootFd = -1;
+#endif
   IAllocator& a = *alloc_;
   base::FreeArray(a, im.files, im.cfg.maxOpenFiles, MemTag::Misc);
   base::FreeArray(a, im.slots, im.cfg.maxInFlight, MemTag::Misc);
@@ -248,10 +344,7 @@ FileId DefaultFileSystem::Open(const char* path) {
 #if defined(O_CLOEXEC)
   flags |= O_CLOEXEC;
 #endif
-  int fd = -1;
-  do {
-    fd = ::open(full, flags);
-  } while (fd < 0 && errno == EINTR);
+  const int fd = im.OpenBeneath(path, full, flags);
   if (fd < 0) return kInvalidFile;
   struct stat st;
   if (::fstat(fd, &st) != 0 || !S_ISREG(st.st_mode)) {

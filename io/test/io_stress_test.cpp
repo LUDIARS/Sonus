@@ -15,6 +15,7 @@
 #include "snd/test/test.hpp"
 
 using namespace snd::iotest;
+using snd::io::kInvalidChunk;
 
 namespace {
 constexpr std::uint32_t kStreams = 4;
@@ -131,6 +132,12 @@ SND_TEST(IoStress, ConcurrentPostSeekConsumeAndBankLoads) {
     fs.FailNthRead(3);
   }
   loader.join();
+  // Do not stop on wall time alone: on a loaded machine (TSan, parallel ctest)
+  // little may have been consumed yet. Wait for real progress (bounded).
+  const std::uint64_t progressDeadline = snd::platform::MonotonicNanoseconds() + 120ull * 1000000000ull;
+  while (consumed.load() <= 100u && snd::platform::MonotonicNanoseconds() < progressDeadline) {
+    snd::platform::SleepFor(10u * 1000000u);
+  }
   stopAudio.store(true);
   audio.join();
   for (std::uint32_t s = 0; s < kStreams; ++s) io.Channel(s).Cancel();
@@ -152,6 +159,111 @@ SND_TEST(IoStress, ConcurrentPostSeekConsumeAndBankLoads) {
   SND_CHECK(banksDone.load() >= 1u);
   SND_CHECK_EQ(fs.InFlight(), 0u);
   SND_CHECK_EQ(fs.OpenFiles(), 0u);
+  io.Destroy();
+  SND_CHECK_EQ(pool.Used(), 0u);
+  SND_CHECK_EQ(pool.Stats().badReleases, 0u);
+  pool.Destroy();
+  SND_CHECK_EQ(alloc.TotalUsed(), 0u);
+}
+
+// Requests that own their chunk (dst = caller chunk) and requests that ask the
+// IO thread for one (dst = nullptr) in the SAME class, with a pool small enough
+// that the caller chunks can hold all of it (regression for the deadlock where
+// Select only looked at class heads). Each channel uses one mode (mixing modes
+// inside one channel is the caller's duty, io_scheduler.hpp). Every channel
+// must keep making progress, and every chunk comes back.
+SND_TEST(IoStress, MixedChunkModesInOneClassKeepProgressing) {
+  constexpr std::uint32_t kN = 4;  // channels 0,1: dst=nullptr; 2,3: caller chunks
+  snd::base::AccountingAllocator alloc(snd::base::DefaultAllocator());
+  snd::mock::MemoryFileSystem fs;
+  for (std::uint32_t s = 0; s < kN; ++s) fs.AddFile(kPaths[s], MakePattern(s, kStressFile));
+  fs.SetDefaultLatency(1);
+  snd::io::StreamPool pool;
+  SND_REQUIRE(pool.Init(alloc, 6u * kStressChunk, kStressChunk, kN));  // 6 chunks, 4 channels x 8 slots of demand
+  snd::io::IoScheduler io;
+  snd::io::IoSchedulerConfig cfg;
+  cfg.maxStreams = kN;
+  cfg.ringChunks = 8;
+  cfg.maxInFlight = 4;
+  cfg.bytesPerWindow = 0;
+  cfg.pollIntervalNs = 100000;
+  SND_REQUIRE(io.Init(alloc, fs, pool, cfg));
+  SND_REQUIRE(io.Start());
+  constexpr std::uint32_t kTarget = 300;  // records per channel
+  std::atomic<bool> stop{false};
+  std::atomic<std::uint32_t> got[kN] = {};
+  std::atomic<std::uint32_t> badData{0};
+  std::thread audio([&] {
+    snd::io::StreamReadPlanner planners[kN];
+    for (std::uint32_t s = 0; s < kN; ++s) planners[s].Reset(0, kStressFile, 0, 0, kStressChunk);
+    while (!stop.load(std::memory_order_relaxed)) {
+      {
+        SND_RT_SCOPE();
+        for (std::uint32_t s = 0; s < kN; ++s) {
+          snd::io::StreamChannel& ch = io.Channel(s);
+          while (ch.Outstanding() < ch.Capacity()) {
+            snd::io::StreamRead r{};
+            if (!planners[s].Next(r)) {
+              planners[s].Seek(0);
+              continue;
+            }
+            void* dst = nullptr;
+            std::uint32_t chunk = kInvalidChunk;
+            if (s >= 2u) {
+              chunk = pool.Acquire(s);
+              if (chunk == kInvalidChunk) {
+                planners[s].Seek(r.offset);
+                break;
+              }
+              dst = pool.Data(chunk);
+            }
+            if (!io.Post(StreamReq(s, kPaths[s], r.offset, r.bytes, snd::io::IoClass::Music, 0, dst))) {
+              if (chunk != kInvalidChunk) pool.Release(chunk);
+              planners[s].Seek(r.offset);
+              break;
+            }
+          }
+        }
+      }
+      snd::platform::YieldThread();
+    }
+  });
+  std::thread decode([&] {
+    while (!stop.load(std::memory_order_relaxed)) {
+      {
+        SND_RT_SCOPE();
+        for (std::uint32_t s = 0; s < kN; ++s) {
+          snd::io::ChunkRecord rec;
+          while (io.Channel(s).Pop(rec)) {
+            if (rec.status == snd::io::ChunkStatus::Ok &&
+                !MatchesPattern(s, rec.offset, pool.Data(rec.chunk), rec.bytes)) {
+              badData.fetch_add(1);
+            }
+            io.Channel(s).Release(rec);
+            got[s].fetch_add(1);
+          }
+        }
+      }
+      snd::platform::YieldThread();
+    }
+  });
+  const std::uint64_t deadline = snd::platform::MonotonicNanoseconds() + 120ull * 1000000000ull;
+  for (;;) {
+    bool all = true;
+    for (std::uint32_t s = 0; s < kN; ++s) all = all && got[s].load() >= kTarget;
+    if (all || snd::platform::MonotonicNanoseconds() >= deadline) break;
+    snd::platform::SleepFor(5u * 1000000u);
+  }
+  stop.store(true);
+  audio.join();
+  decode.join();
+  for (std::uint32_t s = 0; s < kN; ++s) {
+    SND_CHECK_MSG(got[s].load() >= kTarget, "channel %u received only %u records", s, got[s].load());
+    io.Channel(s).Cancel();
+  }
+  io.Shutdown();
+  for (std::uint32_t s = 0; s < kN; ++s) SND_CHECK(io.Channel(s).Reclaim());
+  SND_CHECK_EQ(badData.load(), 0u);
   io.Destroy();
   SND_CHECK_EQ(pool.Used(), 0u);
   SND_CHECK_EQ(pool.Stats().badReleases, 0u);

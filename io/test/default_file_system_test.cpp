@@ -240,3 +240,29 @@ SND_TEST(DefaultFileSystem, DrivesTheSchedulerOnItsThread) {
   fs.Shutdown();
   SND_CHECK_EQ(alloc.TotalUsed(), 0u);
 }
+
+SND_TEST(DefaultFileSystem, RefusesSymlinksThatLeaveTheRoot) {
+  TempRoot tmp;
+  SND_REQUIRE(!tmp.root.empty());
+  const std::string outside = tmp.root + "/../snd-io-outside-" + tmp.Base();
+  const std::string links[] = {tmp.root + "/in_rel", tmp.root + "/in_abs", tmp.root + "/out_file",
+                               tmp.root + "/out_dir", tmp.root + "/sub/in_up"};
+  SND_REQUIRE(symlink("a.bin", links[0].c_str()) == 0);                      // relative, inside
+  SND_REQUIRE(symlink((tmp.root + "/a.bin").c_str(), links[1].c_str()) == 0);  // absolute, inside
+  SND_REQUIRE(symlink(outside.c_str(), links[2].c_str()) == 0);              // file outside
+  SND_REQUIRE(symlink("..", links[3].c_str()) == 0);                         // directory outside (parent)
+  SND_REQUIRE(symlink("../a.bin", links[4].c_str()) == 0);                   // relative up, still inside
+  for (const std::string& l : links) tmp.files.push_back(l);
+  DefaultFileSystem fs;
+  DefaultFileSystemConfig cfg;
+  cfg.root = tmp.root.c_str();
+  SND_REQUIRE(fs.Init(snd::base::DefaultAllocator(), cfg));
+  SND_CHECK(fs.Open("in_rel") != kInvalidFile);
+  SND_CHECK(fs.Open("in_abs") != kInvalidFile);
+  SND_CHECK(fs.Open("sub/in_up") != kInvalidFile);
+  SND_CHECK_EQ(fs.Open("out_file"), kInvalidFile);
+  SND_CHECK_EQ(fs.Open(("out_dir/snd-io-outside-" + tmp.Base()).c_str()), kInvalidFile);
+  // Leaving and re-entering ends inside the root: the resolved file counts (decision b).
+  SND_CHECK(fs.Open(("out_dir/" + tmp.Base() + "/a.bin").c_str()) != kInvalidFile);
+  fs.Shutdown();
+}

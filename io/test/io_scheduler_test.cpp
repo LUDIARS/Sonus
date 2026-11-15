@@ -589,3 +589,80 @@ SND_TEST(IoScheduler, MakeConfigFromSndConfig) {
   SND_CHECK_EQ(ic.stallNs, 150000000ull);
   SND_CHECK_EQ(ic.windowNs, 100000000ull);
 }
+
+SND_TEST(IoScheduler, ReadPosIsEmptyAfterCancelUntilTheNextDelivery) {
+  Rig rig;
+  SND_REQUIRE(rig.Init());
+  AddFiles(rig);
+  SND_CHECK_EQ(rig.io.Channel(0).ReadPos(), snd::io::StreamChannel::kNoReadPos);  // nothing yet
+  SND_CHECK(rig.io.Post(StreamReq(0, "music.bin", 0, kChunk, IoClass::Music)));
+  rig.Run();
+  SND_CHECK_EQ(rig.io.Channel(0).ReadPos(), kChunk);
+  {
+    SND_RT_SCOPE();
+    rig.io.Channel(0).Cancel();
+    SND_CHECK_EQ(rig.io.Channel(0).ReadPos(), snd::io::StreamChannel::kNoReadPos);
+  }
+  SND_CHECK(rig.io.Channel(0).Reclaim());
+  SND_CHECK(rig.io.Post(StreamReq(0, "music.bin", 5u * kChunk, kChunk, IoClass::Music)));
+  rig.Run();
+  SND_CHECK_EQ(rig.io.Channel(0).ReadPos(), 6u * kChunk);
+  rig.Consume(0, 1);
+}
+
+SND_TEST(IoScheduler, PostRefusesChunksOfOtherSlotsAndDoublePosts) {
+  Rig rig;
+  SND_REQUIRE(rig.Init());
+  AddFiles(rig);
+  const std::uint32_t mine = rig.pool.Acquire(1);
+  const std::uint32_t other = rig.pool.Acquire(2);
+  const std::uint32_t loose = rig.pool.Acquire(snd::io::kNoOwner);
+  SND_REQUIRE(mine != kInvalidChunk && other != kInvalidChunk && loose != kInvalidChunk);
+  {
+    SND_RT_SCOPE();
+    SND_CHECK(!rig.io.Post(StreamReq(1, "music.bin", 0, 100, IoClass::Music, 0, rig.pool.Data(other))));  // slot 2's chunk
+    SND_CHECK(rig.io.Post(StreamReq(1, "music.bin", 0, 100, IoClass::Music, 1, rig.pool.Data(mine))));
+    SND_CHECK(!rig.io.Post(StreamReq(1, "music.bin", 100, 100, IoClass::Music, 2, rig.pool.Data(mine))));  // twice
+    SND_CHECK(rig.io.Post(StreamReq(1, "music.bin", 100, 100, IoClass::Music, 3, rig.pool.Data(loose))));  // unattributed
+  }
+  rig.Run();
+  std::vector<ChunkRecord> recs;
+  bool ok = true;
+  // After delivery the consumer owns the chunk: it may post it again (once).
+  ChunkRecord rec;
+  SND_REQUIRE(rig.io.Channel(1).Pop(rec));
+  SND_CHECK_EQ(rec.chunk, mine);
+  SND_CHECK(rig.io.Post(StreamReq(1, "music.bin", 200, 100, IoClass::Music, 4, rig.pool.Data(mine))));
+  // The record's reservation ends without returning the re-posted chunk to the pool.
+  rec.chunk = kInvalidChunk;
+  rig.io.Channel(1).Release(rec);
+  rig.Run();
+  rig.Consume(1, 1, &recs, &ok);
+  SND_CHECK(ok);
+  SND_REQUIRE_EQ(recs.size(), 2u);
+  SND_CHECK_EQ(recs[0].tag, 3u);
+  SND_CHECK_EQ(recs[1].tag, 4u);
+  rig.pool.Release(other);
+  SND_CHECK_EQ(rig.pool.Used(), 0u);
+  SND_CHECK_EQ(rig.io.Stats().streamRejected, 2u);
+}
+
+SND_TEST(IoScheduler, ClockGoingBackStartsANewWindow) {
+  Rig rig;
+  rig.cfg.bytesPerWindow = kChunk;
+  rig.cfg.maxInFlight = 8;
+  SND_REQUIRE(rig.Init());
+  AddFiles(rig);
+  for (std::uint32_t i = 0; i < 3; ++i) SND_CHECK(rig.io.Post(StreamReq(0, "music.bin", i * kChunk, kChunk, IoClass::Music)));
+  rig.clock.now.store(10000000000ull);
+  rig.io.RunOnce();
+  SND_CHECK_EQ(rig.io.Stats().readsIssued, 1u);
+  rig.clock.now.store(1000000000ull);  // 9 s back
+  rig.io.RunOnce();
+  SND_CHECK_EQ(rig.io.Stats().readsIssued, 2u);  // new window at once, not after 9 s
+  rig.io.RunOnce();
+  SND_CHECK_EQ(rig.io.Stats().readsIssued, 2u);  // and that window has its budget
+  rig.clock.AdvanceMs(100);
+  rig.Run();
+  SND_CHECK_EQ(rig.Consume(0, 1), 3u);
+}

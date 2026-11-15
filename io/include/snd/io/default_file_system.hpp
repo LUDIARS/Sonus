@@ -22,7 +22,12 @@
 // kInvalidFile): empty paths, absolute paths ('/...'), backslashes, NUL-free
 // paths longer than the internal limit, and any path whose ".." components
 // would leave the root. "." and empty components ("a//b") are ignored.
-// Symbolic links inside the root are followed as the OS does (not checked).
+// Symbolic links: a path whose RESOLVED file lies outside the root is refused
+// (links to files or directories outside, absolute or relative); links that
+// stay inside the root are followed. Linux uses openat2(RESOLVE_BENEATH) and,
+// where that is unavailable or refuses an absolute in-root link, checks the
+// canonical path of the opened descriptor (/proc/self/fd) or realpath(). A
+// root that does not exist at Init makes every Open fail.
 //
 // Platforms: POSIX (Linux, macOS, ...) is implemented. Other platforms build a
 // stub whose Open always fails.
