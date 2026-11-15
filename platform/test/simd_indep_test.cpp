@@ -207,7 +207,9 @@ std::uint32_t CheckWidth(const char* path, bool fused, const WidthResults& w, co
     for (std::uint32_t i = 0; i < kN; ++i) {
       float ref = RefF(f, in, i, fused);
       if (f == kSet1Lane) ref = in.a[(i / W) * W];
-      const bool ok = Same(w.f[op][i], ref, IsRounding(f) && !roundingSignOnly);
+      // Decision (dsp fix round): the sign of a zero rounding result is not
+      // guaranteed, so Floor/Trunc/Round are always compared by value.
+      const bool ok = Same(w.f[op][i], ref, IsRounding(f));
       if (!ok) {
         ++bad;
         if (shown++ < 3) {
@@ -339,8 +341,11 @@ SND_TEST(SimdIndep, Avx2PathMatchesReference) {
 }
 #endif
 
-// simd.hpp: "Floor/Trunc/Round are exact" and "element-wise operations give the
-// same bits on every path". IEEE roundToIntegral keeps the sign of the input
+// Decision (coordinator, item 12): the sign of a zero result of Floor/Trunc/Round
+// is NOT guaranteed and is excluded from the "same bits on every path" rule
+// (simd.hpp). This test now checks the rounding results by value, ignoring the
+// sign of zero. Original note: simd.hpp said "Floor/Trunc/Round are exact" and
+// "element-wise operations give the same bits on every path". IEEE roundToIntegral keeps the sign of the input
 // for a zero result (trunc(-0.5) = -0, floor(-0) = -0, round(-0.4) = -0), and
 // the NEON path (vrndq / vrndmq / vrndnq) does so. The x86 and scalar paths go
 // through int32 conversion and return +0, so NEON and x86 builds give

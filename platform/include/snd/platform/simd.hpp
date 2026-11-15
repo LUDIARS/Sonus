@@ -19,12 +19,22 @@
 // widest native width (kWidth lanes).
 //
 // Determinism rules (2.5 "same SIMD path"):
-//   - Element-wise operations give the same bits on every path, except
-//     MulAdd/NegMulAdd, which are fused (one rounding) when kFusedMulAdd is
-//     true (AVX2 + FMA, NEON) and unfused otherwise.
+//   - Element-wise operations give the same bits on every path, with two
+//     exceptions:
+//       * MulAdd/NegMulAdd (and Lerp) are fused (one rounding) exactly when
+//         kFusedMulAdd is true (AVX2 + FMA, NEON) and unfused (two roundings)
+//         otherwise. The scalar path computes the product and the sum as two
+//         statements; that it stays unfused also relies on the compiler not
+//         contracting them, which the Sonus build guarantees with
+//         -ffp-contract=off (cmake/SonusOptions.cmake). A user of this header
+//         compiling with -mfma and contraction enabled may get a fused scalar
+//         path although kFusedMulAdd says false.
+//       * The sign of a ZERO result of Floor/Trunc/Round is not guaranteed
+//         (x86 and scalar return +0, e.g. Trunc(-0.5) = +0; NEON keeps the IEEE
+//         sign, -0). Non-zero results are exact and identical on every path.
 //   - Horizontal reductions use one fixed order on every path:
 //     F32x4: (v0 + v2) + (v1 + v3); F32x8: ReduceAdd(lo + hi).
-//   - Sqrt is correctly rounded everywhere. Floor/Trunc/Round are exact.
+//   - Sqrt is correctly rounded everywhere.
 //
 // Loads/stores: Load/Store require natural vector alignment (16 bytes for x4,
 // 32 bytes for x8; DSP buffers are 64-byte aligned, 3.4). LoadU/StoreU accept

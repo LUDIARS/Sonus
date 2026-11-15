@@ -1,4 +1,6 @@
 // Resampler: passband flatness, aliasing, block-split invariance, golden.
+#include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <functional>
 #include <vector>
@@ -23,7 +25,7 @@ struct Driver {
   dsptest::AlignedMem state;
   std::uint64_t srcPos = 0;
   Driver(ResamplerQuality quality, std::uint32_t ch)
-      : q(quality), channels(ch), state(ResamplerStateBytes(quality, ch)) {
+      : q(quality), channels(ch), state(ResamplerStateBytes(quality, ch), dsptest::kDirty) {
     ResamplerInit(state.get(), q, ch);
   }
   // Appends `frames` output frames (ratio r0 -> r1) to out[c] at `offset`.
@@ -69,15 +71,20 @@ double MeasureTone(ResamplerQuality q, double ratio, double freqIn, double freqM
 SND_TEST(Resampler, SizesAndInlineFit) {
   SND_CHECK_EQ(ResamplerHistoryFrames(ResamplerQuality::Linear), 2u);
   SND_CHECK_EQ(ResamplerHistoryFrames(ResamplerQuality::Cubic), 4u);
-  SND_CHECK_EQ(ResamplerHistoryFrames(ResamplerQuality::Sinc), 32u);
+  SND_CHECK_EQ(ResamplerHistoryFrames(ResamplerQuality::Sinc, 4.0f), 32u);
+  SND_CHECK_EQ(ResamplerHistoryFrames(ResamplerQuality::Sinc, 8.0f), 96u);
+  SND_CHECK_EQ(ResamplerHistoryFrames(ResamplerQuality::Sinc), 384u);
+  SND_CHECK_EQ(ResamplerLookaheadFrames(ResamplerQuality::Sinc, 1.0f), 16u);
+  SND_CHECK_EQ(ResamplerLookaheadFrames(ResamplerQuality::Sinc, 32.0f), 192u);
   SND_CHECK_EQ(ResamplerPadFrames(ResamplerQuality::Sinc) % 16u, 0u);
   SND_CHECK(ResamplerFitsInline(ResamplerQuality::Linear, 2));
   SND_CHECK(ResamplerFitsInline(ResamplerQuality::Cubic, 2));
   SND_CHECK(!ResamplerFitsInline(ResamplerQuality::Sinc, 1));
   for (std::uint32_t ch = 1; ch <= 8; ++ch) {
-    snd::test::Note("state bytes ch=%u: linear %zu cubic %zu sinc %zu", ch,
+    snd::test::Note("state bytes ch=%u: linear %zu cubic %zu sinc(max ratio 4) %zu sinc(max 32) %zu", ch,
                     ResamplerStateBytes(ResamplerQuality::Linear, ch),
                     ResamplerStateBytes(ResamplerQuality::Cubic, ch),
+                    ResamplerStateBytes(ResamplerQuality::Sinc, ch, 4.0f),
                     ResamplerStateBytes(ResamplerQuality::Sinc, ch));
   }
 }
@@ -130,6 +137,43 @@ SND_TEST(Resampler, SincSuppressesAliasing) {
   // Upsampling: no images of an input tone near the input Nyquist.
   const double img = MeasureTone(ResamplerQuality::Sinc, 0.5, 10000.0, 24000.0 - 10000.0);
   SND_CHECK_MSG(img < -70.0, "image %.1f dB", img);
+}
+
+// Ratios above 4 (ratio-scaled kernel): passband edge, aliasing and cost per ratio.
+SND_TEST(Resampler, SincHighRatios) {
+  for (double r : {4.0, 4.5, 6.0, 8.0, 12.0, 16.0, 24.0, 32.0}) {
+    double edge = 0.0;  // highest tone (250 Hz steps) within +-0.1 dB
+    for (double f = 1000.0; f < 24000.0; f += 250.0) {
+      if (std::fabs(MeasureTone(ResamplerQuality::Sinc, r, f, f)) > 0.1) break;
+      edge = f;
+    }
+    double worst = -300.0;  // alias of source tones between 0.75 and 0.98 x the output rate
+    for (double x = 0.75; x <= 0.981; x += 0.01) {
+      const double fin = x * 48000.0;
+      worst = std::max(worst, MeasureTone(ResamplerQuality::Sinc, r, fin, 48000.0 - fin));
+    }
+    double us[2];  // one voice, 256 frames per call
+    for (std::uint32_t ch = 1; ch <= 2; ++ch) {
+      Driver d(ResamplerQuality::Sinc, ch);
+      const std::uint32_t pad = ResamplerPadFrames(ResamplerQuality::Sinc);
+      Audio in(ch, static_cast<std::uint32_t>(256 * r) + 512, pad), o(ch, 256);
+      float* base[2] = {in.Base(0), ch > 1 ? in.Base(1) : nullptr};
+      constexpr int kIter = 200;
+      const auto t0 = std::chrono::steady_clock::now();
+      for (int k = 0; k < kIter; ++k) {
+        const std::uint32_t n = ResamplerInputFrames(d.state.get(), 256, static_cast<float>(r), static_cast<float>(r));
+        ResamplerProcess(d.state.get(), base, n, o.p(), 256, static_cast<float>(r), static_cast<float>(r));
+      }
+      const auto t1 = std::chrono::steady_clock::now();
+      us[ch - 1] = std::chrono::duration<double, std::micro>(t1 - t0).count() / kIter;
+    }
+    snd::test::Note("sinc ratio %4.1f: lookahead %3u, passband to %5.0f Hz, worst alias %.1f dB, "
+                    "%.1f us (mono) / %.1f us (stereo) per 256 frames",
+                    r, ResamplerLookaheadFrames(ResamplerQuality::Sinc, static_cast<float>(r)), edge, worst, us[0], us[1]);
+    SND_CHECK(edge >= 9000.0);
+    // Ratio 4 still uses the 32-tap table (stopband from ~0.76 x outRate): measured only.
+    if (r > 4.0) SND_CHECK_MSG(worst < -78.0, "ratio %.1f alias %.1f dB", r, worst);
+  }
 }
 
 SND_TEST(Resampler, BlockSplitInvariance) {

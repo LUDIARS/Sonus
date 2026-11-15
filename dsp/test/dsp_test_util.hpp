@@ -18,16 +18,18 @@ inline constexpr double kPi = 3.14159265358979323846;
 class AlignedMem {
  public:
   AlignedMem() = default;
-  explicit AlignedMem(std::size_t bytes) { Reset(bytes); }
+  // fill: initial byte value. DSP states are created on dirty memory (0xFF =
+  // NaN floats) to prove that every Init writes all of its state.
+  explicit AlignedMem(std::size_t bytes, int fill = 0) { Reset(bytes, fill); }
   ~AlignedMem() { std::free(p_); }
   AlignedMem(const AlignedMem&) = delete;
   AlignedMem& operator=(const AlignedMem&) = delete;
-  void Reset(std::size_t bytes) {
+  void Reset(std::size_t bytes, int fill = 0) {
     std::free(p_);
     bytes_ = (bytes + 63u) & ~std::size_t{63};
     if (bytes_ == 0) bytes_ = 64;
     p_ = std::aligned_alloc(64, bytes_);
-    std::memset(p_, 0, bytes_);
+    std::memset(p_, fill, bytes_);
   }
   void* get() const { return p_; }
   std::size_t size() const { return bytes_; }
@@ -36,6 +38,9 @@ class AlignedMem {
   void* p_ = nullptr;
   std::size_t bytes_ = 0;
 };
+
+// Memory for DSP state: deliberately dirty.
+inline constexpr int kDirty = 0xFF;
 
 // Non-interleaved multi-channel audio, each channel 64-byte aligned, with an
 // optional writable pad in front (resampler input).
