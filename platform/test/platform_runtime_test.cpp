@@ -280,3 +280,35 @@ SND_TEST(TimerDevice, DefaultsRejectsAndFactoryThroughCTable) {
   DestroyOutputDevice(dev, acc);
   SND_CHECK_EQ(acc.TotalUsed(), 0u);
 }
+
+namespace {
+struct SelfStopper {
+  TimerOutputDevice* dev = nullptr;
+  std::atomic<std::uint64_t> calls{0};
+  static void Callback(void* user, float*, std::uint32_t, std::uint32_t) {
+    auto* s = static_cast<SelfStopper*>(user);
+    if (s->calls.fetch_add(1) == 2u) {
+      s->dev->Stop();   // forbidden: ignored, counted
+      s->dev->Close();  // forbidden: ignored, counted
+    }
+  }
+};
+}  // namespace
+
+SND_TEST(TimerDevice, StopAndCloseFromCallbackAreIgnoredAndCounted) {
+  TimerDeviceConfig cfg;
+  cfg.realtimeThread = false;
+  TimerOutputDevice dev(snd::base::DefaultAllocator(), cfg);
+  SelfStopper s;
+  s.dev = &dev;
+  SND_REQUIRE(dev.Open(snd::DeviceDesc{48000, 2, 96, 0}, &SelfStopper::Callback, &s));
+  SND_REQUIRE(dev.Start());
+  const std::uint64_t deadline = MonotonicNanoseconds() + 5000000000ull;
+  while (s.calls.load() < 10u && MonotonicNanoseconds() < deadline) SleepFor(1000000);
+  SND_CHECK(s.calls.load() >= 10u);  // kept running after the ignored Stop/Close
+  SND_CHECK_EQ(dev.MisuseFromCallback(), 2u);
+  SND_CHECK(dev.IsOpen());
+  dev.Close();  // from the owner thread: works
+  SND_CHECK(!dev.IsOpen());
+  SND_CHECK(!dev.IsStarted());
+}

@@ -26,10 +26,28 @@
 //    of chunk i may be used by the caller after Run() only if ChunkDone(i).
 //  - A Late chunk may still be running when Run() returns and even when the
 //    next Run() starts. Its function keeps reading its inputs and writing its
-//    outputs until it returns. The caller must therefore keep the inputs and
-//    output buffers of a Late chunk untouched until IsQuiescent() (or give
-//    each batch generation its own buffers, e.g. double-buffer by
-//    generation parity and skip reuse while StragglersInFlight() > 0).
+//    outputs until it returns. What to wait for before touching them:
+//
+//      SAFE POINT. Let G be the generation returned by a Run() that has
+//      returned. If IsQuiescent() returns true in a call made after that
+//      Run() returned (same thread, or any thread ordered after it), then
+//        (a) no chunk function of any generation <= G is executing, and none
+//            will ever start (every chunk of those batches is Done or Late,
+//            and a Late chunk that was not claimed in time is never run);
+//        (b) every memory write made by any chunk function of generation <= G
+//            happens-before the return of that IsQuiescent() call.
+//      From then on the inputs and outputs of all chunks of those batches,
+//      including the Late ones, may be reused or freed. The guarantee does not
+//      cover batches started after the call (a worker may already be running
+//      a chunk of a later Run(); IsQuiescent() then returns false).
+//
+//    StragglersInFlight() == 0 (audio thread, after Run()) gives the same
+//    guarantee (a) and (b) for all generations OLDER than the current one,
+//    while chunks of the current generation may still run. It is meant for
+//    double-buffering by generation: reuse the buffers of generation G-1 once
+//    StragglersInFlight() is 0. Both functions are conservative: a worker that
+//    is about to discover there is nothing to run may make them report
+//    "busy" for a moment, never the opposite.
 //  - scratch is the calling thread's arena (Config.memory.threadArenaBytes),
 //    reset when that thread starts its first chunk of a batch; it stays valid
 //    until that thread joins a later batch, i.e. until the next Run().
@@ -102,10 +120,12 @@ class RtWorkerPool {
 
   std::uint32_t Workers() const noexcept { return workerCount_; }
   std::uint32_t MaxChunks() const noexcept { return maxChunks_; }
-  // Audio thread: workers still executing a chunk of an older generation
-  // (Late chunks in flight). RT-safe.
+  // Audio thread, after Run(): workers that may be executing (or about to
+  // start) a chunk of a generation older than the last Run's. RT-safe. See the
+  // SAFE POINT rules above.
   std::uint32_t StragglersInFlight() const noexcept;
-  // Any thread: true when no worker executes any chunk. RT-safe.
+  // Any thread: true when no worker executes or is about to start a chunk.
+  // RT-safe. See the SAFE POINT rules above for what it guarantees.
   bool IsQuiescent() const noexcept;
   platform::PriorityResult WorkerPriority(std::uint32_t worker) const noexcept;
 
@@ -145,7 +165,6 @@ class RtWorkerPool {
   std::atomic<RtChunkFn> fn_{nullptr};
   std::atomic<void*> ctx_{nullptr};
   std::atomic<std::uint32_t> count_{0};
-  base::CachePadded<std::atomic<std::uint32_t>> remaining_;  // chunks of the batch not yet Done
 
   std::atomic<bool> stop_{false};
   std::atomic<std::uint64_t> runs_{0}, chunks_{0}, late_{0}, discarded_{0}, byWorkers_{0}, clampedRuns_{0};

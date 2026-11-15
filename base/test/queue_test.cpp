@@ -129,7 +129,7 @@ SND_TEST(Mpmc, FifoSingleThreadAndBounds) {
   SND_RT_SCOPE();
   for (std::uint32_t i = 0; i < 4; ++i) SND_CHECK(q.TryPush(i));
   SND_CHECK(!q.TryPush(4));
-  std::uint32_t v;
+  std::uint32_t v = 0;
   for (std::uint32_t i = 0; i < 4; ++i) {
     SND_CHECK(q.TryPop(v));
     SND_CHECK_EQ(v, i);
@@ -163,7 +163,7 @@ SND_TEST(Mpmc, ManyProducersManyConsumers) {
       std::uint64_t last[kProducers];
       for (auto& l : last) l = ~0ull;
       while (count.load(std::memory_order_relaxed) < kProducers * kPerProducer) {
-        std::uint64_t v;
+        std::uint64_t v = 0;
         if (!q.TryPop(v)) continue;
         const std::uint32_t p = static_cast<std::uint32_t>(v >> 32);
         const std::uint64_t i = v & 0xFFFFFFFFu;

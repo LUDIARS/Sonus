@@ -179,10 +179,23 @@ inline void EndSnapshot(SnapshotTripleBuffer& tb) noexcept {
 
 // Reader (Update): takes the newest frame if there is one. Returns true if
 // the front changed. Queries afterwards see that frame.
+//
+// Front sequence: base uses SnapshotFrame::reserved (unused by the contract)
+// as "the seq this frame had when it became the front". The old front goes
+// back to `middle` BEFORE frontPublished moves on, so in that window Publish
+// may already rewrite it while frontPublished still names it. Readers accept
+// a frame only if its seq equals its front sequence, which a rewritten frame
+// never does until a later SwapFront makes it the front again.
+inline std::uint32_t FrontSequence(const SnapshotFrame& f) noexcept {
+  return __atomic_load_n(&const_cast<SnapshotFrame&>(f).reserved, __ATOMIC_ACQUIRE);
+}
 inline bool SwapFront(SnapshotTripleBuffer& tb) noexcept {
   if ((tb.middle.load(std::memory_order_relaxed) & snd::notify::kTripleDirtyBit) == 0u) return false;
   const std::uint32_t prev = tb.middle.exchange(tb.front, std::memory_order_acq_rel);
   tb.front = prev & 3u;
+  SnapshotFrame& f = tb.frames[tb.front];
+  // The new front left `middle`, so Publish no longer writes it: seq is final.
+  __atomic_store_n(&f.reserved, f.seq.load(std::memory_order_acquire), __ATOMIC_RELEASE);
   tb.frontPublished.store(tb.front, std::memory_order_release);
   return true;
 }
@@ -196,12 +209,22 @@ bool ReadFront(const SnapshotTripleBuffer& tb, Fn&& copy, std::uint32_t maxAttem
     const std::uint32_t idx = tb.frontPublished.load(std::memory_order_acquire) & 3u;
     const SnapshotFrame& f = tb.frames[idx];
     const std::uint32_t s1 = f.seq.load(std::memory_order_acquire);
-    if ((s1 & 1u) != 0u) {
+    // The frame must hold exactly the content it had when Update made it the
+    // front: not being written (odd) and not rewritten since (front sequence).
+    if ((s1 & 1u) != 0u || s1 != FrontSequence(f)) {
       CpuRelax();
       continue;
     }
-    copy(f);  // acquire loads: the re-check below cannot move before them
-    if (f.seq.load(std::memory_order_relaxed) == s1) return true;
+    copy(f);  // acquire loads: the re-checks below cannot move before them
+    // (1) seq unchanged: not rewritten while we copied, so the copy is the
+    //     content f had as the front; (2) still named by frontPublished.
+    // Together: the result is the state of the latest Update() at some instant
+    // of this call, and successive calls on one thread never go back in time
+    // (frontPublished only moves to newer frames).
+    if (f.seq.load(std::memory_order_acquire) == s1 &&
+        (tb.frontPublished.load(std::memory_order_acquire) & 3u) == idx) {
+      return true;
+    }
     CpuRelax();
   }
   return false;

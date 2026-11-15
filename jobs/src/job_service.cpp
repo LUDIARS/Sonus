@@ -70,8 +70,10 @@ std::uint32_t JobPump::Pump(std::uint32_t max) noexcept {
   JobLane batchLane = JobLane::Prefetch;
   auto flush = [&] {
     if (n == 0u) return;
+    // Counted before handing over: once submitted, a job may run (and its
+    // done counter drop) at once, and Forwarded() must already include it.
+    forwarded_.fetch_add(n, std::memory_order_release);
     target_->Submit(batch, n, batchLane);
-    forwarded_.fetch_add(n, std::memory_order_relaxed);
     n = 0;
   };
   PostedJob p;

@@ -26,19 +26,23 @@ bool IsLength(char c) noexcept {
   return c == 'h' || c == 'l' || c == 'L' || c == 'q' || c == 'j' || c == 'z' || c == 't';
 }
 
-// Runs snprintf with a format we built ourselves from a validated spec.
+// Runs snprintf with a format we built ourselves from a validated spec,
+// directly into the remaining output, so one conversion can use all of it.
 template <class T>
 void Emit(Out& o, const char* spec, T value) noexcept {
-  char buf[128];
+  if (o.len + 1u >= o.n) return;  // output full
+  const std::size_t room = o.n - o.len;  // includes the NUL
 #if defined(__GNUC__) || defined(__clang__)
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wformat-nonliteral"
 #endif
-  const int k = std::snprintf(buf, sizeof(buf), spec, value);
+  const int k = std::snprintf(o.p + o.len, room, spec, value);
 #if defined(__GNUC__) || defined(__clang__)
 #pragma GCC diagnostic pop
 #endif
-  if (k > 0) o.Put(buf, static_cast<std::size_t>(k) < sizeof(buf) ? static_cast<std::size_t>(k) : sizeof(buf) - 1u);
+  if (k <= 0) return;
+  const std::size_t wrote = static_cast<std::size_t>(k) < room ? static_cast<std::size_t>(k) : room - 1u;
+  o.len += wrote;
 }
 
 }  // namespace

@@ -15,3 +15,15 @@ snd_add_header_checks(base_header_check
     snd/base/log.hpp snd/base/mpmc.hpp snd/base/mutex.hpp snd/base/notify.hpp
     snd/base/pool.hpp snd/base/sparse_set.hpp snd/base/spsc.hpp
   LINK sonus_base)
+
+# --- Independent (adversarial) tests: expected to pass --------------------------------
+snd_add_test(base_adv_queue_test SOURCES adv_queue_test.cpp LINK sonus_base sonus_mocks)
+snd_add_test(base_adv_notify_test SOURCES adv_notify_test.cpp LINK sonus_base sonus_mocks)
+snd_add_test(base_adv_tables_test SOURCES adv_tables_test.cpp LINK sonus_base sonus_mocks)
+
+# --- Independent tests that reproduce defects (fail until the defect is fixed) ----------
+foreach(_defect HANDLE SNAPSHOT ALLOC SIZE LOG)
+  string(TOLOWER ${_defect} _lower)
+  snd_add_test(base_defect_${_lower}_test SOURCES defect_base_test.cpp LINK sonus_base sonus_mocks)
+  target_compile_definitions(base_defect_${_lower}_test PRIVATE SND_DEFECT_${_defect}=1)
+endforeach()

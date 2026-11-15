@@ -6,24 +6,38 @@
 // workers (they use JobPump, D-08) — Submit takes a mutex and may allocate,
 // both of which the RT checks report.
 //
-// Scheduling:
-//  - Every worker owns one queue per lane (Prefetch, Background). A queue is
-//    a priority heap: higher JobDesc::priority first, FIFO among equals
-//    (per queue).
-//  - Submit from a worker of this pool pushes to that worker's own queue;
-//    other threads distribute round-robin.
-//  - An idle worker takes from its own queue, then steals from the others
-//    (work stealing), lane by lane. Workers 0..M-2 look at Prefetch first;
-//    with M >= 2 the last worker looks at Background first so background work
-//    is never starved by a stream of decode jobs.
+// Scheduling (ext.h: "within a lane: higher runs first, FIFO among equals"):
+//  - Every worker owns one queue per lane (Prefetch, Background); a queue is a
+//    priority heap ordered by (priority desc, submission order asc). Submit
+//    from a worker of this pool pushes to that worker's own queue; other
+//    threads distribute round-robin.
+//  - Lane-wide priority: an idle worker looks at the heads of ALL queues of
+//    the lane and takes the best one (its own or another worker's: work
+//    stealing). So a worker never starts a lower-priority job of its own queue
+//    while a higher-priority job of the same lane waits in another queue.
+//    Two workers racing for the same head can produce a momentary inversion
+//    (one of them falls back to the next best head); nothing else does.
+//    Submission order is global, so FIFO among equal priorities holds across
+//    queues as well.
+//  - Lanes: Prefetch (decode, latency sensitive) is served first. To keep the
+//    Background lane from starving, every worker that has run
+//    `prefetchBurst` (default 8) Prefetch jobs in a row runs one waiting
+//    Background job next, whatever the number of workers.
 //  - Jobs follow the JobDesc contract through snd::RunJob: each runs at most
 //    once, a set cancel flag skips fn, the done counter is decremented exactly
 //    once either way.
-//  - Priority is a hint: no global ordering across queues or lanes.
+//
+// Threads: Submit may be called from any non-RT thread, concurrently with
+// everything including Shutdown(). A Submit that overlaps Shutdown either
+// queues the jobs before the pool stops (they run, or are completed as
+// cancelled with Shutdown(false)) or runs them inline; in every case each
+// job's done counter drops exactly once. Init/Shutdown themselves are called
+// by the owner thread only (never concurrently with each other).
 //
 // Submit never runs a job synchronously, except as a documented last resort:
-// after Shutdown(), or if growing a queue fails (out of memory), the job is
-// executed inline on the submitting thread so its done counter still drops.
+// before Init / during and after Shutdown (from a thread that is not one of
+// this pool's workers), or if growing a queue fails (out of memory), the job
+// is executed inline on the submitting thread so its done counter still drops.
 #ifndef SND_JOBS_WORKER_POOL_HPP
 #define SND_JOBS_WORKER_POOL_HPP
 
@@ -44,6 +58,9 @@ struct WorkerPoolConfig {
   std::uint32_t initialQueueCapacity = 64;  // per worker and lane; grows on demand (non-RT)
   bool flushDenormals = true;               // FTZ/DAZ on workers (2.4)
   const char* threadName = "snd-worker";
+  // After this many Prefetch jobs in a row, a worker runs one waiting
+  // Background job (0 = treated as 1).
+  std::uint32_t prefetchBurst = 8;
 };
 
 class WorkerPool final : public IJobSystem {
@@ -53,9 +70,9 @@ class WorkerPool final : public IJobSystem {
   WorkerPool(const WorkerPool&) = delete;
   WorkerPool& operator=(const WorkerPool&) = delete;
 
-  // Non-RT. Starts the workers. false on failure (nothing left running).
+  // Non-RT, owner thread. Starts the workers. false on failure (nothing left running).
   bool Init(IAllocator& allocator, const WorkerPoolConfig& config) noexcept;
-  // Non-RT. Stops the workers after the queues are empty. With
+  // Non-RT, owner thread. Stops the workers after the queues are empty. With
   // runPending=false, queued jobs that have not started are completed as
   // cancelled (fn skipped, done counter decremented). Jobs submitted by running
   // jobs during shutdown are handled the same way. Idempotent.
@@ -76,12 +93,17 @@ class WorkerPool final : public IJobSystem {
     std::uint64_t executed;  // fn called
     std::uint64_t skipped;   // cancelled before start
     std::uint64_t stolen;    // taken from another worker's queue
-    std::uint64_t inline_;   // run inline in Submit (after shutdown / OOM)
+    std::uint64_t inline_;   // run inline in Submit (before Init / during or after Shutdown / OOM)
   };
   Stats GetStats() const noexcept;
-  std::uint64_t Pending() const noexcept { return pending_.value.load(std::memory_order_acquire); }
+  // Jobs queued and not yet taken by a worker (approximate while busy).
+  std::uint64_t Pending() const noexcept {
+    const std::int64_t p = pending_.value.load(std::memory_order_acquire);
+    return p > 0 ? static_cast<std::uint64_t>(p) : 0u;
+  }
 
  private:
+  static constexpr int kLanes = static_cast<int>(JobLane::Count);
   struct Entry {
     JobDesc desc;
     std::uint64_t seq;
@@ -95,15 +117,17 @@ class WorkerPool final : public IJobSystem {
   struct Worker {
     WorkerPool* pool = nullptr;
     std::uint32_t index = 0;
-    Queue lanes[static_cast<int>(JobLane::Count)];
+    Queue lanes[kLanes];
     platform::Thread thread;
   };
 
   static void WorkerMain(void* w) noexcept;
   void WorkerLoop(Worker& w) noexcept;
   bool Push(Queue& q, const JobDesc& d) noexcept;  // false on OOM
-  bool Pop(Queue& q, Entry& out) noexcept;
-  bool FindJob(std::uint32_t self, Entry& out) noexcept;
+  bool Pop(Queue& q, int lane, Entry& out) noexcept;
+  bool Peek(Queue& q, Entry& out) noexcept;
+  bool TakeBest(std::uint32_t self, int lane, Entry& out) noexcept;
+  bool FindJob(std::uint32_t self, std::uint32_t& prefetchStreak, Entry& out) noexcept;
   void Execute(const Entry& e) noexcept;
   void RunInline(const JobDesc& d) noexcept;
 
@@ -112,14 +136,15 @@ class WorkerPool final : public IJobSystem {
   Worker* workers_ = nullptr;
   std::uint32_t workerCount_ = 0;
   platform::Semaphore wake_;
-  base::CachePadded<std::atomic<std::uint64_t>> pending_;  // queued, not yet popped
+  base::CachePadded<std::atomic<std::int64_t>> pending_;  // queued, not yet popped
+  std::atomic<std::int64_t> lanePending_[kLanes] = {};
   base::CachePadded<std::atomic<std::int32_t>> sleepers_;
+  base::CachePadded<std::atomic<std::uint32_t>> submitsInFlight_;  // Submit <-> Shutdown handshake
   std::atomic<std::uint32_t> running_{0};
   std::atomic<std::uint32_t> roundRobin_{0};
   std::atomic<std::uint64_t> seq_{0};
-  std::atomic<bool> stopping_{false};
+  std::atomic<bool> stopping_{true};  // true while not initialised
   std::atomic<bool> cancelPending_{false};
-  std::atomic<bool> shutDown_{false};
   std::atomic<std::uint64_t> submitted_{0}, executed_{0}, skipped_{0}, stolen_{0}, inline_{0};
 };
 

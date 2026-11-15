@@ -86,6 +86,25 @@ constexpr std::uint64_t NextPowerOfTwo(std::uint64_t v) noexcept {
 constexpr std::size_t AlignUp(std::size_t v, std::size_t align) noexcept {
   return (v + (align - 1u)) & ~(align - 1u);
 }
+// Overflow-checked size arithmetic for Init paths: false (and *out untouched)
+// when the result does not fit in size_t.
+constexpr bool CheckedMul(std::size_t a, std::size_t b, std::size_t* out) noexcept {
+  if (a != 0u && b > (~static_cast<std::size_t>(0)) / a) return false;
+  *out = a * b;
+  return true;
+}
+constexpr bool CheckedAdd(std::size_t a, std::size_t b, std::size_t* out) noexcept {
+  if (b > (~static_cast<std::size_t>(0)) - a) return false;
+  *out = a + b;
+  return true;
+}
+// `align` must be a power of two.
+constexpr bool CheckedAlignUp(std::size_t v, std::size_t align, std::size_t* out) noexcept {
+  std::size_t t = 0;
+  if (!CheckedAdd(v, align - 1u, &t)) return false;
+  *out = t & ~(align - 1u);
+  return true;
+}
 inline int CountTrailingZeros64(std::uint64_t v) noexcept { return std::countr_zero(v); }
 
 }  // namespace snd::base

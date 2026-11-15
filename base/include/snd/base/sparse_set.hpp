@@ -14,6 +14,11 @@
 //
 // Indexing::Direct tables (slot == position, Listener / Spatial) have no
 // dense/sparse arrays: liveness is generation[slot] != 0, Remove zeroes it.
+// CAUTION: because Remove zeroes the generation, a Direct slot that is
+// re-inserted can get the same generation again, so a stale HandleRef to a
+// Direct row may look current. Never refer to Direct rows by handle (they are
+// addressed by fixed slot: listener index, emitter*L + listener); use
+// IsLive(slot) only.
 //
 // Slot choice: rows whose slot is chosen by the game side (Playback, Emitter,
 // Transport, ...: 2.1 handle issue) are inserted with Insert(slot, generation).
@@ -45,9 +50,14 @@ using schema::TableRows;
 
 // Bytes of row bookkeeping for `capacity` slots (one block, 64-byte aligned):
 // generation[cap] | slotToDense[cap] | denseToSlot[cap] (the last two Sparse only).
+// Returns 0 if the size does not fit in size_t (32-bit targets).
 constexpr std::size_t StorageBytes(std::uint32_t capacity, Indexing indexing) noexcept {
-  const std::size_t one = AlignUp(sizeof(std::uint32_t) * static_cast<std::size_t>(capacity), kBufferAlignment);
-  return indexing == Indexing::Sparse ? one * 3u : one;
+  std::size_t raw = 0, one = 0, total = 0;
+  if (!CheckedMul(sizeof(std::uint32_t), capacity, &raw) || !CheckedAlignUp(raw, kBufferAlignment, &one) ||
+      !CheckedMul(one, indexing == Indexing::Sparse ? 3u : 1u, &total)) {
+    return 0;
+  }
+  return total;
 }
 
 // Binds caller memory of StorageBytes() bytes (8-byte aligned at least) and
@@ -77,7 +87,9 @@ inline bool Init(TableRows& r, IAllocator& a, std::uint32_t capacity, Indexing i
                  MemTag tag = MemTag::Tables) noexcept {
   r = TableRows{};
   if (capacity == 0u || capacity == kInvalidSlot) return false;
-  void* p = a.Allocate(StorageBytes(capacity, indexing), kBufferAlignment, tag);
+  const std::size_t bytes = StorageBytes(capacity, indexing);
+  if (bytes == 0u) return false;
+  void* p = a.Allocate(bytes, kBufferAlignment, tag);
   if (p == nullptr) return false;
   Bind(r, capacity, indexing, p);
   return true;

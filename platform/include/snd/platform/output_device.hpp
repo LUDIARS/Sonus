@@ -10,6 +10,16 @@
 // the owner thread; queries any thread after Open. The callback runs on the
 // device's own thread (priority: ThreadPriority::Realtime with fallback).
 // Stop() returns after the last callback has finished.
+//
+// Calling Stop() or Close() from inside the device callback is FORBIDDEN (it
+// would join the calling thread / free the buffer being filled). The device
+// detects it, does nothing (no join, no free), returns, and counts it in
+// MisuseFromCallback(); the device keeps running.
+//
+// Timing: deadlines advance by exactly one period per callback in integer
+// nanoseconds plus a remainder (no drift, no overflow for any run time). If
+// the thread wakes more than one period late it resynchronises (LateWakeups)
+// instead of firing catch-up callbacks.
 #ifndef SND_PLATFORM_OUTPUT_DEVICE_HPP
 #define SND_PLATFORM_OUTPUT_DEVICE_HPP
 
@@ -59,6 +69,8 @@ class TimerOutputDevice final : public IOutputDevice {
   std::uint64_t FramesDelivered() const noexcept { return frames_.load(std::memory_order_relaxed); }
   // Periods where the timer woke more than one period late and resynchronised.
   std::uint64_t LateWakeups() const noexcept { return late_.load(std::memory_order_relaxed); }
+  // Stop()/Close() calls made from inside the callback and ignored.
+  std::uint64_t MisuseFromCallback() const noexcept { return misuseFromCallback_.load(std::memory_order_relaxed); }
   PriorityResult ThreadPriorityResult() const noexcept { return thread_.Priority(); }
   bool IsOpen() const noexcept { return open_; }
   bool IsStarted() const noexcept { return started_; }
@@ -83,6 +95,7 @@ class TimerOutputDevice final : public IOutputDevice {
   std::atomic<std::uint64_t> callbacks_{0};
   std::atomic<std::uint64_t> frames_{0};
   std::atomic<std::uint64_t> late_{0};
+  std::atomic<std::uint64_t> misuseFromCallback_{0};
   Thread thread_;
 };
 

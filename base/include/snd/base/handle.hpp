@@ -81,8 +81,9 @@ class HandleAllocator {
     return HandleRef{slot, g};
   }
   // `h` must be the live handle of its slot; stale or invalid handles are ignored (returns false).
+  // Generations with bit 31 set are never issued and are always rejected.
   bool Release(HandleRef h) noexcept {
-    if (h.slot >= capacity_ || h.generation == 0u) return false;
+    if (!Issuable(h)) return false;
     std::uint32_t expected = h.generation | kLiveBit;
     std::uint32_t next = NextGen(h.generation);
     if (!generation_[h.slot].compare_exchange_strong(expected, next, std::memory_order_acq_rel,
@@ -93,8 +94,12 @@ class HandleAllocator {
     return true;
   }
   bool IsCurrent(HandleRef h) const noexcept {
-    return h.slot < capacity_ && h.generation != 0u &&
-           generation_[h.slot].load(std::memory_order_acquire) == (h.generation | kLiveBit);
+    return Issuable(h) && generation_[h.slot].load(std::memory_order_acquire) == (h.generation | kLiveBit);
+  }
+  // True if `h` could have been issued by this allocator (slot in range,
+  // generation in [1, 2^31)). Says nothing about whether it is still current.
+  bool Issuable(HandleRef h) const noexcept {
+    return h.slot < capacity_ && h.generation != 0u && (h.generation & kLiveBit) == 0u;
   }
   std::uint32_t Capacity() const noexcept { return capacity_; }
   std::uint32_t Available() const noexcept { return free_.Available(); }
