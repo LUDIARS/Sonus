@@ -48,6 +48,13 @@
 //    StragglersInFlight() is 0. Both functions are conservative: a worker that
 //    is about to discover there is nothing to run may make them report
 //    "busy" for a moment, never the opposite.
+//  - Core's rules on top of this (contract 1.1, CONTRACTS.md D-43): two sets of
+//    render lists / chunk accumulators alternating per block, the previous set
+//    reused only after StragglersInFlight() == 0, serial rendering on the audio
+//    thread while that cannot be confirmed, and voices of a Late chunk held
+//    (schema Voice.renderHold) until the worker is quiescent.
+//  - Stack: workers get at least platform::kRtThreadMinStackBytes (256 KiB,
+//    D-47; RtWorkerConfig::minStackBytes).
 //  - scratch is the calling thread's arena (Config.memory.threadArenaBytes),
 //    reset when that thread starts its first chunk of a batch; it stays valid
 //    until that thread joins a later batch, i.e. until the next Run().
