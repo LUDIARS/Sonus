@@ -6,7 +6,9 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include <atomic>
 #include <cstdint>
+#include <thread>
 #include <cstdio>
 #include <cstdlib>
 #include <string>
@@ -100,41 +102,196 @@ SND_TEST(DefaultFsEdge, ValidatePathBoundaries) {
   SND_CHECK(DefaultFileSystem::ValidatePath(deep.c_str()));
 }
 
+namespace {
+// Opens `rel`, reads up to 64 bytes. Returns the bytes read, -1 if Open refused.
+int OpenRead(DefaultFileSystem& fs, const char* rel, std::uint8_t* buf) {
+  const FileId f = fs.Open(rel);
+  if (f == kInvalidFile) return -1;
+  int got = -2;
+  if (fs.ReadAsync(f, 0, buf, 64, IoToken{4242})) {
+    const IoStatus st = WaitFor(fs, 4242);
+    got = snd::StateOf(st) == IoState::Done ? static_cast<int>(st.bytes) : -3;
+  }
+  fs.Close(f);
+  return got;
+}
+}  // namespace
+
+// Decision b: a path whose RESOLVED file lies outside the root is refused
+// (links to files and to directories, relative or absolute, chains, links in
+// the middle of the path); links that stay inside the root are followed.
 SND_TEST(DefaultFsEdge, OpenRejectsEscapesAndDirectoriesButFollowsSymlinks) {
+  Sandbox sb;
+  SND_REQUIRE(!sb.base.empty());
+  const std::string& R = sb.root;
+  // Links (created before Init: nothing is cached anyway).
+  auto L = [&](const std::string& target, const std::string& name) { return symlink(target.c_str(), (R + "/" + name).c_str()) == 0; };
+  SND_REQUIRE(L("a.bin", "rel_in.bin"));                       // relative, inside
+  SND_REQUIRE(L(R + "/a.bin", "abs_in.bin"));                  // absolute, inside
+  SND_REQUIRE(L("../secret.bin", "rel_out.bin"));              // relative, outside
+  SND_REQUIRE(L(sb.base + "/secret.bin", "abs_out.bin"));      // absolute, outside
+  SND_REQUIRE(L("rel_in.bin", "chain_in.bin"));                // chain -> chain -> a.bin
+  SND_REQUIRE(L("rel_out.bin", "chain_out.bin"));              // chain -> outside
+  SND_REQUIRE(L("abs_in.bin", "chain_abs_in.bin"));            // relative -> absolute inside
+  SND_REQUIRE(L("sub", "dir_rel_in"));                         // directory link, inside
+  SND_REQUIRE(L(R + "/sub", "dir_abs_in"));                    // absolute directory link, inside
+  SND_REQUIRE(L("..", "dir_up"));                              // directory link to the parent
+  SND_REQUIRE(L(sb.base + "/root2", "dir_abs_out"));           // absolute directory link, outside (root's name as prefix)
+  SND_REQUIRE(L("sub/../../root/a.bin", "dotdot_in.bin"));     // leaves and re-enters the root
+  SND_REQUIRE(L("missing.bin", "dangling.bin"));
+  DefaultFileSystem fs;
+  DefaultFileSystemConfig cfg;
+  const std::string rootSlash = R + "///";  // trailing slashes are stripped
+  cfg.root = rootSlash.c_str();
+  SND_REQUIRE(fs.Init(snd::base::DefaultAllocator(), cfg));
+  std::uint8_t buf[64];
+  struct Case {
+    const char* path;
+    int expect;  // bytes read, or -1 = refused
+    std::uint32_t seed;
+  };
+  const Case cases[] = {
+      {"a.bin", 64, 1},           {"sub/../a.bin", 64, 1},     {"./sub//b.bin", 64, 2},
+      {"rel_in.bin", 64, 1},      {"abs_in.bin", 64, 1},       {"chain_in.bin", 64, 1},
+      {"chain_abs_in.bin", 64, 1}, {"dir_rel_in/b.bin", 64, 2}, {"dir_abs_in/b.bin", 64, 2},
+      {"dir_rel_in/../a.bin", 64, 1}, {"dotdot_in.bin", 64, 1},
+      {"rel_out.bin", -1, 0},     {"abs_out.bin", -1, 0},      {"chain_out.bin", -1, 0},
+      {"dir_up/secret.bin", -1, 0}, {"dir_up/root/a.bin", 64, 1}, {"dir_abs_out/x.bin", -1, 0},
+      {"dangling.bin", -1, 0},    {"sub", -1, 0},              {"sub/", -1, 0},
+      {"a.bin/", -1, 0},          {"../secret.bin", -1, 0},    {"../root2/x.bin", -1, 0},
+      {"missing.bin", -1, 0},
+  };
+  for (const Case& c : cases) {
+    const int got = OpenRead(fs, c.path, buf);
+    SND_CHECK_MSG(got == c.expect, "'%s': got %d, expected %d", c.path, got, c.expect);
+    if (got == 64 && c.expect == 64) SND_CHECK_MSG(MatchesPattern(c.seed, 0, buf, 64), "'%s': wrong data", c.path);
+  }
+  SND_CHECK_EQ(fs.OpenFileCount(), 0u);
+  fs.Shutdown();
+}
+
+// The root itself is a symbolic link: files below it are inside; links that
+// point outside the link's target are refused; an absolute link spelled through
+// the root link is inside.
+SND_TEST(DefaultFsEdge, RootThatIsASymlink) {
+  Sandbox sb;
+  SND_REQUIRE(!sb.base.empty());
+  const std::string rootLink = sb.base + "/rootlink";
+  SND_REQUIRE(symlink(sb.root.c_str(), rootLink.c_str()) == 0);
+  SND_REQUIRE(symlink((rootLink + "/a.bin").c_str(), (sb.root + "/via_link.bin").c_str()) == 0);
+  SND_REQUIRE(symlink((sb.base + "/secret.bin").c_str(), (sb.root + "/out.bin").c_str()) == 0);
+  DefaultFileSystem fs;
+  DefaultFileSystemConfig cfg;
+  cfg.root = rootLink.c_str();
+  SND_REQUIRE(fs.Init(snd::base::DefaultAllocator(), cfg));
+  std::uint8_t buf[64];
+  SND_CHECK_EQ(OpenRead(fs, "a.bin", buf), 64);
+  SND_CHECK_EQ(OpenRead(fs, "via_link.bin", buf), 64);
+  SND_CHECK_EQ(OpenRead(fs, "out.bin", buf), -1);
+  // Retarget the root link after Init: openat2 resolves below the directory
+  // opened at Init, the fallback below the canonical path taken at Init. Either
+  // way the old root's files stay readable through relative paths, and the new
+  // target is not reachable.
+  SND_REQUIRE(unlink(rootLink.c_str()) == 0);
+  SND_REQUIRE(symlink((sb.base + "/root2").c_str(), rootLink.c_str()) == 0);
+  const int a = OpenRead(fs, "a.bin", buf);
+  const int x = OpenRead(fs, "x.bin", buf);
+  snd::test::Note("after retargeting the root link: a.bin -> %d, x.bin (new target) -> %d", a, x);
+  SND_CHECK_EQ(x, -1);
+  fs.Shutdown();
+}
+
+// TOCTOU: a link inside the root is flipped between an inside and an outside
+// target while the IO thread opens it. Every successful Open must read the
+// inside file. Relative links go through openat2(RESOLVE_BENEATH) (atomic in
+// the kernel); absolute links fall back to open() + /proc/self/fd check of the
+// opened descriptor (also race-free for the file that is read).
+SND_TEST(DefaultFsEdge, LinkSwappedDuringOpenNeverReadsOutside) {
   Sandbox sb;
   SND_REQUIRE(!sb.base.empty());
   DefaultFileSystem fs;
   DefaultFileSystemConfig cfg;
-  const std::string rootSlash = sb.root + "///";  // trailing slashes are stripped
-  cfg.root = rootSlash.c_str();
+  cfg.root = sb.root.c_str();
   SND_REQUIRE(fs.Init(snd::base::DefaultAllocator(), cfg));
-  SND_CHECK(fs.Open("a.bin") != kInvalidFile);
-  SND_CHECK(fs.Open("sub/../a.bin") != kInvalidFile);
-  SND_CHECK(fs.Open("./sub//b.bin") != kInvalidFile);
-  SND_CHECK_EQ(fs.Open("sub"), kInvalidFile);       // directory
-  SND_CHECK_EQ(fs.Open("sub/"), kInvalidFile);
-  SND_CHECK_EQ(fs.Open("a.bin/"), kInvalidFile);    // not a directory
-  SND_CHECK_EQ(fs.Open("../secret.bin"), kInvalidFile);
-  SND_CHECK_EQ(fs.Open("../root2/x.bin"), kInvalidFile);  // sibling with the root's name as prefix
-  SND_CHECK_EQ(fs.Open("missing.bin"), kInvalidFile);
-  // A symbolic link inside the root that points outside: the header says links
-  // are followed unchecked. This test documents that a file outside the root
-  // is readable through it (spec gap: the contract only says "relative to the root").
-  const std::string link = sb.root + "/escape.bin";
-  SND_REQUIRE(symlink((sb.base + "/secret.bin").c_str(), link.c_str()) == 0);
-  const FileId e = fs.Open("escape.bin");
-  SND_CHECK(e != kInvalidFile);
-  if (e != kInvalidFile) {
-    std::uint8_t buf[64] = {};
-    SND_REQUIRE(fs.ReadAsync(e, 0, buf, 64, IoToken{1}));
-    const IoStatus st = WaitFor(fs, 1);
-    SND_CHECK(snd::StateOf(st) == IoState::Done && st.bytes == 64u && MatchesPattern(7, 0, buf, 64));
-    snd::test::Note("a file outside the root was read through a symlink (spec gap, reported)");
-    fs.Close(e);
+  for (int absolute = 0; absolute < 2; ++absolute) {
+    const std::string in = absolute != 0 ? sb.root + "/a.bin" : std::string("a.bin");
+    const std::string out = absolute != 0 ? sb.base + "/secret.bin" : std::string("../secret.bin");
+    const std::string link = sb.root + "/flip.bin";
+    const std::string tmpIn = sb.root + "/.flip_in", tmpOut = sb.root + "/.flip_out";
+    unlink(tmpIn.c_str());
+    unlink(tmpOut.c_str());
+    SND_REQUIRE(symlink(in.c_str(), tmpIn.c_str()) == 0);
+    SND_REQUIRE(symlink(out.c_str(), tmpOut.c_str()) == 0);
+    SND_REQUIRE(symlink(in.c_str(), link.c_str()) == 0);
+    std::atomic<bool> stop{false};
+    std::thread flipper([&] {
+      // rename() replaces the link atomically; recreate the source each time.
+      for (std::uint32_t i = 0; !stop.load(); ++i) {
+        const bool o = (i & 1u) != 0u;
+        const std::string tmp = sb.root + (o ? "/.n_out" : "/.n_in");
+        unlink(tmp.c_str());
+        if (symlink((o ? out : in).c_str(), tmp.c_str()) == 0) (void)rename(tmp.c_str(), link.c_str());
+      }
+    });
+    std::uint32_t opened = 0, refused = 0, outside = 0;
+    std::uint8_t buf[64];
+    const std::uint64_t until = snd::platform::MonotonicNanoseconds() + 700000000ull;
+    while (snd::platform::MonotonicNanoseconds() < until) {
+      const int got = OpenRead(fs, "flip.bin", buf);
+      if (got < 0) {
+        ++refused;
+        continue;
+      }
+      ++opened;
+      if (MatchesPattern(7, 0, buf, 64) || !MatchesPattern(1, 0, buf, 64)) ++outside;
+    }
+    stop.store(true);
+    flipper.join();
+    unlink(link.c_str());
+    snd::test::Note("%s link: %u opens, %u refused, %u read outside data", absolute != 0 ? "absolute" : "relative", opened,
+                    refused, outside);
+    SND_CHECK_EQ(outside, 0u);
+    SND_CHECK(opened > 0u && refused > 0u);
   }
-  // Directory symlink.
-  SND_REQUIRE(symlink(sb.base.c_str(), (sb.root + "/up").c_str()) == 0);
-  SND_CHECK(fs.Open("up/secret.bin") != kInvalidFile);
+  fs.Shutdown();
+}
+
+// A FIFO (or any special file) reachable from the root: Open must refuse it
+// without blocking the IO thread (open(O_RDONLY) of a FIFO without a writer
+// blocks; the outside one through a link is opened by the fallback BEFORE the
+// "outside the root" check).
+SND_TEST(IoDefect, FifoInTheRootOrBehindALinkBlocksOpen) {
+  Sandbox sb;
+  SND_REQUIRE(!sb.base.empty());
+  SND_REQUIRE(mkfifo((sb.root + "/pipe").c_str(), 0600) == 0);
+  SND_REQUIRE(mkfifo((sb.base + "/outpipe").c_str(), 0600) == 0);
+  SND_REQUIRE(symlink((sb.base + "/outpipe").c_str(), (sb.root + "/outpipe_link").c_str()) == 0);
+  DefaultFileSystem fs;
+  DefaultFileSystemConfig cfg;
+  cfg.root = sb.root.c_str();
+  SND_REQUIRE(fs.Init(snd::base::DefaultAllocator(), cfg));
+  const char* names[] = {"pipe", "outpipe_link"};
+  const std::string fifos[] = {sb.root + "/pipe", sb.base + "/outpipe"};
+  for (int k = 0; k < 2; ++k) {
+    std::atomic<int> state{0};  // 0 running, 1 returned
+    FileId id = kInvalidFile;
+    std::thread t([&] {
+      id = fs.Open(names[k]);
+      state.store(1);
+    });
+    const std::uint64_t until = snd::platform::MonotonicNanoseconds() + 2000000000ull;
+    while (state.load() == 0 && snd::platform::MonotonicNanoseconds() < until) snd::platform::SleepFor(1000000);
+    const bool blocked = state.load() == 0;
+    if (blocked) {  // unblock it: open the write end
+      const int w = ::open(fifos[k].c_str(), O_WRONLY | O_NONBLOCK);
+      for (int i = 0; i < 200 && state.load() == 0; ++i) snd::platform::SleepFor(10000000);
+      if (w >= 0) ::close(w);
+    }
+    t.join();
+    SND_CHECK_MSG(!blocked, "Open(\"%s\") blocked the calling (IO) thread", names[k]);
+    SND_CHECK_MSG(id == kInvalidFile, "Open(\"%s\") accepted a FIFO", names[k]);
+    if (id != kInvalidFile) fs.Close(id);
+  }
   fs.Shutdown();
 }
 
