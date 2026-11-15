@@ -70,3 +70,18 @@ snd_add_test(bank_validate_edge_test
 snd_add_test(bank_manager_fix_test
   SOURCES manager_fix_test.cpp fixture_bank.cpp
   LINK sonus_bank sonus_mocks)
+
+# Stage 1.5: BankManager over the io module's IoScheduler (deterministic driver).
+snd_add_test(bank_scheduler_io_test
+  SOURCES scheduler_io_test.cpp fixture_bank.cpp
+  LINK sonus_bank sonus_io sonus_mocks)
+
+# Stage 1.5: BankManager + IoScheduler (IO thread) + jobs::WorkerPool + memory FS
+# with latency / failures. Run under TSan; repeated 20 times for acceptance.
+snd_add_test(bank_scheduler_thread_test
+  SOURCES scheduler_thread_test.cpp fixture_bank.cpp
+  LINK sonus_bank sonus_io sonus_jobs sonus_mocks)
+target_link_libraries(bank_scheduler_thread_test PRIVATE Threads::Threads)
+
+# Contract 1.1 in the bank manager (D-46, D-50).
+snd_add_test(bank_contract11_test SOURCES contract11_test.cpp LINK sonus_bank sonus_mocks)

@@ -32,6 +32,7 @@ struct Env {
     BankManagerDesc d;
     d.allocator = &alloc;
     d.fileSystem = &fs;
+    d.ioMode = snd::bank::BankIoMode::DirectFileSystem;  // stage 1.5: the default is the IO scheduler
     d.jobs = &jobs;
     d.maxBanks = maxBanks;
     d.ioChunkBytes = chunk;
@@ -220,6 +221,7 @@ SND_TEST(BankManager, AllocationFailuresNeverLeak) {
     BankManagerDesc d;
     d.allocator = &a;
     d.fileSystem = &fs;
+    d.ioMode = snd::bank::BankIoMode::DirectFileSystem;  // stage 1.5: the default is the IO scheduler
     d.jobs = &jobs;
     a.FailAt(n);
     BankManager* m = nullptr;
@@ -342,6 +344,7 @@ SND_TEST(BankManager, DspPoolHookRejects) {
   BankManagerDesc d;
   d.allocator = &alloc;
   d.fileSystem = &fs;
+  d.ioMode = snd::bank::BankIoMode::DirectFileSystem;  // stage 1.5: the default is the IO scheduler
   d.jobs = &jobs;
   d.dsp.user = &pool;
   d.dsp.reserve = [](void* u, const bf::DspPoolNeed& n) {

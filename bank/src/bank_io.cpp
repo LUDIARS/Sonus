@@ -50,4 +50,44 @@ void CloseBankFile(IFileSystem& fs, FileId file) noexcept {
   if (file != kInvalidFile) fs.Close(file);
 }
 
+namespace {
+SubmitResult Submit(io::IoScheduler& io, SchedulerRead& r, SchedulerRead::Phase phase) noexcept {
+  r.req.ioClass = io::IoClass::Bank;
+  r.req.onComplete = nullptr;  // polled by PumpIo under the manager's mutex
+  r.req.user = nullptr;
+  r.cancelAsked = false;
+  if (!io.Submit(r.req)) {
+    r.phase = SchedulerRead::Phase::Idle;
+    // Submit refuses a full file queue (retry later) or a scheduler that no
+    // longer accepts work (Shutdown): only the latter is final.
+    return io.Accepting() ? SubmitResult::Retry : SubmitResult::ShutDown;
+  }
+  r.phase = phase;
+  return SubmitResult::Submitted;
+}
+}  // namespace
+
+SubmitResult SubmitSizeQuery(io::IoScheduler& io, SchedulerRead& r, const char* path) noexcept {
+  r.req.path = path;
+  r.req.offset = 0;
+  r.req.bytes = 0;
+  r.req.dst = nullptr;
+  return Submit(io, r, SchedulerRead::Phase::Sizing);
+}
+
+SubmitResult SubmitWholeRead(io::IoScheduler& io, SchedulerRead& r, const char* path, std::uint8_t* dst,
+                             std::uint64_t bytes) noexcept {
+  r.req.path = path;
+  r.req.offset = 0;
+  r.req.bytes = bytes;
+  r.req.dst = dst;
+  return Submit(io, r, SchedulerRead::Phase::Reading);
+}
+
+void CancelRead(io::IoScheduler& io, SchedulerRead& r) noexcept {
+  if (!r.InFlight() || r.cancelAsked) return;
+  r.cancelAsked = true;
+  io.Cancel(r.req);
+}
+
 }  // namespace snd::bank::detail

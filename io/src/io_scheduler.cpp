@@ -983,6 +983,10 @@ bool IoScheduler::Start() noexcept {
 
 bool IoScheduler::Running() const noexcept { return impl_ != nullptr && impl_->started && !impl_->shutDown; }
 
+bool IoScheduler::Accepting() const noexcept {
+  return impl_ != nullptr && impl_->accepting.load(std::memory_order_seq_cst) != 0u;
+}
+
 void IoScheduler::Shutdown() noexcept {
   if (impl_ == nullptr || impl_->shutDown) return;
   Impl& im = *impl_;

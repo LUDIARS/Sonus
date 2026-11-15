@@ -6,9 +6,11 @@
 #include <cstring>
 #include <new>
 #include <string_view>
+#include <thread>  // yield while Destroy waits for cancelled reads (bank cannot see platform, 12.1)
 
 #include "bank_io.hpp"
 #include "snd/base/mutex.hpp"
+#include "snd/io/io_scheduler.hpp"
 
 namespace snd::bank {
 namespace {
@@ -43,7 +45,8 @@ struct BankManager::Impl {
     Id langId = 0;              // language of the bank: from the path at request, confirmed by the header
     std::uint8_t* image = nullptr;
     std::uint64_t imageBytes = 0;
-    detail::FileRead read;
+    detail::FileRead read;           // DirectFileSystem mode
+    detail::SchedulerRead sched;     // Scheduler mode
     bool cancel = false;
     // validation job (job writes prepared/jobResult/jobError; manager reads after jobCounter == 0)
     JobCtx ctx{};
@@ -121,13 +124,20 @@ struct BankManager::Impl {
     s.reason[n] = '\0';
     SetState(s, SND_BANK_STATE_FAILED, r);
   }
+  bool SchedulerMode() const noexcept { return desc.ioMode == BankIoMode::Scheduler; }
+  // A read (or size query) still in the IO path: its target and path must stay.
+  bool IoInFlight(const Slot& s) const noexcept {
+    return SchedulerMode() ? s.sched.InFlight() : s.read.inflight;
+  }
   // Frees everything a load holds except the path (no job may be running).
   void FreeLoadMemory(Slot& s) noexcept {
-    if (s.read.inflight) return;  // never free a read target in flight (caller waits)
-    if (s.read.file != kInvalidFile) {
+    if (IoInFlight(s)) return;  // never free a read target in flight (caller waits)
+    if (!SchedulerMode() && s.read.file != kInvalidFile) {
       detail::CloseBankFile(*desc.fileSystem, s.read.file);
       s.read.file = kInvalidFile;
     }
+    s.sched.phase = detail::SchedulerRead::Phase::Idle;
+    s.sched.cancelAsked = false;
     if (s.dspReserved && desc.dsp.release != nullptr && s.prepared != nullptr) {
       desc.dsp.release(desc.dsp.user, s.prepared->dspNeed);
     }
@@ -277,6 +287,11 @@ struct BankManager::Impl {
   }
 
   void PumpIoLocked() noexcept;
+  void PumpSchedulerLocked() noexcept;
+  // Checks the size and allocates the image (fails the slot otherwise).
+  bool AllocateImage(Slot& s, std::uint64_t size) noexcept;
+  // Reading done: validation and preparation on a normal worker (10.3).
+  void StartValidation(Slot& s, std::uint32_t index) noexcept;
   bool PumpLocked() noexcept;
   bool Decide(Slot& s) noexcept;
 };
@@ -289,8 +304,11 @@ using Impl = BankManager::Impl;
 snd_result BankManager::Create(const BankManagerDesc& desc, BankManager** out) noexcept {
   if (out == nullptr) return SND_ERR_INVALID_ARGUMENT;
   *out = nullptr;
-  if (desc.allocator == nullptr || desc.fileSystem == nullptr || desc.jobs == nullptr || desc.maxBanks == 0 ||
-      desc.maxBanks > 0x7FFFFFFFu || desc.ioChunkBytes == 0) {
+  const bool ioOk = desc.ioMode == BankIoMode::Scheduler ? desc.scheduler != nullptr
+                    : desc.ioMode == BankIoMode::DirectFileSystem ? desc.fileSystem != nullptr && desc.ioChunkBytes != 0
+                                                                  : false;
+  if (desc.allocator == nullptr || !ioOk || desc.jobs == nullptr || desc.maxBanks == 0 ||
+      desc.maxBanks > 0x7FFFFFFFu) {
     return SND_ERR_INVALID_ARGUMENT;
   }
   IAllocator& a = *desc.allocator;
@@ -340,6 +358,21 @@ void BankManager::Destroy(BankManager* manager) noexcept {
   Impl* impl = manager->impl_;
   IAllocator& a = *impl->alloc;
   bool anyJob = false;
+  if (impl->SchedulerMode()) {
+    // Requests still in the scheduler target slot memory: cancel them, and wait
+    // for them when the IO thread is there to finish them (header comment).
+    {
+      base::LockGuard lock(impl->mutex);
+      for (std::uint32_t i = 0; i < impl->desc.maxBanks; ++i) {
+        detail::CancelRead(*impl->desc.scheduler, impl->slots[i].sched);
+      }
+    }
+    if (impl->desc.scheduler->Running()) {
+      for (std::uint32_t i = 0; i < impl->desc.maxBanks; ++i) {
+        while (impl->slots[i].sched.InFlight()) std::this_thread::yield();
+      }
+    }
+  }
   {
     base::LockGuard lock(impl->mutex);
     for (std::uint32_t i = 0; i < impl->desc.maxBanks; ++i) {
@@ -348,8 +381,8 @@ void BankManager::Destroy(BankManager* manager) noexcept {
         anyJob = true;  // the job still writes this slot: leak it
         continue;
       }
-      if (s.read.inflight) {
-        anyJob = true;  // a read still targets the image: leak it
+      if (impl->IoInFlight(s)) {
+        anyJob = true;  // a read still targets the image / path: leak it
         continue;
       }
       if (s.stage != Stage::Free) impl->FreeSlot(s);
@@ -414,7 +447,91 @@ void BankManager::PumpIo() noexcept {
   impl_->PumpIoLocked();
 }
 
+bool Impl::AllocateImage(Slot& s, std::uint64_t size) noexcept {
+  if (size > static_cast<std::uint64_t>(SIZE_MAX) - 64 || size == 0) {
+    Fail(s, size == 0 ? SND_ERR_CORRUPT : SND_ERR_OUT_OF_BUDGET,
+         size == 0 ? "the bank file is empty" : "the bank file is too large");
+    return false;
+  }
+  s.image = static_cast<std::uint8_t*>(alloc->Allocate(static_cast<std::size_t>(size), 64, MemTag::Bank));
+  if (s.image == nullptr) {
+    Fail(s, SND_ERR_OUT_OF_BUDGET, "cannot allocate memory for the bank image");
+    return false;
+  }
+  s.imageBytes = size;
+  return true;
+}
+
+void Impl::StartValidation(Slot& s, std::uint32_t i) noexcept {
+  s.stage = Stage::Validating;
+  s.ctx = JobCtx{this, i};
+  s.jobCounter = 1;
+  s.cancelFlag = 0;
+  s.prepared = nullptr;
+  s.jobResult = SND_ERR_NOT_READY;
+  JobDesc job{};
+  job.fn = &Impl::ValidateJob;
+  job.data = &s.ctx;
+  job.done_counter = &s.jobCounter;
+  job.cancel_flag = &s.cancelFlag;
+  desc.jobs->Submit(&job, 1, JobLane::Background);
+}
+
+// Scheduler mode (stage 1.5): size query, then one whole-file read, both
+// FileRequests of IoClass::Bank; only their final states are looked at here.
+void Impl::PumpSchedulerLocked() noexcept {
+  io::IoScheduler& io = *desc.scheduler;
+  using Phase = detail::SchedulerRead::Phase;
+  for (std::uint32_t i = 0; i < desc.maxBanks; ++i) {
+    Slot& s = slots[i];
+    detail::SchedulerRead& r = s.sched;
+    if (s.stage != Stage::Open && s.stage != Stage::Reading) continue;
+    if (s.cancel) {  // freed by Pump once nothing is in flight
+      detail::CancelRead(io, r);
+      if (r.Finished()) r.phase = Phase::Idle;
+      continue;
+    }
+    if (r.phase == Phase::Idle) {
+      const detail::SubmitResult sr = s.stage == Stage::Open
+                                          ? detail::SubmitSizeQuery(io, r, s.path)
+                                          : detail::SubmitWholeRead(io, r, s.path, s.image, s.imageBytes);
+      if (sr == detail::SubmitResult::ShutDown) Fail(s, SND_ERR_IO, "the IO scheduler is shut down");
+      continue;  // Retry: the file queue is full, try at the next PumpIo
+    }
+    if (!r.Finished()) continue;
+    const io::FileResult res = r.req.Result();
+    r.phase = Phase::Idle;
+    if (res.state == io::FileState::Cancelled) {
+      Fail(s, SND_ERR_IO, "the IO scheduler shut down before the bank was read");
+      continue;
+    }
+    if (res.state != io::FileState::Done) {
+      Fail(s, SND_ERR_IO, s.stage == Stage::Open ? "cannot open the bank file" : "reading the bank file failed");
+      continue;
+    }
+    if (s.stage == Stage::Open) {
+      if (!AllocateImage(s, res.fileSize)) continue;
+      s.stage = Stage::Reading;
+      const detail::SubmitResult sr = detail::SubmitWholeRead(io, r, s.path, s.image, s.imageBytes);
+      if (sr == detail::SubmitResult::ShutDown) Fail(s, SND_ERR_IO, "the IO scheduler is shut down");
+      continue;
+    }
+    if (res.bytesRead != s.imageBytes) {
+      char why[128];
+      std::snprintf(why, sizeof(why), "short read: %llu of %llu bytes (the file changed?)",
+                    static_cast<unsigned long long>(res.bytesRead), static_cast<unsigned long long>(s.imageBytes));
+      Fail(s, SND_ERR_IO, why);
+      continue;
+    }
+    StartValidation(s, i);
+  }
+}
+
 void Impl::PumpIoLocked() noexcept {
+  if (SchedulerMode()) {
+    PumpSchedulerLocked();
+    return;
+  }
   IFileSystem& fs = *desc.fileSystem;
   for (std::uint32_t i = 0; i < desc.maxBanks; ++i) {
     Slot& s = slots[i];
@@ -427,17 +544,7 @@ void Impl::PumpIoLocked() noexcept {
         continue;
       }
       s.read.file = file;  // closed by FreeLoadMemory / after reading
-      if (size > static_cast<std::uint64_t>(SIZE_MAX) - 64 || size == 0) {
-        Fail(s, size == 0 ? SND_ERR_CORRUPT : SND_ERR_OUT_OF_BUDGET,
-             size == 0 ? "the bank file is empty" : "the bank file is too large");
-        continue;
-      }
-      s.image = static_cast<std::uint8_t*>(alloc->Allocate(static_cast<std::size_t>(size), 64, MemTag::Bank));
-      if (s.image == nullptr) {
-        Fail(s, SND_ERR_OUT_OF_BUDGET, "cannot allocate memory for the bank image");
-        continue;
-      }
-      s.imageBytes = size;
+      if (!AllocateImage(s, size)) continue;
       s.read.fs = &fs;
       s.read.file = file;
       s.read.dst = s.image;
@@ -458,19 +565,7 @@ void Impl::PumpIoLocked() noexcept {
       detail::CloseBankFile(fs, s.read.file);
       s.read.file = kInvalidFile;
       if (s.cancel) continue;  // freed by Pump
-      // Validation and preparation on a normal worker (10.3).
-      s.stage = Stage::Validating;
-      s.ctx = JobCtx{this, i};
-      s.jobCounter = 1;
-      s.cancelFlag = 0;
-      s.prepared = nullptr;
-      s.jobResult = SND_ERR_NOT_READY;
-      JobDesc job{};
-      job.fn = &Impl::ValidateJob;
-      job.data = &s.ctx;
-      job.done_counter = &s.jobCounter;
-      job.cancel_flag = &s.cancelFlag;
-      desc.jobs->Submit(&job, 1, JobLane::Background);
+      StartValidation(s, i);
     }
   }
 }
@@ -523,13 +618,13 @@ bool Impl::PumpLocked() noexcept {
     Slot& s = slots[i];
     switch (s.stage) {
       case Stage::Open:
-        if (s.cancel) {
+        if (s.cancel && !IoInFlight(s)) {
           FreeSlot(s);
           changed = true;
         }
         break;
       case Stage::Reading:
-        if (s.cancel && !s.read.inflight) {
+        if (s.cancel && !IoInFlight(s)) {
           FreeSlot(s);
           changed = true;
         }

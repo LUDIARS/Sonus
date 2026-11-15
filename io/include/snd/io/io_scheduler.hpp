@@ -404,6 +404,10 @@ class IoScheduler {
   // has been drained and its path copied (bank unload epoch, 3.3).
   std::uint64_t DrainEpoch() const noexcept { return drainEpoch_.value.load(std::memory_order_acquire); }
   bool Running() const noexcept;
+  // Any thread. False once Shutdown() started (Post / Submit refuse everything
+  // from then on); true before. Lets a caller whose Submit failed tell "queue
+  // full, retry" from "shut down" (bank loading, stage 1.5).
+  bool Accepting() const noexcept;
 
   struct Impl;  // private (io/src)
 

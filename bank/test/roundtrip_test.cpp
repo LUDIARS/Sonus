@@ -150,6 +150,7 @@ SND_TEST(BankRoundTrip, ManagerLoadsBuiltBanks) {
   BankManagerDesc d;
   d.allocator = &alloc;
   d.fileSystem = &memFs;
+  d.ioMode = snd::bank::BankIoMode::DirectFileSystem;  // stage 1.5: the default is the IO scheduler
   d.jobs = &jobs;
   d.prepare.devOverlay = true;
   BankManager* m = nullptr;

@@ -102,6 +102,7 @@ SND_TEST(BankManagerThreads, ConcurrentLoadUnloadWithRealWorkers) {
     BankManagerDesc d;
     d.allocator = &alloc;
     d.fileSystem = &fs;
+    d.ioMode = snd::bank::BankIoMode::DirectFileSystem;  // stage 1.5: the default is the IO scheduler
     d.jobs = &pool;
     d.maxBanks = 6;
     d.ioChunkBytes = 512;

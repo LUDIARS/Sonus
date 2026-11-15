@@ -237,6 +237,7 @@ SND_TEST(BuildPipeline, DspNeedEqualsTheRuntimeSizing) {
     bk::BankManagerDesc md;
     md.allocator = &snd::base::DefaultAllocator();
     md.fileSystem = &fs;
+    md.ioMode = bk::BankIoMode::DirectFileSystem;
     md.jobs = &jobs;
     md.dsp.user = &pool;
     md.dsp.reserve = &ReserveHook;

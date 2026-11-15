@@ -3,8 +3,14 @@
 // Loading path (10.3), one bank:
 //
 //   game thread    RequestLoad(path)            slot -> LOADING (same path: existing handle)
-//   IO thread      PumpIo()                     Open / Size / ReadAsync / Poll / Close (IFileSystem)
-//                                               then submits the validation job (background lane)
+//   any non-RT     PumpIo()                     BankIoMode::Scheduler (default): submits io FileRequests
+//                                               (size query, then one whole-file read, IoClass::Bank) to
+//                                               the io module's IoScheduler and polls them; its IO thread
+//                                               does the IFileSystem calls (6.5, 10.3).
+//                                               BankIoMode::DirectFileSystem (tests, single-threaded
+//                                               hosts): PumpIo runs on the IO thread and calls the
+//                                               IFileSystem itself (Open / Size / ReadAsync / Poll / Close).
+//                                               Then submits the validation job (background lane)
 //   normal worker  (job) PrepareBank            validate (§8) + DSP need + dev override layer
 //   any non-RT     Pump()                       dependencies loaded and matching? DSP pool reserved?
 //                                               -> queue a cmd::BankRegister, or FAILED
@@ -19,12 +25,31 @@
 // A bank that is still loading (or failed) is cancelled / freed by
 // BeginUnload + Pump without ever being registered.
 //
-// All IFileSystem calls are in PumpIo (and src/bank_io.cpp); the io module's
-// scheduler will replace that single place in the next stage.
+// IO (stage 1.5, A1-11): src/bank_io.cpp holds both paths. Scheduler mode
+// never calls the IFileSystem: every byte goes through IoScheduler, which
+// orders bank reads with the stream reads by class and bandwidth.
+//
+// Cancellation and shutdown (Scheduler mode):
+//  - BeginUnload / a cancelled load of a bank whose read is in flight calls
+//    IoScheduler::Cancel(FileRequest); the slot (path, image) is freed only
+//    once the request Finished() (the scheduler may still write the image until
+//    then), by a later Pump(). Cancelled loads end UNLOADED, never FAILED.
+//  - IoScheduler::Shutdown() while banks are loading: their FileRequests end
+//    Cancelled; those banks end FAILED with SND_ERR_IO ("IO scheduler shut
+//    down") at the next PumpIo(), and every later RequestLoad fails the same
+//    way (the scheduler accepts nothing any more). Validated / registered banks
+//    are not affected.
+//  - Teardown order: stop the audio thread, IoScheduler::Shutdown(), drain the
+//    job system (no validation job left), BankManager::Destroy(), then
+//    IoScheduler::Destroy(). Destroy() with a request still in flight cancels
+//    it and, if the scheduler's IO thread is running, waits for it to finish;
+//    without a running IO thread such slots are leaked (as with a running job).
 //
 // Threads: every member function is safe to call from any non-RT thread (an
-// internal mutex serialises them; the validation job does not take it). The
-// audio thread only touches SlotStates() atomics and PreparedBank data.
+// internal mutex serialises them; the validation job does not take it). In
+// DirectFileSystem mode PumpIo() must be called on the thread that owns the
+// IFileSystem. The audio thread only touches SlotStates() atomics and
+// PreparedBank data.
 #ifndef SND_BANK_BANK_MANAGER_HPP
 #define SND_BANK_BANK_MANAGER_HPP
 
@@ -39,7 +64,17 @@
 #include "snd/internal/notify.hpp"
 #include "snd/types.h"
 
+namespace snd::io {
+class IoScheduler;  // snd/io/io_scheduler.hpp (bank depends on io, 12.1)
+}  // namespace snd::io
+
 namespace snd::bank {
+
+// Where the bank bytes come from (see the header comment).
+enum class BankIoMode : std::uint8_t {
+  Scheduler = 0,         // default: io::IoScheduler FileRequests (IoClass::Bank)
+  DirectFileSystem = 1,  // IFileSystem calls from PumpIo (tests, single-threaded hosts)
+};
 
 // DSP instance pool hook (3.3): core / dsp reserve the bank's DSPN need from
 // the pool. Returning false fails the load with SND_ERR_OUT_OF_BUDGET.
@@ -51,12 +86,14 @@ struct DspPoolHooks {
 
 struct BankManagerDesc {
   IAllocator* allocator = nullptr;    // required
-  IFileSystem* fileSystem = nullptr;  // required (IO thread only)
+  BankIoMode ioMode = BankIoMode::Scheduler;
+  io::IoScheduler* scheduler = nullptr;  // required in Scheduler mode (must outlive the manager)
+  IFileSystem* fileSystem = nullptr;  // required in DirectFileSystem mode (PumpIo on the IO thread)
   IJobSystem* jobs = nullptr;         // required (background lane)
   std::uint32_t maxBanks = 64;        // Config.maxBanks
   PrepareOptions prepare;             // platform, dev override layer, devReserve
-  std::uint32_t ioChunkBytes = 1u << 20;  // bytes per ReadAsync
-  std::uint64_t ioTokenBase = 0;      // high bits for snd_io_token values (unique per FS user)
+  std::uint32_t ioChunkBytes = 1u << 20;  // DirectFileSystem: bytes per ReadAsync (Scheduler: its filePieceBytes)
+  std::uint64_t ioTokenBase = 0;      // DirectFileSystem: high bits for snd_io_token values (unique per FS user)
   // External slot state array (core's notification block), maxBanks entries.
   // nullptr: the manager allocates its own (MemTag::Notify).
   notify::BankSlotState* slotStates = nullptr;
@@ -84,7 +121,7 @@ class BankManager {
   // No free slot: none handle and SND_ERR_LIMIT_REACHED.
   HandleRef RequestLoad(const char* path, snd_result* result = nullptr) noexcept;
 
-  // --- IO thread --------------------------------------------------------------------
+  // --- IO (Scheduler mode: any non-RT thread; DirectFileSystem: the IO thread) ---------
   void PumpIo() noexcept;
 
   // --- any non-RT thread ---------------------------------------------------------------
