@@ -3,3 +3,23 @@ snd_add_test(buildtool_test
   LINK sonus_buildtool sonus_mocks)
 target_compile_definitions(buildtool_test PRIVATE
   SND_BUILDTOOL_TEST_DATA="${CMAKE_CURRENT_SOURCE_DIR}/data")
+
+# --- Independent tests (test owner, not the implementer) -----------------------------
+# JSON (RFC 8259) and WAV readers: boundaries, error positions, fixed-seed fuzz.
+# Tests named Defect_* fail on purpose (see the file).
+snd_add_test(buildtool_json_wav_edge_test
+  SOURCES json_wav_edge_test.cpp
+  LINK sonus_buildtool sonus_mocks)
+
+# Build edge cases: generated header compiled with the real compiler, real ID
+# collisions, references / cycles, transition warnings, determinism, cache,
+# output atomicity, CLI exit codes. Tests named Defect_* fail on purpose.
+snd_add_test(buildtool_build_edge_test
+  SOURCES build_edge_test.cpp
+  LINK sonus_buildtool sonus_mocks)
+target_compile_definitions(buildtool_build_edge_test PRIVATE
+  SND_TEST_CXX="${CMAKE_CXX_COMPILER}"
+  SND_TEST_PUBLIC_INCLUDE="${PROJECT_SOURCE_DIR}/contract/public/include"
+  SND_BUILD_EXE="$<TARGET_FILE:sonus-build>")
+add_dependencies(buildtool_build_edge_test sonus-build)
+set_tests_properties(buildtool_build_edge_test PROPERTIES TIMEOUT 600)
