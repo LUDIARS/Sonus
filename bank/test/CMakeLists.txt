@@ -85,3 +85,18 @@ target_link_libraries(bank_scheduler_thread_test PRIVATE Threads::Threads)
 
 # Contract 1.1 in the bank manager (D-46, D-50).
 snd_add_test(bank_contract11_test SOURCES contract11_test.cpp LINK sonus_bank sonus_mocks)
+
+# --- Independent tests (contract 1.1 / stage 1.5) ------------------------------------
+# BankManager over IoScheduler: Shutdown at each stage, Destroy with a read in
+# flight, duplicate rules, language names, image integrity.
+snd_add_test(bank_indep_io11_test SOURCES indep_bank_io11_test.cpp fixture_bank.cpp LINK sonus_bank sonus_io sonus_mocks)
+find_package(Threads REQUIRED)
+target_link_libraries(bank_indep_io11_test PRIVATE Threads::Threads)
+# Fails on purpose: the duplicate-bank decision follows the slot index, not the request order.
+snd_add_test(Defect_bank_duplicate_order_test SOURCES defect_bank_duplicate_order_test.cpp fixture_bank.cpp
+  LINK sonus_bank sonus_io sonus_mocks)
+# Real IO thread + worker pool + memory FS faults; content / duplicate / generation
+# invariants checked while it runs. TSan, and ctest --repeat until-fail:20.
+snd_add_test(bank_indep_io11_thread_test SOURCES indep_bank_io11_thread_test.cpp fixture_bank.cpp
+  LINK sonus_bank sonus_io sonus_jobs sonus_mocks)
+target_link_libraries(bank_indep_io11_thread_test PRIVATE Threads::Threads)
