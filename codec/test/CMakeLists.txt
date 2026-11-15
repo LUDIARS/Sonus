@@ -14,3 +14,10 @@ if(CMAKE_NM)
     COMMAND ${CMAKE_COMMAND} -DNM=${CMAKE_NM} -DEXE=$<TARGET_FILE:codec_runtime_test>
             -P ${CMAKE_CURRENT_SOURCE_DIR}/check_no_encoder.cmake)
 endif()
+
+# Independent tests (written by a tester from the specification, not by the implementer).
+snd_add_test(codec_indep_decode_test SOURCES indep_decode_test.cpp LINK sonus_codec)
+snd_add_test(codec_indep_encode_test SOURCES indep_encode_test.cpp LINK sonus_codec)
+snd_add_test(codec_indep_pool_test SOURCES indep_pool_registry_test.cpp LINK sonus_codec)
+snd_add_test(codec_indep_fuzz_test SOURCES indep_fuzz_test.cpp LINK sonus_codec)
+set_tests_properties(codec_indep_decode_test codec_indep_encode_test codec_indep_fuzz_test PROPERTIES TIMEOUT 900)
