@@ -1,0 +1,9 @@
+// Stage-0 smoke test of the jobs module. Replace / extend with the module's
+// unit tests (design.md 14). Mocks: snd/mocks/*.hpp, golden audio:
+// snd/test/golden.hpp, RT checks: snd/test/rt_guard.hpp.
+#include <cstring>
+
+#include "snd/jobs/jobs_module.hpp"
+#include "snd/test/test.hpp"
+
+SND_TEST(Jobs, ModuleLinks) { SND_CHECK(std::strcmp(snd::jobs::ModuleName(), "jobs") == 0); }
