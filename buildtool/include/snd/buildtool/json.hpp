@@ -59,8 +59,12 @@ struct ParseError {
 bool Parse(std::string_view text, Value* out, ParseError* error);
 
 // Serialises with 2-space indentation and the members in stored order.
+// Strings and member names are written as UTF-8: well-formed sequences are
+// copied, and each byte that does not start a well-formed sequence (RFC 3629:
+// no overlongs, surrogates or code points above U+10FFFF) is replaced by
+// U+FFFD, so Write never produces text that Parse rejects.
 std::string Write(const Value& v);
-// JSON string literal (quoted, escaped).
+// JSON string literal (quoted, escaped; malformed UTF-8 -> U+FFFD as in Write).
 std::string Quote(std::string_view s);
 
 // Builders for writers.

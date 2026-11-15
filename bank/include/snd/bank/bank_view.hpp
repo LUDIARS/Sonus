@@ -267,14 +267,23 @@ class BankView {
   // NAME table lookup: first non-alias name of `id` (nullptr if unknown / stripped).
   const char* Name(Id id) const noexcept;
   // ALIS (2.0): current id of a renamed object's old id (10.1), 0 if none.
-  // Kept in release banks (not strippable).
+  // Kept in release banks (not strippable). One step: the build folds chains,
+  // so the row always names the current id. Rows are validated to be sorted by
+  // oldId (strictly increasing): binary search.
   Id ResolveAlias(Id oldId) const noexcept {
     const ColumnView<std::uint32_t> olds = Column<col::ALIS_oldId>();
     const ColumnView<std::uint32_t> ids = Column<col::ALIS_id>();
-    for (std::uint32_t r = 0; r < olds.rows(); ++r) {
-      if (olds[r] == oldId) return ids[r];
+    std::uint32_t lo = 0;
+    std::uint32_t hi = olds.rows();
+    while (lo < hi) {
+      const std::uint32_t mid = lo + (hi - lo) / 2;
+      if (olds[mid] < oldId) {
+        lo = mid + 1;
+      } else {
+        hi = mid;
+      }
     }
-    return 0;
+    return (lo < olds.rows() && olds[lo] == oldId) ? ids[lo] : 0;
   }
   // GUID table lookup (dev builds). false if absent.
   bool Guid(Id id, std::uint64_t* lo, std::uint64_t* hi) const noexcept;

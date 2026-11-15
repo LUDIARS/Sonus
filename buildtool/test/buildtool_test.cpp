@@ -303,8 +303,8 @@ SND_TEST(BuildtoolBuild, SampleProject) {
   SND_CHECK(idsText.find("\"aliasOf\": \"SE/Explosion\"") != std::string::npos);
   const std::vector<std::uint8_t> hdr = sample::ReadFile(out / "sonus_ids.h");
   const std::string h(hdr.begin(), hdr.end());
-  SND_CHECK(h.find("SE_Explosion = " + std::string("0x")) != std::string::npos);
-  SND_CHECK(h.find("static_assert(event::SE_Explosion == snd::HashId(\"SE/Explosion\"));") != std::string::npos);
+  SND_CHECK(h.find("id_SE_Explosion = " + std::string("0x")) != std::string::npos);
+  SND_CHECK(h.find("static_assert(event::id_SE_Explosion == snd::HashId(\"SE/Explosion\"));") != std::string::npos);
 }
 
 SND_TEST(BuildtoolBuild, ReleaseStripsStringsAndGuids) {

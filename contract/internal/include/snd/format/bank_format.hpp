@@ -427,7 +427,9 @@ inline constexpr ChunkInfo kChunks[] = {
   COL(GUID, guidLo, 1, U64, 1, 0)                                                 \
   COL(GUID, guidHi, 2, U64, 1, 0)                                                 \
   COL(GUID, kind, 3, U32, 0, 0)                                                   \
-  /* ALIS (2.0): rename history, kept in release banks ---------------------- */ \
+  /* ALIS (2.0): rename history, kept in release banks. Rows sorted by oldId   */ \
+  /* (strictly increasing), oldId != 0, id != 0, oldId != id; id is always the */ \
+  /* current id (chains folded by the writer); unknown kind values: ignore.    */ \
   COL(ALIS, oldId, 0, U32, 1, 0)        /* snd_hash_id(old name) */              \
   COL(ALIS, id, 1, U32, 1, 0)           /* current runtime id */                 \
   COL(ALIS, kind, 2, U32, 0, 0)         /* NameKind of the object */

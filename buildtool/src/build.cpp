@@ -77,40 +77,33 @@ std::uint64_t Align64(std::uint64_t v) { return (v + 63) & ~std::uint64_t{63}; }
 
 bool ReadBinary(const fs::path& p, std::vector<std::uint8_t>* out) { return detail::ReadFileBytes(p, out); }
 
-// C and C++ keywords, alternative tokens and other names that cannot be identifiers.
-bool IsReservedWord(const std::string& s) {
-  static const char* const kWords[] = {
-      "alignas", "alignof", "and", "and_eq", "asm", "atomic_cancel", "atomic_commit", "atomic_noexcept", "auto",
-      "bitand", "bitor", "bool", "break", "case", "catch", "char", "char8_t", "char16_t", "char32_t", "class",
-      "compl", "concept", "const", "consteval", "constexpr", "constinit", "const_cast", "continue", "co_await",
-      "co_return", "co_yield", "decltype", "default", "delete", "do", "double", "dynamic_cast", "else", "enum",
-      "explicit", "export", "extern", "false", "float", "for", "friend", "goto", "if", "inline", "int", "long",
-      "mutable", "namespace", "new", "noexcept", "not", "not_eq", "nullptr", "operator", "or", "or_eq", "private",
-      "protected", "public", "reflexpr", "register", "reinterpret_cast", "requires", "restrict", "return", "short",
-      "signed", "sizeof", "static", "static_assert", "static_cast", "struct", "switch", "synchronized", "template",
-      "this", "thread_local", "throw", "true", "try", "typedef", "typeid", "typename", "union", "unsigned", "using",
-      "virtual", "void", "volatile", "wchar_t", "while", "xor", "xor_eq", "final", "override", "import", "module",
-      "_Alignas", "_Alignof", "_Atomic", "_Bool", "_Complex", "_Generic", "_Imaginary", "_Noreturn",
-      "_Static_assert", "_Thread_local", "NULL", "EOF", "errno", "assert", "offsetof", "main", "std", "snd",
-      "snd_ids"};
-  for (const char* w : kWords) {
-    if (s == w) return true;
-  }
-  return false;
-}
-
-// Name -> C++ identifier: [A-Za-z0-9_] kept, others '_'; no leading digit or
-// '_' (reserved patterns), no "__", and keywords / macros get a trailing '_'.
-std::string Sanitize(const std::string& name) {
+// Name -> file-name component ([A-Za-z0-9_], other characters '_', no "__").
+std::string FileSafe(const std::string& name) {
   std::string s;
   for (char c : name) {
     const bool ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_';
     const char out = ok ? c : '_';
-    if (out == '_' && !s.empty() && s.back() == '_') continue;  // never "__"
+    if (out == '_' && !s.empty() && s.back() == '_') continue;
     s.push_back(out);
   }
-  if (s.empty() || (s[0] >= '0' && s[0] <= '9') || s[0] == '_') s = "k" + s;
-  if (IsReservedWord(s)) s += "_";
+  return s.empty() ? std::string("_") : s;
+}
+
+// Name -> identifier of sonus_ids.h: the fixed prefix "id_" followed by the
+// name with every character outside [A-Za-z0-9_] replaced by '_', runs of '_'
+// collapsed and leading '_' dropped. The prefix keeps every identifier clear of
+// keywords, of names starting with a digit or '_' (reserved), and of macros
+// (standard and Sonus macros are upper case, start with SND_ or '_', or are a
+// few lower-case names such as assert / errno, none starting with "id_").
+// Names that end up equal get "_2", "_3", ... in id order (WriteIdOutputs).
+std::string HeaderIdent(const std::string& name) {
+  std::string s = "id_";
+  for (char c : name) {
+    const bool ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_';
+    const char out = ok ? c : '_';
+    if (out == '_' && s.back() == '_') continue;  // no "__", no "id__"
+    s.push_back(out);
+  }
   return s;
 }
 
@@ -338,8 +331,15 @@ void Builder::CheckIds() {
             p_.ErrorAt(o, a, "an alias must be a non-empty string", d_);
             continue;
           }
-          const Object* other = p_.FindByName(o.kind, a.text);
-          if (other != nullptr) p_.ErrorAt(o, a, "alias '" + a.text + "' is the name of " + other->file, d_);
+          // An old name must not be a current name of any kind: its id would then
+          // be both live and an alias (ALIS oldId -> id must be a rename).
+          for (int k = 0; k < static_cast<int>(Kind::Count); ++k) {
+            const Object* other = p_.FindByName(static_cast<Kind>(k), a.text);
+            if (other != nullptr) {
+              p_.ErrorAt(o, a, "alias '" + a.text + "' is the name of " + other->file, d_);
+              break;
+            }
+          }
           check(a.text, o, a);
         }
       }
@@ -819,7 +819,7 @@ void Builder::EmitAsset(BankTables& t, const Object& a, const std::string& langu
   }
   char idHex[16];
   std::snprintf(idHex, sizeof(idHex), "%08x", a.id);
-  const std::string rel = "streams/" + Sanitize(a.name) + "_" + idHex + (language.empty() ? "" : "." + language) + ".snds";
+  const std::string rel = "streams/" + FileSafe(a.name) + "_" + idHex + (language.empty() ? "" : "." + language) + ".snds";
   std::vector<std::uint8_t> file(sector, 0);
   const bf::StreamFileHeader sh{bf::kStreamMagic, bf::kStreamVersion, a.id, e.codec, c.channels, c.sampleRate,
                                 e.totalFrames, sector, e.data.size(), static_cast<std::uint32_t>(sector), 0, 0};
@@ -1452,6 +1452,7 @@ void Builder::BuildBank(const Object& bank, const std::string& language) {
                                            col::EVNT_curveReverbSend, col::EVNT_curveBlend3D};
       static const std::uint32_t targets[] = {0, 2, 7, 8, 9};
       for (const auto& m : dc->members) {
+        if (m.first == "notes") continue;  // free-form at every level
         int k = -1;
         for (int j = 0; j < 5; ++j) k = m.first == keys[j] ? j : k;
         if (k < 0) {
@@ -1847,6 +1848,7 @@ void Builder::BuildBank(const Object& bank, const std::string& language) {
       std::vector<bf::PhysCurves> curves(n, bf::PhysCurves{{0.1f, 1.0f, 10.0f, 100.0f}, {0, 0}, {-30.0f, 0.0f}});
       if (const Value* sv = d.Find("single"); sv != nullptr && sv->IsObject()) {
         for (const auto& kv : sv->members) {
+          if (kv.first == "notes") continue;  // free-form at every level
           Value key = json::MakeString(kv.first);
           key.line = kv.second.line;
           key.column = kv.second.column;
@@ -1873,6 +1875,7 @@ void Builder::BuildBank(const Object& bank, const std::string& language) {
       }
       if (const Value* fv = d.Find("footsteps"); fv != nullptr && fv->IsObject()) {
         for (const auto& kv : fv->members) {
+          if (kv.first == "notes") continue;
           Value key = json::MakeString(kv.first);
           key.line = kv.second.line;
           key.column = kv.second.column;
@@ -1888,6 +1891,7 @@ void Builder::BuildBank(const Object& bank, const std::string& language) {
       }
       if (const Value* cv = d.Find("curves"); cv != nullptr && cv->IsObject()) {
         for (const auto& kv : cv->members) {
+          if (kv.first == "notes") continue;
           Value key = json::MakeString(kv.first);
           key.line = kv.second.line;
           key.column = kv.second.column;
@@ -1927,6 +1931,7 @@ void Builder::BuildBank(const Object& bank, const std::string& language) {
   }
 
   // ---- names: bank + aliases (10.1) ----
+  std::map<Id, std::pair<Id, std::uint32_t>> aliasRows;  // oldId -> (id, NameKind)
   AddName(t, HashId(bn), bn, bf::NameKind::Other);
   AddGuid(t, bank, bf::NameKind::Other);
   for (const Object& o : p_.objects()) {
@@ -1940,18 +1945,40 @@ void Builder::BuildBank(const Object& bank, const std::string& language) {
     for (const Value& a : al->items) {
       if (!a.IsString()) continue;
       AddName(t, o.id, a.text, bf::NameKind::Alias);
-      // ALIS (bank format 2.0): old id -> current id, kept in release banks.
-      const std::uint32_t r = t.alis.AddRow();
-      t.alis.U32(col::ALIS_oldId, r, HashId(a.text));
-      t.alis.U32(col::ALIS_id, r, o.id);
       const bf::NameKind k = o.kind == Kind::Event      ? bf::NameKind::Event
                              : o.kind == Kind::Bus      ? bf::NameKind::Bus
                              : o.kind == Kind::Parameter ? bf::NameKind::Param
                              : o.kind == Kind::Category ? bf::NameKind::Category
                              : o.kind == Kind::Snapshot ? bf::NameKind::Snapshot
                                                         : bf::NameKind::Other;
-      t.alis.U32(col::ALIS_kind, r, static_cast<std::uint32_t>(k));
+      const Id oldId = HashId(a.text);
+      auto ins = aliasRows.emplace(oldId, std::make_pair(o.id, static_cast<std::uint32_t>(k)));
+      if (!ins.second && ins.first->second.first != o.id) {
+        p_.ErrorAt(o, a, "alias '" + a.text + "' is also an alias of another object (id " +
+                             detail::Hex32(ins.first->second.first) + ")", d_);
+      }
     }
+  }
+  // ALIS (bank format 2.0): old id -> current id, sorted by oldId, kept in
+  // release banks. Chains (A -> B, B -> C) are folded so that every row names
+  // the current id (the runtime resolves one step). With the rule above an
+  // old name is never a current name, so chains cannot occur; folding keeps
+  // the invariant even if that rule is relaxed.
+  for (auto& [oldId, target] : aliasRows) {
+    Id cur = target.first;
+    for (std::size_t steps = 0; steps < aliasRows.size(); ++steps) {
+      auto next = aliasRows.find(cur);
+      if (next == aliasRows.end()) break;
+      cur = next->second.first;
+    }
+    if (cur == oldId) {
+      p_.ErrorAt(bank, bank.doc, "rename aliases form a cycle through id " + detail::Hex32(oldId), d_);
+      continue;
+    }
+    const std::uint32_t r = t.alis.AddRow();  // std::map: ascending oldId
+    t.alis.U32(col::ALIS_oldId, r, oldId);
+    t.alis.U32(col::ALIS_id, r, cur);
+    t.alis.U32(col::ALIS_kind, r, target.second);
   }
 
   if (d_.errors() > 0) return;
@@ -2079,23 +2106,23 @@ void Builder::WriteIdOutputs() {
   std::string asserts;
   for (const auto& [key, e] : ids_) {
     if (e.kind != currentKind) {
-      if (!currentKind.empty()) h += "}  // namespace " + Sanitize(currentKind) + "\n";
+      if (!currentKind.empty()) h += "}  // namespace " + currentKind + "\n";
       currentKind = e.kind;
       used.clear();
-      h += "namespace " + Sanitize(currentKind) + " {\n";
+      h += "namespace " + currentKind + " {\n";  // kind names: a fixed set of lower-case words
     }
-    std::string ident = Sanitize(e.name);
-    for (int n = 2; !used.insert(ident).second; ++n) ident = Sanitize(e.name) + "_" + std::to_string(n);
+    std::string ident = HeaderIdent(e.name);
+    for (int n = 2; !used.insert(ident).second; ++n) ident = HeaderIdent(e.name) + "_" + std::to_string(n);
     const std::string escaped = json::Quote(e.name);
     if (e.aliasOf.empty()) {
       h += "inline constexpr snd::Id " + ident + " = " + detail::Hex32(e.id) + "u;  // " + escaped + "\n";
-      asserts += "static_assert(" + Sanitize(currentKind) + "::" + ident + " == snd::HashId(" + escaped + "));\n";
+      asserts += "static_assert(" + currentKind + "::" + ident + " == snd::HashId(" + escaped + "));\n";
     } else {
       h += "inline constexpr snd::Id " + ident + " = " + detail::Hex32(HashId(e.aliasOf)) + "u;  // alias " +
            escaped + " -> " + json::Quote(e.aliasOf) + "\n";
     }
   }
-  if (!currentKind.empty()) h += "}  // namespace " + Sanitize(currentKind) + "\n";
+  if (!currentKind.empty()) h += "}  // namespace " + currentKind + "\n";
   h += "\n" + asserts + "\n}  // namespace snd_ids\n";
   Stage(opt_.idsHeader, std::vector<std::uint8_t>(h.begin(), h.end()));
 }

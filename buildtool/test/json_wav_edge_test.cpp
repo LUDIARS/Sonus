@@ -298,24 +298,34 @@ SND_TEST(JsonEdge, WriteQuoteRoundTrip) {
 }
 
 // The writer given malformed UTF-8 (not reachable from Parse, only from code
-// building Values): json.hpp does not document it (spec gap, reported). What
-// must hold: the result is never read back as a *different* valid string -
-// Parse either rejects it (the reader's rule) or returns the same bytes.
+// building Values). Decision (json.hpp): every byte that does not start a
+// well-formed sequence is written as U+FFFD, so the output always parses and
+// reads back as valid UTF-8 with the valid parts unchanged.
+// (Updated by the implementer for the coordinator's decision b; the earlier
+// version expected the reader to reject the pass-through output.)
 SND_TEST(JsonEdge, WriterWithMalformedUtf8) {
-  const char* bad[] = {"\xFF", "\xC0\xAF", "\x80", "\xED\xA0\x80", "\xF5\x80\x80\x80", "\xE3\x81"};
-  int rejected = 0;
-  for (const char* b : bad) {
-    json::Value v = json::MakeString(std::string("x") + b + "y");
+  struct Case {
+    const char* bad;
+    const char* expected;  // what reads back in place of `bad`
+  } cases[] = {
+      {"\xFF", "\xEF\xBF\xBD"},
+      {"\xC0\xAF", "\xEF\xBF\xBD\xEF\xBF\xBD"},
+      {"\x80", "\xEF\xBF\xBD"},
+      {"\xED\xA0\x80", "\xEF\xBF\xBD\xEF\xBF\xBD\xEF\xBF\xBD"},
+      {"\xF5\x80\x80\x80", "\xEF\xBF\xBD\xEF\xBF\xBD\xEF\xBF\xBD\xEF\xBF\xBD"},
+      {"\xE3\x81", "\xEF\xBF\xBD\xEF\xBF\xBD"},
+      {"\xE3\x81\x82\xFF", "\xE3\x81\x82\xEF\xBF\xBD"},  // the valid part is kept
+  };
+  for (const Case& c : cases) {
+    json::Value v = json::MakeObject();
+    json::Add(v, std::string("k") + c.bad, json::MakeString(std::string("x") + c.bad + "y"));
     const std::string text = json::Write(v);
     json::Value back;
-    if (Ok(text, &back)) {
-      SND_CHECK_MSG(Same(v, back), "malformed input came back altered");
-    } else {
-      ++rejected;
-    }
+    SND_REQUIRE(Ok(text, &back));
+    SND_REQUIRE_EQ(back.members.size(), std::size_t{1});
+    SND_CHECK(back.members[0].first == std::string("k") + c.expected);
+    SND_CHECK(back.members[0].second.text == std::string("x") + c.expected + "y");
   }
-  snd::test::Note("writer passes malformed UTF-8 through unchanged; the reader rejects %d of 6", rejected);
-  SND_CHECK_EQ(rejected, 6);
 }
 
 SND_TEST(JsonEdge, FuzzNeverCrashesAndRoundTrips) {

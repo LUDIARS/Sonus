@@ -42,6 +42,12 @@ sonus-build --project game/audio --out build/banks [--platform LNX_] [--release]
 `-fno-exceptions` のビルドなので、ファイルの読み書きは iostream と例外を投げる `std::filesystem` の多重定義を使わず、
 `fopen`/`fread` とエラーコード版で行う（入力パスがディレクトリでも異常終了せず `cannot read` のエラーになる）。
 
+## 生成ヘッダの識別子
+
+`sonus_ids.h` の識別子は `id_` ＋ 名前（`[A-Za-z0-9_]` 以外は `_`、`_` の連続は 1 つ、先頭の `_` は落とす）。
+固定の接頭辞なので C / C++ の予約語、マクロ（`SIZE_MAX`, `SND_API`, `assert` …）、`_` 始まりの予約名とぶつからない。
+加工後に同じになった名前は 2 つ目から `_2`, `_3` … を付ける（project-format.md §5）。
+
 ## ライブラリとして使う
 
 `snd/buildtool/build.hpp` の `snd::buildtool::Build(options, diagnostics, &result)`。差し込み口は `snd/buildtool/plugins.hpp`:

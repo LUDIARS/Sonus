@@ -488,20 +488,30 @@ void BankManager::Pump() noexcept {
     }
   }
   if (loading) return;
-  for (std::uint32_t i = 0; i < impl_->desc.maxBanks; ++i) {
-    Impl::Slot& s = impl_->slots[i];
-    if (s.stage != Stage::Validated) continue;
-    char why[160];
+  // Fail one bank whose dependency is missing at a time, then let the others
+  // decide again (a second load of the same bank waits for the first one, so
+  // it gets its own reason once the first has failed).
+  for (;;) {
+    Impl::Slot* victim = nullptr;
     std::uint32_t missing = 0;
-    for (std::uint32_t d = 0; d < s.prepared->dependencyCount; ++d) {
-      const bf::Dependency dep = s.prepared->view.dependency(d);
-      if (impl_->FindLoaded(dep.bankId, 0) == nullptr) {
-        missing = dep.bankId;
-        break;
+    for (std::uint32_t i = 0; i < impl_->desc.maxBanks && victim == nullptr; ++i) {
+      Impl::Slot& s = impl_->slots[i];
+      if (s.stage != Stage::Validated) continue;
+      for (std::uint32_t d = 0; d < s.prepared->dependencyCount; ++d) {
+        const bf::Dependency dep = s.prepared->view.dependency(d);
+        if (impl_->FindLoaded(dep.bankId, 0) == nullptr) {
+          victim = &s;
+          missing = dep.bankId;
+          break;
+        }
       }
     }
+    if (victim == nullptr) break;
+    char why[160];
     std::snprintf(why, sizeof(why), "dependency bank %08x is not loaded", missing);
-    impl_->Fail(s, SND_ERR_BANK_DEPENDENCY, why);
+    impl_->Fail(*victim, SND_ERR_BANK_DEPENDENCY, why);
+    while (impl_->PumpLocked()) {
+    }
   }
 }
 
@@ -562,6 +572,9 @@ bool Impl::Decide(Slot& s) noexcept {
                          (o.stage == Stage::Validated && &o < &s);
     if (&o == &s || o.cancel || !earlier || o.prepared == nullptr) continue;
     if (o.prepared->bankId == pb.bankId && o.prepared->languageId == pb.languageId) {
+      // The first one is still deciding (e.g. waiting for its dependencies): wait
+      // for its outcome so that the reason given here is the real one.
+      if (o.stage == Stage::Validated) return false;
       char why[192];
       std::snprintf(why, sizeof(why), "bank %08x is already loaded or loading from '%.120s'", pb.bankId,
                     o.path != nullptr ? o.path : "?");

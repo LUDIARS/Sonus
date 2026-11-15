@@ -90,6 +90,18 @@ inline std::vector<Case> Cases() {
   add("unterminated stream path", [](B& b) { b.Find(ch::SPTH)->blob = fixture::Bytes("x", false); }, nullptr, true,
       SND_ERR_CORRUPT);
   add("stem channels", [](B& b) { b.SetU32(ch::MSTM, c::MSTM_channelCount, 0, 3); }, nullptr, true, SND_ERR_CORRUPT);
+  add("ALIS not sorted",
+      [](B& b) { b.Table(ch::ALIS, 2, {fixture::U32(c::ALIS_oldId, {9, 3}), fixture::U32(c::ALIS_id, {1, 1})}); },
+      nullptr, true, SND_ERR_CORRUPT);
+  add("ALIS duplicate oldId",
+      [](B& b) { b.Table(ch::ALIS, 2, {fixture::U32(c::ALIS_oldId, {3, 3}), fixture::U32(c::ALIS_id, {1, 2})}); },
+      nullptr, true, SND_ERR_CORRUPT);
+  add("ALIS id 0", [](B& b) { b.Table(ch::ALIS, 1, {fixture::U32(c::ALIS_oldId, {3}), fixture::U32(c::ALIS_id, {0})}); },
+      nullptr, true, SND_ERR_CORRUPT);
+  add("ALIS oldId 0", [](B& b) { b.Table(ch::ALIS, 1, {fixture::U32(c::ALIS_oldId, {0}), fixture::U32(c::ALIS_id, {4})}); },
+      nullptr, true, SND_ERR_CORRUPT);
+  add("ALIS self", [](B& b) { b.Table(ch::ALIS, 1, {fixture::U32(c::ALIS_oldId, {7}), fixture::U32(c::ALIS_id, {7})}); },
+      nullptr, true, SND_ERR_CORRUPT);
   add("DSPN size", [](B& b) { b.Find(ch::DSPN)->blob.resize(8); }, nullptr, true, SND_ERR_CORRUPT);
   add("PHYS size", [](B& b) { b.Find(ch::PHYS)->blob.resize(40); }, nullptr, true, SND_ERR_CORRUPT);
   return v;

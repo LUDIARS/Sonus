@@ -156,6 +156,7 @@ void CheckMembers(const std::string& file, const json::Value& v, const Schema* s
   if (!v.IsObject()) return;
   for (const auto& m : v.members) {
     const std::string path = where.empty() ? m.first : where + "." + m.first;
+    if (m.first == "notes") continue;  // free-form text allowed in every object (project-format.md §1)
     if (schema->freeKeys) {
       CheckMembers(file, m.second, schema->freeChild, path, diag);
       continue;

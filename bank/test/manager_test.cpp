@@ -476,3 +476,20 @@ SND_TEST(BankManager, RetryResetsNotified) {
   env.Settle(2);
   SND_CHECK_EQ(env.m->State(h), SND_BANK_STATE_LOADED);
 }
+
+// The second load of the same bank waits for the first one's outcome: when the
+// first fails for a missing dependency, so does the second, with that reason.
+SND_TEST(BankManager, SameBankTwiceWithMissingDependencyGivesTheRealReason) {
+  Env env;
+  fixture::Bank b = SimpleBank("Dep2");
+  b.deps.push_back(bf::Dependency{HashId("Nowhere"), 0, 1});
+  const std::vector<std::uint8_t> bytes = b.Build();
+  env.fs.AddFile("a/Dep2.sndb", bytes);
+  env.fs.AddFile("b/Dep2.sndb", bytes);
+  const HandleRef a = env.m->RequestLoad("a/Dep2.sndb");
+  const HandleRef c = env.m->RequestLoad("b/Dep2.sndb");
+  env.Settle(3);
+  SND_CHECK_EQ(env.m->Result(a), SND_ERR_BANK_DEPENDENCY);
+  SND_CHECK_EQ(env.m->Result(c), SND_ERR_BANK_DEPENDENCY);
+  SND_CHECK(std::strstr(env.m->FailureReason(c), "is not loaded") != nullptr);
+}

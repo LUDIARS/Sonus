@@ -423,9 +423,49 @@ bool Parse(std::string_view text, Value* out, ParseError* error) {
   return p.Document(out);
 }
 
+namespace {
+// Length of the well-formed UTF-8 sequence at s[i] (RFC 3629), 0 if malformed.
+std::size_t Utf8Length(std::string_view s, std::size_t i) {
+  const auto b0 = static_cast<unsigned char>(s[i]);
+  std::size_t n = 0;
+  std::uint32_t cp = 0;
+  std::uint32_t min = 0;
+  if (b0 >= 0xC2 && b0 <= 0xDF) {
+    n = 1, cp = b0 & 0x1Fu, min = 0x80;
+  } else if (b0 >= 0xE0 && b0 <= 0xEF) {
+    n = 2, cp = b0 & 0x0Fu, min = 0x800;
+  } else if (b0 >= 0xF0 && b0 <= 0xF4) {
+    n = 3, cp = b0 & 0x07u, min = 0x10000;
+  } else {
+    return 0;
+  }
+  if (s.size() - i < n + 1) return 0;
+  for (std::size_t k = 1; k <= n; ++k) {
+    const auto b = static_cast<unsigned char>(s[i + k]);
+    if ((b & 0xC0u) != 0x80u) return 0;
+    cp = (cp << 6) | (b & 0x3Fu);
+  }
+  if (cp < min || cp > 0x10FFFF || (cp >= 0xD800 && cp <= 0xDFFF)) return 0;
+  return n + 1;
+}
+}  // namespace
+
 std::string Quote(std::string_view s) {
   std::string out = "\"";
-  for (char c : s) {
+  for (std::size_t i = 0; i < s.size(); ++i) {
+    const char c = s[i];
+    if (static_cast<unsigned char>(c) >= 0x80) {
+      // Well-formed UTF-8 is copied; every byte that does not start one is
+      // written as U+FFFD (json.hpp), so the output is always valid JSON text.
+      const std::size_t n = Utf8Length(s, i);
+      if (n == 0) {
+        out += "\xEF\xBF\xBD";
+      } else {
+        out.append(s.substr(i, n));
+        i += n - 1;
+      }
+      continue;
+    }
     switch (c) {
       case '"': out += "\\\""; break;
       case '\\': out += "\\\\"; break;

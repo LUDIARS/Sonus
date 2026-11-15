@@ -695,6 +695,22 @@ snd_result Checker::CheckReferences() noexcept {
   SND_TRY(Row(ch::MSTG, c::MSTG_event, ch::EVNT, false));
   // NAME (only when the string pool is usable; both are strippable together)
   if (RowsOf(ch::NAME) > 0) SND_TRY(Str(ch::NAME, c::NAME_stringOffset, ch::STRS));
+  // ALIS (2.0): oldId strictly increasing (sorted, no duplicates), ids non-zero, oldId != id.
+  {
+    const Col oldId = C(ch::ALIS, c::ALIS_oldId);
+    const Col id = C(ch::ALIS, c::ALIS_id);
+    for (std::uint32_t r = 0; r < RowsOf(ch::ALIS); ++r) {
+      const std::uint64_t o = oldId.Get(r);
+      const std::uint64_t n = id.Get(r);
+      if (o == 0 || n == 0 || o == n) {
+        return Fail(SND_ERR_CORRUPT, ch::ALIS, c::ALIS_oldId, r, "alias %llu -> %llu is not a rename (0 or itself)",
+                    static_cast<unsigned long long>(o), static_cast<unsigned long long>(n));
+      }
+      if (r > 0 && o <= oldId.Get(r - 1)) {
+        return Fail(SND_ERR_CORRUPT, ch::ALIS, c::ALIS_oldId, r, "alias rows are not in strictly increasing oldId order");
+      }
+    }
+  }
   return SND_OK;
 }
 
