@@ -210,7 +210,7 @@ SND_TEST(BankValidateEdge, VersionsAndPlatforms) {
     return b;
   };
   SND_CHECK_EQ(Parse(withHeader([](bf::FileHeader& h) { h.formatMinor = 0xFFFF; })), SND_OK);
-  SND_CHECK_EQ(Parse(withHeader([](bf::FileHeader& h) { h.formatMajor = 2; })), SND_ERR_VERSION_MISMATCH);
+  SND_CHECK_EQ(Parse(withHeader([](bf::FileHeader& h) { h.formatMajor = 3; })), SND_ERR_VERSION_MISMATCH);  // format 2.0: was 2
   SND_CHECK_EQ(Parse(withHeader([](bf::FileHeader& h) { h.formatMajor = 0; })), SND_ERR_VERSION_MISMATCH);
   SND_CHECK_EQ(Parse(withHeader([](bf::FileHeader& h) { h.platform = bf::kPlatformWindows; })),
                RuntimePlatform() == bf::kPlatformWindows ? SND_OK : SND_ERR_VERSION_MISMATCH);

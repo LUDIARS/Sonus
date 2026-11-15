@@ -20,6 +20,27 @@ SND_TEST(BankFormat, Crc32cReferenceVector) {
   SND_CHECK_EQ(c, 0xE3069283u);
 }
 
+// 2.0: the header checksum covers all 128 header bytes except its own field.
+SND_TEST(BankFormat, HeaderChecksumCoversTheWholeHeader) {
+  std::uint8_t h[128];
+  for (int i = 0; i < 128; ++i) h[i] = static_cast<std::uint8_t>(i * 7 + 1);
+  const std::uint32_t c = bf::HeaderChecksum(h);
+  std::uint8_t z[128];
+  std::memcpy(z, h, 128);
+  z[52] = z[53] = z[54] = z[55] = 0;
+  SND_CHECK_EQ(c, bf::Crc32c(z, 128));
+  h[52] ^= 0xFF;  // its own field does not matter
+  SND_CHECK_EQ(bf::HeaderChecksum(h), c);
+  for (int i : {0, 51, 56, 60, 80, 127}) {
+    std::uint8_t m[128];
+    std::memcpy(m, h, 128);
+    m[i] ^= 1;
+    SND_CHECK_MSG(bf::HeaderChecksum(m) != c, "byte %d not covered", i);
+  }
+  static_assert(sizeof(bf::StreamFileHeader) == 64);
+  SND_CHECK_EQ(bf::kFormatMajor, 2u);
+}
+
 SND_TEST(BankFormat, ColumnsBelongToTableChunks) {
   for (const bf::ColumnInfo& col : bf::kColumns) {
     bool found = false;
@@ -78,14 +99,15 @@ SND_TEST(BankFormat, MinimalBankRoundTrip) {
   std::memcpy(chunk + 192, retrig, sizeof(retrig));
 
   h.checksum = bf::Crc32c(file.data() + h.headerBytes, file.size() - h.headerBytes);
-  h.headerChecksum = bf::Crc32c(reinterpret_cast<const std::uint8_t*>(&h), 52);
+  std::memcpy(file.data(), &h, sizeof(h));  // headerChecksum still 0 here
+  h.headerChecksum = bf::HeaderChecksum(file.data());
   std::memcpy(file.data(), &h, sizeof(h));
 
   // --- parse --------------------------------------------------------------
   bf::FileHeader r;
   std::memcpy(&r, file.data(), sizeof(r));
   SND_REQUIRE_EQ(r.magic, bf::kMagic);
-  SND_CHECK_EQ(bf::Crc32c(file.data(), 52), r.headerChecksum);
+  SND_CHECK_EQ(bf::HeaderChecksum(file.data()), r.headerChecksum);  // field itself read as 0
   SND_CHECK_EQ(bf::Crc32c(file.data() + r.headerBytes, r.fileBytes - r.headerBytes), r.checksum);
   bf::ChunkEntry re;
   std::memcpy(&re, file.data() + r.chunkTableOffset, sizeof(re));

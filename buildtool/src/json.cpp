@@ -1,8 +1,9 @@
 #include "snd/buildtool/json.hpp"
 
-#include <cerrno>
+#include <charconv>
 #include <cmath>
-#include <cstdlib>
+#include <set>
+#include <system_error>
 
 namespace snd::buildtool::json {
 namespace {
@@ -12,6 +13,12 @@ class Parser {
   Parser(std::string_view text, ParseError* err) : s_(text), err_(err) {}
 
   bool Document(Value* out) {
+    // A UTF-8 byte order mark is skipped (RFC 8259 §8.1 allows ignoring it).
+    if (s_.size() >= 3 && static_cast<unsigned char>(s_[0]) == 0xEF && static_cast<unsigned char>(s_[1]) == 0xBB &&
+        static_cast<unsigned char>(s_[2]) == 0xBF) {
+      pos_ = 3;
+      col_ = 4;
+    }
     SkipWs();
     if (!ParseValue(out, 0)) return false;
     SkipWs();
@@ -101,6 +108,7 @@ class Parser {
       Advance();
       return true;
     }
+    std::set<std::string> seen;  // duplicate check, O(n log n)
     for (;;) {
       SkipWs();
       if (Peek() != '"') return Fail("expected a member name");
@@ -108,12 +116,10 @@ class Parser {
       const std::uint32_t kl = line_;
       const std::uint32_t kc = col_;
       if (!ParseString(&key)) return false;
-      for (const auto& m : v->members) {
-        if (m.first == key) {
-          line_ = kl;
-          col_ = kc;
-          return Fail("duplicate member \"" + key + "\"");
-        }
+      if (!seen.insert(key).second) {
+        line_ = kl;
+        col_ = kc;
+        return Fail("duplicate member \"" + key + "\"");
       }
       SkipWs();
       if (!Expect(':')) return false;
@@ -199,6 +205,41 @@ class Parser {
     return true;
   }
 
+  // One well-formed UTF-8 sequence (RFC 3629: no overlongs, no surrogates, <= U+10FFFF).
+  bool Utf8Sequence(std::string* out) {
+    const auto b0 = static_cast<unsigned char>(Peek());
+    int n = 0;
+    std::uint32_t cp = 0;
+    std::uint32_t min = 0;
+    if (b0 >= 0xC2 && b0 <= 0xDF) {
+      n = 1;
+      cp = b0 & 0x1Fu;
+      min = 0x80;
+    } else if (b0 >= 0xE0 && b0 <= 0xEF) {
+      n = 2;
+      cp = b0 & 0x0Fu;
+      min = 0x800;
+    } else if (b0 >= 0xF0 && b0 <= 0xF4) {
+      n = 3;
+      cp = b0 & 0x07u;
+      min = 0x10000;
+    } else {
+      return Fail("invalid UTF-8 in string");
+    }
+    if (s_.size() - pos_ < static_cast<std::size_t>(n) + 1) return Fail("truncated UTF-8 sequence in string");
+    for (int i = 1; i <= n; ++i) {
+      const auto b = static_cast<unsigned char>(s_[pos_ + static_cast<std::size_t>(i)]);
+      if ((b & 0xC0u) != 0x80u) return Fail("invalid UTF-8 in string");
+      cp = (cp << 6) | (b & 0x3Fu);
+    }
+    if (cp < min || cp > 0x10FFFF || (cp >= 0xD800 && cp <= 0xDFFF)) return Fail("invalid UTF-8 in string");
+    for (int i = 0; i <= n; ++i) {
+      out->push_back(Peek());
+      Advance();
+    }
+    return true;
+  }
+
   bool ParseString(std::string* out) {
     Advance();  // opening quote
     out->clear();
@@ -210,6 +251,10 @@ class Parser {
         return true;
       }
       if (static_cast<unsigned char>(c) < 0x20) return Fail("control character in string");
+      if (static_cast<unsigned char>(c) >= 0x80) {
+        if (!Utf8Sequence(out)) return false;
+        continue;
+      }
       if (c != '\\') {
         out->push_back(c);
         Advance();
@@ -332,10 +377,12 @@ const Value* Value::Find(std::string_view key) const {
 
 bool Value::AsDouble(double* out) const {
   if (type != Type::Number) return false;
-  char* end = nullptr;
-  errno = 0;
-  const double d = std::strtod(text.c_str(), &end);
-  if (end == nullptr || *end != '\0' || !std::isfinite(d)) return false;
+  // Locale independent (from_chars ignores LC_NUMERIC).
+  double d = 0;
+  const char* first = text.data();
+  const char* last = text.data() + text.size();
+  const std::from_chars_result r = std::from_chars(first, last, d);
+  if (r.ec != std::errc() || r.ptr != last || !std::isfinite(d)) return false;
   *out = d;
   return true;
 }

@@ -27,7 +27,7 @@ namespace snd::bank_format {
 // Versions and identification
 // ---------------------------------------------------------------------------
 inline constexpr std::uint32_t kMagic = Fourcc('S', 'N', 'D', 'B');
-inline constexpr std::uint16_t kFormatMajor = 1;  // incompatible change
+inline constexpr std::uint16_t kFormatMajor = 2;  // incompatible change (2.0: header checksum over [0,128))
 inline constexpr std::uint16_t kFormatMinor = 0;  // additive change (new chunk / column / enum value)
 inline constexpr std::uint8_t kLittleEndian = 1;
 inline constexpr std::uint8_t kAlignLog2 = 6;  // 64 bytes
@@ -65,14 +65,14 @@ struct FileHeader {
   std::uint64_t projectBuildHash; //  32 live link handshake (11.2)
   std::uint64_t contentHash;      //  40 differential build cache key (10.3)
   std::uint32_t checksum;         //  48 CRC-32C of bytes [headerBytes, fileBytes)
-  std::uint32_t headerChecksum;   //  52 CRC-32C of bytes [0, 52)
+  std::uint32_t headerChecksum;   //  52 HeaderChecksum(): CRC-32C of [0, 128) with this field read as 0
   std::uint32_t dependencyCount;  //  56
   std::uint32_t chunkCount;       //  60
   std::uint64_t dependencyOffset; //  64 -> Dependency[dependencyCount]
   std::uint64_t chunkTableOffset; //  72 -> ChunkEntry[chunkCount]
   std::uint32_t languageId;       //  80 HashId(language) or 0
-  std::uint32_t reserved0;        //  84
-  std::uint8_t reserved[40];      //  88..127 zero
+  std::uint32_t reserved0;        //  84 must be 0
+  std::uint8_t reserved[40];      //  88..127 must be 0
 };
 static_assert(sizeof(FileHeader) == 128);
 static_assert(offsetof(FileHeader, checksum) == 48);
@@ -170,7 +170,8 @@ constexpr std::uint32_t ColumnTypeBytes(ColumnType t) noexcept {
   K(PHYS, Blob, kChunkApplication, "physics material tables (9): PhysChunkHeader")  \
   K(STRS, Blob, kChunkStrippable, "string pool, NUL-terminated UTF-8")              \
   K(NAME, Table, kChunkStrippable, "id -> name (and rename aliases, 10.1)")         \
-  K(GUID, Table, kChunkDevOnly, "id -> GUID (dev builds, 11.2)")
+  K(GUID, Table, kChunkDevOnly, "id -> GUID (dev builds, 11.2)")                    \
+  K(ALIS, Table, 0, "rename aliases: old id -> current id (10.1, not strippable)")
 
 namespace chunk {
 #define SND_BANK_CHUNK_ID(id, kind, flags, doc) \
@@ -238,7 +239,7 @@ inline constexpr ChunkInfo kChunks[] = {
   COL(TRAK, bus, 7, U32, 0, kNone)                                                \
   /* CLIP ------------------------------------------------------------------ */  \
   COL(CLIP, kind, 0, U32, 1, 0)  /* ClipKind */                                   \
-  COL(CLIP, target, 1, U32, 1, 0)  /* ASST / EVNT (nested) / SYNP row */          \
+  COL(CLIP, target, 1, U32, 1, 0)  /* ASST / EVNT (nested: row > owner) / SYNP */ \
   COL(CLIP, startMs, 2, F32, 0, 0)                                                \
   COL(CLIP, weight, 3, F32, 0, 1)                                                 \
   COL(CLIP, volumeDb, 4, F32, 0, 0)                                               \
@@ -302,7 +303,7 @@ inline constexpr ChunkInfo kChunks[] = {
   COL(CPNT, shape, 2, F32, 0, 0)   /* 0 linear, >0 exponent */                    \
   /* CATG ------------------------------------------------------------------ */  \
   COL(CATG, id, 0, U32, 1, 0)                                                     \
-  COL(CATG, parent, 1, U32, 0, kNone)                                             \
+  COL(CATG, parent, 1, U32, 0, kNone)   /* row > own row (2.0) */                  \
   COL(CATG, flags, 2, U32, 0, 0)   /* CategoryFlags */                            \
   COL(CATG, volumeDb, 3, F32, 0, 0)                                               \
   /* SNAP / SNPV ---------------------------------------------------------- */  \
@@ -339,7 +340,7 @@ inline constexpr ChunkInfo kChunks[] = {
   COL(ASST, dataOffset, 10, U64, 0, 0)  /* within WAVE (resident forms) */        \
   COL(ASST, dataBytes, 11, U64, 0, 0)                                             \
   COL(ASST, loopStart, 12, U64, 0, 0)                                             \
-  COL(ASST, loopEnd, 13, U64, 0, 0)     /* 0 = no loop; sample accurate (6.3) */  \
+  COL(ASST, loopEnd, 13, U64, 0, 0)     /* exclusive end; 0 = no loop (6.3) */    \
   COL(ASST, preloadOffset, 14, U64, 0, 0) /* within PREL */                       \
   COL(ASST, preloadBytes, 15, U32, 0, 0)                                          \
   COL(ASST, preloadFrames, 16, U32, 0, 0)                                         \
@@ -350,7 +351,7 @@ inline constexpr ChunkInfo kChunks[] = {
   COL(ASST, extraBytes, 21, U32, 0, 0)                                            \
   COL(ASST, flags, 22, U32, 0, 0)       /* AssetFlags */                          \
   COL(SEEK, frame, 0, U64, 1, 0)                                                  \
-  COL(SEEK, byteOffset, 1, U64, 1, 0)   /* within the stream file / asset data */ \
+  COL(SEEK, byteOffset, 1, U64, 1, 0)   /* from the data start; row 0 = {0,0} */  \
   COL(STRM, pathOffset, 0, U32, 1, 0)   /* within SPTH */                         \
   COL(STRM, fileBytes, 1, U64, 1, 0)                                              \
   COL(STRM, dataOffset, 2, U64, 0, 0)   /* first packet, sector aligned */        \
@@ -425,7 +426,11 @@ inline constexpr ChunkInfo kChunks[] = {
   COL(GUID, id, 0, U32, 1, 0)                                                     \
   COL(GUID, guidLo, 1, U64, 1, 0)                                                 \
   COL(GUID, guidHi, 2, U64, 1, 0)                                                 \
-  COL(GUID, kind, 3, U32, 0, 0)
+  COL(GUID, kind, 3, U32, 0, 0)                                                   \
+  /* ALIS (2.0): rename history, kept in release banks ---------------------- */ \
+  COL(ALIS, oldId, 0, U32, 1, 0)        /* snd_hash_id(old name) */              \
+  COL(ALIS, id, 1, U32, 1, 0)           /* current runtime id */                 \
+  COL(ALIS, kind, 2, U32, 0, 0)         /* NameKind of the object */
 
 struct ColumnInfo {
   std::uint32_t chunk;
@@ -524,6 +529,28 @@ enum class NameKind : std::uint32_t { Event = 0, Bus = 1, Param = 2, Category = 
 // ---------------------------------------------------------------------------
 // Blob layouts
 // ---------------------------------------------------------------------------
+// Stream file (10.2): separate file referenced by STRM / SPTH. One header
+// sector, then the encoded data from dataOffset (= STRM.dataOffset, a multiple
+// of sectorAlign); the file is zero padded to a multiple of sectorAlign
+// (STRM.fileBytes is the padded size). SEEK.byteOffset counts from dataOffset.
+inline constexpr std::uint32_t kStreamMagic = Fourcc('S', 'N', 'D', 'S');
+inline constexpr std::uint32_t kStreamVersion = 1;
+struct StreamFileHeader {
+  std::uint32_t magic;        //  0 kStreamMagic
+  std::uint32_t version;      //  4 kStreamVersion
+  std::uint32_t assetId;      //  8 ASST.id
+  std::uint32_t codec;        // 12 fourcc
+  std::uint32_t channels;     // 16
+  std::uint32_t sampleRate;   // 20
+  std::uint64_t totalFrames;  // 24
+  std::uint64_t dataOffset;   // 32 first packet, multiple of sectorAlign
+  std::uint64_t dataBytes;    // 40 encoded bytes (before padding)
+  std::uint32_t sectorAlign;  // 48
+  std::uint32_t reserved0;    // 52 zero
+  std::uint64_t reserved1;    // 56 zero
+};
+static_assert(sizeof(StreamFileHeader) == 64);
+
 struct DspPoolNeed {  // DSPN
   std::uint64_t instanceBytes;  // sum of EFFX.stateBytes, each rounded up to 64
   std::uint32_t instanceCount;
@@ -573,6 +600,14 @@ constexpr std::uint32_t Crc32cUpdate(std::uint32_t crc, const std::uint8_t* data
 }
 constexpr std::uint32_t Crc32c(const std::uint8_t* data, std::size_t n) noexcept {
   return Crc32cUpdate(0u, data, n);
+}
+// FileHeader.headerChecksum (2.0): CRC-32C of the 128 header bytes with the
+// headerChecksum field itself (bytes [52, 56)) read as zero.
+constexpr std::uint32_t HeaderChecksum(const std::uint8_t* header128) noexcept {
+  const std::uint8_t zero[4] = {0, 0, 0, 0};
+  std::uint32_t c = Crc32cUpdate(0u, header128, 52);
+  c = Crc32cUpdate(c, zero, 4);
+  return Crc32cUpdate(c, header128 + 56, 72);
 }
 
 }  // namespace snd::bank_format

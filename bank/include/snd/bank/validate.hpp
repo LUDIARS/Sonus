@@ -5,8 +5,9 @@
 // every failure returns a code and a human-readable reason.
 //
 // Checks, in order (§8):
-//  1. size >= 128, headerChecksum, magic, formatMajor, endianness, alignLog2,
-//     headerBytes, platform (ANY_ or the runtime's), language flag/id.
+//  1. size >= 128, headerChecksum (2.0: all 128 bytes, its own field read as
+//     0), magic, formatMajor, endianness, alignLog2, headerBytes, platform
+//     (ANY_ or the runtime's), reserved bytes zero, language flag/id.
 //  2. fileBytes == size, checksum of [headerBytes, fileBytes).
 //  3. dependency table and chunk table in range and not overlapping the header;
 //     dependencies non-zero, not self, not duplicated; every chunk in range,
@@ -20,7 +21,9 @@
 //     offset + length lies inside its chunk, every string offset points to a
 //     NUL-terminated string inside its pool, kind-dependent references
 //     (CLIP.kind, SNPV.targetKind, DUCK.kind) have a known kind, buses are in
-//     graph order (parent and send targets after the bus), PHYS ranges, DSPN size.
+//     graph order (parent and send targets after the bus), nested events and
+//     category parents are after their owner (so every chain is acyclic), seek
+//     tables start at {0,0} and increase, PHYS ranges, DSPN size.
 //  6. failures are SND_ERR_CORRUPT; version / platform are SND_ERR_VERSION_MISMATCH.
 //
 // Unknown chunks and unknown columns are ignored (after range checks); a

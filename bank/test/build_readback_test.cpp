@@ -651,7 +651,7 @@ SND_TEST(BuildReadback, FuzzTheBuiltBank) {
     std::memcpy(&wh, w.data(), sizeof wh);
     wh.checksum = bf::Crc32c(w.data() + 128, w.size() - 128);
     std::memcpy(w.data(), &wh, sizeof wh);
-    wh.headerChecksum = bf::Crc32c(w.data(), 52);
+    wh.headerChecksum = bf::HeaderChecksum(w.data());  // format 2.0 (was Crc32c(w, 52))
     std::memcpy(w.data(), &wh, sizeof wh);
     void* m = nullptr;
     SND_REQUIRE(posix_memalign(&m, 64, w.size()) == 0);

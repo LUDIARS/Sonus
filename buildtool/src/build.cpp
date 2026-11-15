@@ -13,8 +13,10 @@
 #include <set>
 
 #include "convert.hpp"
+#include "detail/file_io.hpp"
 #include "detail/fnv.hpp"
 #include "project.hpp"
+#include "self_check.hpp"
 #include "snd/buildtool/bank_writer.hpp"
 #include "snd/buildtool/json.hpp"
 #include "snd/ext.h"
@@ -73,20 +75,42 @@ std::uint32_t DefaultCompose(std::uint32_t target) {
 
 std::uint64_t Align64(std::uint64_t v) { return (v + 63) & ~std::uint64_t{63}; }
 
-bool ReadBinary(const fs::path& p, std::vector<std::uint8_t>* out) {
-  std::ifstream in(p, std::ios::binary);
-  if (!in) return false;
-  out->assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
-  return true;
+bool ReadBinary(const fs::path& p, std::vector<std::uint8_t>* out) { return detail::ReadFileBytes(p, out); }
+
+// C and C++ keywords, alternative tokens and other names that cannot be identifiers.
+bool IsReservedWord(const std::string& s) {
+  static const char* const kWords[] = {
+      "alignas", "alignof", "and", "and_eq", "asm", "atomic_cancel", "atomic_commit", "atomic_noexcept", "auto",
+      "bitand", "bitor", "bool", "break", "case", "catch", "char", "char8_t", "char16_t", "char32_t", "class",
+      "compl", "concept", "const", "consteval", "constexpr", "constinit", "const_cast", "continue", "co_await",
+      "co_return", "co_yield", "decltype", "default", "delete", "do", "double", "dynamic_cast", "else", "enum",
+      "explicit", "export", "extern", "false", "float", "for", "friend", "goto", "if", "inline", "int", "long",
+      "mutable", "namespace", "new", "noexcept", "not", "not_eq", "nullptr", "operator", "or", "or_eq", "private",
+      "protected", "public", "reflexpr", "register", "reinterpret_cast", "requires", "restrict", "return", "short",
+      "signed", "sizeof", "static", "static_assert", "static_cast", "struct", "switch", "synchronized", "template",
+      "this", "thread_local", "throw", "true", "try", "typedef", "typeid", "typename", "union", "unsigned", "using",
+      "virtual", "void", "volatile", "wchar_t", "while", "xor", "xor_eq", "final", "override", "import", "module",
+      "_Alignas", "_Alignof", "_Atomic", "_Bool", "_Complex", "_Generic", "_Imaginary", "_Noreturn",
+      "_Static_assert", "_Thread_local", "NULL", "EOF", "errno", "assert", "offsetof", "main", "std", "snd",
+      "snd_ids"};
+  for (const char* w : kWords) {
+    if (s == w) return true;
+  }
+  return false;
 }
 
+// Name -> C++ identifier: [A-Za-z0-9_] kept, others '_'; no leading digit or
+// '_' (reserved patterns), no "__", and keywords / macros get a trailing '_'.
 std::string Sanitize(const std::string& name) {
   std::string s;
   for (char c : name) {
     const bool ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_';
-    s.push_back(ok ? c : '_');
+    const char out = ok ? c : '_';
+    if (out == '_' && !s.empty() && s.back() == '_') continue;  // never "__"
+    s.push_back(out);
   }
-  if (s.empty() || (s[0] >= '0' && s[0] <= '9')) s = "_" + s;
+  if (s.empty() || (s[0] >= '0' && s[0] <= '9') || s[0] == '_') s = "k" + s;
+  if (IsReservedWord(s)) s += "_";
   return s;
 }
 
@@ -108,7 +132,7 @@ struct BankTables {
       snap{ch::SNAP}, snpv{ch::SNPV}, vlgr{ch::VLGR}, duck{ch::DUCK}, asst{ch::ASST}, seek{ch::SEEK},
       strm{ch::STRM}, synp{ch::SYNP}, mseg{ch::MSEG}, mpls{ch::MPLS}, mple{ch::MPLE}, mstm{ch::MSTM},
       msta{ch::MSTA}, mtrn{ch::MTRN}, mstg{ch::MSTG}, mmrk{ch::MMRK}, mtmp{ch::MTMP}, name{ch::NAME},
-      guid{ch::GUID};
+      guid{ch::GUID}, alis{ch::ALIS};
   std::vector<std::uint8_t> wave, prel, spth, efbl, strs, phys;
   std::map<std::string, std::uint32_t> strOffsets;
   std::uint64_t dspBytes = 0;
@@ -153,6 +177,11 @@ class Builder {
   void CheckNestedCycles();
   bool OrderBanks(std::vector<const Object*>* order);
   const Object* MasterBus(const Object& from, const Value& at);
+  void CheckBusRoots();
+  // Kahn order: `before` must precede everything it points to; ties by name.
+  std::vector<const Object*> TopoOrder(const std::vector<const Object*>& nodes,
+                                       const std::map<const Object*, std::vector<const Object*>>& edges,
+                                       const char* what);
   bool CanReach(const std::string& fromBank, const std::string& toBank) const;
   void CheckAccess(const Object& from, const Value& at, const Object& target, const std::string& bank);
 
@@ -201,6 +230,10 @@ bool Builder::Run() {
   ReadProjectSettings();
   CheckIds();
   CheckNestedCycles();
+  CheckBusRoots();
+  for (const Object* dk : p_.OfKind(Kind::Ducking)) {
+    if (dk->bank.empty()) p_.WarnAt(*dk, dk->doc, "ducking without \"bank\" is not built into any bank", d_);
+  }
   std::vector<const Object*> order;
   if (!OrderBanks(&order) || d_.errors() > 0) return false;
   for (const Object* b : order) {
@@ -229,9 +262,20 @@ bool Builder::Run() {
     bb.contentHash = b.contentHash;
     bb.bytes = bytes.size();
     res_->banks.push_back(bb);
+    // Self-check: every bank the build writes must pass the runtime's validation.
+    std::string why;
+    if (!detail::SelfCheckBank(bytes, &why)) {
+      d_.Error(b.file, 0, 0, "internal error: the runtime would reject this bank (" + why + ")");
+      continue;
+    }
     Stage(b.file, std::move(bytes));
   }
+  if (d_.errors() > 0) return false;
   WriteIdOutputs();
+  if (opt_.warningsAsErrors && d_.warnings() > 0) {
+    d_.Error("", 0, 0, std::to_string(d_.warnings()) + " warning(s) treated as errors (--werror)");
+    return false;
+  }
   return Commit();
 }
 
@@ -439,6 +483,45 @@ bool Builder::OrderBanks(std::vector<const Object*>* order) {
   return ok;
 }
 
+std::vector<const Object*> Builder::TopoOrder(const std::vector<const Object*>& nodes,
+                                              const std::map<const Object*, std::vector<const Object*>>& edges,
+                                              const char* what) {
+  std::map<const Object*, int> indeg;
+  for (const Object* n : nodes) indeg[n] += 0;
+  for (const auto& [from, tos] : edges) {
+    for (const Object* t : tos) ++indeg[t];
+  }
+  std::vector<const Object*> ready;
+  for (const Object* n : nodes) {
+    if (indeg[n] == 0) ready.push_back(n);
+  }
+  std::vector<const Object*> out;
+  auto byName = [](const Object* a, const Object* b) {
+    return a->name != b->name ? a->name < b->name : a->guidText < b->guidText;
+  };
+  while (!ready.empty()) {
+    std::sort(ready.begin(), ready.end(), byName);
+    const Object* n = ready.front();
+    ready.erase(ready.begin());
+    out.push_back(n);
+    auto it = edges.find(n);
+    if (it == edges.end()) continue;
+    for (const Object* t : it->second) {
+      if (--indeg[t] == 0) ready.push_back(t);
+    }
+  }
+  if (out.size() != nodes.size()) {
+    for (const Object* n : nodes) {
+      if (indeg[n] > 0) {
+        p_.ErrorAt(*n, n->doc, std::string(what) + " cycle through '" + n->name + "'", d_);
+        break;
+      }
+    }
+    return nodes;
+  }
+  return out;
+}
+
 bool Builder::CanReach(const std::string& from, const std::string& to) const {
   if (from == to) return true;
   std::set<std::string> seen;
@@ -465,22 +548,34 @@ void Builder::CheckAccess(const Object& from, const Value& at, const Object& tar
              d_);
 }
 
+// The bus tree has exactly one root (a bus without "parent"); it is the master.
 const Object* Builder::MasterBus(const Object& from, const Value& at) {
-  const Object* master = nullptr;
-  int count = 0;
+  const Object* root = nullptr;
   for (const Object* b : p_.OfKind(Kind::Bus)) {
-    if (p_.Bool(*b, b->doc, "master", false, d_)) {
-      master = b;
-      ++count;
+    const Value* pv = b->doc.Find("parent");
+    if (pv == nullptr || pv->IsNull()) {
+      root = b;
+      break;
     }
   }
-  if (count != 1) {
-    p_.ErrorAt(from, at, count == 0 ? "no \"bus\" given and the project has no master bus"
-                                    : "no \"bus\" given and the project has several master buses",
+  if (root == nullptr) p_.ErrorAt(from, at, "no \"bus\" given and the project has no root (master) bus", d_);
+  return root;
+}
+
+void Builder::CheckBusRoots() {
+  const Object* first = nullptr;
+  for (const Object* b : p_.OfKind(Kind::Bus)) {
+    const Value* pv = b->doc.Find("parent");
+    if (pv != nullptr && !pv->IsNull()) continue;
+    if (first == nullptr) {
+      first = b;
+      continue;
+    }
+    p_.ErrorAt(*b, b->doc,
+               "bus '" + b->name + "' has no parent but '" + first->name +
+                   "' is already the root: the bus tree has exactly one root, the master bus (give it a \"parent\")",
                d_);
-    return nullptr;
   }
-  return master;
 }
 
 std::uint32_t Builder::Str(BankTables& t, const std::string& s) {
@@ -726,12 +821,8 @@ void Builder::EmitAsset(BankTables& t, const Object& a, const std::string& langu
   std::snprintf(idHex, sizeof(idHex), "%08x", a.id);
   const std::string rel = "streams/" + Sanitize(a.name) + "_" + idHex + (language.empty() ? "" : "." + language) + ".snds";
   std::vector<std::uint8_t> file(sector, 0);
-  struct StreamHeader {  // project-format.md "stream file"
-    std::uint32_t magic, version, assetId, codec, channels, sampleRate;
-    std::uint64_t totalFrames, dataOffset, dataBytes;
-    std::uint32_t sectorAlign, reserved;
-  } sh{0x53444E53u /* 'SNDS' */, 1, a.id, e.codec, c.channels, c.sampleRate, e.totalFrames, sector,
-       e.data.size(), static_cast<std::uint32_t>(sector), 0};
+  const bf::StreamFileHeader sh{bf::kStreamMagic, bf::kStreamVersion, a.id, e.codec, c.channels, c.sampleRate,
+                                e.totalFrames, sector, e.data.size(), static_cast<std::uint32_t>(sector), 0, 0};
   std::memcpy(file.data(), &sh, sizeof(sh));
   file.insert(file.end(), e.data.begin(), e.data.end());
   file.resize((file.size() + sector - 1) / sector * sector, 0);
@@ -792,6 +883,24 @@ void Builder::BuildBank(const Object& bank, const std::string& language) {
   std::vector<const Object*> events;
   for (const Object* e : p_.OfKind(Kind::Event)) {
     if (inBank(e)) events.push_back(e);
+  }
+  // Bank format 2.0 (§6.0): a nested event's row is after the event nesting it.
+  {
+    std::map<const Object*, std::vector<const Object*>> nests;
+    const std::set<const Object*> here(events.begin(), events.end());
+    Diagnostics quiet;  // reference errors are reported with the clips below
+    for (const Object* e : events) {
+      const Value* tracks = e->doc.Find("tracks");
+      for (const Value& tr : (tracks != nullptr && tracks->IsArray()) ? tracks->items : EmptyArray().items) {
+        const Value* clips = tr.Find("clips");
+        for (const Value& c : (clips != nullptr && clips->IsArray()) ? clips->items : EmptyArray().items) {
+          const Value* ev = c.Find("event");
+          const Object* n = ev != nullptr ? p_.Resolve(*e, *ev, Kind::Event, quiet) : nullptr;
+          if (n != nullptr && n != e && here.count(n) != 0) nests[e].push_back(n);
+        }
+      }
+    }
+    events = TopoOrder(events, nests, "nested event");
   }
   std::map<const Object*, std::uint32_t> eventRow;
   for (const Object* e : events) eventRow[e] = static_cast<std::uint32_t>(eventRow.size());
@@ -902,7 +1011,7 @@ void Builder::BuildBank(const Object& bank, const std::string& language) {
     if (chans > SND_MAX_CHANNELS) p_.ErrorAt(*b, d, "bus channels must be 0 (parent's) .. 8", d_);
     t.buss.U32(col::BUSS_channels, r, static_cast<std::uint32_t>(chans));
     std::uint32_t flags = 0;
-    if (p_.Bool(*b, d, "master", false, d_)) flags |= bf::kBusMaster;
+    if (p_.Bool(*b, d, "master", false, d_) || parent == nullptr) flags |= bf::kBusMaster;  // the root
     if (p_.Bool(*b, d, "output", false, d_)) flags |= bf::kBusOutput;
     if (p_.Bool(*b, d, "lodBypassable", false, d_)) flags |= bf::kBusLodBypassable;
     if (p_.Bool(*b, d, "meter", false, d_)) flags |= bf::kBusMeter;
@@ -1027,6 +1136,17 @@ void Builder::BuildBank(const Object& bank, const std::string& language) {
   }
   std::vector<const Object*> catList(cats.begin(), cats.end());
   std::sort(catList.begin(), catList.end(), byName);
+  {
+    // Bank format 2.0 (§6.0): a category's parent row is after the category.
+    std::map<const Object*, std::vector<const Object*>> up;
+    Diagnostics quiet;
+    for (const Object* c : catList) {
+      const Value* pv = c->doc.Find("parent");
+      const Object* parent = (pv != nullptr && !pv->IsNull()) ? p_.Resolve(*c, *pv, Kind::Category, quiet) : nullptr;
+      if (parent != nullptr && parent != c) up[c].push_back(parent);
+    }
+    catList = TopoOrder(catList, up, "category parent");
+  }
   std::map<const Object*, std::uint32_t> catRow;
   for (const Object* c : catList) catRow[c] = static_cast<std::uint32_t>(catRow.size());
   for (const Object* c : catList) {
@@ -1243,8 +1363,24 @@ void Builder::BuildBank(const Object& bank, const std::string& language) {
     for (const Value& s : stems->items) {
       const std::uint32_t r = t.mstm.AddRow();
       t.mstm.U32(col::MSTM_segment, r, segRow[sg]);
-      t.mstm.U32(col::MSTM_channelFirst, r, static_cast<std::uint32_t>(p_.U64(*sg, s, "channelFirst", 0, d_)));
-      t.mstm.U32(col::MSTM_channelCount, r, static_cast<std::uint32_t>(p_.U64(*sg, s, "channelCount", 2, d_)));
+      const std::uint64_t first = p_.U64(*sg, s, "channelFirst", 0, d_);
+      const std::uint64_t count = p_.U64(*sg, s, "channelCount", 2, d_);
+      {
+        // The stem's channels must exist in its (converted) asset (bank-format.md §8 MSTM).
+        const Value* av = s.Find("asset");
+        const Value* sv = sg->doc.Find("asset");
+        const Value* ref = av != nullptr ? av : sv;
+        const Object* a = ref != nullptr ? p_.Resolve(*sg, *ref, Kind::Asset, d_) : nullptr;
+        Converted c;
+        if (a != nullptr && ConvertAsset(*a, language, &c) && (first > c.channels || count > c.channels - first)) {
+          p_.ErrorAt(*sg, s,
+                     "stem channels [" + std::to_string(first) + ", +" + std::to_string(count) + ") exceed the " +
+                         std::to_string(c.channels) + " channels of asset '" + a->name + "' (after conversion)",
+                     d_);
+        }
+      }
+      t.mstm.U32(col::MSTM_channelFirst, r, static_cast<std::uint32_t>(first));
+      t.mstm.U32(col::MSTM_channelCount, r, static_cast<std::uint32_t>(count));
       if (const Value* cv = s.Find("volumeCurve"); cv != nullptr) {
         t.mstm.U32(col::MSTM_volumeCurve, r, EmitCurve(t, *sg, *cv, false, 0, &params));
       }
@@ -1446,6 +1582,7 @@ void Builder::BuildBank(const Object& bank, const std::string& language) {
           const Object* target = tv != nullptr ? p_.Resolve(*e, *tv, targetKind, d_) : nullptr;
           if (tv == nullptr) p_.ErrorAt(*e, a, "an action needs \"target\"", d_);
           if (target != nullptr) {
+            CheckAccess(*e, *tv, *target, bn);  // runtime-id references follow the bank rule too (§3)
             t.actn.U32(col::ACTN_target, ar, target->id);
             if (targetKind == Kind::Parameter) params.insert(target);
           }
@@ -1676,6 +1813,7 @@ void Builder::BuildBank(const Object& bank, const std::string& language) {
     auto eventId = [&](const Object& m, const Value* v) -> std::uint32_t {
       if (v == nullptr || v->IsNull()) return 0;
       const Object* ev = p_.Resolve(m, *v, Kind::Event, d_);
+      if (ev != nullptr) CheckAccess(m, *v, *ev, bn);
       return ev != nullptr ? ev->id : 0;
     };
     auto put = [&](const void* p, std::size_t n) {
@@ -1800,7 +1938,19 @@ void Builder::BuildBank(const Object& bank, const std::string& language) {
                       (o.kind == Kind::Asset && assetRow.count(&o)) || (o.kind == Kind::Snapshot && inBank(&o));
     if (!here) continue;
     for (const Value& a : al->items) {
-      if (a.IsString()) AddName(t, o.id, a.text, bf::NameKind::Alias);
+      if (!a.IsString()) continue;
+      AddName(t, o.id, a.text, bf::NameKind::Alias);
+      // ALIS (bank format 2.0): old id -> current id, kept in release banks.
+      const std::uint32_t r = t.alis.AddRow();
+      t.alis.U32(col::ALIS_oldId, r, HashId(a.text));
+      t.alis.U32(col::ALIS_id, r, o.id);
+      const bf::NameKind k = o.kind == Kind::Event      ? bf::NameKind::Event
+                             : o.kind == Kind::Bus      ? bf::NameKind::Bus
+                             : o.kind == Kind::Parameter ? bf::NameKind::Param
+                             : o.kind == Kind::Category ? bf::NameKind::Category
+                             : o.kind == Kind::Snapshot ? bf::NameKind::Snapshot
+                                                        : bf::NameKind::Other;
+      t.alis.U32(col::ALIS_kind, r, static_cast<std::uint32_t>(k));
     }
   }
 
@@ -1814,7 +1964,7 @@ void Builder::BuildBank(const Object& bank, const std::string& language) {
   b.file = bn + (language.empty() ? "" : "." + language) + ".sndb";
   for (TableBuilder* tb : {&t.evnt, &t.trak, &t.clip, &t.actn, &t.buss, &t.send, &t.effx, &t.efpv, &t.parm, &t.curv,
                            &t.cpnt, &t.catg, &t.snap, &t.snpv, &t.vlgr, &t.duck, &t.asst, &t.seek, &t.strm, &t.synp,
-                           &t.mseg, &t.mpls, &t.mple, &t.mstm, &t.msta, &t.mtrn, &t.mstg, &t.mmrk, &t.mtmp}) {
+                           &t.mseg, &t.mpls, &t.mple, &t.mstm, &t.msta, &t.mtrn, &t.mstg, &t.mmrk, &t.mtmp, &t.alis}) {
     b.writer.AddTable(*tb);
   }
   if (!t.wave.empty()) b.writer.AddBlob(ch::WAVE, t.wave);
@@ -1954,33 +2104,60 @@ void Builder::Stage(const std::string& rel, std::vector<std::uint8_t> bytes) {
   pending_.push_back(PendingFile{rel, std::move(bytes)});
 }
 
+// Two phases so that a failure never leaves the output half replaced:
+//  1. every changed file is written under a temporary name next to its target
+//     (and every target is checked to be a regular file or absent);
+//  2. only if all of that succeeded, the temporary files are renamed over the
+//     targets. Any failure in phase 1 removes the temporary files and keeps the
+//     old outputs. A failure inside phase 2 (rename refused by the OS after
+//     the checks passed) is reported; outputs renamed before it are new, the
+//     rest are old and their temporary files are removed (README).
 bool Builder::Commit() {
-  for (PendingFile& f : pending_) {
+  struct Job {
+    fs::path target;
+    fs::path tmp;
+    const PendingFile* file;
+  };
+  std::vector<Job> jobs;
+  std::error_code ec;
+  for (const PendingFile& f : pending_) {
     const fs::path path = fs::path(opt_.outDir) / f.rel;
     std::vector<std::uint8_t> old;
     if (ReadBinary(path, &old) && old == f.bytes) {
       ++res_->filesUnchanged;
       continue;
     }
-    std::error_code ec;
-    fs::create_directories(path.parent_path(), ec);
-    const fs::path tmp = path.string() + ".tmp";
-    {
-      std::ofstream out(tmp, std::ios::binary | std::ios::trunc);
-      out.write(reinterpret_cast<const char*>(f.bytes.data()), static_cast<std::streamsize>(f.bytes.size()));
-      if (!out) {
-        d_.Error(f.rel, 0, 0, "cannot write output file " + path.string());
-        continue;
-      }
+    jobs.push_back(Job{path, fs::path(path.string() + ".sonus-tmp"), &f});
+  }
+  auto removeTemps = [&]() {
+    for (const Job& j : jobs) fs::remove(j.tmp, ec);
+  };
+  for (const Job& j : jobs) {
+    const fs::file_status st = fs::symlink_status(j.target, ec);
+    if (fs::exists(st) && !fs::is_regular_file(st)) {
+      d_.Error(j.file->rel, 0, 0, "cannot replace " + j.target.string() + ": it exists and is not a regular file");
+      removeTemps();
+      return false;
     }
-    fs::rename(tmp, path, ec);
+    fs::create_directories(j.target.parent_path(), ec);
+    if (!detail::WriteFileBytes(j.tmp, j.file->bytes)) {
+      d_.Error(j.file->rel, 0, 0, "cannot write output file " + j.tmp.string());
+      removeTemps();
+      return false;
+    }
+  }
+  for (std::size_t i = 0; i < jobs.size(); ++i) {
+    fs::rename(jobs[i].tmp, jobs[i].target, ec);
     if (ec) {
-      d_.Error(f.rel, 0, 0, "cannot replace output file " + path.string());
-      continue;
+      d_.Error(jobs[i].file->rel, 0, 0,
+               "cannot replace output file " + jobs[i].target.string() + " (" + std::to_string(i) + " of " +
+                   std::to_string(jobs.size()) + " files were already replaced)");
+      removeTemps();
+      return false;
     }
     ++res_->filesWritten;
     for (BuiltBank& b : res_->banks) {
-      if (b.path == f.rel) b.written = true;
+      if (b.path == jobs[i].file->rel) b.written = true;
     }
   }
   return d_.errors() == 0;

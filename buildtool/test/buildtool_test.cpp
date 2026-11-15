@@ -39,7 +39,7 @@ struct Bank {
     if (bytes.size() < 128) return;
     std::memcpy(&h, bytes.data(), sizeof(h));
     if (h.magic != bf::kMagic || h.fileBytes != bytes.size()) return;
-    if (bf::Crc32c(bytes.data(), 52) != h.headerChecksum) return;
+    if (bf::HeaderChecksum(bytes.data()) != h.headerChecksum) return;
     if (bf::Crc32c(bytes.data() + 128, bytes.size() - 128) != h.checksum) return;
     for (std::uint32_t i = 0; i < h.chunkCount; ++i) {
       Chunk c;
@@ -493,4 +493,15 @@ SND_TEST(BuildtoolErrors, BusCycleAndReferences) {
                         R"({"type": "event", "guid": "6a0e0000-0000-4000-8000-000000000014", "name": "SE/Hello2",
   "bank": "Level1", "tracks": [{"clips": [{"asset": "vo/hello"}]}]})",
                         "per-language files but is used by a non-language bank"));
+}
+
+SND_TEST(BuildtoolBuild, WarningsAsErrors) {
+  const fs::path proj = sample::MakeProject("bt-werror");
+  bt::BuildOptions o = Options(proj, "out");
+  o.warningsAsErrors = true;  // the sample project has warnings (unreachable rule, DSP provider)
+  bt::BuildResult r;
+  bt::Diagnostics d;
+  SND_CHECK(!bt::Build(o, d, &r));
+  SND_CHECK(d.Contains("treated as errors"));
+  SND_CHECK(!fs::exists(o.outDir));
 }

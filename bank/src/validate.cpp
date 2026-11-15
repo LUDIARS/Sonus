@@ -168,7 +168,11 @@ snd_result Checker::CheckHeader(const ParseOptions& opt) noexcept {
                 static_cast<unsigned long long>(n_), static_cast<unsigned>(sizeof(bf::FileHeader)));
   }
   std::memcpy(&h_, d_, sizeof(h_));
-  const std::uint32_t hc = detail::Crc32cFast(0, d_, offsetof(bf::FileHeader, headerChecksum));
+  // 2.0: CRC-32C of the whole header with the headerChecksum field read as 0.
+  static const std::uint8_t kZero[4] = {0, 0, 0, 0};
+  std::uint32_t hc = detail::Crc32cFast(0, d_, offsetof(bf::FileHeader, headerChecksum));
+  hc = detail::Crc32cFast(hc, kZero, 4);
+  hc = detail::Crc32cFast(hc, d_ + 56, sizeof(bf::FileHeader) - 56);
   if (hc != h_.headerChecksum) {
     return Fail(SND_ERR_CORRUPT, 0, kNoCol, kNoRow, "header checksum mismatch (stored %08x, computed %08x)",
                 h_.headerChecksum, hc);
@@ -198,6 +202,12 @@ snd_result Checker::CheckHeader(const ParseOptions& opt) noexcept {
     FourccText(opt.platform, b);
     return Fail(SND_ERR_VERSION_MISMATCH, 0, kNoCol, kNoRow, "bank platform '%s' does not match runtime '%s'",
                 a, b);
+  }
+  bool reservedZero = h_.reserved0 == 0;
+  for (std::uint8_t b : h_.reserved) reservedZero = reservedZero && b == 0;
+  if (!reservedZero) return Fail(SND_ERR_CORRUPT, 0, kNoCol, kNoRow, "reserved header bytes are not zero");
+  if ((h_.flags & bf::kFileLanguageBank) == 0u && h_.languageId != 0u) {
+    return Fail(SND_ERR_CORRUPT, 0, kNoCol, kNoRow, "languageId set on a bank without the language flag");
   }
   if ((h_.flags & bf::kFileLanguageBank) != 0u && h_.languageId == 0u) {
     return Fail(SND_ERR_CORRUPT, 0, kNoCol, kNoRow, "language bank without languageId");
@@ -485,6 +495,31 @@ snd_result Checker::CheckReferences() noexcept {
       }
     }
   }
+  // Nested events (2.0): a nested EVNT row is after the event that nests it,
+  // so nesting is acyclic and every chain ends (checked over the tracks of each event).
+  {
+    const Col tf = C(ch::EVNT, c::EVNT_trackFirst);
+    const Col tc = C(ch::EVNT, c::EVNT_trackCount);
+    const Col cf = C(ch::TRAK, c::TRAK_clipFirst);
+    const Col cc = C(ch::TRAK, c::TRAK_clipCount);
+    const Col kind = C(ch::CLIP, c::CLIP_kind);
+    const Col target = C(ch::CLIP, c::CLIP_target);
+    for (std::uint32_t e = 0; e < RowsOf(ch::EVNT); ++e) {
+      const std::uint64_t tn = tc.Get(e);
+      for (std::uint64_t t = 0; t < tn; ++t) {
+        const auto tr = static_cast<std::uint32_t>(tf.Get(e) + t);
+        const std::uint64_t cn = cc.Get(tr);
+        for (std::uint64_t k = 0; k < cn; ++k) {
+          const auto cl = static_cast<std::uint32_t>(cf.Get(tr) + k);
+          if (kind.Get(cl) == static_cast<std::uint32_t>(bf::ClipKind::NestedEvent) && target.Get(cl) <= e) {
+            return Fail(SND_ERR_CORRUPT, ch::CLIP, c::CLIP_target, cl,
+                        "nested event row %llu is not after event row %u (nesting must be acyclic)",
+                        static_cast<unsigned long long>(target.Get(cl)), e);
+          }
+        }
+      }
+    }
+  }
   // BUSS: graph order (inputs before outputs), sends, effects.
   SND_TRY(Row(ch::BUSS, c::BUSS_parent, ch::BUSS, true));
   SND_TRY(Range(ch::BUSS, c::BUSS_sendFirst, c::BUSS_sendCount, ch::SEND));
@@ -516,6 +551,17 @@ snd_result Checker::CheckReferences() noexcept {
   SND_TRY(Blob(ch::EFFX, c::EFFX_blobOffset, c::EFFX_blobBytes, ch::EFBL, 1));
   SND_TRY(Range(ch::CURV, c::CURV_pointFirst, c::CURV_pointCount, ch::CPNT));
   SND_TRY(Row(ch::CATG, c::CATG_parent, ch::CATG, true));
+  {
+    const Col parent = C(ch::CATG, c::CATG_parent);
+    for (std::uint32_t r = 0; r < RowsOf(ch::CATG); ++r) {
+      const std::uint64_t p = parent.Get(r);
+      if (p != kNone && p <= r) {
+        return Fail(SND_ERR_CORRUPT, ch::CATG, c::CATG_parent, r,
+                    "parent row %llu is not after the category (parent chains must be acyclic)",
+                    static_cast<unsigned long long>(p));
+      }
+    }
+  }
   SND_TRY(Range(ch::SNAP, c::SNAP_valueFirst, c::SNAP_valueCount, ch::SNPV));
   {
     const Col kind = C(ch::SNPV, c::SNPV_targetKind);
@@ -556,6 +602,27 @@ snd_result Checker::CheckReferences() noexcept {
   SND_TRY(Blob(ch::ASST, c::ASST_extraOffset, c::ASST_extraBytes, ch::WAVE, 1));
   SND_TRY(Blob(ch::ASST, c::ASST_preloadOffset, c::ASST_preloadBytes, ch::PREL, 1));
   SND_TRY(Range(ch::ASST, c::ASST_seekFirst, c::ASST_seekCount, ch::SEEK));
+  {
+    // Seek table of an asset: first row {0, 0}, frames strictly increasing, offsets non-decreasing.
+    const Col first = C(ch::ASST, c::ASST_seekFirst);
+    const Col count = C(ch::ASST, c::ASST_seekCount);
+    const Col frame = C(ch::SEEK, c::SEEK_frame);
+    const Col off = C(ch::SEEK, c::SEEK_byteOffset);
+    for (std::uint32_t r = 0; r < RowsOf(ch::ASST); ++r) {
+      const std::uint64_t n = count.Get(r);
+      if (n == 0) continue;
+      const auto f0 = static_cast<std::uint32_t>(first.Get(r));
+      if (frame.Get(f0) != 0 || off.Get(f0) != 0) {
+        return Fail(SND_ERR_CORRUPT, ch::ASST, c::ASST_seekFirst, r, "seek table does not start at {0, 0}");
+      }
+      for (std::uint64_t i = 1; i < n; ++i) {
+        const auto k = static_cast<std::uint32_t>(f0 + i);
+        if (frame.Get(k) <= frame.Get(k - 1) || off.Get(k) < off.Get(k - 1)) {
+          return Fail(SND_ERR_CORRUPT, ch::SEEK, c::SEEK_frame, k, "seek table of asset row %u is not increasing", r);
+        }
+      }
+    }
+  }
   SND_TRY(Row(ch::ASST, c::ASST_stream, ch::STRM, true));
   {
     const Col form = C(ch::ASST, c::ASST_loadForm);

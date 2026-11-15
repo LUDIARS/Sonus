@@ -4,7 +4,7 @@
 どう変えるか、段階0で何を決めたかをまとめる。段階1以降の並列実装はこの文書と下記のファイルだけを入力にする。
 
 - 契約の版: **1.0**（`SND_CONTRACT_VERSION_MAJOR = 1`, `SND_CONTRACT_VERSION_MINOR = 0`、`contract/public/include/snd/version.h`）
-- バンク形式: **1.0**（`snd::bank_format::kFormatMajor/Minor`）
+- バンク形式: **2.0**（`snd::bank_format::kFormatMajor/Minor`）
 - ライブリンク: **1.0**（`snd::livelink::kProtocolMajor/Minor`）
 
 ## 1. 凍結対象のファイル
@@ -230,3 +230,4 @@ bank / buildtool:
 | 版 | 日付 | 内容 |
 | --- | --- | --- |
 | 1.0 | 2026-11-15 | 段階0で凍結 |
+| 1.0（バンク形式 2.0） | 2026-11-15 | バンク形式 2.0: headerChecksum をヘッダ全体に、予約バイト 0 を検証、`ALIS` チャンク、行の並びの規則、`loopEnd`/`SEEK`/ストリームファイル/エンディアン/`fileBytes` の明文化（bank-format.md §7） |

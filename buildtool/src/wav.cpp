@@ -37,13 +37,25 @@ bool ReadWav(const std::vector<std::uint8_t>& b, PcmData* out, std::string* erro
   bool haveFmt = false;
   const std::uint8_t* data = nullptr;
   std::uint64_t dataBytes = 0;
+  // Sizes that point past the end of the file are errors (a truncated file
+  // would otherwise silently give a shorter sound). Only the pad byte of an
+  // odd-sized last chunk may be missing.
+  if (static_cast<std::uint64_t>(U32(b.data() + 4)) + 8 > b.size() + 1) {
+    *error = "RIFF size " + std::to_string(U32(b.data() + 4)) + " is larger than the file (truncated?)";
+    return false;
+  }
   std::size_t pos = 12;
   while (pos + 8 <= b.size()) {
     const std::uint8_t* h = b.data() + pos;
     const std::uint64_t size = U32(h + 4);
     const std::size_t body = pos + 8;
     const std::uint64_t avail = b.size() - body;
-    const std::uint64_t n = size < avail ? size : avail;  // tolerate a truncated last chunk
+    if (size > avail) {
+      *error = std::string("chunk '") + std::string(reinterpret_cast<const char*>(h), 4) + "' size " +
+               std::to_string(size) + " runs past the end of the file (truncated?)";
+      return false;
+    }
+    const std::uint64_t n = size;
     if (std::memcmp(h, "fmt ", 4) == 0) {
       if (n < 16) {
         *error = "fmt chunk too small";
@@ -75,6 +87,10 @@ bool ReadWav(const std::vector<std::uint8_t>& b, PcmData* out, std::string* erro
       }
     }
     pos = body + static_cast<std::size_t>(n) + (n & 1u);
+  }
+  if (pos < b.size()) {
+    *error = "trailing bytes after the last chunk (truncated chunk header)";
+    return false;
   }
   if (!haveFmt || data == nullptr) {
     *error = "missing fmt or data chunk";

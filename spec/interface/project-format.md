@@ -9,14 +9,16 @@
 
 - プロジェクトはディレクトリ。その下の `*.json`（再帰、名前順。`.` で始まるディレクトリと出力・キャッシュ先は除く）が
   1 ファイル 1 オブジェクト。波形などの素材は同じディレクトリ以下に置き、プロジェクトからの相対パス（`/` 区切り）で指す。
-- 文字コードは UTF-8、JSON は RFC 8259（同じメンバ名の重複はエラー）。
-- 未知のメンバは警告（綴り間違いが既定値に化けるのを防ぐ）。ツールは自分が知らないメンバを保存時に残すこと。
+- 文字コードは UTF-8（不正なバイト列はエラー、先頭の BOM は読み飛ばす）、JSON は RFC 8259（同じメンバ名の重複はエラー）。
+  診断の桁はバイト単位。
+- 未知のメンバは**どの階層でも**警告（綴り間違いが既定値に化けるのを防ぐ。`convert` / `platforms` の機種キーも検査）。
+  `--werror` で警告をエラーにできる。ツールは自分が知らないメンバを保存時に残すこと。
 
 | メンバ | 型 | 必須 | 内容 |
 | --- | --- | --- | --- |
 | `type` | string | 必須 | 種類（2 節） |
 | `guid` | string | 必須 | `xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx`（16 進。`{}` 付きも可）。オブジェクトの不変の識別子。プロジェクト内で一意 |
-| `name` | string | 必須（`ducking` は任意） | ランタイム ID の元（`snd_hash_id(name)`、FNV-1a 32、CONTRACTS D-04）。同じ種類で一意 |
+| `name` | string | 必須（`ducking` は任意）。制御文字（U+0000〜U+001F、U+007F）は不可（`aliases` も） | ランタイム ID の元（`snd_hash_id(name)`、FNV-1a 32、CONTRACTS D-04）。同じ種類で一意 |
 | `aliases` | string[] | 任意 | リネーム前の名前（10.1）。ID 表・ゲーム用ヘッダ・`NAME` 表（kind = Alias）に残す |
 | `bank` | 参照 | 任意 | 所属バンク。無ければ共有オブジェクト（参照されたバンクに複製される） |
 | `notes` | any | 任意 | ツール用のメモ（ビルドは無視） |
@@ -54,7 +56,7 @@
 
 ### category → `CATG`
 
-`parent`, `ignorePause`, `muteOnFocusLoss`, `volumeDb`。
+`parent`, `ignorePause`, `muteOnFocusLoss`, `volumeDb`。`CATG` の行は子が先・親が後（バンク形式 2.0 §6.0）。親の循環はエラー。
 
 ### parameter → `PARM`
 
@@ -135,7 +137,8 @@ event の `music`:
   前の行に覆われて一致しえない行は警告。`*` はワイルドカード（列の値 0）。
 - `timing`: `immediate` / `nextBeat` / `nextBar` / `barsAfter` / `grid` / `nextMarker` / `segmentEnd`（`snd_when_kind`）。
   `start`: `head` / `sameBar` / `marker` / `lastPosition`。`interrupt`: `allowed` / `afterBridge`。`late`: `nextGrid` / `startLate` / `cancel`。
-- スティンガーの Event は同じバンクにあること。
+- スティンガーの Event は同じバンクにあること。`stingers[].timingCount`（`MSTG.timingCount`、`barsAfter` の N や `grid` の分割数）も書ける。
+- `MSTA.flags` はバンク形式でビットの意味が未定義のため、プロジェクト形式には項目を設けず常に 0 を書く（意味が決まった時点で項目を足す）。
 
 **segment** → `MSEG`, `MTMP`, `MMRK`, `MSTM`: `asset`（必須）, `bars`（必須）, `tempo: [{tick, bpm, beatsPerBar, beatUnit}]`（既定 120 BPM 4/4）,
 `entryFrame`, `exitFrame`, `markers: [{name, frame, kind: user|entry|exit|pickup}]`, `stems: [{channelFirst, channelCount, volumeCurve, asset}]`,
@@ -166,11 +169,17 @@ event の `music`:
   **そのバンクに複製**される（形式 1.0 の行参照は同じバンク内に限るため）。バスは親とセンド先まで閉包をとる。
   同じ ID の行が複数バンクに現れうるので、ランタイム（core）は ID で同一視する。
 - `bank` を持つオブジェクトを別のバンクから使うには、使う側がそのバンクに（推移的に）依存していること。違反はエラー。
-- 入れ子の Event とスティンガーの Event は同じバンクに置く。
+- 入れ子の Event とスティンガーの Event は同じバンクに置く。`EVNT` の行は入れ子にする側が先・される側が後
+  （バンク形式 2.0 §6.0。同順位は名前順）。
+- アクションの対象（Event / スナップショット / パラメータ）と材質表の Event のように**ランタイム ID で参照するもの**も同じ規則に従う
+  （別バンクの Event なら、そのバンクへの依存が必要）。
+- `bank` の無い ducking はどのバンクにも入らない（警告）。
 
 ## 4. バスの並び（graph order）
 
 `BUSS` は「入力が先、出力が後」の依存順（子とセンド元が先、マスターが最後）。同順位は名前順。
+バスの木の**ルート（`parent` の無いバス）はちょうど 1 つ**で、それがマスター（`kBusMaster`）。2 つ目のルートはエラー。
+`bus` を書かない Event はマスターに出る。
 `BUSS.parent` と `SEND.targetBus` は必ず自分より後ろの行を指す（bank の検証もこれを確かめる）。循環はビルドエラー。
 
 ## 5. ID（10.1）
@@ -178,6 +187,9 @@ event の `music`:
 - ランタイム ID = `snd_hash_id(name)`。衝突検出は**プロジェクト全体**: 名前・別名・音楽 State / スティンガー / マーカー名・
   `switchValue` の名前・エフェクト種別名・言語名のうち、**異なる文字列が同じ ID** になったらビルドエラー
   （`ファイル:行:列: error: id collision: 'A' and 'B' (...) both hash to 0x...`）。同じ文字列を別の種類で使うのは可。
+- 別名は `ALIS` チャンク（旧 ID → 現在の ID、除去不可。バンク形式 2.0）と `NAME`（kind = Alias、除去可）の両方に入る。
+- `sonus_ids.h` の識別子: 英数字と `_` 以外は `_`、`__` は 1 つに、数字や `_` で始まるものは先頭に `k`、C / C++ の予約語・
+  代替トークン（`new`, `default`, `and` など）は末尾に `_`。同じ識別子になったものは `_2`, `_3` … を付ける。
 - 出力: `ids.json`（kind, name, id, guid, aliasOf, banks）と `sonus_ids.h`（`namespace snd_ids::<kind>` の定数と
   `static_assert(... == snd::HashId("..."))`。別名は現在の ID を指す定数）。
 
@@ -189,25 +201,7 @@ event の `music`:
 | `streams/<名前>_<id8桁>[.<language>].snds` | ストリーム波形（下記）。`SPTH` のパスは出力ディレクトリからの相対 |
 | `ids.json`, `sonus_ids.h` | ID 表、ゲーム用ヘッダ |
 
-**ストリームファイル**（段階1で buildtool が決めた形。bank-format.md に無い）:
-
-| offset | 型 | 内容 |
-| --- | --- | --- |
-| 0 | u32 | magic `'SNDS'` |
-| 4 | u32 | version 1 |
-| 8 | u32 | asset id |
-| 12 | u32 | codec fourcc |
-| 16 | u32 | channels |
-| 20 | u32 | sampleRate |
-| 24 | u64 | totalFrames |
-| 32 | u64 | dataOffset（= `STRM.dataOffset` = sectorAlign） |
-| 40 | u64 | dataBytes |
-| 48 | u32 | sectorAlign |
-| 52 | u32 | reserved |
-
-ヘッダの残りは 0 で sectorAlign まで埋め、データの後もセクタ境界まで 0 で埋める（`STRM.fileBytes` は埋めた後の長さ）。
-`SEEK.byteOffset` は**データ先頭（dataOffset / ASST.dataOffset）からの**位置。プリロード（`PREL`）はデータ先頭からのコピーで、
-パケット境界で切る（PCM は `preloadMs` を切り上げたフレーム数）。
+**ストリームファイル**: 形式は bank-format.md §6.3（`'SNDS'`、`bank_format::StreamFileHeader`）。
 
 **PCM の詰め方**（codec 担当への申し送り）: `PCMF` はインターリーブの float32 LE、`PC16` はインターリーブの int16 LE、
 `framesPerPacket = 1`、`blockAlign = channels × バイト数`。
@@ -218,4 +212,7 @@ event の `music`:
 - `contentHash` = FNV-1a 64（本体 `[128, fileBytes)` ＋ bankId・機種・フラグ・言語）。`projectBuildHash` = 全バンクの
   （ファイル名, contentHash）の FNV-1a 64。
 - 変換結果（波形のエンコード）は `--cache <dir>` に内容ハッシュ（WAV のバイト列 ＋ 変換設定 ＋ エンコーダの版）で保存し、
-  次回は再エンコードしない。中身が変わらない出力ファイルは書き直さない。
+  次回は再エンコードしない。中身が変わらない出力ファイルは書き直さない。キャッシュの各エントリは末尾に中身の FNV-1a 64 を持ち、
+  合わなければ（壊れていれば）黙って捨てて再エンコードする。
+- ビルドは書き出す各バンクを bank-format.md §8 と同じ規則で自己検査し、通らなければエラーにする（ビルドが成功したバンクは
+  必ずランタイムの `ParseBank` を通る）。

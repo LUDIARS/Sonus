@@ -18,6 +18,7 @@ void Usage(FILE* f) {
                "  --cache <dir>       differential build cache for converted waveforms\n"
                "  --ids-header <rel>  game header path inside --out (default sonus_ids.h, '' = none)\n"
                "  --quiet             only print diagnostics\n"
+               "  --werror            treat warnings as errors (nothing is written)\n"
                "bank format %u.%u\n",
                snd::bank_format::kFormatMajor, snd::bank_format::kFormatMinor);
 }
@@ -62,6 +63,8 @@ int main(int argc, char** argv) {
       o.devBuild = false;
     } else if (a == "--strip-strings") {
       o.stripStrings = true;
+    } else if (a == "--werror") {
+      o.warningsAsErrors = true;
     } else if (a == "--quiet") {
       quiet = true;
     } else {

@@ -4,6 +4,21 @@ snd_add_test(buildtool_test
 target_compile_definitions(buildtool_test PRIVATE
   SND_BUILDTOOL_TEST_DATA="${CMAKE_CURRENT_SOURCE_DIR}/data")
 
+# Self-check of written banks: the same corruption cases as the runtime's
+# ParseBank (bank/test/corruption_cases.hpp, built from bank/test fixtures).
+snd_add_test(buildtool_self_check_test
+  SOURCES self_check_test.cpp ${PROJECT_SOURCE_DIR}/bank/test/fixture_bank.cpp
+  LINK sonus_buildtool sonus_mocks)
+target_include_directories(buildtool_self_check_test PRIVATE
+  ${PROJECT_SOURCE_DIR}/bank/test ${PROJECT_SOURCE_DIR}/buildtool/src)
+
+# self_check.cpp is generated from bank/src/validate.cpp: fail when stale.
+find_package(Python3 COMPONENTS Interpreter QUIET)
+if(Python3_Interpreter_FOUND)
+  add_test(NAME buildtool_self_check_in_sync
+    COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/buildtool/tools/gen_self_check.py ${PROJECT_SOURCE_DIR} --check)
+endif()
+
 # --- Independent tests (test owner, not the implementer) -----------------------------
 # JSON (RFC 8259) and WAV readers: boundaries, error positions, fixed-seed fuzz.
 # Tests named Defect_* fail on purpose (see the file).

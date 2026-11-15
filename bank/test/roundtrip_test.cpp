@@ -29,13 +29,14 @@ struct Built {
   bool ok = false;
 };
 
-Built BuildSample(const char* name, bool dev) {
+Built BuildSample(const char* name, bool dev, bool strip = false) {
   Built b;
   const fs::path proj = sample::MakeProject(name);
   snd::buildtool::BuildOptions o;
   o.projectDir = proj.string();
   o.outDir = (proj.parent_path() / "out").string();
   o.devBuild = dev;
+  o.stripStrings = strip;
   snd::buildtool::Diagnostics d;
   snd::buildtool::BuildResult r;
   b.ok = snd::buildtool::Build(o, d, &r);
@@ -184,4 +185,22 @@ SND_TEST(BankRoundTrip, ManagerLoadsBuiltBanks) {
   SND_CHECK_EQ(m->CheckUnload(common, SND_UNLOAD_STOP_AND_UNLOAD, false), SND_ERR_BANK_IN_USE);
   BankManager::Destroy(m);
   SND_CHECK_EQ(alloc.Live(), 0u);
+}
+
+// Bank format 2.0: rename aliases survive a release build without strings (ALIS),
+// nested events are after their owner.
+SND_TEST(BankRoundTrip, AliasesResolveInStrippedReleaseBanks) {
+  const Built b = BuildSample("roundtrip-alias", false, true);
+  SND_REQUIRE(b.ok);
+  Loaded level(b.out / "Level1.sndb");
+  SND_REQUIRE_EQ(level.result, SND_OK);
+  SND_CHECK(!level.view.HasChunk(ch::NAME));
+  SND_CHECK_EQ(level.view.ResolveAlias(HashId("SE/Boom")), HashId("SE/Explosion"));
+  SND_CHECK_EQ(level.view.ResolveAlias(HashId("SE/Explosion")), 0u);
+  Loaded common(b.out / "Common.sndb");
+  SND_REQUIRE_EQ(common.result, SND_OK);
+  SND_CHECK_EQ(common.view.ResolveAlias(HashId("SE/Boom")), 0u);  // not in this bank
+  const std::uint32_t ex = level.view.FindRow<col::EVNT_id>(HashId("SE/Explosion"));
+  const std::uint32_t nested = level.view.FindRow<col::EVNT_id>(HashId("SE/Nested"));
+  SND_CHECK(ex < nested);
 }

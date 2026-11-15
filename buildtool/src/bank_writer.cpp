@@ -191,7 +191,7 @@ std::vector<std::uint8_t> BankWriter::Layout(const BankHeaderInfo& h, std::uint6
   hd.languageId = h.languageId;
   hd.checksum = bf::Crc32c(f.data() + 128, f.size() - 128);
   std::memcpy(f.data(), &hd, sizeof(hd));
-  hd.headerChecksum = bf::Crc32c(f.data(), 52);
+  hd.headerChecksum = bf::HeaderChecksum(f.data());
   std::memcpy(f.data(), &hd, sizeof(hd));
   return f;
 }

@@ -3,6 +3,7 @@
 #include <string>
 #include <vector>
 
+#include "corruption_cases.hpp"
 #include "fixture_writer.hpp"
 #include "snd/bank/validate.hpp"
 #include "snd/id.hpp"
@@ -204,7 +205,7 @@ SND_TEST(BankValidate, Header) {
   bytes[20] ^= 1;  // bankId changed without re-signing the header
   ExpectFail(bytes, SND_ERR_CORRUPT, "header checksum");
   ExpectFail(WithHeader([](bf::FileHeader& h) { h.magic = 0x12345678; }), SND_ERR_CORRUPT, "magic");
-  ExpectFail(WithHeader([](bf::FileHeader& h) { h.formatMajor = 2; }), SND_ERR_VERSION_MISMATCH, "format 2.");
+  ExpectFail(WithHeader([](bf::FileHeader& h) { h.formatMajor = 3; }), SND_ERR_VERSION_MISMATCH, "format 3.");
   ExpectFail(WithHeader([](bf::FileHeader& h) { h.endianness = 2; }), SND_ERR_VERSION_MISMATCH, "endian");
   ExpectFail(WithHeader([](bf::FileHeader& h) { h.alignLog2 = 4; }), SND_ERR_CORRUPT, "alignLog2");
   ExpectFail(WithHeader([](bf::FileHeader& h) { h.headerBytes = 132; }), SND_ERR_CORRUPT, "headerBytes");
@@ -413,4 +414,13 @@ SND_TEST(BankValidate, BlobAndStringReferences) {
   b = fixture::RichBank();
   b.Find(ch::PHYS)->blob.resize(40);
   ExpectFail(b, SND_ERR_CORRUPT, "PHYS");
+}
+
+// Shared with buildtool's self-check (buildtool/test/self_check_test.cpp).
+SND_TEST(BankValidate, SharedCorruptionCases) {
+  for (const corruption::Case& k : corruption::Cases()) {
+    ParseError e;
+    const snd_result r = Parse(corruption::Build(k), &e);
+    SND_CHECK_MSG(r == k.expected, "%s: got %d (%s), expected %d", k.name, r, e.message, k.expected);
+  }
 }

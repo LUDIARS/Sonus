@@ -181,7 +181,7 @@ struct Bank {
     std::memcpy(&h, f.data(), sizeof(h));
     h.checksum = bf::Crc32c(f.data() + 128, f.size() - 128);
     std::memcpy(f.data(), &h, sizeof(h));
-    h.headerChecksum = bf::Crc32c(f.data(), 52);
+    h.headerChecksum = bf::HeaderChecksum(f.data());
     std::memcpy(f.data(), &h, sizeof(h));
   }
 };

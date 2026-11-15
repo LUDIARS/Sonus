@@ -1,10 +1,10 @@
 #include "project.hpp"
 
+#include "detail/file_io.hpp"
+
 #include <algorithm>
 #include <cstdio>
 #include <filesystem>
-#include <fstream>
-#include <iterator>
 #include <system_error>
 
 namespace snd::buildtool::detail {
@@ -17,32 +17,164 @@ const char* const kKindNames[] = {"project", "bank",  "bus",     "category", "pa
                                   "segment",  "playlist", "materialTable"};
 static_assert(sizeof(kKindNames) / sizeof(kKindNames[0]) == static_cast<std::size_t>(Kind::Count));
 
-// Top-level members each kind understands (others: warning, likely a typo).
-const char* const kCommon[] = {"type", "guid", "name", "aliases", "bank", "notes", nullptr};
-const char* const kKeys[][32] = {
-    /* project */ {"formatVersion", "languages", "platforms", nullptr},
-    /* bank */ {"dependsOn", "language", nullptr},
-    /* bus */ {"parent", "master", "output", "lodBypassable", "meter", "volumeDb", "channels", "lodPriority",
-               "sends", "effects", nullptr},
-    /* category */ {"parent", "ignorePause", "muteOnFocusLoss", "volumeDb", nullptr},
-    /* parameter */ {"kind", "scope", "min", "max", "default", "rampRate", nullptr},
-    /* snapshot */ {"values", nullptr},
-    /* voiceLimitGroup */ {"maxVoices", "steal", nullptr},
-    /* ducking */ {"kind", "source", "target", "amountDb", "attackMs", "releaseMs", "thresholdDb", nullptr},
-    /* asset */ {"file", "languages", "loadForm", "loop", "convert", "stallPolicy", "virtualReturn", "ioPriority",
-                 "preloadMs", "seekIntervalMs", nullptr},
-    /* event */ {"bus", "category", "limitGroup", "maxInstances", "retriggerMs", "priority", "sequence", "is3D",
-                 "ignorePause", "stinger", "virtualReturn", "fadeOutMs", "comboWindowMs", "maxDistance", "cone",
-                 "distanceCurves", "curves", "tracks", "music", nullptr},
-    /* segment */ {"asset", "bars", "tempo", "entryFrame", "exitFrame", "markers", "stems", "entryPreload", nullptr},
-    /* playlist */ {"mode", "loopCount", "entries", nullptr},
-    /* materialTable */ {"materials", "single", "pairs", "footsteps", "defaults", "curves", nullptr},
+// Members each kind understands, at every level (project-format.md §1:
+// unknown members are warned about so that typos do not fall back to defaults).
+// A Schema lists the allowed keys of an object; a Field's `child` describes the
+// value of the key (object, or array of objects). `freeKeys` objects take any
+// key whose value follows `freeChild` (material names, languages, ...).
+struct Schema;
+struct Field {
+  const char* key;
+  const Schema* child;  // nullptr: scalar / array of scalars / anything (no check)
 };
+struct Schema {
+  const Field* fields;
+  bool freeKeys;
+  const Schema* freeChild;
+};
+#define SND_FIELDS(name, ...) constexpr Field name[] = {__VA_ARGS__, {nullptr, nullptr}};
+
+SND_FIELDS(kLoopF, {"start", nullptr}, {"end", nullptr})
+constexpr Schema kLoop{kLoopF, false, nullptr};
+SND_FIELDS(kConvertSetF, {"codec", nullptr}, {"sampleRate", nullptr}, {"channels", nullptr})
+constexpr Schema kConvertSet{kConvertSetF, false, nullptr};
+SND_FIELDS(kPlatformSetF, {"codec", nullptr}, {"sampleRate", nullptr}, {"channels", nullptr}, {"sectorAlign", nullptr})
+constexpr Schema kPlatformSet{kPlatformSetF, false, nullptr};
+SND_FIELDS(kConvertF, {"default", &kConvertSet}, {"ANY_", &kConvertSet}, {"WIN_", &kConvertSet}, {"LNX_", &kConvertSet},
+           {"MAC_", &kConvertSet}, {"IOS_", &kConvertSet}, {"AND_", &kConvertSet})
+constexpr Schema kConvert{kConvertF, false, nullptr};
+SND_FIELDS(kPlatformsF, {"default", &kPlatformSet}, {"ANY_", &kPlatformSet}, {"WIN_", &kPlatformSet},
+           {"LNX_", &kPlatformSet}, {"MAC_", &kPlatformSet}, {"IOS_", &kPlatformSet}, {"AND_", &kPlatformSet})
+constexpr Schema kPlatforms{kPlatformsF, false, nullptr};
+constexpr Field kNoFields[] = {{nullptr, nullptr}};
+constexpr Schema kFreeScalars{kNoFields, true, nullptr};
+SND_FIELDS(kCurveF, {"parameter", nullptr}, {"target", nullptr}, {"compose", nullptr}, {"points", nullptr})
+constexpr Schema kCurve{kCurveF, false, nullptr};
+SND_FIELDS(kDistanceF, {"volume", &kCurve}, {"lowpass", &kCurve}, {"spread", &kCurve}, {"reverbSend", &kCurve},
+           {"blend3D", &kCurve})
+constexpr Schema kDistance{kDistanceF, false, nullptr};
+SND_FIELDS(kConeF, {"innerDeg", nullptr}, {"outerDeg", nullptr}, {"outerDb", nullptr})
+constexpr Schema kCone{kConeF, false, nullptr};
+SND_FIELDS(kRandomF, {"volumeDb", nullptr}, {"pitchCents", nullptr}, {"pan", nullptr}, {"startMs", nullptr},
+           {"filterHz", nullptr})
+constexpr Schema kRandom{kRandomF, false, nullptr};
+SND_FIELDS(kSynthF, {"kind", nullptr}, {"waveform", nullptr}, {"frequencyHz", nullptr}, {"duty", nullptr},
+           {"noiseColor", nullptr}, {"asset", nullptr}, {"channels", nullptr})
+constexpr Schema kSynth{kSynthF, false, nullptr};
+SND_FIELDS(kClipF, {"asset", nullptr}, {"event", nullptr}, {"synth", &kSynth}, {"startMs", nullptr}, {"weight", nullptr},
+           {"volumeDb", nullptr}, {"pitchCents", nullptr}, {"random", &kRandom}, {"switchValue", nullptr},
+           {"layer", nullptr}, {"fadeInMs", nullptr}, {"fadeOutMs", nullptr}, {"loopCount", nullptr})
+constexpr Schema kClip{kClipF, false, nullptr};
+SND_FIELDS(kActionF, {"timeMs", nullptr}, {"action", nullptr}, {"target", nullptr}, {"value", nullptr})
+constexpr Schema kAction{kActionF, false, nullptr};
+SND_FIELDS(kTrackF, {"bus", nullptr}, {"layerParameter", nullptr}, {"flags", nullptr}, {"clips", &kClip},
+           {"actions", &kAction})
+constexpr Schema kTrack{kTrackF, false, nullptr};
+SND_FIELDS(kStateF, {"name", nullptr}, {"playlist", nullptr})
+constexpr Schema kState{kStateF, false, nullptr};
+SND_FIELDS(kTransitionF, {"from", nullptr}, {"to", nullptr}, {"timing", nullptr}, {"timingCount", nullptr},
+           {"fadeOutBeats", nullptr}, {"fadeInBeats", nullptr}, {"bridge", nullptr}, {"start", nullptr},
+           {"startMarker", nullptr}, {"interrupt", nullptr}, {"late", nullptr}, {"prepare", nullptr})
+constexpr Schema kTransition{kTransitionF, false, nullptr};
+SND_FIELDS(kStingerF, {"name", nullptr}, {"event", nullptr}, {"timing", nullptr}, {"timingCount", nullptr},
+           {"overlap", nullptr})
+constexpr Schema kStinger{kStingerF, false, nullptr};
+SND_FIELDS(kMusicF, {"initialState", nullptr}, {"states", &kState}, {"transitions", &kTransition},
+           {"stingers", &kStinger})
+constexpr Schema kMusic{kMusicF, false, nullptr};
+SND_FIELDS(kSendF, {"bus", nullptr}, {"levelDb", nullptr}, {"preFader", nullptr})
+constexpr Schema kSend{kSendF, false, nullptr};
+SND_FIELDS(kEffectF, {"type", nullptr}, {"params", nullptr}, {"blob", nullptr}, {"flags", nullptr})
+constexpr Schema kEffect{kEffectF, false, nullptr};
+SND_FIELDS(kSnapValueF, {"kind", nullptr}, {"bus", nullptr}, {"value", nullptr}, {"effect", nullptr},
+           {"param", nullptr}, {"send", nullptr})
+constexpr Schema kSnapValue{kSnapValueF, false, nullptr};
+SND_FIELDS(kTempoF, {"tick", nullptr}, {"bpm", nullptr}, {"beatsPerBar", nullptr}, {"beatUnit", nullptr})
+constexpr Schema kTempo{kTempoF, false, nullptr};
+SND_FIELDS(kMarkerF, {"name", nullptr}, {"frame", nullptr}, {"kind", nullptr})
+constexpr Schema kMarker{kMarkerF, false, nullptr};
+SND_FIELDS(kStemF, {"channelFirst", nullptr}, {"channelCount", nullptr}, {"volumeCurve", &kCurve}, {"asset", nullptr})
+constexpr Schema kStem{kStemF, false, nullptr};
+SND_FIELDS(kEntryF, {"segment", nullptr}, {"weight", nullptr}, {"repeat", nullptr})
+constexpr Schema kEntry{kEntryF, false, nullptr};
+SND_FIELDS(kContactF, {"impact", nullptr}, {"slide", nullptr}, {"roll", nullptr}, {"break", nullptr})
+constexpr Schema kContact{kContactF, false, nullptr};
+constexpr Schema kPerMaterialContact{kNoFields, true, &kContact};
+SND_FIELDS(kPairF, {"a", nullptr}, {"b", nullptr}, {"event", nullptr})
+constexpr Schema kPair{kPairF, false, nullptr};
+SND_FIELDS(kPhysCurveF, {"impulseToVelocity", nullptr}, {"massToPitchCents", nullptr}, {"speedToVolumeDb", nullptr})
+constexpr Schema kPhysCurve{kPhysCurveF, false, nullptr};
+constexpr Schema kPerMaterialCurve{kNoFields, true, &kPhysCurve};
+
+#define SND_COMMON \
+  {"type", nullptr}, {"guid", nullptr}, {"name", nullptr}, {"aliases", nullptr}, {"bank", nullptr}, {"notes", nullptr}
+SND_FIELDS(kProjectF, SND_COMMON, {"formatVersion", nullptr}, {"languages", nullptr}, {"platforms", &kPlatforms})
+SND_FIELDS(kBankF, SND_COMMON, {"dependsOn", nullptr}, {"language", nullptr})
+SND_FIELDS(kBusF, SND_COMMON, {"parent", nullptr}, {"master", nullptr}, {"output", nullptr}, {"lodBypassable", nullptr},
+           {"meter", nullptr}, {"volumeDb", nullptr}, {"channels", nullptr}, {"lodPriority", nullptr},
+           {"sends", &kSend}, {"effects", &kEffect})
+SND_FIELDS(kCategoryF, SND_COMMON, {"parent", nullptr}, {"ignorePause", nullptr}, {"muteOnFocusLoss", nullptr},
+           {"volumeDb", nullptr})
+SND_FIELDS(kParameterF, SND_COMMON, {"kind", nullptr}, {"scope", nullptr}, {"min", nullptr}, {"max", nullptr},
+           {"default", nullptr}, {"rampRate", nullptr})
+SND_FIELDS(kSnapshotF, SND_COMMON, {"values", &kSnapValue})
+SND_FIELDS(kGroupF, SND_COMMON, {"maxVoices", nullptr}, {"steal", nullptr})
+SND_FIELDS(kDuckingF, SND_COMMON, {"kind", nullptr}, {"source", nullptr}, {"target", nullptr}, {"amountDb", nullptr},
+           {"attackMs", nullptr}, {"releaseMs", nullptr}, {"thresholdDb", nullptr})
+SND_FIELDS(kAssetF, SND_COMMON, {"file", nullptr}, {"languages", &kFreeScalars}, {"loadForm", nullptr},
+           {"loop", &kLoop}, {"convert", &kConvert}, {"stallPolicy", nullptr}, {"virtualReturn", nullptr},
+           {"ioPriority", nullptr}, {"preloadMs", nullptr}, {"seekIntervalMs", nullptr})
+SND_FIELDS(kEventF, SND_COMMON, {"bus", nullptr}, {"category", nullptr}, {"limitGroup", nullptr},
+           {"maxInstances", nullptr}, {"retriggerMs", nullptr}, {"priority", nullptr}, {"sequence", nullptr},
+           {"is3D", nullptr}, {"ignorePause", nullptr}, {"stinger", nullptr}, {"virtualReturn", nullptr},
+           {"fadeOutMs", nullptr}, {"comboWindowMs", nullptr}, {"maxDistance", nullptr}, {"cone", &kCone},
+           {"distanceCurves", &kDistance}, {"curves", &kCurve}, {"tracks", &kTrack}, {"music", &kMusic})
+SND_FIELDS(kSegmentF, SND_COMMON, {"asset", nullptr}, {"bars", nullptr}, {"tempo", &kTempo}, {"entryFrame", nullptr},
+           {"exitFrame", nullptr}, {"markers", &kMarker}, {"stems", &kStem}, {"entryPreload", nullptr})
+SND_FIELDS(kPlaylistF, SND_COMMON, {"mode", nullptr}, {"loopCount", nullptr}, {"entries", &kEntry})
+SND_FIELDS(kMaterialF, SND_COMMON, {"materials", nullptr}, {"single", &kPerMaterialContact}, {"pairs", &kPair},
+           {"footsteps", &kFreeScalars}, {"defaults", &kContact}, {"curves", &kPerMaterialCurve})
+#undef SND_COMMON
+#undef SND_FIELDS
+
+constexpr Schema kKindSchemas[] = {
+    {kProjectF, false, nullptr},  {kBankF, false, nullptr},      {kBusF, false, nullptr},
+    {kCategoryF, false, nullptr}, {kParameterF, false, nullptr}, {kSnapshotF, false, nullptr},
+    {kGroupF, false, nullptr},    {kDuckingF, false, nullptr},   {kAssetF, false, nullptr},
+    {kEventF, false, nullptr},    {kSegmentF, false, nullptr},   {kPlaylistF, false, nullptr},
+    {kMaterialF, false, nullptr},
+};
+static_assert(sizeof(kKindSchemas) / sizeof(kKindSchemas[0]) == static_cast<std::size_t>(Kind::Count));
+
+void CheckMembers(const std::string& file, const json::Value& v, const Schema* schema, const std::string& where,
+                  Diagnostics& diag) {
+  if (schema == nullptr) return;
+  if (v.IsArray()) {
+    for (const json::Value& item : v.items) CheckMembers(file, item, schema, where + "[]", diag);
+    return;
+  }
+  if (!v.IsObject()) return;
+  for (const auto& m : v.members) {
+    const std::string path = where.empty() ? m.first : where + "." + m.first;
+    if (schema->freeKeys) {
+      CheckMembers(file, m.second, schema->freeChild, path, diag);
+      continue;
+    }
+    const Field* f = schema->fields;
+    while (f->key != nullptr && m.first != f->key) ++f;
+    if (f->key == nullptr) {
+      diag.Warning(file, m.second.line, m.second.column, "unknown member \"" + path + "\" ignored");
+      continue;
+    }
+    if (m.first == "notes") continue;  // free-form
+    CheckMembers(file, m.second, f->child, path, diag);
+  }
+}
 
 bool ReadFile(const fs::path& p, std::string* out) {
-  std::ifstream in(p, std::ios::binary);
-  if (!in) return false;
-  out->assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+  std::vector<std::uint8_t> b;
+  if (!ReadFileBytes(p, &b)) return false;
+  out->assign(b.begin(), b.end());
   return true;
 }
 
@@ -176,13 +308,27 @@ bool Project::Load(const std::string& root, const std::vector<std::string>& skip
       continue;
     }
     o.id = o.name.empty() ? 0 : HashId(o.name);
-    // Unknown members: warn (typos would otherwise silently fall back to defaults).
-    for (const auto& m : o.doc.members) {
-      bool known = false;
-      for (const char* const* k = kCommon; *k != nullptr && !known; ++k) known = m.first == *k;
-      for (const char* const* k = kKeys[static_cast<int>(o.kind)]; *k != nullptr && !known; ++k) known = m.first == *k;
-      if (!known) diag.Warning(rel, m.second.line, m.second.column, "unknown member \"" + m.first + "\" ignored");
+    // Names: no control characters (U+0000..U+001F, U+007F): they break the
+    // NUL-terminated string pool and the generated C++ header.
+    bool badName = false;
+    auto checkName = [&](const json::Value& v) {
+      for (char ch : v.text) {
+        if (static_cast<unsigned char>(ch) < 0x20 || ch == 0x7F) {
+          diag.Error(rel, v.line, v.column, "a name or alias must not contain control characters");
+          badName = true;
+          return;
+        }
+      }
+    };
+    if (name != nullptr) checkName(*name);
+    if (const json::Value* al = o.doc.Find("aliases"); al != nullptr && al->IsArray()) {
+      for (const json::Value& a : al->items) {
+        if (a.IsString()) checkName(a);
+      }
     }
+    if (badName) continue;
+    // Unknown members at every level: warn (typos would otherwise fall back to defaults).
+    CheckMembers(rel, o.doc, &kKindSchemas[static_cast<int>(o.kind)], "", diag);
     objects_.push_back(std::move(o));
   }
   // Indexes, duplicates.

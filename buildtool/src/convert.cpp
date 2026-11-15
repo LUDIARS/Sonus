@@ -3,15 +3,13 @@
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
-#include <fstream>
-#include <iterator>
-
+#include "detail/file_io.hpp"
 #include "detail/fnv.hpp"
 
 namespace snd::buildtool::detail {
 namespace {
 
-constexpr std::uint64_t kCacheVersion = 1;
+constexpr std::uint64_t kCacheVersion = 2;  // 2: trailing FNV-1a 64 of the entry
 constexpr std::uint32_t kCacheMagic = 0x43444E53u;  // 'SNDC'
 
 void Put(std::vector<std::uint8_t>& v, std::uint64_t x) {
@@ -110,9 +108,13 @@ std::uint64_t CacheKey(const std::vector<std::uint8_t>& wav, const ConvertSettin
 
 bool LoadCached(const std::string& dir, std::uint64_t key, Converted* out) {
   if (dir.empty()) return false;
-  std::ifstream in(CachePath(dir, key), std::ios::binary);
-  if (!in) return false;
-  const std::vector<std::uint8_t> b((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+  std::vector<std::uint8_t> b;
+  if (!ReadFileBytes(CachePath(dir, key), &b) || b.size() < 8) return false;
+  // Integrity: the last 8 bytes are FNV-1a 64 of everything before them.
+  std::uint64_t stored = 0;
+  for (int i = 0; i < 8; ++i) stored |= static_cast<std::uint64_t>(b[b.size() - 8 + static_cast<std::size_t>(i)]) << (8 * i);
+  b.resize(b.size() - 8);
+  if (Fnv64().Bytes(b.data(), b.size()).value() != stored) return false;  // corrupt: re-encode
   Reader r{b};
   if (r.Get() != kCacheMagic || r.Get() != kCacheVersion || r.Get() != key) return false;
   Converted c;
@@ -137,7 +139,7 @@ bool LoadCached(const std::string& dir, std::uint64_t key, Converted* out) {
     p.byteOffset = r.Get();
     c.enc.seek.push_back(p);
   }
-  if (!r.ok) return false;
+  if (!r.ok || r.pos != b.size()) return false;
   *out = std::move(c);
   return true;
 }
@@ -161,15 +163,15 @@ void StoreCached(const std::string& dir, std::uint64_t key, const Converted& c) 
     Put(b, p.frame);
     Put(b, p.byteOffset);
   }
+  Put(b, Fnv64().Bytes(b.data(), b.size()).value());
   const std::string path = CachePath(dir, key);
   const std::string tmp = path + ".tmp";
-  {
-    std::ofstream out(tmp, std::ios::binary | std::ios::trunc);
-    if (!out) return;
-    out.write(reinterpret_cast<const char*>(b.data()), static_cast<std::streamsize>(b.size()));
-    if (!out) return;
+  if (!WriteFileBytes(tmp, b)) {
+    std::filesystem::remove(tmp, ec);
+    return;
   }
   std::filesystem::rename(tmp, path, ec);
+  if (ec) std::filesystem::remove(tmp, ec);
 }
 
 bool ConvertWav(const std::vector<std::uint8_t>& wavBytes, const ConvertSettings& s, const Encoder& encoder,

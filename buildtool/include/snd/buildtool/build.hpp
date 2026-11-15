@@ -34,6 +34,7 @@ struct BuildOptions {
   std::uint32_t platform = bank_format::kPlatformAny;
   bool devBuild = true;            // GUID chunk + kFileDevBuild (live link override layer)
   bool stripStrings = false;       // drop STRS / NAME (release)
+  bool warningsAsErrors = false;   // any warning fails the build (nothing written)
   std::string idsHeader = "sonus_ids.h";  // relative to outDir ("" = none)
   const EncoderRegistry* encoders = nullptr;  // nullptr = built-ins only
   DspSizer dsp;                    // stateBytes == nullptr: provisional size + warning
