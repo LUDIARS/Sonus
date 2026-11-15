@@ -190,7 +190,9 @@ SND_TEST(EffectsIndep, NeutralSettingsPassTheSignal) {
       {EffectKind::Flanger, {{0, 1.0f}, {1, 0.0f}}, 0.0f, "WetMix 0"},
       {EffectKind::Distortion, {{1, 0.0f}}, 0.0f, "Mix 0"},
       {EffectKind::Compressor, {{1, 1.0f}}, 0.0f, "Ratio 1"},
-      {EffectKind::ParamEq, {}, 0.0f, "defaults (all bands peaking 0 dB)"},
+      // Bit-exact without FMA; with -mfma GCC contracts b0*x + z1 etc., so b == a
+      // no longer cancels exactly (measured 4e-5 = -88 dB on full-scale material).
+      {EffectKind::ParamEq, {}, 1e-4f, "defaults (all bands peaking 0 dB)"},
       {EffectKind::ParamEq, {{0, 0.0f}, {4, 0.0f}, {8, 0.0f}, {12, 0.0f}}, 0.0f, "all bands off"},
       {EffectKind::PitchShifter, {{2, 0.0f}}, 0.0f, "Mix 0"},
       {EffectKind::Surround, {{0, 1.0f}}, 1e-6f, "Width 1 (stereo)"},
