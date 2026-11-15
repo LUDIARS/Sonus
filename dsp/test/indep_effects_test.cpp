@@ -788,3 +788,38 @@ SND_TEST(EffectsIndep, DumpForCrossBuildComparison) {
   std::fclose(f);
   snd::test::Note("wrote %zu floats to %s", dump.size(), path);
 }
+
+// Decision (fix round): a call whose input or output holds NaN / Inf outputs 0
+// for the non-finite samples and ends with the state reset (as EffectReset), so
+// the following calls equal a fresh instance with the current parameters.
+SND_TEST(EffectsIndep, NonFiniteInputRecoversLikeFreshInstance) {
+  const float bads[] = {std::numeric_limits<float>::quiet_NaN(), INFINITY, -INFINITY};
+  for (std::uint32_t k = 0; k < kKindCount; ++k) {
+    const EffectKind kind = static_cast<EffectKind>(k);
+    for (float bad : bads) {
+      Fx fx(kind, 2, 256, 48000), fresh(kind, 2, 256, 48000);
+      SND_REQUIRE(fx.ok && fresh.ok);
+      Audio a(2, 256), f(2, 256);
+      for (int b = 0; b < 10; ++b) {
+        Material(a, static_cast<std::uint64_t>(b) * 256u, 256, 0.8f);
+        Run(fx, a.cp(), a.p(), 2, 256);
+      }
+      Material(a, 5000, 256, 0.8f);
+      a.ch(1)[100] = bad;
+      Run(fx, a.cp(), a.p(), 2, 256);
+      const bool finite = !HasNonFinite(a.ch(0), 256) && !HasNonFinite(a.ch(1), 256);
+      SND_CHECK_MSG(finite, "%s: non-finite output in the call with a %g input sample", Short(kind), static_cast<double>(bad));
+      SND_CHECK(EffectIsTailDone(fx.state()));
+      float diff = 0.0f;
+      for (int b = 0; b < 20; ++b) {
+        Material(a, 9000u + static_cast<std::uint64_t>(b) * 256u, 256, 0.8f);
+        Material(f, 9000u + static_cast<std::uint64_t>(b) * 256u, 256, 0.8f);
+        Run(fx, a.cp(), a.p(), 2, 256);
+        Run(fresh, f.cp(), f.p(), 2, 256);
+        for (std::uint32_t c = 0; c < 2; ++c) diff = std::max(diff, dsptest::MaxAbsDiff(a.ch(c), f.ch(c), 256));
+      }
+      SND_CHECK_MSG(diff == 0.0f, "%s: after a %g input sample the output differs from a fresh instance by %g", Short(kind),
+                    static_cast<double>(bad), static_cast<double>(diff));
+    }
+  }
+}

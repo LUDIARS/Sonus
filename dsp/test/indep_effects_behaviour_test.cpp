@@ -446,3 +446,28 @@ SND_TEST(EffectsBehaviour, EchoMaxDecaySustainedInputMeasured) {
   snd::test::Note("echo Decay=1, 10 ms, 0.1 sine at 100 Hz: peak %.1f after 1 s, %.1f after 10 s", static_cast<double>(p1),
                   static_cast<double>(p10));
 }
+
+// Decision (fix round): the pitch shifter delays its dry part by WindowMs / 2
+// and reports it, "Pitch 1 = the input delayed, any Mix". At 44.1 kHz with the
+// default 50 ms window, WindowMs / 2 = 1102.5 frames: the delay is fractional
+// (linear interpolation, a lowpass: -3 dB at fs / 4, -inf at Nyquist) while
+// EffectLatencyFrames reports 1103.
+SND_TEST(EffectsBehaviour, PitchShifterUnityPitchIsDelayedInputAt44k) {
+  for (float mix : {0.0f, 0.5f, 1.0f}) {
+    Fx fx(EffectKind::PitchShifter, 1, 256, 44100, {{0, 1.0f}, {1, 50.0f}, {2, mix}});
+    const std::uint32_t lat = EffectLatencyFrames(fx.state());
+    dsptest::Noise nz(11);
+    std::vector<float> x(44100);
+    for (float& v : x) v = nz.Next(0.5f);
+    const auto y = RunMono(fx, x);
+    float worst = 0.0f;
+    for (std::size_t i = 4410; i < x.size(); ++i) worst = std::max(worst, std::fabs(y[i] - x[i - lat]));
+    const double hf = dsptest::Db(LsAmp(RunMono(Fx(EffectKind::PitchShifter, 1, 256, 44100, {{0, 1.0f}, {1, 50.0f}, {2, mix}}),
+                                                Sine(44100, 11025.0, 44100.0, 0.5f)),
+                                        8820, 22050, 11025.0, 44100.0) / 0.5);
+    snd::test::Note("44.1 kHz pitch 1 mix %.1f: latency %u, max |y - x delayed| %.3g, 11025 Hz at %.2f dB", static_cast<double>(mix),
+                    lat, static_cast<double>(worst), hf);
+    SND_CHECK_MSG(worst < 1e-5f, "44.1 kHz pitch 1 mix %.1f: output is not the input delayed by %u (max diff %.3g)",
+                  static_cast<double>(mix), lat, static_cast<double>(worst));
+  }
+}

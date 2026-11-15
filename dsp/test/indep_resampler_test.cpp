@@ -43,10 +43,12 @@ struct Guarded {
   std::size_t stateFloats;
   std::uint64_t consumed = 0;
   std::uint32_t violations = 0;
-  Guarded(ResamplerQuality quality, std::uint32_t ch) : q(quality), channels(ch) {
-    stateFloats = (ResamplerStateBytes(q, ch) + 3) / 4;
+  float maxRatio;
+  Guarded(ResamplerQuality quality, std::uint32_t ch, float maxR = kResamplerMaxRatio)
+      : q(quality), channels(ch), maxRatio(maxR) {
+    stateFloats = (ResamplerStateBytes(q, ch, maxR) + 3) / 4;
     state.assign(stateFloats + 16 + 4, kStateGuard);
-    ResamplerInit(st(), q, ch);
+    ResamplerInit(st(), q, ch, maxR);
   }
   // 16-byte aligned start inside the vector (the documented alignment).
   float* st() {
@@ -61,7 +63,7 @@ struct Guarded {
   }
   // Produces `frames` output frames into out[c] (appended).
   std::uint32_t Run(const Signal& sig, std::vector<std::vector<float>>& out, std::uint32_t frames, float r0, float r1) {
-    const std::uint32_t pad = ResamplerPadFrames(q);
+    const std::uint32_t pad = ResamplerPadFrames(q, maxRatio);
     const std::uint32_t need = ResamplerInputFrames(st(), frames, r0, r1);
     const std::uint32_t stride = 16 + pad + need + kPost;
     dsptest::AlignedMem mem(sizeof(float) * stride * channels);
@@ -554,4 +556,67 @@ SND_TEST(ResamplerIndep, SincStopbandFailsAboveRatio5) {
                     worst, at);
     SND_CHECK_MSG(worst < -78.0, "ratio %.0f: tone %.0f Hz aliases at %.1f dB (documented stopband >= ~80 dB)", r, at, worst);
   }
+}
+
+// Fix-round regression checks for the ratio > 4 sinc path (per-call polyphase
+// table of a ratio-scaled kernel): guards and state size for every maxRatio,
+// and no level jump / click where a ramp crosses ratio 4 (the two kernels have
+// different passbands: the table at 4 is flat to ~0.21 x out, the scaled kernel
+// to ~0.33 x out).
+SND_TEST(ResamplerIndep, SincAbove4GuardsForEveryMaxRatio) {
+  const float nan = std::numeric_limits<float>::quiet_NaN();
+  for (float maxR : {1.0f, 4.0f, 4.01f, 5.5f, 8.0f, 16.0f, 31.9f, 32.0f}) {
+    for (std::uint32_t ch : {1u, 3u, 8u}) {
+      Guarded g(ResamplerQuality::Sinc, ch, maxR);
+      SND_CHECK_EQ(ResamplerHistoryFrames(ResamplerQuality::Sinc, maxR),
+                   2u * ResamplerLookaheadFrames(ResamplerQuality::Sinc, maxR));
+      SND_CHECK_EQ(ResamplerPadFrames(ResamplerQuality::Sinc, maxR) % 16u, 0u);
+      std::vector<std::vector<float>> out(ch);
+      const auto sig = SineSig(700.0, 48000.0);
+      const float rs[][2] = {{0.5f, 3.9f}, {3.9f, 4.2f}, {40.0f, 40.0f}, {maxR, 1.0f}, {nan, 33.0f}, {7.0f, 7.0f}, {4.0f, 4.0f}};
+      for (const auto& r : rs)
+        for (std::uint32_t n : {1u, 64u, 255u}) g.Run(sig, out, n, r[0], r[1]);
+      SND_CHECK_MSG(g.violations == 0, "maxRatio %.2f, %u ch: %u guard / consumption violations", static_cast<double>(maxR), ch,
+                    g.violations);
+    }
+  }
+}
+
+SND_TEST(ResamplerIndep, SincNoJumpAcrossRatio4) {
+  // Level of a tone just below and just above ratio 4 (same source frequency).
+  // Inside both passbands (<= 0.21 x out = 10 kHz) the level must not jump;
+  // above, the documented passbands differ (measured only).
+  for (double fOut : {2000.0, 6000.0, 9000.0, 11000.0, 14000.0}) {
+    double lvl[2];
+    for (int k = 0; k < 2; ++k) {
+      const double r = k == 0 ? 3.999 : 4.001;
+      const auto y = RunSine(ResamplerQuality::Sinc, r, fOut, 9600, 480);  // f Hz in = f Hz out
+      lvl[k] = dsptest::Db(FitSine(y.data() + 512, 8192, fOut / kOut, 512).amp / 0.5);
+    }
+    snd::test::Note("tone at %.0f Hz out: ratio 3.999 %.3f dB, 4.001 %.3f dB", fOut, lvl[0], lvl[1]);
+    if (fOut <= 10000.0)
+      SND_CHECK_MSG(std::fabs(lvl[0] - lvl[1]) < 0.1, "tone at %.0f Hz: level jumps %.3f dB across ratio 4", fOut, lvl[1] - lvl[0]);
+  }
+  // Ramp 3.6 -> 4.4 -> 3.6 in 128-frame blocks under a 1 kHz output tone: no click.
+  Guarded g(ResamplerQuality::Sinc, 1);
+  std::vector<std::vector<float>> out(1);
+  const auto sig = SineSig(1000.0, 4.0 * 48000.0, 0.5);  // output 1000 * r / 4 Hz: 0.9..1.1 kHz
+  for (int b = 0; b < 80; ++b) {
+    const int k = b < 40 ? b : 80 - b;
+    g.Run(sig, out, 128, 3.6f + 0.02f * k, 3.6f + 0.02f * (b < 40 ? k + 1 : k - 1));
+  }
+  float worst = 0.0f;
+  std::size_t at = 0;
+  for (std::size_t i = 64; i < out[0].size(); ++i) {
+    const float d2 = std::fabs(out[0][i] - 2.0f * out[0][i - 1] + out[0][i - 2]);
+    if (d2 > 0.015f) snd::test::Note("  d2 %.4f at %zu (block %zu + %zu)", static_cast<double>(d2), i, i / 128, i % 128);
+    if (d2 > worst) {
+      worst = d2;
+      at = i;
+    }
+  }
+  // A 1.1 kHz sine of 0.5 has |second difference| <= 0.5 (2 pi 1100 / 48k)^2 = 0.0104.
+  snd::test::Note("ramp across ratio 4: max second difference %.4f at %zu", static_cast<double>(worst), at);
+  SND_CHECK_MSG(worst < 0.015f, "click %.4f at output frame %zu (block %zu)", static_cast<double>(worst), at, at / 128);
+  SND_CHECK_EQ(g.violations, 0u);
 }
