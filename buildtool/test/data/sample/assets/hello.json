@@ -1,0 +1,10 @@
+{
+  "type": "asset",
+  "guid": "5a0e0000-0000-4000-8000-000000000012",
+  "name": "vo/hello",
+  "languages": {
+    "ja": "audio/ja/hello.wav",
+    "en": "audio/en/hello.wav"
+  },
+  "loadForm": "compressed"
+}

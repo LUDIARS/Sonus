@@ -1,0 +1,19 @@
+{
+  "type": "project",
+  "guid": "5a0e0000-0000-4000-8000-000000000001",
+  "name": "Sample",
+  "formatVersion": 1,
+  "languages": [
+    "ja",
+    "en"
+  ],
+  "platforms": {
+    "default": {
+      "codec": "PC16",
+      "sectorAlign": 2048
+    },
+    "LNX_": {
+      "sampleRate": 48000
+    }
+  }
+}

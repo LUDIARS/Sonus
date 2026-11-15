@@ -1,0 +1,9 @@
+{
+  "type": "ducking",
+  "guid": "5a0e0000-0000-4000-8000-00000000000e",
+  "bank": "Common",
+  "kind": "rule",
+  "source": "SE",
+  "target": "Reverb",
+  "amountDb": -6
+}

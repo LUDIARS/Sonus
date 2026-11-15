@@ -1,0 +1,92 @@
+{
+  "type": "event",
+  "guid": "5a0e0000-0000-4000-8000-000000000013",
+  "name": "SE/Explosion",
+  "bank": "Level1",
+  "bus": "SFX",
+  "category": "SE",
+  "limitGroup": "Footsteps",
+  "priority": 200,
+  "sequence": "random",
+  "is3D": true,
+  "maxDistance": 50,
+  "aliases": [
+    "SE/Boom"
+  ],
+  "distanceCurves": {
+    "volume": {
+      "points": [
+        [
+          0,
+          0
+        ],
+        [
+          50,
+          -40,
+          2
+        ]
+      ]
+    }
+  },
+  "curves": [
+    {
+      "parameter": "Speed",
+      "target": "pitch",
+      "points": [
+        [
+          0,
+          0
+        ],
+        [
+          10,
+          1200
+        ]
+      ]
+    }
+  ],
+  "tracks": [
+    {
+      "clips": [
+        {
+          "asset": "wav/boom",
+          "weight": 2,
+          "random": {
+            "pitchCents": 50,
+            "volumeDb": 2
+          }
+        },
+        {
+          "event": "SE/Nested"
+        },
+        {
+          "synth": {
+            "kind": "oscillator",
+            "waveform": "square",
+            "frequencyHz": 220
+          }
+        }
+      ],
+      "actions": [
+        {
+          "timeMs": 100,
+          "action": "setParameter",
+          "target": "Speed",
+          "value": 0.5
+        }
+      ]
+    },
+    {
+      "layerParameter": "Speed",
+      "clips": [
+        {
+          "asset": "wav/amb",
+          "layer": [
+            0,
+            5
+          ],
+          "switchValue": "Grass"
+        }
+      ]
+    }
+  ]
+}

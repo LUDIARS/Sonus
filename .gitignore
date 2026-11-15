@@ -1,0 +1,20 @@
+# Build trees
+/build/
+/build-*/
+/out/
+/cmake-build-*/
+CMakeUserPresets.json
+compile_commands.json
+
+# Editors / OS
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store
+
+# Generated test output (committed references live in */test/golden/ and tests/selftest/golden/)
+*.sndg.actual
+
+# エージェントの作業ツリー
+.claude/worktrees/

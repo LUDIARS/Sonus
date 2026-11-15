@@ -1,0 +1,17 @@
+{
+  "type": "event",
+  "guid": "5a0e0000-0000-4000-8000-000000000017",
+  "name": "VO/Hello",
+  "bank": "Voice",
+  "bus": "Master",
+  "category": "UI",
+  "tracks": [
+    {
+      "clips": [
+        {
+          "asset": "vo/hello"
+        }
+      ]
+    }
+  ]
+}
