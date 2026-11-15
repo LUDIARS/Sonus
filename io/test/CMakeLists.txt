@@ -17,3 +17,10 @@ snd_add_header_checks(io_header_check
     snd/io/io.hpp snd/io/io_module.hpp snd/io/stream_pool.hpp snd/io/io_scheduler.hpp
     snd/io/stream_read_planner.hpp snd/io/default_file_system.hpp
   LINK sonus_io)
+
+# Independent (adversarial) tests: model-based, edge cases, contract checks.
+snd_add_test(io_adv_test
+  SOURCES
+    io_model_test.cpp
+    io_scheduler_edge_test.cpp
+  LINK sonus_io sonus_jobs sonus_mocks)
