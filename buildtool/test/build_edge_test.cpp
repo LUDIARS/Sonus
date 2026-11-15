@@ -751,3 +751,72 @@ SND_TEST(BuildEdge, Defect_IdsHeaderWithMacroNamesDoesNotCompile) {
   const int rc = CompileHeader(p.out() / "sonus_ids.h", &log);
   SND_CHECK_MSG(rc == 0, "sonus_ids.h does not compile:\n%.1500s", log.c_str());
 }
+
+// Two-phase commit (all outputs written under temporary names, then renamed):
+// a failure while writing any one of them leaves every existing output
+// unchanged and no temporary file behind.
+SND_TEST(BuildEdge, TwoPhaseCommitFailuresLeaveOutputsUnchanged) {
+  auto snapshot = [](const fs::path& dir) {
+    std::vector<std::pair<std::string, std::vector<std::uint8_t>>> s;
+    for (const std::string& f : ListFiles(dir)) {
+      if (fs::is_regular_file(dir / f)) s.emplace_back(f, mini::ReadBytes(dir / f));
+    }
+    return s;
+  };
+  auto noTemps = [](const fs::path& dir) {
+    for (const std::string& f : ListFiles(dir)) {
+      if (f.find("tmp") != std::string::npos) return false;
+    }
+    return true;
+  };
+  struct Case {
+    const char* what;
+    std::function<void(const fs::path& out)> block;
+  } cases[] = {
+      {"streams/ is a regular file", [](const fs::path& out) {
+         std::error_code ec;
+         fs::remove_all(out / "streams", ec);
+         mini::WriteBytes(out / "streams", {1, 2, 3});
+       }},
+      {"the header path is a directory", [](const fs::path& out) {
+         std::error_code ec;
+         fs::remove(out / "sonus_ids.h", ec);
+         fs::create_directories(out / "sonus_ids.h" / "x", ec);
+       }},
+      {"a bank path is a directory", [](const fs::path& out) {
+         std::error_code ec;
+         fs::remove(out / "Main.sndb", ec);
+         fs::create_directories(out / "Main.sndb", ec);
+       }},
+  };
+  for (Case& c : cases) {
+    Project p("2pc");
+    p.Minimal();
+    p.Wav("audio/s.wav", mini::Tone(1, 48000, 4800));
+    p.Add("assets/s.json", "asset", "s", "\"file\": \"audio/s.wav\", \"loadForm\": \"stream\"");
+    p.Add("events/S.json", "event", "S", "\"bank\": \"Main\", \"tracks\": [{\"clips\": [{\"asset\": \"s\"}]}]");
+    bt::Diagnostics d;
+    REQUIRE_MSG(p.Build(&d), "%s", mini::Dump(d).c_str());
+    c.block(p.out());
+    const auto before = snapshot(p.out());
+    p.Add("events/F.json", "event", "F", "\"bank\": \"Main\", \"priority\": 7");  // changes Main.sndb and ids
+    p.Wav("audio/s.wav", mini::Tone(1, 48000, 4800, 300));                       // changes the stream file
+    std::string log;
+    const int rc = RunCli("--project \"" + p.dir().string() + "\" --out \"" + p.out().string() + "\"", &log);
+    SND_CHECK_MSG(rc == 1, "%s: exit %d\n%.300s", c.what, rc, log.c_str());
+    SND_CHECK_MSG(snapshot(p.out()) == before, "%s: existing outputs changed", c.what);
+    SND_CHECK_MSG(noTemps(p.out()), "%s: temporary file left", c.what);
+  }
+  // Fresh (non-existent, nested) output directory and an unchanged rebuild.
+  Project p("2pc-fresh");
+  p.Minimal();
+  bt::BuildOptions o = p.Options();
+  o.outDir = (p.root() / "a" / "b" / "c").string();
+  bt::Diagnostics d;
+  bt::BuildResult r;
+  REQUIRE_MSG(p.Build(o, &d, &r), "%s", mini::Dump(d).c_str());
+  SND_CHECK(r.filesWritten > 0);
+  REQUIRE_MSG(p.Build(o, &d, &r), "%s", mini::Dump(d).c_str());
+  SND_CHECK_EQ(r.filesWritten, 0u);
+  SND_CHECK(noTemps(o.outDir));
+}
