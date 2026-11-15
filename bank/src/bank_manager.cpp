@@ -557,10 +557,11 @@ bool Impl::Decide(Slot& s) noexcept {
   // The same bank (bankId + language) from another path: the first one wins.
   for (std::uint32_t i = 0; i < desc.maxBanks; ++i) {
     const Slot& o = slots[i];
-    if (&o == &s || o.cancel || o.prepared == nullptr) continue;
+    // Only stages whose `prepared` is settled (a Validating slot's job may still write it).
     const bool earlier = o.stage == Stage::Ready || o.stage == Stage::Registered || o.stage == Stage::Unloading ||
                          (o.stage == Stage::Validated && &o < &s);
-    if (earlier && o.prepared->bankId == pb.bankId && o.prepared->languageId == pb.languageId) {
+    if (&o == &s || o.cancel || !earlier || o.prepared == nullptr) continue;
+    if (o.prepared->bankId == pb.bankId && o.prepared->languageId == pb.languageId) {
       char why[192];
       std::snprintf(why, sizeof(why), "bank %08x is already loaded or loading from '%.120s'", pb.bankId,
                     o.path != nullptr ? o.path : "?");
