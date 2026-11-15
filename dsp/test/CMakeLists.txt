@@ -34,3 +34,5 @@ set_tests_properties(dsp_test dsp_test_scalar PROPERTIES TIMEOUT 1200)
 
 # Contract 1.1 D-48 (stage 1.5 integration).
 snd_add_test(dsp_effect_rate_test SOURCES effect_rate_test.cpp LINK sonus_dsp)
+# Independent: D-48 for every standard kind, D-44 pitch-ratio limit / resampler pool slot.
+snd_add_test(dsp_indep_contract11_test SOURCES indep_contract11_dsp_test.cpp LINK sonus_dsp)

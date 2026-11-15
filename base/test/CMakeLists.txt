@@ -31,3 +31,5 @@ endforeach()
 
 # Generic parts moved into base from the modules (stage 1.5, A1-12).
 snd_add_test(base_common_parts_test SOURCES common_parts_test.cpp LINK sonus_base)
+# Independent: published vectors / bit-serial reference for the parts moved into base (A1-12).
+snd_add_test(base_indep_common11_test SOURCES indep_common11_test.cpp LINK sonus_base)

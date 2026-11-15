@@ -27,3 +27,6 @@ snd_apply_options(contract_undeclared_read)
 add_test(NAME contract_undeclared_read_rejected
   COMMAND ${CMAKE_COMMAND} --build ${CMAKE_BINARY_DIR} --target contract_undeclared_read)
 set_tests_properties(contract_undeclared_read_rejected PROPERTIES WILL_FAIL TRUE TIMEOUT 300)
+
+# Independent self-check of contract 1.1 (test owner).
+snd_add_test(contract_indep11_test SOURCES indep_contract11_test.cpp LINK sonus_contract)
