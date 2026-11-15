@@ -27,3 +27,7 @@ snd_add_test(dsp_test_scalar
 target_include_directories(dsp_test_scalar PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../include
                                                    ${CMAKE_CURRENT_SOURCE_DIR}/../src)
 target_compile_definitions(dsp_test_scalar PRIVATE SND_SIMD_FORCE_SCALAR=1)
+
+# The dsp tests run minutes of audio (tails, extreme parameters); under
+# ThreadSanitizer they exceed the default 120 s.
+set_tests_properties(dsp_test dsp_test_scalar PROPERTIES TIMEOUT 1200)
