@@ -231,6 +231,64 @@ inline std::string CheckInvariants(const BankView& v) {
     Cell(v, ch::NAME, c::NAME_stringOffset, i, &off);
     if (!terminated(v.Chunk(ch::STRS), off)) return "NAME string not a terminated string";
   }
+  // Format 2.0 header rules: reserved bytes zero, languageId only with the language flag.
+  {
+    const bf::FileHeader& h = v.header();
+    bool zero = h.reserved0 == 0;
+    for (std::uint8_t b : h.reserved) zero = zero && b == 0;
+    if (!zero) return "reserved header bytes not zero";
+    if ((h.flags & bf::kFileLanguageBank) == 0u && h.languageId != 0u) return "languageId without the language flag";
+  }
+  // Format 2.0 row order rules (§6.0): every chain is acyclic.
+  for (std::uint32_t r = 0; r < rows(ch::BUSS); ++r) {
+    std::uint64_t p = 0, sf = 0, sc = 0;
+    Cell(v, ch::BUSS, c::BUSS_parent, r, &p);
+    if (p != bf::kNone && p <= r) return "BUSS parent not after the bus";
+    Cell(v, ch::BUSS, c::BUSS_sendFirst, r, &sf);
+    Cell(v, ch::BUSS, c::BUSS_sendCount, r, &sc);
+    for (std::uint64_t k = 0; k < sc; ++k) {
+      std::uint64_t t = 0;
+      Cell(v, ch::SEND, c::SEND_targetBus, static_cast<std::uint32_t>(sf + k), &t);
+      if (t <= r) return "SEND target not after the bus";
+    }
+  }
+  for (std::uint32_t r = 0; r < rows(ch::CATG); ++r) {
+    std::uint64_t p = 0;
+    Cell(v, ch::CATG, c::CATG_parent, r, &p);
+    if (p != bf::kNone && p <= r) return "CATG parent not after the category (cycle possible)";
+  }
+  for (std::uint32_t e = 0; e < rows(ch::EVNT); ++e) {
+    std::uint64_t tf = 0, tc = 0;
+    Cell(v, ch::EVNT, c::EVNT_trackFirst, e, &tf);
+    Cell(v, ch::EVNT, c::EVNT_trackCount, e, &tc);
+    for (std::uint64_t t = 0; t < tc; ++t) {
+      std::uint64_t cf = 0, cc = 0;
+      Cell(v, ch::TRAK, c::TRAK_clipFirst, static_cast<std::uint32_t>(tf + t), &cf);
+      Cell(v, ch::TRAK, c::TRAK_clipCount, static_cast<std::uint32_t>(tf + t), &cc);
+      for (std::uint64_t k = 0; k < cc; ++k) {
+        std::uint64_t kind = 0, target = 0;
+        Cell(v, ch::CLIP, c::CLIP_kind, static_cast<std::uint32_t>(cf + k), &kind);
+        Cell(v, ch::CLIP, c::CLIP_target, static_cast<std::uint32_t>(cf + k), &target);
+        if (kind == 1 && target <= e) return "nested event not after its owner (cycle possible)";
+      }
+    }
+  }
+  for (std::uint32_t a = 0; a < rows(ch::ASST); ++a) {
+    std::uint64_t first = 0, count = 0;
+    Cell(v, ch::ASST, c::ASST_seekFirst, a, &first);
+    Cell(v, ch::ASST, c::ASST_seekCount, a, &count);
+    for (std::uint64_t i = 0; i < count; ++i) {
+      std::uint64_t fr = 0, o = 0, pf = 0, po = 0;
+      Cell(v, ch::SEEK, c::SEEK_frame, static_cast<std::uint32_t>(first + i), &fr);
+      Cell(v, ch::SEEK, c::SEEK_byteOffset, static_cast<std::uint32_t>(first + i), &o);
+      if (i == 0 && (fr != 0 || o != 0)) return "seek table does not start at {0,0}";
+      if (i > 0) {
+        Cell(v, ch::SEEK, c::SEEK_frame, static_cast<std::uint32_t>(first + i - 1), &pf);
+        Cell(v, ch::SEEK, c::SEEK_byteOffset, static_cast<std::uint32_t>(first + i - 1), &po);
+        if (fr <= pf || o < po) return "seek table not increasing";
+      }
+    }
+  }
   // Dependencies inside the file.
   if (v.dependencyCount() > 0) {
     const bf::FileHeader& h = v.header();
@@ -287,6 +345,13 @@ inline std::uint64_t ReadAllColumns(const BankView& v) {
 inline std::uint64_t Touch(const ByteSpan& s) {
   if (s.bytes == 0 || s.data == nullptr) return 0;
   return static_cast<std::uint64_t>(s.data[0]) + s.data[s.bytes - 1] + s.data[s.bytes / 2];
+}
+
+inline std::uint64_t ResolveAllAliases(const BankView& v) {
+  std::uint64_t sum = 0;
+  for (std::uint32_t r = 0; r < v.Rows(ch::ALIS); ++r) sum += v.ResolveAlias(v.Column<snd::bank::col::ALIS_oldId>()[r]);
+  sum += v.ResolveAlias(0) + v.ResolveAlias(0xFFFFFFFFu);
+  return sum;
 }
 
 // Every accessor of BankView, every reference followed into its target
@@ -364,6 +429,14 @@ inline std::uint64_t DeepWalk(const BankView& v) {
     const std::uint32_t k = v.Column<snd::bank::col::DUCK_kind>()[i];
     readRow(k == 0 ? ch::BUSS : ch::CATG, v.Column<snd::bank::col::DUCK_source>()[i]);
   }
+  // Follow every nesting chain and category chain to its end; the 2.0 order
+  // rules promise termination within `rows` steps.
+  for (std::uint32_t r = 0; r < v.Rows(ch::CATG); ++r) {
+    std::uint32_t at = r, steps = 0;
+    while (at != bf::kNone && steps++ <= v.Rows(ch::CATG)) at = v.Column<snd::bank::col::CATG_parent>()[at];
+    sum += steps;
+  }
+  sum += ResolveAllAliases(v);
   // Typed helpers, including out-of-range rows.
   const std::uint32_t assets = v.Rows(ch::ASST);
   for (std::uint32_t a = 0; a <= assets + 1; ++a) {

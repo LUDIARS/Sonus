@@ -22,7 +22,9 @@ target_compile_definitions(bank_roundtrip_test PRIVATE
 # invariants re-checked against the spec, every accessor walked (run under ASan/UBSan).
 snd_add_test(bank_struct_fuzz_test
   SOURCES struct_fuzz_test.cpp fixture_bank.cpp
-  LINK sonus_bank sonus_mocks)
+  LINK sonus_bank sonus_buildtool sonus_mocks)
+# Differential check against buildtool's generated self-check (buildtool/src/self_check.hpp).
+target_include_directories(bank_struct_fuzz_test PRIVATE ${PROJECT_SOURCE_DIR}/buildtool/src)
 set_tests_properties(bank_struct_fuzz_test PROPERTIES TIMEOUT 1200)
 
 # Manager edge cases (cancel at every step, alloc failure at every n, queue,

@@ -19,6 +19,7 @@
 #include "snd/bank/validate.hpp"
 #include "snd/id.hpp"
 #include "snd/test/test.hpp"
+#include "self_check.hpp"
 #include "spec_walk.hpp"
 #include "test_support.hpp"
 
@@ -193,6 +194,25 @@ void Judge(const std::vector<std::uint8_t>& work, Outcome* out, const char* cont
   BankView v;
   ParseError err;
   const snd_result r = ParseBank(img.data(), img.size(), ParseOptions{}, &v, &err);
+  // Differential: buildtool's self-check (a generated copy of the rules) must
+  // agree with ParseBank. It checks the platform against the bank's own tag,
+  // so compare with ParseBank run the same way.
+  {
+    ParseOptions same;
+    if (work.size() >= sizeof(bf::FileHeader)) std::memcpy(&same.platform, work.data() + 8, 4);
+    BankView v2;
+    ParseError e2;
+    const bool rt = ParseBank(img.data(), img.size(), same, &v2, &e2) == SND_OK;
+    std::string why;
+    const bool sc = snd::buildtool::detail::SelfCheckBank(work, &why);
+    if (rt != sc) {
+      ++out->violations;
+      if (out->firstViolation.empty()) {
+        out->firstViolation = std::string(context) + ": ParseBank " + (rt ? "accepts" : "rejects") +
+                              " but self-check " + (sc ? "accepts" : "rejects") + " (" + e2.message + " / " + why + ")";
+      }
+    }
+  }
   if (r != SND_OK) {
     ++out->rejected;
     if (err.message[0] == '\0') {
@@ -224,6 +244,12 @@ std::vector<std::vector<std::uint8_t>> Bases() {
   b.deps.push_back(bf::Dependency{snd::HashId("Third"), 0, 0x5678});
   b.flags |= bf::kFileLanguageBank;
   b.languageId = snd::HashId("ja");
+  // 2.0: rename aliases and a category parent chain (order rule §6.0).
+  b.Table(ch::ALIS, 3,
+          {fixture::U32(c::ALIS_oldId, {snd::HashId("Old/A"), snd::HashId("Old/B"), snd::HashId("Old/C")}),
+           fixture::U32(c::ALIS_id, {snd::HashId("SE/Explosion"), snd::HashId("Master"), snd::HashId("UI")}),
+           fixture::U32(c::ALIS_kind, {0, 1, 3})});
+  b.Find(ch::CATG)->columns.push_back(fixture::U32(c::CATG_parent, {1, bf::kNone}));
   out.push_back(b.Build());
   return out;
 }
