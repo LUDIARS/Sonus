@@ -26,15 +26,26 @@
 // an empty window. Work that costs no bandwidth (size queries) never waits.
 // If the clock goes back (an IoClock contract violation) a new window starts
 // at that point instead of stalling.
-// An eligible request is one that can be issued now: any FileRequest, and a
-// stream request that owns a chunk or for which the pool may have one. Every
-// pending request is considered (not only the head of each class), so while at
-// least one eligible request exists one is issued (no deadlock when queued
-// requests hold the last chunks). Issue order may differ from request order;
-// delivery inside a channel is always in request order. Caller's duty: within
-// ONE channel, do not queue dst=nullptr requests in front of requests carrying
-// the pool's last free chunks (their data can only be delivered after the
-// earlier request, which can never get a chunk).
+// Progress invariants (stream reads):
+//  I1 (selection) An eligible request is one that can be issued now: any
+//     FileRequest, and a stream request that owns a chunk or for which the pool
+//     may have one. Every pending request is considered, not only the head of
+//     each class: while at least one eligible request exists, one is issued.
+//  I2 (chunks in channel order) The IO thread borrows pool chunks for a channel
+//     in request order: before a request gets one, every earlier current
+//     request of the same channel gets one. Hence every request holding a
+//     chunk borrowed by the IO thread has all earlier current requests of its
+//     channel holding chunks; they can all be issued, complete and be delivered
+//     in order, so borrowed chunks always come back once the consumer releases
+//     delivered records. A later, higher-class request may be ISSUED before an
+//     earlier one (priority), but only after the earlier ones got their chunks.
+//  I3 (delivery) Inside a channel records are delivered in request order.
+// With dst=nullptr only, the scheduler therefore never wedges as long as the
+// consumer keeps popping and releasing. Caller's duty for caller chunks (dst
+// set): within ONE channel, do not queue dst=nullptr requests in front of
+// requests carrying the pool's last free chunks (I2 cannot give the earlier
+// request a chunk; that channel then stops, nothing breaks, and Cancel() +
+// Reclaim() recover it).
 //
 // Starvation policy (aging): a request that has waited agingNs (default 300 ms
 // = 3 windows) is served before any younger request, oldest first, whatever

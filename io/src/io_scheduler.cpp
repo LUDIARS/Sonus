@@ -518,6 +518,33 @@ struct IoScheduler::Impl {
     return static_cast<std::uint32_t>(piece);
   }
 
+  // Pool chunks are handed out in CHANNEL ORDER: before stream node i borrows
+  // a chunk, every earlier current-epoch Pending node of its channel gets one
+  // first (oldest first). Invariant: a node holding a chunk the IO thread
+  // borrowed has all earlier current requests of its channel holding a chunk
+  // too (or already issued / completed). Such a channel can always complete
+  // and deliver its chunk-holding requests in order, so a borrowed chunk never
+  // waits forever behind a request that cannot get one. The previous code gave
+  // the chunk to whichever request was issued first: after a class change
+  // inside a channel the later (higher-class) request took the last chunk and
+  // then waited for delivery behind the earlier one, which could never get a
+  // chunk (IoDefect.ClassChangeInsideAChannelDeadlocksWithoutCallerChunks).
+  // A later request may still be ISSUED first (priority), once the earlier ones
+  // hold their chunks. On a failed Acquire the chunks already granted stay with
+  // the earlier requests (the invariant holds for them).
+  bool GrantChunksInOrder(std::uint32_t i) noexcept {
+    Node& n = nodes[i];
+    const std::uint32_t epoch = Ch(n.slot).Epoch();
+    for (std::uint32_t j = chHead[n.slot]; j != kNil && j != i; j = nodes[j].cnext) {
+      Node& m = nodes[j];
+      if (m.state != NodeState::Pending || m.epoch != epoch || m.chunk != kInvalidChunk) continue;
+      m.chunk = pool->Acquire(m.slot);
+      if (m.chunk == kInvalidChunk) return false;
+    }
+    n.chunk = pool->Acquire(n.slot);
+    return n.chunk != kInvalidChunk;
+  }
+
   IssueResult Issue(std::uint32_t i) noexcept {
     Node& n = nodes[i];
     Unlink(i);
@@ -536,13 +563,10 @@ struct IoScheduler::Impl {
         Deliver(n.slot);
         return IssueResult::Finished;
       }
-      if (n.chunk == kInvalidChunk) {
-        n.chunk = pool->Acquire(n.slot);
-        if (n.chunk == kInvalidChunk) {
-          poolStarved.Add();
-          PushFront(i);
-          return IssueResult::PoolEmpty;
-        }
+      if (n.chunk == kInvalidChunk && !GrantChunksInOrder(i)) {
+        poolStarved.Add();
+        PushFront(i);
+        return IssueResult::PoolEmpty;
       }
       const std::uint64_t token = ++nextToken;
       if (!fs->ReadAsync(files[n.file].id, n.offset, pool->Data(n.chunk), n.bytes, IoToken{token})) {

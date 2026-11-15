@@ -666,3 +666,55 @@ SND_TEST(IoScheduler, ClockGoingBackStartsANewWindow) {
   rig.Run();
   SND_CHECK_EQ(rig.Consume(0, 1), 3u);
 }
+
+// Class change inside a channel with dst=nullptr only (decision: pool chunks
+// are handed out in channel order). Pool of N chunks, N channels each posting
+// an ambience request then a music request: with a consumer that pops and
+// releases, every channel delivers both records in request order. (Before the
+// fix the music requests took all N chunks and nothing was ever delivered.)
+SND_TEST(IoScheduler, ClassChangeInsideAChannelKeepsProgressingWithPoolChunks) {
+  for (std::uint32_t n : {1u, 3u}) {
+    Rig rig(n);
+    rig.cfg.maxInFlight = 8;
+    SND_REQUIRE(rig.Init());
+    AddFiles(rig);
+    for (std::uint32_t s = 0; s < n; ++s) {
+      SND_REQUIRE(rig.io.Post(StreamReq(s, "music.bin", 0, kChunk, IoClass::Ambience, 1)));
+      SND_REQUIRE(rig.io.Post(StreamReq(s, "music.bin", kChunk, kChunk, IoClass::Music, 2)));
+    }
+    std::vector<std::vector<ChunkRecord>> got(n);
+    bool ok = true;
+    for (int step = 0; step < 50; ++step) {
+      rig.io.RunOnce();
+      for (std::uint32_t s = 0; s < n; ++s) rig.Consume(s, 1, &got[s], &ok);
+    }
+    SND_CHECK(ok);
+    for (std::uint32_t s = 0; s < n; ++s) {
+      SND_REQUIRE_EQ(got[s].size(), 2u);
+      SND_CHECK_EQ(got[s][0].tag, 1u);
+      SND_CHECK_EQ(got[s][1].tag, 2u);
+    }
+    SND_CHECK_EQ(rig.pool.Used(), 0u);
+  }
+}
+
+// With enough chunks the later music request is still issued first, but the
+// earlier ambience request got its chunk before it (channel order of chunks).
+SND_TEST(IoScheduler, LaterHigherClassRequestIsIssuedFirstAfterEarlierOnesGotChunks) {
+  Rig rig(4);
+  rig.cfg.maxInFlight = 1;
+  SND_REQUIRE(rig.Init());
+  AddFiles(rig);
+  rig.fs.SetLatency("music.bin", 2);
+  SND_REQUIRE(rig.io.Post(StreamReq(0, "music.bin", 0, kChunk, IoClass::Ambience, 1)));
+  SND_REQUIRE(rig.io.Post(StreamReq(0, "music.bin", kChunk, kChunk, IoClass::Music, 2)));
+  rig.io.RunOnce();
+  SND_CHECK_EQ(rig.io.Stats().readsIssued, 1u);
+  SND_CHECK_EQ(rig.pool.HeldBy(0), 2u);  // the in-flight music read and the waiting ambience request
+  rig.Run();
+  std::vector<ChunkRecord> recs;
+  rig.Consume(0, 1, &recs);
+  SND_REQUIRE_EQ(recs.size(), 2u);
+  SND_CHECK_EQ(recs[0].tag, 1u);
+  SND_CHECK_EQ(recs[1].tag, 2u);
+}

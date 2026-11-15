@@ -26,8 +26,14 @@
 // (links to files or directories outside, absolute or relative); links that
 // stay inside the root are followed. Linux uses openat2(RESOLVE_BENEATH) and,
 // where that is unavailable or refuses an absolute in-root link, checks the
-// canonical path of the opened descriptor (/proc/self/fd) or realpath(). A
-// root that does not exist at Init makes every Open fail.
+// canonical path of the opened descriptor (/proc/self/fd) or realpath(), and
+// requires that this path names the opened file (same device and inode, so a
+// link swapped after the open is caught). A root that does not exist at Init
+// makes every Open fail.
+// Only regular files are opened: FIFOs, devices, sockets and directories are
+// refused. Files are opened with O_NONBLOCK | O_NOCTTY, so Open never blocks
+// on a special file, inside the root or behind a link (it opens, sees with
+// fstat that it is not a regular file, and closes).
 //
 // Platforms: POSIX (Linux, macOS, ...) is implemented. Other platforms build a
 // stub whose Open always fails.

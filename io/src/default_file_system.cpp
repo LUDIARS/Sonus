@@ -129,7 +129,14 @@ struct DefaultFileSystem::Impl {
     }
 #endif
     if (!resolved) resolved = ::realpath(full, real) != nullptr;
-    if (!resolved || !InsideRoot(real)) {
+    // The canonical path must be inside the root AND name the very file we
+    // opened (same device and inode). This closes the realpath() race (a link
+    // swapped between open() and realpath() resolves to a different inode) and
+    // double-checks /proc. A hard link inside the root to an outside file is a
+    // file of the root (it has a name there) and is accepted.
+    struct stat opened, named;
+    if (!resolved || !InsideRoot(real) || ::fstat(fd, &opened) != 0 || ::stat(real, &named) != 0 ||
+        opened.st_dev != named.st_dev || opened.st_ino != named.st_ino) {
       ::close(fd);
       return -1;
     }
@@ -340,7 +347,13 @@ FileId DefaultFileSystem::Open(const char* path) {
   std::memcpy(full, im.root, im.rootLen);
   full[im.rootLen] = '/';
   std::memcpy(full + im.rootLen + 1u, path, rel + 1u);
-  int flags = O_RDONLY;
+  // Only regular files are opened (decision). O_NONBLOCK: opening a FIFO
+  // without a writer (or some devices) would otherwise block the IO thread,
+  // and the fallback below opens BEFORE it can tell whether the target lies
+  // outside the root. O_NOCTTY: never acquire a controlling terminal. The
+  // fstat below then refuses FIFOs, devices, sockets and directories.
+  // (O_NONBLOCK has no effect on reads of regular files.)
+  int flags = O_RDONLY | O_NONBLOCK | O_NOCTTY;
 #if defined(O_CLOEXEC)
   flags |= O_CLOEXEC;
 #endif
