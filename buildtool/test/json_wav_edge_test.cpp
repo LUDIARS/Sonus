@@ -210,7 +210,7 @@ SND_TEST(JsonEdge, ManyMembersTime) {
   json::Value v;
   SND_CHECK(Ok(obj, &v));
   const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
-  snd::test::Note("object with %d members parsed in %.0f ms (duplicate check is O(n^2))", n, ms);
+  snd::test::Note("object with %d members parsed in %.0f ms", n, ms);
 }
 
 SND_TEST(JsonEdge, DuplicatesTrailingCommasBomAndEmpty) {
@@ -273,16 +273,49 @@ SND_TEST(JsonEdge, EveryPrefixOfADocumentIsRejected) {
   }
 }
 
+// Valid UTF-8 strings round-trip through Write/Parse: every ASCII byte
+// (control characters escaped), 2/3/4-byte characters, characters written
+// as surrogate pairs on input, and members / values alike.
 SND_TEST(JsonEdge, WriteQuoteRoundTrip) {
   std::string all;
-  for (int c = 1; c < 256; ++c) all.push_back(static_cast<char>(c));
+  for (int c = 1; c < 128; ++c) all.push_back(static_cast<char>(c));
+  all += "\xC3\xA9\xE2\x82\xAC\xE3\x81\x82\xF0\x9F\x98\x80\xF4\x8F\xBF\xBF\xEF\xBF\xBF";  // e-acute, euro, a, emoji, U+10FFFF, U+FFFF
   json::Value o = json::MakeObject();
   json::Add(o, all, json::MakeString(all));
   json::Add(o, "n", json::MakeNumber("-1.25e-7"));
+  json::Add(o, std::string(1, '\0'), json::MakeString(std::string("a\0b", 3)));
   json::Value back;
   SND_REQUIRE(Ok(json::Write(o), &back));
   SND_CHECK(Same(o, back));
   SND_CHECK(json::Quote(std::string(1, '\0')) == "\"\\u0000\"");
+  // A string that came in as a surrogate pair is written back as UTF-8 and re-reads equal.
+  json::Value sp;
+  SND_REQUIRE(Ok("[\"\\ud83d\\ude00 \\u00e9\"]", &sp));
+  json::Value sp2;
+  SND_REQUIRE(Ok(json::Write(sp), &sp2));
+  SND_CHECK(Same(sp, sp2));
+  SND_CHECK(sp2.items[0].text == "\xF0\x9F\x98\x80 \xC3\xA9");
+}
+
+// The writer given malformed UTF-8 (not reachable from Parse, only from code
+// building Values): json.hpp does not document it (spec gap, reported). What
+// must hold: the result is never read back as a *different* valid string -
+// Parse either rejects it (the reader's rule) or returns the same bytes.
+SND_TEST(JsonEdge, WriterWithMalformedUtf8) {
+  const char* bad[] = {"\xFF", "\xC0\xAF", "\x80", "\xED\xA0\x80", "\xF5\x80\x80\x80", "\xE3\x81"};
+  int rejected = 0;
+  for (const char* b : bad) {
+    json::Value v = json::MakeString(std::string("x") + b + "y");
+    const std::string text = json::Write(v);
+    json::Value back;
+    if (Ok(text, &back)) {
+      SND_CHECK_MSG(Same(v, back), "malformed input came back altered");
+    } else {
+      ++rejected;
+    }
+  }
+  snd::test::Note("writer passes malformed UTF-8 through unchanged; the reader rejects %d of 6", rejected);
+  SND_CHECK_EQ(rejected, 6);
 }
 
 SND_TEST(JsonEdge, FuzzNeverCrashesAndRoundTrips) {
