@@ -1,9 +1,14 @@
 // io module (design.md 12.1): default IFileSystem, IO scheduler (priority and bandwidth).
 // Dependencies (frozen, root CMakeLists.txt): base, jobs.
 //
-// Stage-0 stub. The owner of this module adds its headers under
-// io/include/snd/io/ and its sources under io/src/. Only types from the
-// contract (contract/), base and platform may appear in headers here.
+// Public headers (only contract and base types appear in them, D-02; platform
+// and jobs stay inside io/src because the modules using io do not see them):
+//   stream_pool.hpp          StreamPool: fixed chunks of Config.memory.streamPoolBytes
+//   io_scheduler.hpp         IoScheduler (IO thread, priority + bandwidth), StreamChannel
+//                            (compressed ring IO -> decode), FileRequest (bank loading)
+//   stream_read_planner.hpp  StreamReadPlanner: chunked read sequence with loop wrap
+//   default_file_system.hpp  DefaultFileSystem: IFileSystem over OS files (D-24)
+//   io.hpp                   all of the above
 #ifndef SND_IO_IO_MODULE_HPP
 #define SND_IO_IO_MODULE_HPP
 
