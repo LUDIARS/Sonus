@@ -706,3 +706,48 @@ SND_TEST(BuildEdge, CliExitCodesAndMessages) {
   SND_CHECK_MSG(log.find("events/Bad.json:6:10: error: unknown bus 'Nope'") != std::string::npos, "%s", log.c_str());
   SND_CHECK(log.find("nothing written") != std::string::npos);
 }
+
+// Documented members must not be reported as unknown (the nested check added
+// after Defect_TyposInNestedObjectsAreSilentlyIgnored): "notes" may hold any
+// content at any level, platform tags are valid convert / platforms keys,
+// and every documented nested member is accepted.
+SND_TEST(BuildEdge, DocumentedNestedMembersDoNotWarn) {
+  Project p("doc-members");
+  p.Add("project.json", "project", "P",
+        "\"formatVersion\": 1, \"notes\": {\"anything\": [1, {\"deep\": true}]}, "
+        "\"platforms\": {\"default\": {\"codec\": \"PC16\", \"sampleRate\": 0, \"channels\": 0, \"sectorAlign\": 2048}, "
+        "\"LNX_\": {\"sampleRate\": 48000}, \"WIN_\": {\"codec\": \"PCMF\"}, \"ANY_\": {}}");
+  p.Add("banks/Main.json", "bank", "Main", "\"language\": false, \"dependsOn\": [], \"notes\": \"x\"");
+  p.Add("buses/Master.json", "bus", "Master", "\"master\": true, \"notes\": {\"levelDB\": 1}");
+  p.Wav("audio/a.wav", mini::Tone(1, 48000, 480));
+  p.Add("assets/a.json", "asset", "a",
+        "\"file\": \"audio/a.wav\", \"convert\": {\"default\": {\"codec\": \"PC16\"}, \"LNX_\": {\"sampleRate\": 24000}, "
+        "\"MAC_\": {\"channels\": 1}}, \"loop\": {\"start\": 0, \"end\": 100}");
+  p.Add("events/E.json", "event", "E",
+        "\"bank\": \"Main\", \"tracks\": [{\"clips\": [{\"asset\": \"a\", "
+        "\"random\": {\"volumeDb\": 1, \"pitchCents\": 1, \"pan\": 0.1, \"startMs\": 1, \"filterHz\": 10}}], "
+        "\"actions\": [], \"flags\": 0}], \"cone\": {\"innerDeg\": 1, \"outerDeg\": 2, \"outerDb\": -1}");
+  bt::Diagnostics d;
+  REQUIRE_MSG(p.Build(&d), "%s", mini::Dump(d).c_str());
+  SND_CHECK_MSG(d.warnings() == 0, "%s", mini::Dump(d).c_str());
+}
+
+// Defect (after the keyword fix): generated identifiers can still be macros
+// that the header itself pulls in through snd/id.hpp -> <cstdint> / snd/id.h
+// (SIZE_MAX, UINT32_MAX, INT32_C, SND_API, SND_CALL, ...): sonus_ids.h then
+// does not compile. Sanitize() only escapes a fixed word list. A fix: prefix
+// every identifier, or escape names that are all upper case / match macros.
+SND_TEST(BuildEdge, Defect_IdsHeaderWithMacroNamesDoesNotCompile) {
+  Project p("hdr-macro");
+  p.Minimal();
+  int i = 0;
+  for (const char* n : {"SND_API", "SND_CALL", "UINT32_MAX", "SIZE_MAX", "INT32_C", "NULL", "assert", "errno",
+                        "new", "class_", "k_x", "_x", "__y", "a__b", "a_b", "a_b_2", "true", "SND_IDS_H"}) {
+    p.Add("events/M" + std::to_string(i++) + ".json", "event", n, "\"bank\": \"Main\"");
+  }
+  bt::Diagnostics d;
+  REQUIRE_MSG(p.Build(&d), "%s", mini::Dump(d).c_str());
+  std::string log;
+  const int rc = CompileHeader(p.out() / "sonus_ids.h", &log);
+  SND_CHECK_MSG(rc == 0, "sonus_ids.h does not compile:\n%.1500s", log.c_str());
+}

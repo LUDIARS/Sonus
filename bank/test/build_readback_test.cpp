@@ -162,6 +162,8 @@ SND_TEST(BuildReadback, EveryDocumentedFieldComesBack) {
   const bool ok = p.Build(&d);
   REQUIRE_MSG(ok, "%s", mini::Dump(d).c_str());
   if (d.warnings() > 0) snd::test::Note("warnings:\n%s", mini::Dump(d).c_str());
+  // Every member used here is documented: no "unknown member" warning may appear.
+  SND_CHECK_MSG(!d.Contains("unknown member"), "documented fields warned as unknown:\n%s", mini::Dump(d).c_str());
   Loaded L(p.out() / "Main.sndb");
   REQUIRE_MSG(L.result == SND_OK, "Main.sndb rejected: %s", L.err.message);
   const BankView& v = L.v;
