@@ -54,6 +54,11 @@ class ScriptFs final : public IFileSystem {
     randomLatency_ = maxPolls;
     rng_ = seed | 1u;
   }
+  // Every read in flight completes at its next poll.
+  void ExpireLatency() {
+    std::lock_guard<std::mutex> l(m_);
+    for (auto& kv : reads_) kv.second.polls = 0;
+  }
   void Hold(bool hold) { std::lock_guard<std::mutex> l(m_); hold_ = hold; }
   void FailOpen(const std::string& path) { std::lock_guard<std::mutex> l(m_); failOpen_.insert(path); }
   void FailNextReads(std::uint32_t n) { std::lock_guard<std::mutex> l(m_); failNext_ = n; }

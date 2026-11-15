@@ -85,6 +85,25 @@ class FailingAllocator final : public snd::IAllocator {
 
 }  // namespace
 
+namespace {
+struct Chain {
+  snd::io::IoScheduler* io;
+  FileRequest req;
+  std::uint32_t remaining;
+  std::uint32_t calls;
+  std::uint32_t submitFailures;
+  static void Fn(void* user, const FileResult& r) noexcept {
+    auto* c = static_cast<Chain*>(user);
+    ++c->calls;
+    if (r.state != FileState::Done) return;
+    if (c->remaining == 0u) return;
+    --c->remaining;
+    c->req.offset += 100u;
+    if (!c->io->Submit(c->req)) ++c->submitFailures;  // resubmit the same request from its callback
+  }
+};
+}  // namespace
+
 // ===========================================================================
 // Defects (expected to fail)
 // ===========================================================================
@@ -164,6 +183,29 @@ SND_TEST(IoDefect, SizeQueryIsHeldBackByAnExhaustedBudget) {
   SND_REQUIRE(rig.io.Submit(q));
   for (int i = 0; i < 5; ++i) rig.io.RunOnce();  // same window
   SND_CHECK(q.State() == FileState::Done);
+}
+
+// RunOnce is documented to return true "if work remains (queued, ...)". A
+// FileRequest submitted from a completion callback (on the IO thread, during
+// the iteration) is in the input queue, but HasWork() only looks at the class
+// lists and in-flight reads, so RunOnce returns false. Only the manual test
+// driver is affected (the IO thread is woken by Submit's Wake()). Low severity.
+SND_TEST(IoDefect, RunOnceReportsIdleWithACallbackSubmittedRequestQueued) {
+  ScriptRig rig;
+  SND_REQUIRE(rig.Init());
+  AddStd(rig);
+  std::vector<std::uint8_t> dst(100);
+  Chain chain{&rig.io, {}, 1, 0, 0};
+  chain.req.path = "b.bin";
+  chain.req.bytes = 100;
+  chain.req.dst = dst.data();
+  chain.req.onComplete = &Chain::Fn;
+  chain.req.user = &chain;
+  SND_REQUIRE(rig.io.Submit(chain.req));
+  bool more = true;
+  for (int i = 0; i < 100 && more; ++i) more = rig.io.RunOnce();
+  SND_CHECK_EQ(chain.calls, 2u);  // the resubmitted request must have been run before RunOnce says idle
+  SND_CHECK(chain.req.State() == FileState::Done);
 }
 
 // ===========================================================================
@@ -247,6 +289,10 @@ SND_TEST(IoEdge, RepostAfterCancelIsNotHeldBackByStaleInFlightReads) {
   SND_CHECK_EQ(rig.io.Channel(0).ReadPos(), 12u * kChunk);
   SND_CHECK_EQ(rig.io.Channel(0).Outstanding(), 2u);  // the two stale in-flight reads
   SND_CHECK(!rig.io.Channel(0).Reclaim());
+  rig.fs.ExpireLatency();
+  rig.Run();
+  SND_CHECK(rig.io.Channel(0).Reclaim());
+  SND_CHECK_EQ(rig.pool.Used(), 0u);
 }
 
 SND_TEST(IoEdge, CancelBetweenDeliveryAndPopNeverHandsOutStaleData) {
@@ -535,16 +581,22 @@ SND_TEST(IoEdge, BudgetExtremesAndClockJumps) {
   SND_CHECK_EQ(rig.fs.Issues().size(), 1u);
   rig.clock.now.store(1000000000ull);  // back to 1 s
   std::uint32_t it = 0;
-  for (; it < 200 && Drain(rig, 0).size() == 0u && rig.fs.Issues().size() < 4u; ++it) {
+  for (; it < 200 && rig.fs.Issues().size() < 2u; ++it) {
+    rig.io.RunOnce();
+    Drain(rig, 0);
+    rig.clock.AdvanceMs(100);
+  }
+  for (int i = 0; i < 400 && rig.fs.Issues().size() < 4u; ++i) {
     rig.io.RunOnce();
     rig.clock.AdvanceMs(100);
   }
-  for (int i = 0; i < 10; ++i) rig.io.RunOnce();
-  snd::test::Note("after the clock went back 9 s, the next read waited %u windows", it);
-  std::uint64_t fixedMax = 0, slidingMax = 0;
-  std::uint32_t single = 0;
-  WindowMaxima(rig.fs.Issues(), 0, 100000000ull, &fixedMax, &slidingMax, &single);
-  SND_CHECK(rig.fs.Issues().size() >= 2u);
+  rig.Run();
+  // IoClock is documented as monotonic, so this is not a defect: the stall
+  // lasts as long as the clock needs to get back past the window start.
+  snd::test::Note("after the clock went back 9 s, the next read waited %u windows of 100 ms", it);
+  SND_CHECK_EQ(rig.fs.Issues().size(), 4u);
+  SND_CHECK_EQ(Drain(rig, 0).size() + 0u, 3u);
+  SND_CHECK_EQ(rig.pool.Used(), 0u);
 }
 
 SND_TEST(IoEdge, RejectedReadsDoNotConsumeTheBudget) {
@@ -824,24 +876,6 @@ SND_TEST(IoEdge, FileRequestRejectsInvalidAndBusyAndFullQueue) {
   SND_CHECK(c.State() == FileState::Done);
 }
 
-namespace {
-struct Chain {
-  snd::io::IoScheduler* io;
-  FileRequest req;
-  std::uint32_t remaining;
-  std::uint32_t calls;
-  std::uint32_t submitFailures;
-  static void Fn(void* user, const FileResult& r) noexcept {
-    auto* c = static_cast<Chain*>(user);
-    ++c->calls;
-    if (r.state != FileState::Done) return;
-    if (c->remaining == 0u) return;
-    --c->remaining;
-    c->req.offset += 100u;
-    if (!c->io->Submit(c->req)) ++c->submitFailures;  // resubmit the same request from its callback
-  }
-};
-}  // namespace
 
 SND_TEST(IoEdge, FileRequestCallbackMaySubmitAgain) {
   ScriptRig rig;
@@ -856,7 +890,7 @@ SND_TEST(IoEdge, FileRequestCallbackMaySubmitAgain) {
   chain.req.onComplete = &Chain::Fn;
   chain.req.user = &chain;
   SND_REQUIRE(rig.io.Submit(chain.req));
-  rig.Run();
+  for (int i = 0; i < 100; ++i) rig.io.RunOnce();  // not rig.Run(): see IoDefect.RunOnceReportsIdleWithACallbackSubmittedRequestQueued
   SND_CHECK_EQ(chain.calls, 6u);
   SND_CHECK_EQ(chain.submitFailures, 0u);
   SND_CHECK(chain.req.State() == FileState::Done);
@@ -1037,7 +1071,9 @@ SND_TEST(IoEdge, RtSideApiIsRtSafeWithTheThreadRunning) {
       if (!snd::io::IoScheduler::PostIo(&io, StreamReq(1, "a.bin", 0, kChunk, IoClass::Music, 0, dst)) && c != kInvalidChunk) {
         pool.Release(c);
       }
-      (void)io.Post(StreamReq(1, "a.bin", kChunk, kChunk, IoClass::Music, 1));
+      // dst = nullptr on another channel and class (mixing both in one class can
+      // wedge the scheduler: IoDefect.QueuedCallerChunksBehindChunklessHeadDeadlock).
+      (void)io.Post(StreamReq(2, "a.bin", kChunk, kChunk, IoClass::Voice, 1));
       io.Wake();
       (void)ch.Epoch();
       (void)ch.Outstanding();
@@ -1060,6 +1096,10 @@ SND_TEST(IoEdge, RtSideApiIsRtSafeWithTheThreadRunning) {
         ch.Release(r);
         ++got;
       }
+      while (io.Channel(2).Pop(r)) {
+        io.Channel(2).Release(r);
+        ++got;
+      }
       if (round % 17 == 0) {
         ch.Cancel();
         (void)ch.Reclaim();
@@ -1070,8 +1110,10 @@ SND_TEST(IoEdge, RtSideApiIsRtSafeWithTheThreadRunning) {
   SND_CHECK(got >= 50u);
   SND_CHECK_EQ(snd::test::rt::UnexpectedTotal(), 0u);
   io.Channel(1).Cancel();
+  io.Channel(2).Cancel();
   io.Shutdown();
   SND_CHECK(io.Channel(1).Reclaim());
+  SND_CHECK(io.Channel(2).Reclaim());
   io.Destroy();
   SND_CHECK_EQ(pool.Used(), 0u);
 }
