@@ -83,6 +83,13 @@ namespace snd::io {
 
 class IoScheduler;
 
+// Longest path (in bytes, including the terminating NUL) the scheduler accepts
+// for IoReadRequest::path and FileRequest::path; paths are copied into the
+// open-file table. A longer (or empty / null) path is not passed to the file
+// system: a stream read is delivered with ChunkStatus::OpenFailed, a FileRequest
+// ends in FileState::Error. Paths of up to kMaxIoPathBytes - 1 bytes are fine.
+inline constexpr std::uint32_t kMaxIoPathBytes = 1024;
+
 // Service classes. The first three equal source::SourceAsset::ioPriority /
 // IoReadRequest::priority (6.1); Bank is used by FileRequest by default.
 enum class IoClass : std::uint8_t { Ambience = 0, Voice = 1, Music = 2, Bank = 3, Count = 4 };

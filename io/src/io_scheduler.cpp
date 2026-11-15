@@ -13,7 +13,7 @@ namespace snd::io {
 namespace {
 
 constexpr std::uint32_t kNil = 0xFFFFFFFFu;
-constexpr std::uint32_t kMaxPathBytes = 256;  // including the terminating NUL
+constexpr std::uint32_t kMaxPathBytes = kMaxIoPathBytes;  // including the terminating NUL
 
 enum class NodeKind : std::uint8_t { Stream = 0, File = 1 };
 enum class NodeState : std::uint8_t { Pending = 0, InFlight = 1, Completed = 2 };
@@ -709,6 +709,9 @@ struct IoScheduler::Impl {
 
   bool HasWork() const noexcept {
     if (inflightCount != 0u) return true;
+    // Requests accepted during this iteration (e.g. submitted from a completion
+    // callback) are still in the input queues.
+    if (streamQueue.SizeApprox() != 0u || fileQueue.SizeApprox() != 0u) return true;
     for (std::uint32_t c = 0; c < kIoClassCount; ++c) {
       if (head[c] != kNil) return true;
     }
