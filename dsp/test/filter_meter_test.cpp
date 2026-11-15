@@ -229,7 +229,7 @@ SND_TEST(Meter, LoudnessEbuReference) {
 
 SND_TEST(Meter, SpectrumFindsTheTone) {
   constexpr std::uint32_t kN = 1024;
-  dsptest::AlignedMem mem(SpectrumStateBytes(kN));
+  dsptest::AlignedMem mem(SpectrumStateBytes(kN), dsptest::kDirty);
   SND_REQUIRE(SpectrumInit(mem.get(), kN));
   SND_CHECK_EQ(SpectrumStateBytes(1000), 0u);
   Audio a(2, 256);

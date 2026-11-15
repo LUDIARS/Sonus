@@ -39,7 +39,7 @@ constexpr EffectParamInfo kReverbParams[] = {
 };
 constexpr EffectParamInfo kEchoParams[] = {
     {"Delay", "ms", 1.0f, 5000.0f, 500.0f, 0},
-    {"Decay", "", 0.0f, 1.0f, 0.5f, 0},
+    {"Decay", "", 0.0f, 0.98f, 0.5f, 0},  // capped: no lossless loop (decision a)
     {"DryMix", "", 0.0f, 1.0f, 1.0f, 0},
     {"WetMix", "", 0.0f, 1.0f, 1.0f, 0},
     {"MaxDelay", "ms", 10.0f, 5000.0f, 1000.0f, kInit},
@@ -244,13 +244,13 @@ void ProcessKind(EffectKind kind, void* state, const FxIo& io, const FxParams& p
 }
 
 // Processes one instance, splitting into sub-blocks of maxFrames if needed.
-inline void ProcessOne(EffectKind kind, const EffectInfo& info, void* state,
-                       const float* const* in, float* const* out, std::uint32_t channels,
-                       std::uint32_t frames, const ParamBlock* pb,
-                       const EffectSidechain* sc) noexcept {
+void ReinitKeepingParams(void* state) noexcept;
+
+inline void ProcessCore(EffectKind kind, const EffectInfo& info, void* state,
+                        const float* const* in, float* const* out, std::uint32_t channels,
+                        std::uint32_t frames, const ParamBlock* pb,
+                        const EffectSidechain* sc) noexcept {
   FxHeader& h = *Header(state);
-  if (frames == 0) return;
-  if (channels > h.channels) channels = h.channels;
   FxParams p;
   LoadParams(h, info, pb, &p);
   if (frames <= h.maxFrames) {
@@ -279,6 +279,31 @@ inline void ProcessOne(EffectKind kind, const EffectInfo& info, void* state,
     ProcessKind(kind, state, FxIo{inp, outp, channels, n, sc != nullptr ? &sub : nullptr}, q);
     done += n;
   }
+}
+
+// Every entry point goes through here: empty calls do nothing; non-finite
+// input or output resets the state (as a fresh EffectInit with the current
+// parameters) at the end of the call and non-finite output samples become 0.
+inline void ProcessOne(EffectKind kind, const EffectInfo& info, void* state,
+                       const float* const* in, float* const* out, std::uint32_t channels,
+                       std::uint32_t frames, const ParamBlock* pb,
+                       const EffectSidechain* sc) noexcept {
+  FxHeader& h = *Header(state);
+  if (frames == 0 || channels == 0) return;
+  if (channels > h.channels) channels = h.channels;
+  bool bad = false;
+  for (std::uint32_t c = 0; c < channels && !bad; ++c) bad = HasNonFinite(in[c], frames);
+  ProcessCore(kind, info, state, in, out, channels, frames, pb, sc);
+  for (std::uint32_t c = 0; c < channels; ++c) {
+    float* y = out[c];
+    for (std::uint32_t i = 0; i < frames; ++i) {
+      if (!std::isfinite(y[i])) {
+        y[i] = 0.0f;
+        bad = true;
+      }
+    }
+  }
+  if (bad) ReinitKeepingParams(state);
 }
 
 std::uint32_t RoundUp64(std::size_t n) noexcept {
@@ -312,6 +337,43 @@ std::uint32_t EffectStateBytes(const EffectDesc& desc, std::uint32_t sampleRate)
   return RoundUp64(kOps[static_cast<std::uint32_t>(info->kind)].layout(nullptr, cfg));
 }
 
+namespace {
+// Writes every byte the instance uses (the pool memory may hold anything).
+void InitWith(void* state, std::size_t bytes, std::size_t need, const EffectInfo& info,
+              const FxConfig& cfg) noexcept {
+  const KindOps& ops = kOps[static_cast<std::uint32_t>(info.kind)];
+  std::memset(state, 0, need);
+  ops.layout(state, cfg);
+  FxHeader& h = *Header(state);
+  h.magic = fx::kFxMagic;
+  h.kind = static_cast<std::uint32_t>(info.kind);
+  h.channels = cfg.channels;
+  h.sampleRate = cfg.sampleRate;
+  h.sizingRate = cfg.sizingRate;
+  h.maxFrames = cfg.maxFrames;
+  h.bytes = static_cast<std::uint32_t>(bytes > 0xFFFFFFFFu ? 0xFFFFFFFFu : bytes);
+  h.paramCount = info.paramCount;
+  for (std::uint32_t i = 0; i < kMaxEffectParams; ++i) h.cur[i] = cfg.init[i];
+  ops.init(state, cfg);
+  h.silentFrames = h.tailFrames;  // nothing sounding yet
+  h.cleared = 1;
+}
+
+void ReinitKeepingParams(void* state) noexcept {
+  const FxHeader h = *Header(state);
+  const std::uint32_t k = h.kind < static_cast<std::uint32_t>(EffectKind::Count) ? h.kind : 0u;
+  const EffectInfo& info = kInfos[k];
+  FxConfig cfg;
+  cfg.channels = h.channels;
+  cfg.sizingRate = h.sizingRate;
+  cfg.sampleRate = h.sampleRate;
+  cfg.maxFrames = h.maxFrames;
+  for (std::uint32_t i = 0; i < kMaxEffectParams; ++i) cfg.init[i] = h.cur[i];
+  const std::size_t need = kOps[k].layout(nullptr, cfg);
+  InitWith(state, h.bytes, need, info, cfg);
+}
+}  // namespace
+
 bool EffectInit(void* state, std::size_t bytes, const EffectDesc& desc,
                 std::uint32_t sampleRate) noexcept {
   const EffectInfo* info = FindEffect(desc.effect_type);
@@ -333,20 +395,7 @@ bool EffectInit(void* state, std::size_t bytes, const EffectDesc& desc,
     need = ops.layout(nullptr, cfg);
     if (need > bytes) return false;
   }
-  std::memset(state, 0, sizeof(FxHeader));
-  ops.layout(state, cfg);
-  FxHeader& h = *Header(state);
-  h.magic = fx::kFxMagic;
-  h.kind = static_cast<std::uint32_t>(info->kind);
-  h.channels = cfg.channels;
-  h.sampleRate = sampleRate;
-  h.maxFrames = cfg.maxFrames;
-  h.bytes = static_cast<std::uint32_t>(bytes > 0xFFFFFFFFu ? 0xFFFFFFFFu : bytes);
-  h.paramCount = info->paramCount;
-  for (std::uint32_t i = 0; i < kMaxEffectParams; ++i) h.cur[i] = cfg.init[i];
-  ops.init(state, cfg);
-  h.silentFrames = h.tailFrames;  // nothing sounding yet
-  h.cleared = 1;
+  InitWith(state, bytes, need, *info, cfg);
   return true;
 }
 
@@ -395,12 +444,7 @@ bool EffectIsTailDone(const void* state) noexcept {
   return h.silentFrames >= h.tailFrames;
 }
 
-void EffectReset(void* state) noexcept {
-  FxHeader& h = *Header(state);
-  kOps[h.kind < static_cast<std::uint32_t>(EffectKind::Count) ? h.kind : 0].reset(state);
-  h.silentFrames = h.tailFrames;
-  h.cleared = 1;
-}
+void EffectReset(void* state) noexcept { ReinitKeepingParams(state); }
 
 EffectKind EffectStateKind(const void* state) noexcept {
   return static_cast<EffectKind>(Header(state)->kind);

@@ -56,7 +56,7 @@ struct Pipeline {
       vc->channels = channels;
       vc->table = &table;
       vc->pos = v * 977u;
-      vc->resampler.Reset(ResamplerStateBytes(q, channels));
+      vc->resampler.Reset(ResamplerStateBytes(q, channels), dsptest::kDirty);
       ResamplerInit(vc->resampler.get(), q, channels);
       vc->pitch = 0.75f + 0.5f * static_cast<float>(v % 17) / 16.0f;
       vc->azimuth = -3.0f + 6.0f * static_cast<float>(v) / static_cast<float>(count);

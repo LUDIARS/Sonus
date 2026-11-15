@@ -191,19 +191,23 @@ void DistortionProcess(void* state, const FxIo& io, const FxParams& p) noexcept 
   auto toneCoef = [sr](float hz) {
     return hz >= 19999.0f ? 0.0f : std::exp(-2.0f * detail::kPiF * hz / sr);
   };
-  const float a0 = toneCoef(p.s[3]), a1 = toneCoef(p.e[3]);
-  const float d0 = DbToGain(p.s[0] * 40.0f), d1 = DbToGain(p.e[0] * 40.0f);
-  const float o0 = DbToGain(p.s[2]), o1 = DbToGain(p.e[2]);
+  // Parameters ramp linearly (D-26); the derived gains / coefficient are
+  // computed per frame from the interpolated parameter while it ramps.
+  const bool rDrive = p.Ramps(0), rOut = p.Ramps(2), rTone = p.Ramps(3);
+  const float dC = DbToGain(p.s[0] * 40.0f), oC = DbToGain(p.s[2]), aC = toneCoef(p.s[3]);
   float peak = 0.0f;
   for (std::uint32_t c = 0; c < io.channels; ++c) {
     float lp = s.lp[c];
     for (std::uint32_t i = 0; i < n; ++i) {
       const float t = static_cast<float>(i) * inv;
       const float x = io.in[c][i];
-      const float v = SoftClip(x * (d0 + (d1 - d0) * t));
-      lp = detail::FlushState(v + (lp - v) * (a0 + (a1 - a0) * t));
+      const float drive = rDrive ? DbToGain(p.At(0, t) * 40.0f) : dC;
+      const float a = rTone ? toneCoef(p.At(3, t)) : aC;
+      const float og = rOut ? DbToGain(p.At(2, t)) : oC;
+      const float v = SoftClip(x * drive);
+      lp = detail::FlushState(v + (lp - v) * a);
       const float mix = p.At(1, t);
-      const float y = ((1.0f - mix) * x + mix * lp) * (o0 + (o1 - o0) * t);
+      const float y = ((1.0f - mix) * x + mix * lp) * og;
       io.out[c][i] = y;
       peak = detail::Max(peak, std::fabs(y));
     }

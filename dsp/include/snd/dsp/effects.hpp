@@ -12,11 +12,32 @@
 //
 // Parameters: EFPV values / ParamBlock entries are indexed as in the tables
 // below (name, unit, range, default). Values are clamped to the range (NaN ->
-// default). ParamBlock start/end are interpolated per frame for gains and mix
-// values and every 16-32 frames for coefficients (D-26). Parameters missing
-// from a ParamBlock (index >= count, or a null block) keep their last value.
-// Parameters marked [init] size buffers or set latency and are only read by
-// EffectInit (from EffectDesc::initial_params).
+// default, +-Inf -> the bound). ParamBlock start/end ramp linearly (D-26):
+//   - mix values, times, cutoffs read per frame from the interpolated parameter;
+//   - Distortion (drive, output, tone) and Compressor (attack, release, makeup,
+//     sidechain gain) derive their gains / coefficients per frame from the
+//     interpolated parameter while it ramps;
+//   - Delay (dry/wet gains, damping), Limiter (release), Normalize (fade),
+//     Surround (rear/centre gains, lowpass) and Reverb (all derived gains and
+//     coefficients) interpolate the derived values between the block's start
+//     and end values;
+//   - filter coefficients (ParamEq, Lowpass, Highpass) are designed every 32
+//     frames and interpolated per frame in between.
+// Block splitting: with constant parameters the output is bit-identical however
+// a block is split into calls. With ramping parameters, splitting a ramp at the
+// matching intermediate values changes the output by less than 2e-4 (measured,
+// every parameter ramping 70 % of the way to its maximum over 1024 frames split
+// into 4 calls: <= 9.2e-5 for Normalize and Flanger, <= 2e-6 for the others).
+// Parameters missing from a ParamBlock (index >= count, or a null block) keep
+// their last value. Parameters marked [init] size buffers or set latency and
+// are only read by EffectInit (from EffectDesc::initial_params).
+//
+// Robustness: calls with 0 channels or 0 frames do nothing. If the input or the
+// output of a call contains NaN / Inf, the non-finite output samples are set to
+// 0 and the state is reset at the end of the call (as EffectReset), so the next
+// call is normal again. EffectInit writes every byte the instance uses (the
+// pool memory may hold anything). Feedback loops are never lossless: loop gains
+// are capped below 1 (Echo Decay, Delay Feedback 0.98; Chorus 0.9; Flanger 0.95).
 //
 //  snd.fx.reverb   (algorithmic, 8-line FDN; I3DL2 / Unity SFX Reverb set)
 //    0 DryLevel         mB  -10000..0      0
@@ -35,11 +56,17 @@
 //   13 LFReference      Hz  20..1000       250
 //    (I3DL2 RoomRolloffFactor is distance attenuation and belongs to core's 3D.)
 //  snd.fx.echo     (Unity Echo)
-//    0 Delay ms 1..5000 500 | 1 Decay 0..1 0.5 | 2 DryMix 0..1 1 | 3 WetMix 0..1 1
+//    0 Delay ms 1..5000 500 | 1 Decay 0..0.98 0.5 | 2 DryMix 0..1 1 | 3 WetMix 0..1 1
 //    4 MaxDelay ms 10..5000 1000 [init]
+//    (Delay is clamped to MaxDelay. Tail length after the input stops: about
+//     Delay * ln(peak / 1e-5) / -ln(Decay), e.g. 500 ms, Decay 0.98, 0 dBFS: ~5 min.)
 //  snd.fx.delay    (feedback delay with damping and ping-pong)
 //    0 Time ms 0..4000 250 | 1 Feedback 0..0.98 0.3 | 2 DryDb -96..0 0 | 3 WetDb -96..0 -6
 //    4 DampingHz 500..20000 20000 | 5 PingPong 0..1 0 | 6 MaxDelay ms 10..4000 1000 [init]
+//    (Time below one frame, including 0 ms, acts as 1 frame; Time is clamped to
+//     MaxDelay. DryDb / WetDb -96 is -96 dB, not off. Tail length after the input
+//     stops: about Time * ln(peak / 1e-5) / -ln(Feedback): 250 ms at 0.3: 2.6 s,
+//     at 0.9: 27 s, at 0.98: ~2.5 min from 0 dBFS.)
 //  snd.fx.chorus   (3 modulated taps, 120 deg apart; Unity Chorus)
 //    0 DryMix 0..1 0.5 | 1 WetMix 0..1 0.5 | 2 Delay ms 1..50 20 | 3 Rate Hz 0..10 0.8
 //    4 Depth 0..1 0.3 | 5 Feedback -0.9..0.9 0
@@ -52,6 +79,9 @@
 //    0 ThresholdDb -60..0 -20 | 1 Ratio 1..50 4 | 2 AttackMs 0.05..500 10
 //    3 ReleaseMs 1..5000 100 | 4 KneeDb 0..24 6 | 5 MakeupDb 0..30 0
 //    6 SidechainDb -24..24 0 | 7 UseSidechain 0..1 1
+//    (Attack / release are one-pole time constants on the gain change in dB: the
+//     remaining change falls to 1/e (-63 %) after AttackMs / ReleaseMs; peak
+//     detector, max |x| over the channels or the sidechain.)
 //  snd.fx.limiter  (look-ahead brickwall)
 //    0 CeilingDb -30..0 -0.3 | 1 ReleaseMs 1..1000 50 | 2 LookaheadMs 0..10 2 [init]
 //    3 InputGainDb 0..24 0
@@ -63,6 +93,8 @@
 //    0 CutoffHz 10..22000 5000 | 1 Resonance (Q) 0.5..10 1
 //  snd.fx.pitchshift (two-tap delay-line pitch shifter)
 //    0 Pitch 0.5..2 1 | 1 WindowMs 10..200 50 | 2 Mix 0..1 1
+//    (Latency WindowMs / 2, reported by EffectLatencyFrames; the dry part of Mix
+//     is delayed by the same amount, so Pitch 1 = the input delayed, any Mix.)
 //  snd.fx.normalize (Unity Normalize)
 //    0 FadeInMs 0..20000 5000 | 1 LowestVolume 0..1 0.1 | 2 MaximumAmp 1..100000 20
 //  snd.fx.surround (pseudo surround / stereo widener; CRI "サラウンダー" equivalent)
@@ -176,12 +208,13 @@ void EffectProcess(void* state, const float* const* in, float* const* out, std::
                    std::uint32_t frames, const ParamBlock* params,
                    const EffectSidechain* sidechain = nullptr) noexcept;
 bool EffectIsTailDone(const void* state) noexcept;
-// Clears the audio history (delay lines, filters, envelopes); keeps parameters.
+// Same state as a fresh EffectInit with the current parameter values (history,
+// envelopes, LFO phases and latency); the tail is done afterwards.
 void EffectReset(void* state) noexcept;
 EffectKind EffectStateKind(const void* state) noexcept;
 // Current (last end) parameter value, for tools and tests.
 float EffectParamValue(const void* state, std::uint32_t index) noexcept;
-// Latency in frames (limiter look-ahead), 0 for the others.
+// Latency in frames: limiter look-ahead - 1, pitch shifter WindowMs / 2, 0 for the others.
 std::uint32_t EffectLatencyFrames(const void* state) noexcept;
 
 // --- Batch: one call per kind, no per-instance dispatch (12.3) ---

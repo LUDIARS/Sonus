@@ -27,7 +27,7 @@ struct FxHeader {
   std::uint32_t latency;       // frames
   std::uint32_t cleared;       // audio history cleared after the tail ended
   std::uint32_t paramCount;
-  std::uint32_t reserved;
+  std::uint32_t sizingRate;    // rate the buffers were sized for (EffectReset re-runs Init)
   float cur[kMaxEffectParams];  // parameter values at the end of the last block
   std::uint32_t pad[4];
 };

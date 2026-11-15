@@ -37,7 +37,7 @@ struct Instance {
     desc.param_count = info.paramCount;
     desc.initial_params = params;
     const std::uint32_t bytes = EffectStateBytes(desc, kRate);
-    mem.Reset(bytes);
+    mem.Reset(bytes, dsptest::kDirty);
     ok = bytes > 0 && EffectInit(mem.get(), mem.size(), desc, kRate);
   }
   void* state() const { return mem.get(); }
@@ -446,7 +446,7 @@ SND_TEST(Effects, ChainWithPluginAndBypass) {
   pd.effect_type = pluginId;
   pd.channels = 2;
   pd.max_frames = kBlock;
-  dsptest::AlignedMem pstate(PluginStateBytes(table, pd));
+  dsptest::AlignedMem pstate(PluginStateBytes(table, pd), dsptest::kDirty);
   SND_CHECK_EQ(pstate.size(), 64u);
   table.init(table.user, pstate.get(), &pd, kRate);
 
@@ -511,11 +511,124 @@ SND_TEST(Effects, PoolSizing) {
   snd::EffectDesc longEcho{kEffectEcho, 2, 256, 5, ep, nullptr, 0};
   SND_CHECK(EffectStateBytes(longEcho, kRate) > EffectStateBytes(descs[1], kRate));
   // Sized for 48 kHz, run at 96 kHz: init succeeds with clamped capacity.
-  dsptest::AlignedMem mem(EffectStateBytes(longEcho, kRate));
+  dsptest::AlignedMem mem(EffectStateBytes(longEcho, kRate), dsptest::kDirty);
   SND_CHECK(EffectInit(mem.get(), mem.size(), longEcho, 96000));
   Audio a(2, kBlock);
   a.ch(0)[0] = 1.0f;
   Process(mem.get(), a, kBlock);
   SND_CHECK(!HasNonFinite(a.ch(0), kBlock));
   SND_CHECK(!EffectInit(mem.get(), 64, longEcho, kRate));  // far too small
+}
+
+// Decision b: one NaN sample -> that block's non-finite output is zeroed, the
+// state is reset at the end of the block, and the next blocks are normal.
+SND_TEST(Effects, RecoversFromNonFiniteInput) {
+  for (std::uint32_t k = 0; k < static_cast<std::uint32_t>(EffectKind::Count); ++k) {
+    const EffectKind kind = static_cast<EffectKind>(k);
+    Instance fx(kind, 2), fresh(kind, 2);
+    SND_REQUIRE(fx.ok && fresh.ok);
+    Audio a(2, kBlock), f(2, kBlock);
+    TestSignal(a, 0, kBlock);
+    a.ch(0)[17] = NAN;
+    a.ch(1)[3] = INFINITY;
+    Process(fx.state(), a, kBlock);
+    SND_CHECK_MSG(!HasNonFinite(a.ch(0), kBlock) && !HasNonFinite(a.ch(1), kBlock), "%s: non-finite output",
+                  ShortName(kind));
+    // After the reset the effect behaves exactly like a fresh instance.
+    float diff = 0.0f;
+    for (std::uint32_t b = 1; b < 8; ++b) {
+      TestSignal(a, b * kBlock, kBlock);
+      TestSignal(f, b * kBlock, kBlock);
+      Process(fx.state(), a, kBlock);
+      Process(fresh.state(), f, kBlock);
+      for (std::uint32_t c = 0; c < 2; ++c) diff = std::max(diff, dsptest::MaxAbsDiff(a.ch(c), f.ch(c), kBlock));
+    }
+    SND_CHECK_MSG(diff == 0.0f, "%s: differs from a fresh instance after recovery by %g", ShortName(kind),
+                  static_cast<double>(diff));
+    // Empty calls do nothing.
+    Process(fx.state(), a, 0);
+    SND_RT_SCOPE();
+    EffectProcess(fx.state(), a.cp(), a.p(), 0, kBlock, nullptr, nullptr);
+  }
+}
+
+// Decision c: EffectReset == a fresh EffectInit (LFO phases included).
+SND_TEST(Effects, ResetEqualsFreshInit) {
+  for (EffectKind kind : {EffectKind::Chorus, EffectKind::Flanger, EffectKind::PitchShifter, EffectKind::Reverb}) {
+    Instance used(kind, 2), fresh(kind, 2);
+    Audio a(2, kBlock), f(2, kBlock);
+    for (std::uint32_t b = 0; b < 30; ++b) {
+      TestSignal(a, b * kBlock, kBlock);
+      Process(used.state(), a, kBlock);
+    }
+    {
+      SND_RT_SCOPE();
+      EffectReset(used.state());
+    }
+    float diff = 0.0f;
+    for (std::uint32_t b = 0; b < 8; ++b) {
+      TestSignal(a, b * kBlock, kBlock);
+      TestSignal(f, b * kBlock, kBlock);
+      Process(used.state(), a, kBlock);
+      Process(fresh.state(), f, kBlock);
+      for (std::uint32_t c = 0; c < 2; ++c) diff = std::max(diff, dsptest::MaxAbsDiff(a.ch(c), f.ch(c), kBlock));
+    }
+    SND_CHECK_MSG(diff == 0.0f, "%s: reset differs from fresh by %g", ShortName(kind), static_cast<double>(diff));
+  }
+}
+
+// Item 4: the pitch shifter at Pitch = 1 is the input delayed by its reported latency.
+SND_TEST(Effects, PitchShifterUnityIsDelayedInput) {
+  for (float mix : {1.0f, 0.5f, 0.0f}) {
+    const float ov[] = {1.0f, 20.0f, mix};
+    Instance fx(EffectKind::PitchShifter, 1, kBlock, ov, 3);
+    const std::uint32_t lat = EffectLatencyFrames(fx.state());
+    SND_CHECK_EQ(lat, 480u);
+    std::vector<float> in, out;
+    Audio m(1, kBlock);
+    dsptest::Noise nz(4);
+    for (int b = 0; b < 8; ++b) {
+      for (std::uint32_t i = 0; i < kBlock; ++i) m.ch(0)[i] = nz.Next(0.5f);
+      in.insert(in.end(), m.ch(0), m.ch(0) + kBlock);
+      Process(fx.state(), m, kBlock);
+      out.insert(out.end(), m.ch(0), m.ch(0) + kBlock);
+    }
+    SND_CHECK(dsptest::MaxAbsDiff(in.data(), out.data() + lat, 8 * kBlock - lat) < 1e-6f);
+  }
+}
+
+// Ramped parameters split at the matching intermediate values (documented
+// tolerance in effects.hpp): every parameter ramps from its default to 70 % of
+// the way to its maximum over 1024 frames, processed as one call vs 4 x 256.
+SND_TEST(Effects, RampedBlockSplitDifference) {
+  constexpr std::uint32_t kN = 1024;
+  for (std::uint32_t k = 0; k < static_cast<std::uint32_t>(EffectKind::Count); ++k) {
+    const EffectKind kind = static_cast<EffectKind>(k);
+    const EffectInfo& info = GetEffectInfo(kind);
+    float s[kMaxEffectParams], e[kMaxEffectParams];
+    EffectDefaultParams(kind, s);
+    for (std::uint32_t p = 0; p < info.paramCount; ++p) {
+      const bool integer = (info.params[p].flags & kParamInteger) != 0;
+      e[p] = integer ? s[p] : s[p] + 0.7f * (info.params[p].maxValue - s[p]);
+    }
+    Instance a(kind, 2, kN), b(kind, 2, kN);
+    Audio xa(2, kN), xb(2, kN);
+    TestSignal(xa, 0, kN);
+    TestSignal(xb, 0, kN);
+    snd::ParamBlock full{s, e, info.paramCount, 0xFFFFFFFFu, nullptr};
+    Process(a.state(), xa, kN, &full);
+    for (std::uint32_t q = 0; q < 4; ++q) {
+      float ms[kMaxEffectParams], me[kMaxEffectParams];
+      for (std::uint32_t p = 0; p < info.paramCount; ++p) {
+        ms[p] = s[p] + (e[p] - s[p]) * (static_cast<float>(q) / 4.0f);
+        me[p] = s[p] + (e[p] - s[p]) * (static_cast<float>(q + 1) / 4.0f);
+      }
+      snd::ParamBlock part{ms, me, info.paramCount, 0xFFFFFFFFu, nullptr};
+      float* p2[2] = {xb.ch(0) + q * 256, xb.ch(1) + q * 256};
+      EffectProcess(b.state(), p2, p2, 2, 256, &part, nullptr);
+    }
+    const float d = std::max(dsptest::MaxAbsDiff(xa.ch(0), xb.ch(0), kN), dsptest::MaxAbsDiff(xa.ch(1), xb.ch(1), kN));
+    snd::test::Note("%-11s ramped split vs single call: max diff %.3g", ShortName(kind), static_cast<double>(d));
+    SND_CHECK_MSG(d < 2e-4f, "%s ramped split diff %g (documented < 2e-4)", ShortName(kind), static_cast<double>(d));
+  }
 }

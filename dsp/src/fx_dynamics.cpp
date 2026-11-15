@@ -59,8 +59,9 @@ void CompressorProcess(void* state, const FxIo& io, const FxParams& p) noexcept 
   const float inv = 1.0f / static_cast<float>(n);
   const bool useSc = io.sidechain != nullptr && io.sidechain->channelCount > 0 &&
                      io.sidechain->channels != nullptr && p.e[7] >= 0.5f;
-  const float att0 = detail::TimeCoef(p.s[2] * 0.001f, sr), att1 = detail::TimeCoef(p.e[2] * 0.001f, sr);
-  const float rel0 = detail::TimeCoef(p.s[3] * 0.001f, sr), rel1 = detail::TimeCoef(p.e[3] * 0.001f, sr);
+  const float att0 = detail::TimeCoef(p.s[2] * 0.001f, sr);
+  const float rel0 = detail::TimeCoef(p.s[3] * 0.001f, sr);
+  const bool rAtt = p.Ramps(2), rRel = p.Ramps(3);
   float env = s.envDb;
   float peak = 0.0f;
   for (std::uint32_t i = 0; i < n; ++i) {
@@ -74,7 +75,9 @@ void CompressorProcess(void* state, const FxIo& io, const FxParams& p) noexcept 
       det = FrameMax(io.in, chs, i) * FastDbToLin(p.At(6, t));
     }
     const float target = CompressorGainDb(LinToDb(det), p.At(0, t), p.At(1, t), p.At(4, t));
-    const float a = target < env ? att0 + (att1 - att0) * t : rel0 + (rel1 - rel0) * t;
+    // Time constants ramp in the parameter domain (D-26).
+    const float a = target < env ? (rAtt ? detail::TimeCoef(p.At(2, t) * 0.001f, sr) : att0)
+                                 : (rRel ? detail::TimeCoef(p.At(3, t) * 0.001f, sr) : rel0);
     env = target + (env - target) * a;
     const float g = FastDbToLin(env + p.At(5, t));
     for (std::uint32_t c = 0; c < chs; ++c) {

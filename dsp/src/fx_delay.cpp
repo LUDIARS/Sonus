@@ -244,14 +244,25 @@ void FlangerProcess(void* state, const FxIo& io, const FxParams& p) noexcept {
 
 // ---------------------------------------------------------------------------
 // Pitch shifter: two taps sweeping through a window, sin^2 crossfade.
+// At Pitch = 1 the taps rest at delay 0 (weight 0) and W/2 (weight 1), so the
+// effect delays by W/2 frames (W = WindowMs); the dry part of Mix is delayed by
+// the same W/2, so Mix never makes a comb filter and Pitch = 1 is the input
+// delayed by EffectLatencyFrames() = round(W/2) (window at the end of the last call).
 // ---------------------------------------------------------------------------
+namespace {
+float PitchWindowFrames(const RingState& s, float ms) noexcept {
+  return detail::Clamp(ms * static_cast<float>(s.h.sampleRate) / 1000.0f, 8.0f,
+                       static_cast<float>(s.size - 4u));
+}
+}  // namespace
 std::size_t PitchShifterLayout(void* state, const FxConfig& cfg) noexcept {
   return RingLayout(state, cfg, 200.0f);
 }
-void PitchShifterInit(void* state, const FxConfig&) noexcept {
+void PitchShifterInit(void* state, const FxConfig& cfg) noexcept {
   auto* s = static_cast<RingState*>(state);
   s->h.tailFrames = s->size;
   s->phase = 0.0;
+  s->h.latency = static_cast<std::uint32_t>(std::lround(0.5f * PitchWindowFrames(*s, cfg.init[1])));
 }
 void PitchShifterReset(void* state) noexcept {
   RingReset(state);
@@ -263,27 +274,30 @@ void PitchShifterProcess(void* state, const FxIo& io, const FxParams& p) noexcep
   const std::uint32_t n = io.frames, chs = io.channels;
   const float inv = 1.0f / static_cast<float>(n);
   const float sr = static_cast<float>(s.h.sampleRate);
-  const float maxW = static_cast<float>(s.size - 4u);
   float* rings[kMaxChannels];
   for (std::uint32_t c = 0; c < chs; ++c) rings[c] = Ring(state, c);
   float peak = 0.0f;
   std::uint32_t w = s.write;
   double phase = s.phase;
+  (void)sr;
   for (std::uint32_t i = 0; i < n; ++i) {
     const float t = static_cast<float>(i) * inv;
-    const float win = detail::Clamp(p.At(1, t) * 0.001f * sr, 8.0f, maxW);
+    const float win = PitchWindowFrames(s, p.At(1, t));
     const float mix = p.At(2, t);
     const float ph1 = static_cast<float>(phase);
     float ph2 = ph1 + 0.5f;
     if (ph2 >= 1.0f) ph2 -= 1.0f;
     const float g1 = std::sin(detail::kPiF * ph1), g2 = std::sin(detail::kPiF * ph2);
     const float w1 = g1 * g1, w2 = g2 * g2;
+    // Write first, then read with delay 0 = the current frame.
+    const std::uint32_t wn = w + 1 == s.size ? 0 : w + 1;
     for (std::uint32_t c = 0; c < chs; ++c) {
       const float xi = io.in[c][i];
-      const float a = ReadFrac(rings[c], s.size, w, ph1 * win);
-      const float b = ReadFrac(rings[c], s.size, w, ph2 * win);
       rings[c][w] = xi;
-      io.out[c][i] = (1.0f - mix) * xi + mix * (w1 * a + w2 * b);
+      const float a = ReadFrac(rings[c], s.size, wn, ph1 * win);
+      const float b = ReadFrac(rings[c], s.size, wn, ph2 * win);
+      const float dry = ReadFrac(rings[c], s.size, wn, 0.5f * win);
+      io.out[c][i] = (1.0f - mix) * dry + mix * (w1 * a + w2 * b);
       const float av = std::fabs(xi);
       peak = av > peak ? av : peak;
     }
@@ -292,6 +306,7 @@ void PitchShifterProcess(void* state, const FxIo& io, const FxParams& p) noexcep
     phase -= std::floor(phase);
   }
   s.phase = phase;
+  s.h.latency = static_cast<std::uint32_t>(std::lround(0.5f * PitchWindowFrames(s, p.e[1])));
   FinishBlock(s, n, peak);
 }
 
