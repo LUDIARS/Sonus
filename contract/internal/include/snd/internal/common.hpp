@@ -214,8 +214,9 @@ static_assert(sizeof(VoiceRenderStatus) == 8);
 // worker may still be running. Written by Render (serial part); SelectVoices,
 // BuildRenderList (and RunEventLogic, which destroys voices) read the previous
 // block's value. While held != 0 no system reads or writes the voice's render
-// state (its RealVoice row and the real-slot pools) and the voice is not put
-// into the render list; its output was faded to silence from the end of the
+// state (its RealVoice row and the real-slot pools), the voice is not put
+// into the render list, and its real slot is neither reassigned (stolen) nor
+// freed; its output was faded to silence from the end of the
 // previous block. Render clears it once RtWorkerPool::IsQuiescent() is true
 // (StragglersInFlight() is for statistics only); the render state is then the
 // value the late chunk wrote.

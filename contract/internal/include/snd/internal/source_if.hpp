@@ -43,8 +43,9 @@
 // serially on the audio thread alone into the set the last parallel block did
 // not use; at most one set is ever in use by a late chunk, so that set always
 // exists. Voices of a late chunk are HELD (schema Voice.renderHold) until
-// IsQuiescent() is true: no system reads or writes their render state, they
-// are not in the render list, their output fades to silence from the end of
+// IsQuiescent() is true: no system reads or writes their render state, their
+// real slots are neither reassigned (stolen) nor freed, they are not in the
+// render list, their output fades to silence from the end of
 // the previous block (D-15 short fade). After the hold the render state is
 // what the late chunk wrote and the voice continues from the next block.
 // StragglersInFlight() is for statistics / diagnostics only.

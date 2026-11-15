@@ -57,6 +57,11 @@
 // cancelled lets the later register. While an old slot of the same bank is
 // UNLOADING (same path or not), a new load is read and validated but waits
 // for the old slot's Release() before it registers (never fails for it).
+// A bank that depends on such a waiting copy waits too (its dependency is not
+// "missing" while the copy waits for the Release; that holds transitively);
+// a dependency that is really missing, or a cycle, still fails it. Side effect
+// of the request order: a later, unrelated bank also waits to register until
+// the earlier requests finished reading and validating.
 //
 // Threads: every member function is safe to call from any non-RT thread (an
 // internal mutex serialises them; the validation job does not take it). In
