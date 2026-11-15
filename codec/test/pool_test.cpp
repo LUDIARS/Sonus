@@ -161,6 +161,7 @@ SND_TEST(DecoderPool, ConcurrentAcquireRelease) {
   SND_REQUIRE(pool.Init(alloc, kSlots, 256));
   std::atomic<std::uint32_t> corrupt{0};
   std::atomic<std::uint32_t> ok{0};
+  std::atomic<std::uint64_t> stale{0};
   auto worker = [&](std::uint32_t id) {
     for (int i = 0; i < 4000; ++i) {
       DecoderSlot s;
@@ -171,7 +172,11 @@ SND_TEST(DecoderPool, ConcurrentAcquireRelease) {
         if (p[k] != id * 100000u + static_cast<std::uint32_t>(i)) corrupt.fetch_add(1);
       }
       ok.fetch_add(1, std::memory_order_relaxed);
-      pool.Release(s.index);
+      if (!pool.Release(s)) corrupt.fetch_add(1);
+      // A late second release with the old generation must always be rejected,
+      // whether the slot is free or already owned by another thread.
+      if (pool.Release(s)) corrupt.fetch_add(1);
+      stale.fetch_add(1, std::memory_order_relaxed);
     }
   };
   std::vector<std::thread> threads;
@@ -182,7 +187,7 @@ SND_TEST(DecoderPool, ConcurrentAcquireRelease) {
   SND_CHECK_EQ(u.inUse, 0u);
   SND_CHECK(u.peakInUse <= kSlots);
   SND_CHECK_EQ(u.acquired, ok.load());
-  SND_CHECK_EQ(u.badReleases, 0u);
+  SND_CHECK_EQ(u.badReleases, stale.load());
   // All slots are back on the free list.
   DecoderSlot s[kSlots];
   for (auto& x : s) SND_CHECK(pool.Acquire(1, &x) == DecoderPoolStatus::Ok);
@@ -207,4 +212,41 @@ SND_TEST(DecoderPool, DecodesInsideASlot) {
   SND_CHECK(!r.error);
   SND_CHECK_EQ(Frames(r.out), 3000u);
   SND_CHECK(pool.Release(s.index));
+}
+
+// Generations (acceptance decision 3) and the null-output argument error (decision 7).
+SND_TEST(DecoderPool, GenerationsAndArgumentErrors) {
+  CountingAllocator alloc;
+  DecoderPool pool;
+  SND_REQUIRE(pool.Init(alloc, 2, 64));
+  SND_CHECK(pool.Acquire(1, nullptr) == DecoderPoolStatus::InvalidArgument);
+  SND_CHECK_EQ(snd::codec::EndDetailFor(DecoderPoolStatus::InvalidArgument), SND_END_DETAIL_DECODER_POOL_FULL);
+  SND_CHECK_EQ(pool.Usage().inUse, 0u);
+  SND_CHECK_EQ(pool.Usage().acquired, 0u);
+  DecoderSlot a, b, c;
+  SND_REQUIRE(pool.Acquire(1, &a) == DecoderPoolStatus::Ok);
+  SND_REQUIRE(pool.Acquire(1, &b) == DecoderPoolStatus::Ok);  // both slots: nullptr took none
+  SND_CHECK(a.generation != 0u && b.generation != 0u);
+  SND_CHECK_EQ(pool.Generation(a.index), a.generation);
+  SND_CHECK(!pool.Release(a.index, a.generation + 1u));  // wrong generation
+  SND_CHECK(!pool.Release(a.index, 0u));
+  SND_CHECK(pool.Release(a));
+  SND_CHECK_EQ(pool.Generation(a.index), 0u);  // free
+  SND_REQUIRE(pool.Acquire(1, &c) == DecoderPoolStatus::Ok);
+  SND_CHECK_EQ(c.index, a.index);
+  SND_CHECK_EQ(c.generation, a.generation + 1u);
+  SND_CHECK(!pool.Release(a));                 // stale
+  SND_CHECK_EQ(pool.Usage().inUse, 2u);
+  SND_CHECK_EQ(pool.Usage().badReleases, 3u);
+  SND_CHECK(pool.Release(c.index, c.generation));
+  SND_CHECK(pool.Release(b.index));            // index-only form: no generation check
+  SND_CHECK_EQ(pool.Usage().inUse, 0u);
+  {
+    SND_RT_SCOPE();
+    DecoderSlot x;
+    SND_CHECK(pool.Acquire(1, &x) == DecoderPoolStatus::Ok);
+    SND_CHECK(pool.Release(x));
+    SND_CHECK(!pool.Release(x));
+    (void)pool.Generation(0);
+  }
 }

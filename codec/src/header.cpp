@@ -44,15 +44,11 @@ HeaderError ValidateHeader(const CodecHeader& h) noexcept {
     if (h.frames_per_packet != 0u && h.frames_per_packet != fpb) return HeaderError::BadFramesPerPacket;
     return HeaderError::None;
   }
+  // PCM: one packet is one frame. frames_per_packet is 1 (0 = not given, the
+  // bank column's default); block_align is the frame size (0 = not given).
+  if (h.frames_per_packet != 0u && h.frames_per_packet != 1u) return HeaderError::BadFramesPerPacket;
   const std::uint32_t frameBytes = h.channels * (h.codec == SND_CODEC_PCM_F32 ? 4u : 2u);
-  if (h.block_align != 0u) {
-    if (h.block_align % frameBytes != 0u) return HeaderError::BadBlockAlign;
-    // A PCM "packet" may group frames for seek-table granularity; when both are
-    // given they must agree.
-    if (h.frames_per_packet != 0u && h.frames_per_packet != h.block_align / frameBytes) {
-      return HeaderError::BadFramesPerPacket;
-    }
-  }
+  if (h.block_align != 0u && h.block_align != frameBytes) return HeaderError::BadBlockAlign;
   return HeaderError::None;
 }
 
@@ -79,13 +75,16 @@ bool PacketForFrame(const CodecHeader& h, std::uint64_t target, PacketPosition* 
   const std::uint32_t pb = PacketBytes(h);
   const std::uint32_t pf = PacketFrames(h);
   if (pb == 0u || pf == 0u) return false;
-  std::uint64_t d = target > UINT64_MAX - h.pre_skip ? UINT64_MAX : target + h.pre_skip;
+  if (target >= h.total_frames) return false;  // past the playable range
+  // ValidateHeader guarantees pre_skip + total_frames fits, so d does not overflow.
+  const std::uint64_t d = target + h.pre_skip;
   const std::uint64_t packet = d / pf;
-  const std::uint64_t start = packet * pf;
+  const std::uint64_t start = packet * pf;  // <= d
   if (start <= h.pre_skip) {
     *out = PacketPosition{0, 0};
     return true;
   }
+  if (packet > UINT64_MAX / pb) return false;  // byte offset not representable
   *out = PacketPosition{start - h.pre_skip, packet * pb};
   return true;
 }
@@ -105,6 +104,12 @@ std::uint32_t FindSeekPoint(const std::uint64_t* frames, std::uint32_t count, st
     }
   }
   return lo;
+}
+
+std::uint32_t FindSeekPoint(const std::uint64_t* frames, std::uint32_t count, std::uint64_t target,
+                            std::uint32_t preRoll, std::uint64_t totalFrames) noexcept {
+  if (target >= totalFrames) return kNoSeekPoint;
+  return FindSeekPoint(frames, count, target, preRoll);
 }
 
 }  // namespace snd::codec

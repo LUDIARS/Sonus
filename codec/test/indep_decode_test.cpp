@@ -300,8 +300,8 @@ SND_TEST(IndepDecode, FindSeekPointBounds) {
 }
 
 // PacketForFrame: {0,0} for targets inside the first packet / pre_skip, the
-// containing packet otherwise, and a consistent pair for the last frame and
-// targets past the end.
+// containing packet otherwise, a consistent pair for the last frame, and false
+// for targets at or past total_frames (acceptance decision 2).
 SND_TEST(IndepDecode, PacketForFrameBounds) {
   for (std::uint32_t codec : kCodecs) {
     for (std::uint32_t preSkip : {0u, 5u, 121u, 300u}) {
@@ -314,8 +314,10 @@ SND_TEST(IndepDecode, PacketForFrameBounds) {
       SND_REQUIRE(snd::codec::PacketForFrame(h, 0, &pos));
       SND_CHECK_EQ(pos.frame, 0u);
       SND_CHECK_EQ(pos.byteOffset, 0u);
-      for (std::uint64_t t : {std::uint64_t{1}, std::uint64_t{pf}, std::uint64_t{4999}, std::uint64_t{5000},
-                              std::uint64_t{123456}}) {
+      for (std::uint64_t t : {std::uint64_t{5000}, std::uint64_t{123456}, UINT64_MAX}) {
+        SND_CHECK(!snd::codec::PacketForFrame(h, t, &pos));
+      }
+      for (std::uint64_t t : {std::uint64_t{1}, std::uint64_t{pf}, std::uint64_t{4999}}) {
         SND_REQUIRE(snd::codec::PacketForFrame(h, t, &pos));
         SND_CHECK(pos.frame <= t);
         if (pos.frame == 0) {
@@ -512,7 +514,11 @@ SND_TEST(IndepDecode, HeaderFieldExtremes) {
     } else {
       t = b; t.block_align = 0; add("block 0", t, HE::None);
       t = b; t.block_align = UINT32_MAX; add("block max", t, HE::BadBlockAlign);
-      t = b; t.block_align = b.block_align * 4; t.frames_per_packet = 4; add("block x4", t, HE::None);
+      // Acceptance decision 4: a PCM packet is one frame (frames_per_packet 0 or 1, block_align 0 or the frame size).
+      t = b; t.block_align = b.block_align * 4; t.frames_per_packet = 4; add("block x4", t, HE::BadFramesPerPacket);
+      t = b; t.block_align = b.block_align * 4; t.frames_per_packet = 1; add("block x4 fpp 1", t, HE::BadBlockAlign);
+      t = b; t.block_align = 0; t.frames_per_packet = 1; add("block 0 fpp 1", t, HE::None);
+      t = b; t.block_align = 0; t.frames_per_packet = 2; add("block 0 fpp 2", t, HE::BadFramesPerPacket);
       t = b; t.block_align = b.block_align * 4; t.frames_per_packet = 3; add("block x4 fpp 3", t, HE::BadFramesPerPacket);
       t = b; t.frames_per_packet = 0; add("fpp 0", t, HE::None);
     }
@@ -634,14 +640,15 @@ SND_TEST(IndepDecode, AdpcmCorruptBlocks) {
   }
 }
 
-// PCM_F32 passes values through (README: "値はそのまま"), so NaN / Inf bit
-// patterns in the data come out unchanged. PCM_S16 and ADPCM never produce
-// non-finite output or values outside [-1, 1).
+// PCM_F32 decodes NaN / +-Inf bit patterns as 0 (acceptance decision 5: corrupt
+// data must not reach feedback DSP); every other value passes bit-exactly.
+// PCM_S16 and ADPCM never produce non-finite output or values outside [-1, 1).
 SND_TEST(IndepDecode, NonFiniteOnlyFromF32Data) {
   const CodecHeader h = Hdr(SND_CODEC_PCM_F32, 2, 4);
   std::vector<std::uint8_t> data(32);
   const std::uint32_t bits[8] = {0x7FC00001u, 0x7F800000u, 0xFF800000u, 0x3F800000u,
                                  0x00000001u, 0x80000000u, 0x7F7FFFFFu, 0xFFFFFFFFu};
+  const std::uint32_t want[8] = {0u, 0u, 0u, 0x3F800000u, 0x00000001u, 0x80000000u, 0x7F7FFFFFu, 0u};
   for (int i = 0; i < 8; ++i) std::memcpy(&data[static_cast<std::size_t>(i) * 4], &bits[i], 4);  // little-endian host
   bool ok = false;
   const Planar p = OneShot(h, data, &ok);
@@ -649,7 +656,7 @@ SND_TEST(IndepDecode, NonFiniteOnlyFromF32Data) {
   for (int i = 0; i < 8; ++i) {
     std::uint32_t got;
     std::memcpy(&got, &p[static_cast<std::size_t>(i % 2)][static_cast<std::size_t>(i / 2)], 4);
-    SND_CHECK_EQ(got, bits[i]);
+    SND_CHECK_EQ(got, want[i]);
   }
 }
 

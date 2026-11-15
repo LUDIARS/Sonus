@@ -27,13 +27,15 @@ if (pool.Acquire(bytes, &slot) != snd::codec::DecoderPoolStatus::Ok)
 c->Init(slot.state, asset.codec);
 n = c->Decode(slot.state, chunk, chunkBytes, ringPtrs, ringFree);  // 入力は全部消費
 n = c->Decode(slot.state, nullptr, 0, ringPtrs, ringFree);         // 保持分の吐き出し
-pool.Release(slot.index);
+pool.Release(slot);   // 添字と世代の組。古い所有者からの返却は拒否される
 
 // シーク（D-23）
-uint32_t e = snd::codec::FindSeekPoint(asset.seekFrames, asset.seekCount, target, asset.codec.pre_roll);
+uint32_t e = snd::codec::FindSeekPoint(asset.seekFrames, asset.seekCount, target, asset.codec.pre_roll,
+                                       asset.codec.total_frames);  // target >= total_frames なら kNoSeekPoint
 c->Seek(slot.state, asset.seekFrames[e]);
 // asset.seekOffsets[e] のバイトから渡し、先頭 target - seekFrames[e] フレームを捨てる
 // シーク表の無い PCM / ADPCM は snd::codec::PacketForFrame(header, target - pre_roll, &pos) でも求まる
+// （target >= total_frames、またはバイト位置が 64 bit に収まらないときは false）
 
 // ビルド（buildtool）
 snd::CodecHeader h = snd::codec::encode::MakeAdpcmHeader(ch, rate, frames);   // または MakePcmHeader
@@ -52,11 +54,12 @@ ASST の列との対応: `codec, channels, sampleRate, totalFrames, preSkip, pre
 
 | fourcc | 1 パケット | 内容 |
 | --- | --- | --- |
-| `PCMF` | 1 フレーム（`4 × ch` バイト） | float32 リトルエンディアン、インターリーブ。値はそのまま（±1 を超えても切らない） |
+| `PCMF` | 1 フレーム（`4 × ch` バイト） | float32 リトルエンディアン、インターリーブ。有限値はそのまま（±1 を超えても切らない）。**NaN / ±Inf は 0 にする**（壊れたバンクの NaN がリバーブなどのフィードバック系を汚さないため） |
 | `PC16` | 1 フレーム（`2 × ch` バイト） | int16 リトルエンディアン、インターリーブ。`x / 32768` で展開 |
 | `ADPC` | 1 ブロック（`block_align` バイト） | WAV の IMA ADPCM と同じ配置。チャンネルごとに 4 バイトのヘッダ `{s16 予測値, u8 ステップ添字 0..88, u8 0}`、続いて 4 バイト × ch の組を繰り返す（各組がそのチャンネルの 8 サンプル、下位ニブルが先）。1 ブロックのフレーム数は `1 + (block_align − 4ch) / (4ch) × 8`。最後のブロックは詰め物で満たし、`total_frames` で切る |
 
-- PCM のヘッダは `frames_per_packet = 1`、`block_align = フレームの大きさ`（0 も可）。`block_align` がフレームの倍数ならそれでもよい（検証のみ）。
+- PCM の 1 パケットは 1 フレーム。`frames_per_packet` は 1（0 は「指定なし」としてバンクの列の既定値を受け入れる）、それ以外は
+  `BadFramesPerPacket`。`block_align` はフレームの大きさか 0（指定なし）、それ以外は `BadBlockAlign`。エンコーダは 1 とフレームの大きさを書く。
 - ADPCM の `block_align` は `4ch × (1 + k)`（k ≥ 1）かつ 64 KiB 以下。既定は 512 バイト／ch（1017 フレーム、48 kHz で 21 ms）。
   `frames_per_packet` は 0 か計算値。
 - エンコーダ: PCM s16 は最近接丸めで `[-32768, 32767]` に切る。ADPCM は標準の IMA 量子化で、各ブロック・チャンネルの最初のステップ添字を
@@ -84,13 +87,21 @@ ASST の列との対応: `codec, channels, sampleRate, totalFrames, preSkip, pre
    以後の `Decode` はすべて `SND_DECODE_ERROR`。ADPCM のステップ添字 > 88 も `SND_DECODE_ERROR`。初期化していない状態（印の不一致）、
    `src = NULL` で `src_bytes > 0`、`max_frames > 0` で `dst` が NULL も同じ。状態の外と `dst[c][max_frames]` 以降には書かない（ASan とガードで確認）。
 8. ヘッダの `codec` がオブジェクトの fourcc と違うときも無効なヘッダとして扱う。
+9. 状態は `Init` したコーデックを覚えている。別のコーデックの `Decode` に渡すと `SND_DECODE_ERROR`（状態は変えない）、別のコーデックの
+   `Seek` に渡すと状態を失敗にする（以後の `Decode` はエラー、正しいコーデックの `Seek` / `Init` で戻る）。
+10. `PacketForFrame` と `FindSeekPoint`（5 引数版）は `target >= total_frames` で失敗する（false / `kNoSeekPoint`）。4 引数の
+   `FindSeekPoint` は終端を見ない（範囲を自分で確かめる呼び出し側向けに残した）。source は 5 引数版を使う。
 
 ## デコーダプール（3.3、D-14）
 
-- `Config.memory.maxDecoders × decoderSlotBytes`（64 に切り上げ）＋管理領域（スロットごとに 8 バイト、64 に切り上げ）を初期化時に一括で取る。
+- `Config.memory.maxDecoders × decoderSlotBytes`（64 に切り上げ）＋管理領域（スロットごとに 4 バイトのリンクと 8 バイトの {世代, 使用中} 語、それぞれ 64 に切り上げ）を初期化時に一括で取る。
   `Init(IAllocator&, …)` は `MemTag::DecoderPool` で 1 回だけ確保、`Init(void*, bytes, …)` は呼び出し側の領域（64 バイト境界）を使う。
-- `Acquire(stateBytes)`: `stateBytes > スロット` なら `StateTooLarge`、空きが無ければ `Full`。どちらも `EndDetailFor` で
-  `SND_END_DETAIL_DECODER_POOL_FULL`。
+- `Acquire(stateBytes, &slot)`: `stateBytes > スロット` なら `StateTooLarge`、空きが無ければ `Full`。どちらも `EndDetailFor` で
+  `SND_END_DETAIL_DECODER_POOL_FULL`。`slot` が NULL なら `InvalidArgument` でスロットを消費しない。
+- **世代**: `DecoderSlot` は `{index, generation, state}`。取得のたびにそのスロットの世代が 1 進む（0 は使わない）。`Release(slot)` /
+  `Release(index, generation)` は使用中かつ世代が一致するときだけ返却する。返却して別の所有者が再取得した後の古い返却は拒否して
+  `badReleases` に数える（スロットごとの 64 bit 語の CAS、ロックフリー）。添字だけの `Release(index)` も残したが、世代を確かめないので
+  古い返却を見分けられない（添字しか持てない呼び出し側向け。source は世代つきを使うこと）。
 - **呼ぶスレッド**: `Acquire` はオーディオスレッド（RunEventLogic で要求を受理し、ソース種別の `Start` がデコードするボイスを始めるとき）、
   `Release` はオーディオスレッド（`Release` 時に実行中のジョブが無い）か先読みレーンの通常ワーカー（解放済みボイスの最後のデコードジョブが
   終わったとき、3.3 のエポック）。両方とも世代タグ付きの Treiber スタック（64 bit CAS）でロックフリー、確保・ロック・システムコールなし。
@@ -98,7 +109,7 @@ ASST の列との対応: `codec, channels, sampleRate, totalFrames, preSkip, pre
 - 使用量: `Usage()` が容量・スロットの大きさ・プール全体のバイト数・使用中・最大使用数・使用中の `stateBytes` 合計・取得回数・
   満杯／大きすぎによる拒否回数・不正な返却回数を返す（relaxed アトミック。他スレッドが動いている間は近似値）。
   `memory_used[SND_MEM_DECODER_POOL]` には `poolBytes` を入れればよい（初期化時に全部確保するので）。
-- 二重返却・範囲外の返却は無視して `badReleases` に数える。
+- 二重返却・範囲外の返却・世代の合わない返却は無視して `badReleases` に数える。
 - `StateBytes` は「純関数」だが RT 安全は約束されていない（プラグイン）。source はアセットの準備時（バンク読み込み、通常ワーカー）に
   計算して覚え、オーディオスレッドではその値で `Acquire` することを勧める。
 
@@ -180,6 +191,6 @@ ASST の列との対応: `codec, channels, sampleRate, totalFrames, preSkip, pre
 - シーク: シーク表と `PacketForFrame` の両方で、`pre_roll` 0 / 300、各種の目標位置について連続デコードとビット一致。プリスキップ付きも。
 - 壊れた入力: 無効なヘッダ 14 種、途中で切れたストリーム、ステップ添字の破損、未初期化の状態、NULL 引数、ブロック境界でないシーク、
   保持の上限超え、乱数のヘッダとバイト列 300 回。状態・出力の後ろのガードが壊れないこと（ASan でも確認）。
-- プール: 満杯・大きすぎ・二重返却・使用量・呼び出し側メモリ・0 個・確保失敗、4 スレッドの同時取得返却（TSan）、スロット内でのデコード。
+- プール: 満杯・大きすぎ・二重返却・古い世代の返却（並行中も）・NULL 出力・使用量・呼び出し側メモリ・0 個・確保失敗、4 スレッドの同時取得返却（TSan）、スロット内でのデコード。
 - RT: デコード経路（`StateBytes`/`Init`/`Decode`/`Seek`）、`Acquire`/`Release`、`Find` を `SND_RT_SCOPE` の中で実行して検出ゼロ。
 - ゴールデン: `golden/adpcm_stereo_256.sndg`（ADPCM のエンコード→デコード結果、許容差 0）。デコーダかブロック配置が変わると落ちる。

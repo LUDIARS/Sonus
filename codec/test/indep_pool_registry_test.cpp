@@ -245,23 +245,26 @@ SND_TEST(IndepPool, BadReleasesAreIgnored) {
   SND_CHECK_EQ(pool.Usage().capacity, 5u);
 }
 
-// Spec gap (reported, not a failure): DecoderSlot carries no generation, so a
-// stale Release of an index that has meanwhile been re-acquired by another
-// owner is indistinguishable from a valid one and frees the other owner's
-// slot. Documented here so the behaviour is visible.
-SND_TEST(IndepPool, SpecGapStaleReleaseIsUndetectable) {
+// Acceptance decision 3: DecoderSlot carries a generation, and a stale
+// Release (index re-acquired by another owner since) is rejected and counted.
+SND_TEST(IndepPool, StaleReleaseIsRejected) {
   HeapAllocator alloc;
   DecoderPool pool;
   SND_REQUIRE(pool.Init(alloc, 1, 64));
   DecoderSlot a, b, c;
   SND_REQUIRE(pool.Acquire(1, &a) == DecoderPoolStatus::Ok);
-  SND_REQUIRE(pool.Release(a.index));
+  SND_REQUIRE(pool.Release(a));
   SND_REQUIRE(pool.Acquire(1, &b) == DecoderPoolStatus::Ok);  // same index, new owner
-  const bool staleAccepted = pool.Release(a.index);              // owner A releases twice (late)
-  const bool thirdGot = pool.Acquire(1, &c) == DecoderPoolStatus::Ok;
-  snd::test::Note("stale double Release accepted: %d, slot then handed to a second owner: %d", staleAccepted,
-                  thirdGot);
-  if (thirdGot) pool.Release(c.index);
+  SND_CHECK_EQ(b.index, a.index);
+  SND_CHECK(b.generation != a.generation);
+  SND_CHECK(!pool.Release(a));                                    // owner A releases late: rejected
+  SND_CHECK(!pool.Release(a.index, a.generation));
+  SND_CHECK_EQ(pool.Usage().badReleases, 2u);
+  SND_CHECK_EQ(pool.Usage().inUse, 1u);
+  SND_CHECK(pool.Acquire(1, &c) == DecoderPoolStatus::Full);      // B still owns the slot
+  SND_CHECK(pool.Release(b));
+  SND_CHECK(!pool.Release(b));                                    // double release
+  SND_CHECK_EQ(pool.Usage().inUse, 0u);
 }
 
 // Acquire / Release / Usage / State and registry Find inside an RT scope.

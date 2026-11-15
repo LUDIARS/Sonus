@@ -16,9 +16,11 @@
 //     flight) or a normal worker of the prefetch lane (when the last in-flight
 //     decode job of a released voice finishes, epoch reclamation 3.3).
 //   - State / Usage / SlotBytes / Capacity: any thread.
-// Acquire and Release are lock-free (a tagged Treiber stack over slot indices;
-// no allocation, no lock, no system call) and may run concurrently on any
-// number of threads. Usage counters are relaxed atomics: a snapshot taken
+// Acquire and Release are lock-free (a tagged Treiber stack over slot indices
+// plus one 64-bit word per slot holding {generation, in-use}; no allocation, no
+// lock, no system call) and may run concurrently on any number of threads.
+// Each Acquire gives the slot a new generation; Release(index, generation)
+// accepts only the current owner's generation (stale releases are rejected). Usage counters are relaxed atomics: a snapshot taken
 // while other threads acquire/release is approximate.
 //
 // Recommendation for source: compute ICodec::StateBytes when the asset is
@@ -42,18 +44,25 @@ enum class DecoderPoolStatus : std::uint32_t {
   Full = 1,            // every slot is in use
   StateTooLarge = 2,   // stateBytes > slot size (D-14)
   NotInitialized = 3,
+  InvalidArgument = 4, // out == nullptr: nothing is acquired
 };
 const char* DecoderPoolStatusName(DecoderPoolStatus s) noexcept;
 
-// End detail of a playback rejected for this status (SND_END_DETAIL_NONE for Ok).
+// End detail of a playback rejected for this status (SND_END_DETAIL_NONE for Ok;
+// every rejection, including the caller errors NotInitialized / InvalidArgument,
+// maps to SND_END_DETAIL_DECODER_POOL_FULL).
 constexpr snd_end_detail EndDetailFor(DecoderPoolStatus s) noexcept {
   return s == DecoderPoolStatus::Ok ? SND_END_DETAIL_NONE : SND_END_DETAIL_DECODER_POOL_FULL;
 }
 
 inline constexpr std::uint32_t kInvalidDecoderSlot = 0xFFFFFFFFu;
 
+// A slot handed out by Acquire. `generation` distinguishes successive owners
+// of the same index (never 0 for an acquired slot); Release(slot) /
+// Release(index, generation) rejects a stale release by an earlier owner.
 struct DecoderSlot {
   std::uint32_t index = kInvalidDecoderSlot;
+  std::uint32_t generation = 0;
   void* state = nullptr;  // 64-byte aligned, SlotBytes() bytes
 };
 
@@ -67,7 +76,7 @@ struct DecoderPoolUsage {
   std::uint64_t acquired;       // successful Acquire calls
   std::uint64_t rejectedFull;
   std::uint64_t rejectedTooLarge;
-  std::uint64_t badReleases;    // Release of a free or out-of-range slot (ignored)
+  std::uint64_t badReleases;    // Release of a free / out-of-range slot or with a stale generation (ignored)
 };
 
 class DecoderPool {
@@ -87,10 +96,22 @@ class DecoderPool {
   // Returns the memory if it came from an allocator. Owner thread.
   void Shutdown() noexcept;
 
-  // Lock-free. On Ok, *out receives the slot; otherwise *out is reset.
+  // Lock-free. On Ok, *out receives the slot (index, generation, state);
+  // otherwise *out is reset. out == nullptr is rejected (InvalidArgument) and
+  // takes no slot.
   DecoderPoolStatus Acquire(std::uint32_t stateBytes, DecoderSlot* out) noexcept;
-  // Lock-free. False (and counted in badReleases) for a free or invalid index.
+  // Lock-free. Returns the slot only if it is acquired with exactly this
+  // generation; a stale release (the index was released and re-acquired by
+  // another owner since) or a release of a free / invalid index returns false,
+  // changes nothing and is counted in badReleases.
+  bool Release(std::uint32_t index, std::uint32_t generation) noexcept;
+  bool Release(const DecoderSlot& slot) noexcept { return Release(slot.index, slot.generation); }
+  // Lock-free, WITHOUT the generation check: for owners that only keep the
+  // index. Still rejects free and invalid indices, but cannot tell a stale
+  // release from a valid one. Prefer the forms above.
   bool Release(std::uint32_t index) noexcept;
+  // Current generation of an acquired slot, 0 if free / invalid.
+  std::uint32_t Generation(std::uint32_t index) const noexcept;
 
   void* State(std::uint32_t index) const noexcept;
   std::uint32_t SlotBytes() const noexcept { return slotBytes_; }
@@ -103,7 +124,9 @@ class DecoderPool {
 
   std::uint8_t* slots_ = nullptr;
   std::atomic<std::uint32_t>* next_ = nullptr;     // free-list links
-  std::atomic<std::uint32_t>* reserved_ = nullptr; // requested stateBytes + 1 while acquired, 0 when free
+  // Per slot: (generation << 32) | (requested stateBytes + 1 while acquired, 0 when free).
+  std::atomic<std::uint64_t>* word_ = nullptr;
+  bool ReleaseImpl(std::uint32_t index, std::uint32_t generation, bool checkGeneration) noexcept;
   void* owned_ = nullptr;
   IAllocator* allocator_ = nullptr;
   std::size_t poolBytes_ = 0;

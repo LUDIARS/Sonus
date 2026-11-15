@@ -1,7 +1,8 @@
 // Built-in decoders (design.md 6.4, CONTRACTS.md D-23). Runtime side of the codec module.
 //
 // The built-in codecs implement snd::ICodec (snd/ext/codec.hpp) for
-//   SND_CODEC_PCM_F32  little-endian float32, interleaved
+//   SND_CODEC_PCM_F32  little-endian float32, interleaved; NaN / +-Inf decode as 0
+//                      (corrupt data must not reach feedback DSP such as reverb)
 //   SND_CODEC_PCM_S16  little-endian int16, interleaved
 //   SND_CODEC_ADPCM    IMA ADPCM in WAV/IMA block layout, 1..SND_MAX_CHANNELS
 // SND_CODEC_OPUS is not built in (no third-party code, stage0 A0-3). Lookups of
@@ -36,6 +37,10 @@
 //     Init (StateBytes returns kMinStateBytes) and every Decode returns
 //     SND_DECODE_ERROR. A corrupt ADPCM block header (step index > 88) makes
 //     Decode return SND_DECODE_ERROR (sticky until Init/Seek).
+//   - A state initialised by one codec object and passed to another codec's
+//     Decode makes it return SND_DECODE_ERROR; such a Seek leaves the state
+//     failed (the next Decode errors) until Init or a Seek by the right codec.
+//     Init with a header whose codec differs from the object is an invalid header.
 //
 // Threads: StateBytes / ValidateHeader / helpers are pure and thread-safe.
 // Init / Decode / Seek are called by one thread at a time per state (normal
@@ -68,8 +73,8 @@ enum class HeaderError : std::uint32_t {
   CodecUnavailable = 2,    // SND_CODEC_OPUS: not compiled into this build
   BadChannels = 3,         // 0 or > SND_MAX_CHANNELS
   BadSampleRate = 4,       // 0
-  BadBlockAlign = 5,       // PCM: not 0 / multiple of the frame size; ADPCM: wrong layout or too large
-  BadFramesPerPacket = 6,  // does not match block_align
+  BadBlockAlign = 5,       // PCM: not 0 / the frame size; ADPCM: wrong layout or too large
+  BadFramesPerPacket = 6,  // PCM: not 0 / 1; ADPCM: not 0 / the block's frame count
   FrameCountOverflow = 7,  // pre_skip + total_frames overflows
 };
 const char* HeaderErrorName(HeaderError e) noexcept;
@@ -98,7 +103,9 @@ std::uint32_t AdpcmFramesPerBlock(std::uint32_t channels, std::uint32_t blockAli
 // containing playable frame `target` (pass target - pre_roll yourself) is
 // returned as {first playable frame of the packet, byte offset within the codec
 // data}. A packet that starts inside pre_skip maps to {0, 0} (Seek(0) restarts
-// the stream). False if the header is invalid.
+// the stream). False if the header is invalid, out is null, target >=
+// total_frames (past the playable range), or the byte offset does not fit in
+// 64 bits.
 struct PacketPosition {
   std::uint64_t frame;
   std::uint64_t byteOffset;
@@ -107,8 +114,14 @@ bool PacketForFrame(const CodecHeader& header, std::uint64_t target, PacketPosit
 
 // Seek table lookup (6.3, D-23): index of the last entry whose frame is
 // <= target - preRoll (saturating at 0). `frames` is the SEEK.frame column
-// slice of the asset, ascending, with frames[0] == 0. kNoSeekPoint if count == 0.
+// slice of the asset, ascending, with frames[0] == 0.
+// Returns kNoSeekPoint ("not found") if frames is null, count == 0, or (5-arg
+// form) target >= totalFrames (past the playable range; pass the header's
+// total_frames). The 4-arg form has no end bound and is kept for callers that
+// check the range themselves; source should use the 5-arg form.
 inline constexpr std::uint32_t kNoSeekPoint = 0xFFFFFFFFu;
+std::uint32_t FindSeekPoint(const std::uint64_t* frames, std::uint32_t count, std::uint64_t target,
+                            std::uint32_t preRoll, std::uint64_t totalFrames) noexcept;
 std::uint32_t FindSeekPoint(const std::uint64_t* frames, std::uint32_t count, std::uint64_t target,
                             std::uint32_t preRoll) noexcept;
 

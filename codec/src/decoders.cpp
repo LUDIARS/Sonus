@@ -60,7 +60,9 @@ bool RunPcm(DecoderState* s, const std::uint8_t* buf, std::uint32_t avail, Outpu
       if constexpr (kFloat) {
         const std::uint8_t* q = p + c * 4u;
         for (std::uint32_t f = 0; f < k; ++f, q += frameBytes) {
-          d[f] = std::bit_cast<float>(detail::LoadLE32(q));
+          const std::uint32_t bits = detail::LoadLE32(q);
+          // NaN / +-Inf (exponent all ones) -> 0: corrupt data must not reach feedback DSP.
+          d[f] = (bits & 0x7F800000u) == 0x7F800000u ? 0.0f : std::bit_cast<float>(bits);
         }
       } else {
         const std::uint8_t* q = p + c * 2u;
@@ -276,11 +278,29 @@ class BuiltinDecoder final : public ICodec {
   }
   std::uint32_t Decode(void* state, const std::uint8_t* src, std::uint32_t n, float* const* dst,
                        std::uint32_t max) override {
+    if (!OwnsState(state)) return kDecodeError;
     return DecodeImpl(state, src, n, dst, max, run_);
   }
-  void Seek(void* state, std::uint64_t frame) override { SeekImpl(state, frame); }
+  void Seek(void* state, std::uint64_t frame) override {
+    if (!OwnsState(state)) {
+      MarkForeignState(state);
+      return;
+    }
+    SeekImpl(state, frame);
+  }
 
  private:
+  // The state remembers the codec it was initialised for (D-23 states are not
+  // interchangeable between codecs).
+  bool OwnsState(const void* state) const noexcept {
+    const auto* s = static_cast<const DecoderState*>(state);
+    return s != nullptr && s->magic == detail::kStateMagic && s->codec == fourcc_;
+  }
+  static void MarkForeignState(void* state) noexcept {
+    auto* s = static_cast<DecoderState*>(state);
+    if (s != nullptr && s->magic == detail::kStateMagic && s->failed == 0u) s->failed = kFailedRuntime;
+  }
+
   std::uint32_t fourcc_;
   RunFn run_;
 };

@@ -23,7 +23,7 @@ struct Layout {
   std::uint64_t slotBytes;  // rounded
   std::uint64_t slotsBytes;
   std::uint64_t nextOffset;
-  std::uint64_t reservedOffset;
+  std::uint64_t wordOffset;
   std::uint64_t total;
 };
 
@@ -32,11 +32,12 @@ bool ComputeLayout(std::uint32_t maxDecoders, std::uint32_t slotBytes, Layout* o
   if (slot > UINT32_MAX) return false;
   const std::uint64_t slots = slot * maxDecoders;  // < 2^64: both factors < 2^32
   const std::uint64_t links = detail::AlignUp(static_cast<std::uint64_t>(maxDecoders) * 4u, kStateAlignment);
+  const std::uint64_t words = detail::AlignUp(static_cast<std::uint64_t>(maxDecoders) * 8u, kStateAlignment);
   out->slotBytes = slot;
   out->slotsBytes = slots;
   out->nextOffset = slots;
-  out->reservedOffset = slots + links;
-  out->total = slots + 2u * links;
+  out->wordOffset = slots + links;
+  out->total = slots + links + words;
   if (out->total < slots || out->total > SIZE_MAX) return false;
   return true;
 }
@@ -49,6 +50,7 @@ const char* DecoderPoolStatusName(DecoderPoolStatus s) noexcept {
     case DecoderPoolStatus::Full: return "decoder pool full";
     case DecoderPoolStatus::StateTooLarge: return "codec state larger than a decoder slot";
     case DecoderPoolStatus::NotInitialized: return "decoder pool not initialised";
+    case DecoderPoolStatus::InvalidArgument: return "invalid argument (null output slot)";
   }
   return "?";
 }
@@ -78,10 +80,10 @@ bool DecoderPool::Setup(void* memory, std::size_t bytes, std::uint32_t maxDecode
   poolBytes_ = static_cast<std::size_t>(l.total);
   if (maxDecoders > 0u) {
     next_ = reinterpret_cast<std::atomic<std::uint32_t>*>(base + l.nextOffset);
-    reserved_ = reinterpret_cast<std::atomic<std::uint32_t>*>(base + l.reservedOffset);
+    word_ = reinterpret_cast<std::atomic<std::uint64_t>*>(base + l.wordOffset);
     for (std::uint32_t i = 0; i < maxDecoders; ++i) {
       new (&next_[i]) std::atomic<std::uint32_t>(i + 1u < maxDecoders ? i + 1u : kNil);
-      new (&reserved_[i]) std::atomic<std::uint32_t>(0u);
+      new (&word_[i]) std::atomic<std::uint64_t>(0u);  // generation 0, free
     }
   }
   head_.store(Pack(0, maxDecoders > 0u ? 0u : kNil), std::memory_order_release);
@@ -121,7 +123,7 @@ void DecoderPool::Shutdown() noexcept {
   allocator_ = nullptr;
   slots_ = nullptr;
   next_ = nullptr;
-  reserved_ = nullptr;
+  word_ = nullptr;
   capacity_ = 0;
   slotBytes_ = 0;
   poolBytes_ = 0;
@@ -130,7 +132,8 @@ void DecoderPool::Shutdown() noexcept {
 }
 
 DecoderPoolStatus DecoderPool::Acquire(std::uint32_t stateBytes, DecoderSlot* out) noexcept {
-  if (out != nullptr) *out = DecoderSlot{};
+  if (out == nullptr) return DecoderPoolStatus::InvalidArgument;  // takes no slot
+  *out = DecoderSlot{};
   if (!Initialized()) return DecoderPoolStatus::NotInitialized;
   if (stateBytes > slotBytes_) {
     rejectedTooLarge_.fetch_add(1, std::memory_order_relaxed);
@@ -146,30 +149,47 @@ DecoderPoolStatus DecoderPool::Acquire(std::uint32_t stateBytes, DecoderSlot* ou
     const std::uint32_t nxt = next_[top].load(std::memory_order_relaxed);
     if (head_.compare_exchange_weak(h, Pack(TagOf(h) + 1u, nxt), std::memory_order_acq_rel,
                                     std::memory_order_acquire)) {
-      reserved_[top].store(stateBytes + 1u, std::memory_order_relaxed);  // stateBytes <= slotBytes_ < UINT32_MAX
+      // The popped slot is free, so its word is {generation, 0} and only this
+      // thread writes it now (releases never write a free word).
+      std::uint32_t gen = TagOf(word_[top].load(std::memory_order_relaxed)) + 1u;
+      if (gen == 0u) gen = 1u;  // 0 never names an acquired slot
+      word_[top].store(Pack(gen, stateBytes + 1u), std::memory_order_relaxed);  // stateBytes <= slotBytes_ < UINT32_MAX
       const std::uint32_t now = inUse_.fetch_add(1, std::memory_order_relaxed) + 1u;
       std::uint32_t peak = peakInUse_.load(std::memory_order_relaxed);
       while (now > peak && !peakInUse_.compare_exchange_weak(peak, now, std::memory_order_relaxed)) {
       }
       stateBytesInUse_.fetch_add(stateBytes, std::memory_order_relaxed);
       acquired_.fetch_add(1, std::memory_order_relaxed);
-      if (out != nullptr) *out = DecoderSlot{top, slots_ + static_cast<std::size_t>(top) * slotBytes_};
+      *out = DecoderSlot{top, gen, slots_ + static_cast<std::size_t>(top) * slotBytes_};
       return DecoderPoolStatus::Ok;
     }
   }
 }
 
-bool DecoderPool::Release(std::uint32_t index) noexcept {
-  if (index >= capacity_ || reserved_ == nullptr) {
+bool DecoderPool::Release(std::uint32_t index, std::uint32_t generation) noexcept {
+  return ReleaseImpl(index, generation, true);
+}
+
+bool DecoderPool::Release(std::uint32_t index) noexcept { return ReleaseImpl(index, 0, false); }
+
+bool DecoderPool::ReleaseImpl(std::uint32_t index, std::uint32_t generation, bool checkGeneration) noexcept {
+  if (index >= capacity_ || word_ == nullptr) {
     badReleases_.fetch_add(1, std::memory_order_relaxed);
     return false;
   }
-  const std::uint32_t mark = reserved_[index].exchange(0u, std::memory_order_relaxed);
-  if (mark == 0u) {  // already free
-    badReleases_.fetch_add(1, std::memory_order_relaxed);
-    return false;
+  // Atomically: acquired (low != 0) with the expected generation -> free, same generation.
+  std::uint64_t w = word_[index].load(std::memory_order_relaxed);
+  for (;;) {
+    if (IndexOf(w) == 0u || (checkGeneration && TagOf(w) != generation)) {
+      badReleases_.fetch_add(1, std::memory_order_relaxed);
+      return false;
+    }
+    if (word_[index].compare_exchange_weak(w, Pack(TagOf(w), 0u), std::memory_order_relaxed,
+                                           std::memory_order_relaxed)) {
+      break;
+    }
   }
-  stateBytesInUse_.fetch_sub(mark - 1u, std::memory_order_relaxed);
+  stateBytesInUse_.fetch_sub(IndexOf(w) - 1u, std::memory_order_relaxed);
   inUse_.fetch_sub(1, std::memory_order_relaxed);
   std::uint64_t h = head_.load(std::memory_order_relaxed);
   for (;;) {
@@ -179,6 +199,12 @@ bool DecoderPool::Release(std::uint32_t index) noexcept {
       return true;
     }
   }
+}
+
+std::uint32_t DecoderPool::Generation(std::uint32_t index) const noexcept {
+  if (index >= capacity_ || word_ == nullptr) return 0;
+  const std::uint64_t w = word_[index].load(std::memory_order_relaxed);
+  return IndexOf(w) != 0u ? TagOf(w) : 0u;
 }
 
 void* DecoderPool::State(std::uint32_t index) const noexcept {

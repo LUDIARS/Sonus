@@ -463,3 +463,87 @@ SND_TEST(Decode, AdpcmGolden) {
   tol.maxAbs = 0.0f;
   SND_CHECK_GOLDEN("adpcm_stereo_256", buf, tol);
 }
+
+// Acceptance decision 5: PCM_F32 NaN / +-Inf decode as 0, everything else bit-exact.
+SND_TEST(Decode, PcmF32NonFiniteBecomesZero) {
+  const CodecHeader h = enc::MakePcmHeader(SND_CODEC_PCM_F32, 1, 48000, 6);
+  const std::uint32_t bits[6] = {0x7FC00000u, 0xFFC00001u, 0x7F800000u, 0xFF800000u, 0x7F7FFFFFu, 0x80000001u};
+  const std::uint32_t want[6] = {0u, 0u, 0u, 0u, 0x7F7FFFFFu, 0x80000001u};
+  std::vector<std::uint8_t> data(24);
+  for (int i = 0; i < 6; ++i) {
+    for (int k = 0; k < 4; ++k) data[static_cast<std::size_t>(i * 4 + k)] = static_cast<std::uint8_t>(bits[i] >> (8 * k));
+  }
+  FeedResult r = Reference(h, data);
+  SND_REQUIRE(!r.error);
+  SND_REQUIRE_EQ(Frames(r.out), 6u);
+  for (int i = 0; i < 6; ++i) {
+    std::uint32_t got;
+    std::memcpy(&got, &r.out[0][static_cast<std::size_t>(i)], 4);
+    SND_CHECK_EQ(got, want[i]);
+  }
+}
+
+// Acceptance decision 6: a state belongs to the codec that initialised it.
+SND_TEST(Decode, ForeignCodecStateIsRejected) {
+  const CodecHeader h = enc::MakePcmHeader(SND_CODEC_PCM_S16, 1, 48000, 100);
+  auto data = EncodeOrDie(h, MakeSignal(1, 100));
+  snd::ICodec* s16 = snd::codec::BuiltinCodec(SND_CODEC_PCM_S16);
+  snd::ICodec* f32 = snd::codec::BuiltinCodec(SND_CODEC_PCM_F32);
+  snd::ICodec* adp = snd::codec::BuiltinCodec(SND_CODEC_ADPCM);
+  StateMem mem(snd::codec::kMinStateBytes > s16->StateBytes(h) ? snd::codec::kMinStateBytes : s16->StateBytes(h));
+  OutBuf ob(1, 64);
+  s16->Init(mem.get(), h);
+  SND_CHECK_EQ(f32->Decode(mem.get(), data.data(), 8, ob.dst(), 64), snd::kDecodeError);
+  SND_CHECK_EQ(adp->Decode(mem.get(), nullptr, 0, ob.dst(), 64), snd::kDecodeError);
+  // The rightful codec still works after a foreign Decode.
+  SND_CHECK_EQ(s16->Decode(mem.get(), data.data(), 8, ob.dst(), 64), 4u);
+  // A foreign Seek leaves the state failed for the next Decode.
+  adp->Seek(mem.get(), 0);
+  SND_CHECK_EQ(s16->Decode(mem.get(), data.data() + 8, 8, ob.dst(), 64), snd::kDecodeError);
+  // Until the owner seeks (or Init).
+  s16->Seek(mem.get(), 0);
+  SND_CHECK_EQ(s16->Decode(mem.get(), data.data(), 8, ob.dst(), 64), 4u);
+  // Init by a codec object with another codec's header is an invalid header.
+  f32->Init(mem.get(), h);
+  SND_CHECK_EQ(f32->Decode(mem.get(), data.data(), 8, ob.dst(), 64), snd::kDecodeError);
+  SND_CHECK_EQ(s16->Decode(mem.get(), data.data(), 8, ob.dst(), 64), snd::kDecodeError);
+  SND_CHECK(mem.GuardIntact());
+}
+
+// Acceptance decisions 1, 2, 4: range and overflow checks of the seek helpers, PCM packet = 1 frame.
+SND_TEST(Decode, SeekHelpersRejectOutOfRange) {
+  for (std::uint32_t codec : kCodecs) {
+    CodecHeader h = HeaderFor(codec, 2, 5000, 64);
+    snd::codec::PacketPosition pos{};
+    SND_CHECK(snd::codec::PacketForFrame(h, 4999, &pos));
+    for (std::uint64_t t : {std::uint64_t{5000}, std::uint64_t{1} << 40, UINT64_MAX}) {
+      SND_CHECK(!snd::codec::PacketForFrame(h, t, &pos));
+    }
+    // A header whose byte offsets overflow 64 bits near the end.
+    CodecHeader huge = h;
+    huge.total_frames = UINT64_MAX;
+    SND_CHECK(!snd::codec::PacketForFrame(huge, UINT64_MAX - 1, &pos));
+    SND_CHECK(snd::codec::PacketForFrame(huge, 1000, &pos));
+  }
+  const std::uint64_t f[] = {0, 1000, 2000};
+  SND_CHECK_EQ(snd::codec::FindSeekPoint(f, 3, 2500, 0, 3000), 2u);
+  SND_CHECK_EQ(snd::codec::FindSeekPoint(f, 3, 2999, 0, 3000), 2u);
+  SND_CHECK_EQ(snd::codec::FindSeekPoint(f, 3, 3000, 0, 3000), snd::codec::kNoSeekPoint);
+  SND_CHECK_EQ(snd::codec::FindSeekPoint(f, 3, UINT64_MAX, 0, 3000), snd::codec::kNoSeekPoint);
+  SND_CHECK_EQ(snd::codec::FindSeekPoint(f, 3, 0, 0, 0), snd::codec::kNoSeekPoint);
+  SND_CHECK_EQ(snd::codec::FindSeekPoint(f, 0, 10, 0, 3000), snd::codec::kNoSeekPoint);
+  CodecHeader pcm = enc::MakePcmHeader(SND_CODEC_PCM_S16, 2, 48000, 10);
+  for (std::uint32_t fpp : {0u, 1u}) {
+    for (std::uint32_t ba : {0u, 4u}) {
+      pcm.frames_per_packet = fpp;
+      pcm.block_align = ba;
+      SND_CHECK(snd::codec::ValidateHeader(pcm) == snd::codec::HeaderError::None);
+    }
+  }
+  pcm.block_align = 0;
+  pcm.frames_per_packet = 2;
+  SND_CHECK(snd::codec::ValidateHeader(pcm) == snd::codec::HeaderError::BadFramesPerPacket);
+  pcm.frames_per_packet = 1;
+  pcm.block_align = 8;
+  SND_CHECK(snd::codec::ValidateHeader(pcm) == snd::codec::HeaderError::BadBlockAlign);
+}
