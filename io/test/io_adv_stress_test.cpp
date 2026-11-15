@@ -289,9 +289,16 @@ SND_TEST(IoAdvStress, NoLostWakeupsWithASlowPollPeriod) {
 // Shutdown racing with Post and Submit. Afterwards no accepted request may be
 // left inside the scheduler: accepted FileRequests are finished, accepted
 // stream requests are in the ring (or dropped).
-SND_TEST(IoAdvStress, ShutdownRacingWithPostAndSubmitStrandsNothing) {
+// DEFECT (fails intermittently, ~1-3 % of iterations per run): Post / Submit
+// read `accepting` (io_scheduler.cpp 926 / 971) and push to the queue later
+// (945 / 987). If Shutdown stores accepting = 0 and the IO thread runs
+// FinalDrain in between, the request is accepted (returns true) but stays in
+// the queue until Destroy: Outstanding() never returns to 0, Reclaim() stays
+// false, and an accepted FileRequest stays Queued (a loader waiting for
+// Finished() between Shutdown and Destroy hangs).
+SND_TEST(IoDefect, ShutdownRacingWithPostAndSubmitStrandsNothing) {
   std::uint32_t strandedFiles = 0, strandedStreams = 0, acceptedAfter = 0;
-  for (int iter = 0; iter < 150; ++iter) {
+  for (int iter = 0; iter < 400; ++iter) {
     snd::base::AccountingAllocator alloc(snd::base::DefaultAllocator());
     ScriptFs fs;
     fs.AddFile("s.bin", MakePattern(1, 64u * kC));
