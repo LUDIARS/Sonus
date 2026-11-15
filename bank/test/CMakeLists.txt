@@ -64,3 +64,9 @@ set_tests_properties(bank_build_readback_test PROPERTIES TIMEOUT 600)
 snd_add_test(bank_validate_edge_test
   SOURCES validate_edge_test.cpp fixture_bank.cpp
   LINK sonus_bank sonus_mocks)
+
+# Re-check of the manager fixes: cancel x failure kinds, random op sequences,
+# duplicate-bank check, language guess vs header.
+snd_add_test(bank_manager_fix_test
+  SOURCES manager_fix_test.cpp fixture_bank.cpp
+  LINK sonus_bank sonus_mocks)
