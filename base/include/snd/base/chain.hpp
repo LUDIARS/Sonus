@@ -35,6 +35,8 @@ class ChainPool {
 
   bool Init(IAllocator& a, std::uint32_t blocks, MemTag tag = MemTag::Tables) noexcept {
     Destroy();
+    std::size_t entries = 0;
+    if (!CheckedMul(blocks, B, &entries)) return false;  // AllocateArray checks entries * sizeof(T)
     if (!free_.Init(a, blocks, tag)) return false;
     items_ = AllocateArray<T>(a, static_cast<std::size_t>(blocks) * B, tag);
     next_ = AllocateArray<std::uint32_t>(a, blocks, tag);

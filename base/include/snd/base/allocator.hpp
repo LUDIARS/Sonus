@@ -56,9 +56,12 @@ struct MemTagUsage {
 // account without the caller passing the size. Thread-safe (atomics only);
 // not RT-safe because the upstream allocator is not.
 //
-// Budget semantics: a request that would push `used` above a non-zero budget
-// returns nullptr and counts a failure (callers implement 1.2 principle 2 by
-// virtualising / rejecting, not by retrying).
+// Budget semantics: a request that would push the bytes of live allocations
+// plus concurrently in-flight requests above a non-zero budget returns nullptr
+// and counts a failure (callers implement 1.2 principle 2 by virtualising /
+// rejecting, not by retrying). The budget is reserved with a CAS only when the
+// request fits, so a refused (oversized) request never causes another request
+// to be refused. `used` / `peak` count successful allocations only.
 class AccountingAllocator final : public IAllocator {
  public:
   explicit AccountingAllocator(IAllocator& upstream) noexcept : upstream_(upstream) {}
@@ -79,6 +82,7 @@ class AccountingAllocator final : public IAllocator {
 
  private:
   struct Counters {
+    std::atomic<std::uint64_t> reserved{0};  // used + in-flight requests (budget check)
     std::atomic<std::uint64_t> used{0};
     std::atomic<std::uint64_t> peak{0};
     std::atomic<std::uint64_t> budget{0};

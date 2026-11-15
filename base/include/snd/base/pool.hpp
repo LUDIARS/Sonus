@@ -135,7 +135,11 @@ class ConcurrentIndexFreeList {
       }
     }
   }
-  // Approximate under concurrency.
+  // Statistics only. The counter is updated after the head CAS, so while other
+  // threads Pop/Push it may momentarily differ from the real list length (it
+  // can briefly read one lower or higher per thread in flight, and an unsigned
+  // underflow shows as a huge value for an instant). It is exact when no
+  // thread is using the list. Never use it to decide whether Pop() succeeds.
   std::uint32_t Available() const noexcept { return available_.value.load(std::memory_order_relaxed); }
   std::uint32_t Capacity() const noexcept { return capacity_; }
 
@@ -164,9 +168,11 @@ class BasicBlockPool {
     Destroy();
     if (blockBytes == 0u || blockCount == 0u || !IsPowerOfTwo(align)) return false;
     if (align < kMinAlignment) align = kMinAlignment;
-    stride_ = AlignUp(blockBytes, align);
+    std::size_t stride = 0, total = 0;
+    if (!CheckedAlignUp(blockBytes, align, &stride) || !CheckedMul(stride, blockCount, &total)) return false;
+    stride_ = stride;
     if (!free_.Init(a, blockCount, tag)) return false;
-    memory_ = static_cast<std::uint8_t*>(a.Allocate(stride_ * blockCount, align, tag));
+    memory_ = static_cast<std::uint8_t*>(a.Allocate(total, align, tag));
     if (memory_ == nullptr) {
       free_.Destroy();
       return false;

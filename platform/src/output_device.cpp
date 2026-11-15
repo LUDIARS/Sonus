@@ -3,11 +3,18 @@
 #include <cstring>
 #include <new>
 
+#include "snd/base/atomic.hpp"
 #include "snd/platform/clock.hpp"
 #include "snd/platform/cpu.hpp"
 #include "snd/types.h"
 
 namespace snd::platform {
+
+namespace {
+// The device whose callback the calling thread is running (Stop/Close guard).
+thread_local const TimerOutputDevice* tInCallback = nullptr;
+}  // namespace
+
 
 TimerOutputDevice::TimerOutputDevice(IAllocator& allocator, const TimerDeviceConfig& config) noexcept
     : allocator_(allocator), config_(config) {}
@@ -20,7 +27,8 @@ bool TimerOutputDevice::Open(const DeviceDesc& desc, DeviceCallback cb, void* us
   const std::uint32_t ch = desc.channels != 0u ? desc.channels : config_.channels;
   const std::uint32_t period = desc.period_frames != 0u ? desc.period_frames : config_.periodFrames;
   if (rate == 0u || ch == 0u || ch > SND_MAX_CHANNELS || period == 0u) return false;
-  const std::size_t bytes = sizeof(float) * static_cast<std::size_t>(period) * ch;
+  std::size_t samples = 0, bytes = 0;
+  if (!base::CheckedMul(period, ch, &samples) || !base::CheckedMul(samples, sizeof(float), &bytes)) return false;
   buffer_ = static_cast<float*>(allocator_.Allocate(bytes, 64, MemTag::Misc));
   if (buffer_ == nullptr) return false;
   std::memset(buffer_, 0, bytes);
@@ -49,6 +57,10 @@ bool TimerOutputDevice::Start() {
 }
 
 void TimerOutputDevice::Stop() {
+  if (tInCallback == this) {  // forbidden from the callback: joining ourselves would deadlock
+    misuseFromCallback_.fetch_add(1, std::memory_order_relaxed);
+    return;
+  }
   if (!started_) return;
   running_.store(false, std::memory_order_release);
   thread_.Join();  // returns after the last callback finished
@@ -56,6 +68,10 @@ void TimerOutputDevice::Stop() {
 }
 
 void TimerOutputDevice::Close() {
+  if (tInCallback == this) {  // forbidden from the callback (would free the buffer in use)
+    misuseFromCallback_.fetch_add(1, std::memory_order_relaxed);
+    return;
+  }
   Stop();
   if (buffer_ != nullptr) allocator_.Free(buffer_, MemTag::Misc);
   buffer_ = nullptr;
@@ -81,29 +97,42 @@ void TimerOutputDevice::ThreadMain(void* self) noexcept { static_cast<TimerOutpu
 
 void TimerOutputDevice::Run() noexcept {
   ScopedFlushDenormals ftz;  // 2.4: device thread too
-  const std::uint64_t periodNs =
-      static_cast<std::uint64_t>(periodFrames_) * 1000000000ull / static_cast<std::uint64_t>(sampleRate_);
-  // Exact deadlines: period k is due at start + k * period (frames-based, no drift).
-  const std::uint64_t start = MonotonicNanoseconds();
-  std::uint64_t k = 0;
+  tInCallback = this;
+  // Deadlines advance by exactly one period per callback, kept as an integer
+  // part in ns plus a remainder in units of 1/sampleRate ns, so there is no
+  // drift and no product that grows with the running time:
+  //   periodNs = periodFrames * 1e9 / sampleRate = whole + frac / sampleRate
+  // periodFrames * 1e9 < 2^32 * 1e9 < 2^62 fits in 64 bits for any input,
+  // frac < sampleRate < 2^32, and `due` is an absolute monotonic time in ns
+  // (2^64 ns = 584 years), so nothing overflows however long the device runs.
+  const std::uint64_t rate = sampleRate_;
+  const std::uint64_t num = static_cast<std::uint64_t>(periodFrames_) * 1000000000ull;
+  const std::uint64_t whole = num / rate;
+  const std::uint64_t frac = num % rate;
+  std::uint64_t due = MonotonicNanoseconds();
+  std::uint64_t carry = 0;  // < rate
   while (running_.load(std::memory_order_acquire)) {
     callback_(callbackUser_, buffer_, periodFrames_, channels_);
     callbacks_.fetch_add(1, std::memory_order_relaxed);
     frames_.fetch_add(periodFrames_, std::memory_order_relaxed);
-    ++k;
-    std::uint64_t due = start + (k * static_cast<std::uint64_t>(periodFrames_) * 1000000000ull) /
-                                    static_cast<std::uint64_t>(sampleRate_);
+    due += whole;
+    carry += frac;  // < 2 * rate <= 2^33
+    if (carry >= rate) {
+      carry -= rate;
+      ++due;
+    }
     const std::uint64_t now = MonotonicNanoseconds();
-    if (now > due + periodNs) {
+    if (now > due && now - due > whole + 1u) {
       // More than a period late (preempted / debugger): resynchronise instead
-      // of firing a burst of catch-up callbacks.
+      // of firing a burst of catch-up callbacks; the next period starts now.
       late_.fetch_add(1, std::memory_order_relaxed);
-      k = (now - start) * static_cast<std::uint64_t>(sampleRate_) /
-          (static_cast<std::uint64_t>(periodFrames_) * 1000000000ull);
+      due = now;
+      carry = 0;
       continue;
     }
     if (due > now) SleepUntil(due);
   }
+  tInCallback = nullptr;
 }
 
 IOutputDevice* CreateOutputDevice(OutputBackend backend, IAllocator& allocator) noexcept {

@@ -56,12 +56,24 @@ class LinearArena {
     capacity_ = used_ = highWater_ = 0;
   }
 
-  // Bump allocation, `align` a power of two. nullptr when exhausted (counted).
+  // Bump allocation. nullptr (counted in Overflows()) when exhausted, when
+  // `align` is not a power of two, or when the aligned address would not fit.
   void* Allocate(std::size_t bytes, std::size_t align = kBufferAlignment) noexcept {
+    if (base_ == nullptr || !IsPowerOfTwo(align)) {
+      ++overflows_;
+      return nullptr;
+    }
     const std::uintptr_t b = reinterpret_cast<std::uintptr_t>(base_);
-    const std::uintptr_t at = (b + used_ + (align - 1u)) & ~static_cast<std::uintptr_t>(align - 1u);
-    const std::size_t start = static_cast<std::size_t>(at - b);
-    if (base_ == nullptr || start > capacity_ || bytes > capacity_ - start) {
+    const std::uintptr_t cur = b + used_;  // used_ <= capacity_: inside the block
+    const std::uintptr_t mask = static_cast<std::uintptr_t>(align - 1u);
+    const std::uintptr_t at = (cur + mask) & ~mask;
+    if (at < cur) {  // address space wrap (absurd alignment)
+      ++overflows_;
+      return nullptr;
+    }
+    const std::uintptr_t startU = at - b;
+    const std::size_t start = static_cast<std::size_t>(startU);
+    if (startU > capacity_ || bytes > capacity_ - start) {
       ++overflows_;
       return nullptr;
     }
@@ -122,14 +134,16 @@ class ThreadArenaSet {
   ThreadArenaSet& operator=(const ThreadArenaSet&) = delete;
 
   // Non-RT. `bytesPerThread` is rounded up to 64. Tag: MemTag::ThreadArena.
+  // false if the total size does not fit in size_t, or on allocation failure.
   bool Init(IAllocator& a, std::uint32_t threads, std::size_t bytesPerThread,
             MemTag tag = MemTag::ThreadArena) noexcept {
     Destroy();
     if (threads == 0u || bytesPerThread == 0u) return false;
-    const std::size_t per = AlignUp(bytesPerThread, kBufferAlignment);
+    std::size_t per = 0, total = 0;
+    if (!CheckedAlignUp(bytesPerThread, kBufferAlignment, &per) || !CheckedMul(per, threads, &total)) return false;
     arenas_ = AllocateArray<LinearArena>(a, threads, tag);
     if (arenas_ == nullptr) return false;
-    memory_ = static_cast<std::uint8_t*>(a.Allocate(per * threads, kBufferAlignment, tag));
+    memory_ = static_cast<std::uint8_t*>(a.Allocate(total, kBufferAlignment, tag));
     if (memory_ == nullptr) {
       FreeArray(a, arenas_, threads, tag);
       arenas_ = nullptr;

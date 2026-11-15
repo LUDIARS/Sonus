@@ -64,29 +64,39 @@ void* AccountingAllocator::Allocate(std::size_t bytes, std::size_t align, MemTag
     return nullptr;
   }
   if (align < kMinAlignment) align = kMinAlignment;
-  // Reserve the bytes against the budget first (lock-free; undone on failure).
-  const std::uint64_t budget = c.budget.load(std::memory_order_relaxed);
-  const std::uint64_t after = c.used.fetch_add(bytes, std::memory_order_relaxed) + bytes;
-  if (budget != 0u && after > budget) {
-    c.used.fetch_sub(bytes, std::memory_order_relaxed);
+  const std::size_t offset = align;  // >= 16, keeps the payload aligned
+  if (bytes > (~static_cast<std::size_t>(0)) - offset) {
     c.failures.fetch_add(1, std::memory_order_relaxed);
     return nullptr;
   }
-  const std::size_t offset = align;  // >= 16, keeps the payload aligned
-  if (bytes > (~static_cast<std::size_t>(0)) - offset) {
-    c.used.fetch_sub(bytes, std::memory_order_relaxed);
-    c.failures.fetch_add(1, std::memory_order_relaxed);
-    return nullptr;
+  // Two counters: `reserved` enforces the budget and includes requests still
+  // waiting for the upstream allocator; `used` (and therefore `peak`) only
+  // counts successful allocations. The reservation is a CAS that is made only
+  // if the request fits, so an oversized request never occupies budget, and a
+  // request that fails upstream never shows up in `used` / `peak`.
+  const std::uint64_t budget = c.budget.load(std::memory_order_relaxed);
+  if (budget != 0u) {
+    std::uint64_t cur = c.reserved.load(std::memory_order_relaxed);
+    for (;;) {
+      if (bytes > budget || cur > budget - bytes) {
+        c.failures.fetch_add(1, std::memory_order_relaxed);
+        return nullptr;
+      }
+      if (c.reserved.compare_exchange_weak(cur, cur + bytes, std::memory_order_relaxed)) break;
+    }
+  } else {
+    c.reserved.fetch_add(bytes, std::memory_order_relaxed);
   }
   auto* block = static_cast<std::uint8_t*>(upstream_.Allocate(bytes + offset, align, tag));
   if (block == nullptr) {
-    c.used.fetch_sub(bytes, std::memory_order_relaxed);
+    c.reserved.fetch_sub(bytes, std::memory_order_relaxed);
     c.failures.fetch_add(1, std::memory_order_relaxed);
     return nullptr;
   }
   std::uint8_t* payload = block + offset;
   BlockHeader h{bytes, static_cast<std::uint32_t>(offset), kHeaderMagic};
   std::memcpy(payload - sizeof(BlockHeader), &h, sizeof(h));
+  const std::uint64_t after = c.used.fetch_add(bytes, std::memory_order_relaxed) + bytes;
   AtomicFetchMax(c.peak, after);
   c.allocations.fetch_add(1, std::memory_order_relaxed);
   return payload;
@@ -102,6 +112,7 @@ void AccountingAllocator::Free(void* p, MemTag tag) {
   c.used.fetch_sub(h.bytes, std::memory_order_relaxed);
   c.allocations.fetch_sub(1, std::memory_order_relaxed);
   upstream_.Free(payload - h.offset, tag);
+  c.reserved.fetch_sub(h.bytes, std::memory_order_relaxed);  // budget freed after the memory is
 }
 
 void AccountingAllocator::SetBudget(MemTag tag, std::uint64_t bytes) noexcept {

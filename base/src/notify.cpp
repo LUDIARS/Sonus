@@ -73,6 +73,7 @@ bool InitTripleBuffer(SnapshotTripleBuffer& tb, IAllocator& a, std::uint32_t max
                 std::is_trivially_destructible_v<TransportSnapshot> && std::is_trivially_destructible_v<BusSnapshot>);
   for (SnapshotFrame& f : tb.frames) {
     f.seq.store(0, std::memory_order_relaxed);
+    f.reserved = 0;  // front sequence (notify.hpp SwapFront)
     f.block = 0;
     f.clock = 0;
     f.stats = snd_stats{};
