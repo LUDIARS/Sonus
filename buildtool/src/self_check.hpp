@@ -1,7 +1,6 @@
 // Self-check of written banks (principle: a bank the build accepts always
-// passes the runtime's ParseBank). The rules are a generated copy of
-// bank/src/validate.cpp (buildtool must not depend on bank, CONTRACTS.md D-02);
-// regenerate self_check.cpp with tools: see the header comment there.
+// passes the runtime's ParseBank). The rules are the contract's shared header
+// snd/format/bank_check.hpp, the same code ParseBank runs (contract 1.1, A1-13).
 #ifndef SND_BUILDTOOL_SRC_SELF_CHECK_HPP
 #define SND_BUILDTOOL_SRC_SELF_CHECK_HPP
 

@@ -5,4 +5,5 @@ snd_add_module(base
     src/base_module.cpp
     src/allocator.cpp
     src/log.cpp
-    src/notify.cpp)
+    src/notify.cpp
+    src/crc32c.cpp)

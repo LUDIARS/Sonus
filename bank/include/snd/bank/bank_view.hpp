@@ -26,6 +26,7 @@
 #include <cstdint>
 #include <cstring>
 
+#include "snd/format/bank_check.hpp"
 #include "snd/format/bank_format.hpp"
 #include "snd/id.hpp"
 #include "snd/internal/common.hpp"
@@ -37,43 +38,17 @@ namespace bf = ::snd::bank_format;
 // ---------------------------------------------------------------------------
 // Compile-time tables derived from the frozen format definition
 // ---------------------------------------------------------------------------
-inline constexpr std::uint32_t kKnownChunkCount =
-    static_cast<std::uint32_t>(sizeof(bf::kChunks) / sizeof(bf::kChunks[0]));
+// The tables and the parsed-chunk types are the contract's shared checker's
+// (snd/format/bank_check.hpp, contract 1.1 A1-13), so ParseBank and the build
+// tool's self-check share one definition.
+using bf::check::FindColumnInfo;
+using bf::check::KnownChunkIndex;
+using bf::check::KnownColumnCount;
+using bf::check::kKnownChunkCount;
+using bf::check::kMaxTableColumns;
+using bf::check::MaxKnownColumnsPerTable;
 inline constexpr std::uint32_t kKnownColumnCount =
     static_cast<std::uint32_t>(sizeof(bf::kColumns) / sizeof(bf::kColumns[0]));
-
-// Index of a known chunk in bf::kChunks, or -1.
-constexpr int KnownChunkIndex(std::uint32_t fourcc) noexcept {
-  for (std::uint32_t i = 0; i < kKnownChunkCount; ++i) {
-    if (bf::kChunks[i].fourcc == fourcc) return static_cast<int>(i);
-  }
-  return -1;
-}
-
-// Number of columns the format defines for a table chunk.
-constexpr std::uint32_t KnownColumnCount(std::uint32_t fourcc) noexcept {
-  std::uint32_t n = 0;
-  for (const bf::ColumnInfo& c : bf::kColumns) n += c.chunk == fourcc ? 1u : 0u;
-  return n;
-}
-
-constexpr std::uint32_t MaxKnownColumnsPerTable() noexcept {
-  std::uint32_t m = 0;
-  for (const bf::ChunkInfo& ch : bf::kChunks) {
-    const std::uint32_t n = KnownColumnCount(ch.fourcc);
-    if (n > m) m = n;
-  }
-  return m;
-}
-inline constexpr std::uint32_t kMaxTableColumns = MaxKnownColumnsPerTable();
-
-// Column description, or nullptr for an unknown (chunk, column id).
-constexpr const bf::ColumnInfo* FindColumnInfo(std::uint32_t chunk, std::uint32_t columnId) noexcept {
-  for (const bf::ColumnInfo& c : bf::kColumns) {
-    if (c.chunk == chunk && c.columnId == columnId) return &c;
-  }
-  return nullptr;
-}
 
 template <bf::ColumnType T>
 struct ColumnCType;
@@ -143,19 +118,10 @@ class ColumnView {
 // A table chunk as parsed: row count and one pointer per known column
 // (nullptr = column absent, read the default). In the dev override layer
 // (prepared.hpp) every known column is materialised and `capacity` may exceed
-// `rows` by the devReserve rows.
-struct TableView {
-  std::uint32_t rows = 0;
-  std::uint32_t capacity = 0;
-  void* columns[kMaxTableColumns] = {};
-};
-
-struct ChunkRef {
-  const std::uint8_t* data = nullptr;  // nullptr = chunk absent (or ignored: unknown version)
-  std::uint64_t bytes = 0;
-  std::uint16_t version = 0;
-  std::uint16_t flags = 0;
-};
+// `rows` by the devReserve rows. ChunkRef: data == nullptr = chunk absent (or
+// ignored: unknown version).
+using TableView = bf::check::TableView;
+using ChunkRef = bf::check::ChunkRef;
 
 // PHYS (bank-format.md §6.2). Pointers into the chunk, all range checked.
 struct PhysTableView {

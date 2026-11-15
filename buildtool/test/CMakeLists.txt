@@ -12,13 +12,6 @@ snd_add_test(buildtool_self_check_test
 target_include_directories(buildtool_self_check_test PRIVATE
   ${PROJECT_SOURCE_DIR}/bank/test ${PROJECT_SOURCE_DIR}/buildtool/src)
 
-# self_check.cpp is generated from bank/src/validate.cpp: fail when stale.
-find_package(Python3 COMPONENTS Interpreter QUIET)
-if(Python3_Interpreter_FOUND)
-  add_test(NAME buildtool_self_check_in_sync
-    COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/buildtool/tools/gen_self_check.py ${PROJECT_SOURCE_DIR} --check)
-endif()
-
 # --- Independent tests (test owner, not the implementer) -----------------------------
 # JSON (RFC 8259) and WAV readers: boundaries, error positions, fixed-seed fuzz.
 # Tests named Defect_* fail on purpose (see the file).

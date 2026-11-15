@@ -4,7 +4,7 @@
 #include <cstring>
 #include <filesystem>
 #include "detail/file_io.hpp"
-#include "detail/fnv.hpp"
+#include "snd/base/hash.hpp"
 
 namespace snd::buildtool::detail {
 namespace {
@@ -99,7 +99,7 @@ std::vector<float> ConvertChannels(const std::vector<float>& in, std::uint32_t f
 }
 
 std::uint64_t CacheKey(const std::vector<std::uint8_t>& wav, const ConvertSettings& s, std::uint32_t encoderVersion) {
-  Fnv64 h;
+  base::Fnv1a64 h;
   h.U64(kCacheVersion).U64(s.codec).U64(encoderVersion).U64(s.sampleRate).U64(s.channels).U64(s.seekIntervalMs);
   h.U64(s.loop ? 1 : 0).U64(s.loopStart).U64(s.loopEnd);
   h.U64(wav.size()).Bytes(wav.data(), wav.size());
@@ -114,7 +114,7 @@ bool LoadCached(const std::string& dir, std::uint64_t key, Converted* out) {
   std::uint64_t stored = 0;
   for (int i = 0; i < 8; ++i) stored |= static_cast<std::uint64_t>(b[b.size() - 8 + static_cast<std::size_t>(i)]) << (8 * i);
   b.resize(b.size() - 8);
-  if (Fnv64().Bytes(b.data(), b.size()).value() != stored) return false;  // corrupt: re-encode
+  if (base::Fnv1a64().Bytes(b.data(), b.size()).value() != stored) return false;  // corrupt: re-encode
   Reader r{b};
   if (r.Get() != kCacheMagic || r.Get() != kCacheVersion || r.Get() != key) return false;
   Converted c;
@@ -163,7 +163,7 @@ void StoreCached(const std::string& dir, std::uint64_t key, const Converted& c) 
     Put(b, p.frame);
     Put(b, p.byteOffset);
   }
-  Put(b, Fnv64().Bytes(b.data(), b.size()).value());
+  Put(b, base::Fnv1a64().Bytes(b.data(), b.size()).value());
   const std::string path = CachePath(dir, key);
   const std::string tmp = path + ".tmp";
   if (!WriteFileBytes(tmp, b)) {

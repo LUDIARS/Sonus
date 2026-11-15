@@ -86,6 +86,11 @@ constexpr std::uint64_t NextPowerOfTwo(std::uint64_t v) noexcept {
 constexpr std::size_t AlignUp(std::size_t v, std::size_t align) noexcept {
   return (v + (align - 1u)) & ~(align - 1u);
 }
+// 64-bit sizes and file offsets (bank images, codec data), also on 32-bit
+// targets. `align` must be a power of two.
+constexpr std::uint64_t AlignUp64(std::uint64_t v, std::uint64_t align) noexcept {
+  return (v + (align - 1u)) & ~(align - 1u);
+}
 // Overflow-checked size arithmetic for Init paths: false (and *out untouched)
 // when the result does not fit in size_t.
 constexpr bool CheckedMul(std::size_t a, std::size_t b, std::size_t* out) noexcept {

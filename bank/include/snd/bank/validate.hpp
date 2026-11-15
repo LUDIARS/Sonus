@@ -46,13 +46,9 @@ struct ParseOptions {
   std::uint32_t platform = RuntimePlatform();  // banks must be ANY_ or this
 };
 
-struct ParseError {
-  snd_result code = SND_OK;
-  std::uint32_t chunk = 0;           // fourcc of the offending chunk, 0 = header
-  std::uint32_t column = 0xFFFFFFFFu;  // column id, or 0xFFFFFFFF
-  std::uint32_t row = 0xFFFFFFFFu;     // row, or 0xFFFFFFFF
-  char message[192] = {};            // reason, NUL-terminated
-};
+// code, chunk (fourcc, 0 = header), column / row (0xFFFFFFFF = none) and a
+// NUL-terminated reason (the contract checker's error, bank_check.hpp).
+using ParseError = bf::check::CheckError;
 
 // `data` must be 64-byte aligned (SND_ERR_INVALID_ARGUMENT otherwise) and stay
 // valid while `out` is used. On failure `out` is reset to an empty view.

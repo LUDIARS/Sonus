@@ -1,7 +1,7 @@
 # codec モジュール
 
 設計書 6.4（コーデック）、3.3（デコーダプール）、12.1、契約 D-14・D-23・D-31。依存は `base` だけ（ルート `CMakeLists.txt`）。
-段階1 では base がスタブなので、標準ライブラリと契約ヘッダだけで書いている（末尾「codec 内に持った汎用部品」）。
+汎用部品は base のものを使う（末尾「汎用部品」）。
 
 ## 公開ヘッダ
 
@@ -172,13 +172,10 @@ ASST の列との対応: `codec, channels, sampleRate, totalFrames, preSkip, pre
   buildtool は ADPCM のブロックを 1 チャンネルあたり 1024 バイト以下にすること（超えると `DECODER_POOL_FULL` で再生拒否になる）。
 - Opus は上の見積もりのとおり 32 KiB に収まらない見込み。組み込むときに再測定する。
 
-## codec 内に持った汎用部品（base へ移す候補）
+## 汎用部品（統合で base へ移した、A1-12）
 
-| 部品 | 場所 | 内容 |
-| --- | --- | --- |
-| `detail::AlignUp` | `src/detail.hpp` | 2 の冪への切り上げ |
-| `detail::LoadLE16/32`, `StoreLE16/32` | `src/detail.hpp` | エンディアン非依存のリトルエンディアン読み書き |
-| タグ付き Treiber スタック | `src/decoder_pool.cpp`（`DecoderPool::Acquire/Release` 内） | 添字の MPMC ロックフリー空きリスト（`atomic<u64>` の頭＋`atomic<u32>` のリンク）。base の固定ブロックプールが同じ性質（任意スレッド・ロックフリー）を持てば置き換える |
+整列（`base::AlignUp64`）とリトルエンディアンの読み書き（`base::LoadLE16/32`、`StoreLE16/32`、`snd/base/endian.hpp`）は base のものを使う。
+デコーダプールの空きリスト（タグ付き Treiber スタック、`src/decoder_pool.cpp`）は世代つきの語と一体なので codec に残した。
 
 ## テスト
 

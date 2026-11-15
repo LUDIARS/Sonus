@@ -7,5 +7,4 @@ snd_add_module(bank
     src/validate.cpp
     src/prepared.cpp
     src/bank_manager.cpp
-    src/bank_io.cpp
-    src/detail/crc32c.cpp)
+    src/bank_io.cpp)

@@ -8,6 +8,8 @@
 #include "snd/base/atomic.hpp"
 #include "snd/base/base_module.hpp"
 #include "snd/base/chain.hpp"
+#include "snd/base/crc32c.hpp"
+#include "snd/base/endian.hpp"
 #include "snd/base/handle.hpp"
 #include "snd/base/hash.hpp"
 #include "snd/base/log.hpp"

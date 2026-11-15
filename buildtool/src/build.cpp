@@ -14,7 +14,8 @@
 
 #include "convert.hpp"
 #include "detail/file_io.hpp"
-#include "detail/fnv.hpp"
+#include "snd/base/atomic.hpp"
+#include "snd/base/hash.hpp"
 #include "project.hpp"
 #include "self_check.hpp"
 #include "snd/buildtool/bank_writer.hpp"
@@ -73,7 +74,7 @@ std::uint32_t DefaultCompose(std::uint32_t target) {
   }
 }
 
-std::uint64_t Align64(std::uint64_t v) { return (v + 63) & ~std::uint64_t{63}; }
+std::uint64_t Align64(std::uint64_t v) { return base::AlignUp64(v, 64); }  // base (A1-12)
 
 bool ReadBinary(const fs::path& p, std::vector<std::uint8_t>* out) { return detail::ReadFileBytes(p, out); }
 
@@ -241,7 +242,7 @@ bool Builder::Run() {
   }
   if (d_.errors() > 0) return false;
   // Project build hash over every bank's content (live link handshake, 11.2).
-  detail::Fnv64 h;
+  base::Fnv1a64 h;
   for (const BankBuild& b : banks_) h.Str(b.file).U64(b.contentHash);
   res_->projectBuildHash = h.value();
   for (BankBuild& b : banks_) {

@@ -14,6 +14,7 @@ snd_add_header_checks(base_header_check
     snd/base/base_module.hpp snd/base/chain.hpp snd/base/handle.hpp snd/base/hash.hpp
     snd/base/log.hpp snd/base/mpmc.hpp snd/base/mutex.hpp snd/base/notify.hpp
     snd/base/pool.hpp snd/base/sparse_set.hpp snd/base/spsc.hpp
+    snd/base/crc32c.hpp snd/base/endian.hpp
   LINK sonus_base)
 
 # --- Independent (adversarial) tests: expected to pass --------------------------------
@@ -27,3 +28,6 @@ foreach(_defect HANDLE SNAPSHOT ALLOC SIZE LOG)
   snd_add_test(base_defect_${_lower}_test SOURCES defect_base_test.cpp LINK sonus_base sonus_mocks)
   target_compile_definitions(base_defect_${_lower}_test PRIVATE SND_DEFECT_${_defect}=1)
 endforeach()
+
+# Generic parts moved into base from the modules (stage 1.5, A1-12).
+snd_add_test(base_common_parts_test SOURCES common_parts_test.cpp LINK sonus_base)

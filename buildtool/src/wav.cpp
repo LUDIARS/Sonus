@@ -3,16 +3,13 @@
 #include <cmath>
 #include <cstring>
 
+#include "snd/base/endian.hpp"
+
 namespace snd::buildtool {
 namespace {
 
-std::uint32_t U32(const std::uint8_t* p) {
-  return static_cast<std::uint32_t>(p[0]) | (static_cast<std::uint32_t>(p[1]) << 8) |
-         (static_cast<std::uint32_t>(p[2]) << 16) | (static_cast<std::uint32_t>(p[3]) << 24);
-}
-std::uint16_t U16(const std::uint8_t* p) {
-  return static_cast<std::uint16_t>(p[0] | (p[1] << 8));
-}
+using base::LoadLE16;  // little-endian access lives in base (A1-12)
+using base::LoadLE32;
 void Put32(std::vector<std::uint8_t>& v, std::uint32_t x) {
   for (int i = 0; i < 4; ++i) v.push_back(static_cast<std::uint8_t>(x >> (8 * i)));
 }
@@ -40,14 +37,14 @@ bool ReadWav(const std::vector<std::uint8_t>& b, PcmData* out, std::string* erro
   // Sizes that point past the end of the file are errors (a truncated file
   // would otherwise silently give a shorter sound). Only the pad byte of an
   // odd-sized last chunk may be missing.
-  if (static_cast<std::uint64_t>(U32(b.data() + 4)) + 8 > b.size() + 1) {
-    *error = "RIFF size " + std::to_string(U32(b.data() + 4)) + " is larger than the file (truncated?)";
+  if (static_cast<std::uint64_t>(LoadLE32(b.data() + 4)) + 8 > b.size() + 1) {
+    *error = "RIFF size " + std::to_string(LoadLE32(b.data() + 4)) + " is larger than the file (truncated?)";
     return false;
   }
   std::size_t pos = 12;
   while (pos + 8 <= b.size()) {
     const std::uint8_t* h = b.data() + pos;
-    const std::uint64_t size = U32(h + 4);
+    const std::uint64_t size = LoadLE32(h + 4);
     const std::size_t body = pos + 8;
     const std::uint64_t avail = b.size() - body;
     if (size > avail) {
@@ -61,29 +58,29 @@ bool ReadWav(const std::vector<std::uint8_t>& b, PcmData* out, std::string* erro
         *error = "fmt chunk too small";
         return false;
       }
-      format = U16(b.data() + body);
-      channels = U16(b.data() + body + 2);
-      rate = U32(b.data() + body + 4);
-      blockAlign = U16(b.data() + body + 12);
-      bits = U16(b.data() + body + 14);
+      format = LoadLE16(b.data() + body);
+      channels = LoadLE16(b.data() + body + 2);
+      rate = LoadLE32(b.data() + body + 4);
+      blockAlign = LoadLE16(b.data() + body + 12);
+      bits = LoadLE16(b.data() + body + 14);
       if (format == 0xFFFE) {
         if (n < 40) {
           *error = "WAVE_FORMAT_EXTENSIBLE fmt chunk too small";
           return false;
         }
-        format = U16(b.data() + body + 24);  // first two bytes of the sub-format GUID
+        format = LoadLE16(b.data() + body + 24);  // first two bytes of the sub-format GUID
       }
       haveFmt = true;
     } else if (std::memcmp(h, "data", 4) == 0) {
       data = b.data() + body;
       dataBytes = n;
     } else if (std::memcmp(h, "smpl", 4) == 0 && n >= 36 + 24) {
-      const std::uint32_t loops = U32(b.data() + body + 28);
+      const std::uint32_t loops = LoadLE32(b.data() + body + 28);
       if (loops > 0) {
         const std::uint8_t* l = b.data() + body + 36;
         out->hasLoop = true;
-        out->loopStart = U32(l + 8);
-        out->loopEnd = static_cast<std::uint64_t>(U32(l + 12)) + 1;  // smpl end is inclusive
+        out->loopStart = LoadLE32(l + 8);
+        out->loopEnd = static_cast<std::uint64_t>(LoadLE32(l + 12)) + 1;  // smpl end is inclusive
       }
     }
     pos = body + static_cast<std::size_t>(n) + (n & 1u);
@@ -129,14 +126,14 @@ bool ReadWav(const std::vector<std::uint8_t>& b, PcmData* out, std::string* erro
       std::memcpy(&d, p, 8);
       v = static_cast<float>(d);
     } else if (bits == 16) {
-      v = static_cast<float>(static_cast<std::int16_t>(U16(p))) / 32768.0f;
+      v = static_cast<float>(static_cast<std::int16_t>(LoadLE16(p))) / 32768.0f;
     } else if (bits == 24) {
       std::int32_t s = static_cast<std::int32_t>(static_cast<std::uint32_t>(p[0]) << 8 |
                                                  static_cast<std::uint32_t>(p[1]) << 16 |
                                                  static_cast<std::uint32_t>(p[2]) << 24);
       v = static_cast<float>(s >> 8) / 8388608.0f;
     } else {
-      v = static_cast<float>(static_cast<double>(static_cast<std::int32_t>(U32(p))) / 2147483648.0);
+      v = static_cast<float>(static_cast<double>(static_cast<std::int32_t>(LoadLE32(p))) / 2147483648.0);
     }
     out->samples[static_cast<std::size_t>(i)] = v;
   }

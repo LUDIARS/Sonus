@@ -99,7 +99,7 @@ void EncodeAdpcm(const CodecHeader& h, const float* const* src, std::uint64_t fr
         }
       }
       std::uint8_t* head = block + 4u * c;
-      detail::StoreLE16(head, static_cast<std::uint16_t>(static_cast<std::int16_t>(in.At(0))));
+      base::StoreLE16(head, static_cast<std::uint16_t>(static_cast<std::int16_t>(in.At(0))));
       head[2] = static_cast<std::uint8_t>(bestIndex);
       head[3] = 0;
       EncodeChannel(in, fpb, bestIndex, ch, c, block, &prevIndex[c]);
@@ -175,13 +175,13 @@ EncodeStatus Encode(const CodecHeader& h, const float* const* src, std::uint64_t
   if (h.codec == SND_CODEC_PCM_F32) {
     for (std::uint64_t i = 0; i < frames; ++i) {
       for (std::uint32_t c = 0; c < ch; ++c) {
-        detail::StoreLE32(dst + (i * ch + c) * 4u, std::bit_cast<std::uint32_t>(src[c][i]));
+        base::StoreLE32(dst + (i * ch + c) * 4u, std::bit_cast<std::uint32_t>(src[c][i]));
       }
     }
   } else if (h.codec == SND_CODEC_PCM_S16) {
     for (std::uint64_t i = 0; i < frames; ++i) {
       for (std::uint32_t c = 0; c < ch; ++c) {
-        detail::StoreLE16(dst + (i * ch + c) * 2u,
+        base::StoreLE16(dst + (i * ch + c) * 2u,
                           static_cast<std::uint16_t>(static_cast<std::int16_t>(ToS16(src[c][i]))));
       }
     }

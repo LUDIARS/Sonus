@@ -50,6 +50,41 @@ class IdHasher {
 
 static_assert(IdHasher().Append("foo").Append("bar").Finish() == snd::HashId("foobar"));
 
+// 64-bit FNV-1a (offset 14695981039346656037, prime 1099511628211) for content
+// hashes (buildtool's differential build cache and contentHash; moved from
+// buildtool, A1-12). U64 appends 8 bytes little endian; Str appends the length
+// (U64) and then the bytes, so ("ab","c") and ("a","bc") differ. Not an Id.
+class Fnv1a64 {
+ public:
+  constexpr Fnv1a64& Bytes(const void* p, std::size_t n) noexcept {
+    const auto* b = static_cast<const unsigned char*>(p);
+    for (std::size_t i = 0; i < n; ++i) {
+      h_ ^= b[i];
+      h_ *= 1099511628211ull;
+    }
+    return *this;
+  }
+  constexpr Fnv1a64& U64(std::uint64_t v) noexcept {
+    for (int i = 0; i < 8; ++i) {
+      h_ ^= static_cast<std::uint8_t>(v >> (8 * i));
+      h_ *= 1099511628211ull;
+    }
+    return *this;
+  }
+  constexpr Fnv1a64& Str(std::string_view s) noexcept {
+    U64(s.size());
+    for (char c : s) {
+      h_ ^= static_cast<unsigned char>(c);
+      h_ *= 1099511628211ull;
+    }
+    return *this;
+  }
+  constexpr std::uint64_t value() const noexcept { return h_; }
+
+ private:
+  std::uint64_t h_ = 14695981039346656037ull;
+};
+
 // 32-bit integer mixer (for open-addressing tables keyed by Id or slot).
 constexpr std::uint32_t MixU32(std::uint32_t x) noexcept {
   x ^= x >> 16;

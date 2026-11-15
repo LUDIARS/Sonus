@@ -3,12 +3,11 @@
 #include <cstring>
 #include <new>
 
+#include "snd/base/atomic.hpp"
 #include "view_access.hpp"
 
 namespace snd::bank {
 namespace {
-
-constexpr std::uint64_t AlignUp(std::uint64_t v, std::uint64_t a) noexcept { return (v + a - 1) & ~(a - 1); }
 
 std::uint32_t ExtraRows(std::uint32_t fourcc, const DevReserve& r) noexcept {
   if (fourcc == bf::chunk::BUSS) return r.buses;
@@ -57,10 +56,10 @@ snd_result BuildOverlay(PreparedBank* pb, const DevReserve& reserve, IAllocator&
     include[i] = true;
     capacity[i] = static_cast<std::uint32_t>(cap);
     for (const bf::ColumnInfo& c : bf::kColumns) {
-      if (c.chunk == bf::kChunks[i].fourcc) total += AlignUp(cap * bf::ColumnTypeBytes(c.type), 64);
+      if (c.chunk == bf::kChunks[i].fourcc) total += base::AlignUp64(cap * bf::ColumnTypeBytes(c.type), 64);
     }
   }
-  const std::uint64_t spare = AlignUp(reserve.bytes, 64);
+  const std::uint64_t spare = base::AlignUp64(reserve.bytes, 64);
   const std::uint64_t all = total + spare;
   if (all == 0) return SND_OK;
   if (all > static_cast<std::uint64_t>(SIZE_MAX)) return SND_ERR_OUT_OF_BUDGET;
@@ -81,9 +80,9 @@ snd_result BuildOverlay(PreparedBank* pb, const DevReserve& reserve, IAllocator&
       }
       FillDefault(dst + filled * eb, capacity[i] - filled, c);
       const std::uint64_t used = std::uint64_t{capacity[i]} * eb;
-      std::memset(dst + used, 0, AlignUp(used, 64) - used);
+      std::memset(dst + used, 0, base::AlignUp64(used, 64) - used);
       t.columns[c.columnId] = dst;
-      at += AlignUp(used, 64);
+      at += base::AlignUp64(used, 64);
     }
     t.capacity = capacity[i];
   }

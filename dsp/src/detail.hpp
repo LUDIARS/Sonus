@@ -1,6 +1,6 @@
-// Private helpers of the dsp module. Generic parts that belong in base once it
-// exists (listed in the stage-1 report): Carver (bump layout over caller
-// memory), math helpers, denormal flushing.
+// Private helpers of the dsp module: DSP-specific parts (denormal flushing,
+// dB / time-constant conversions, the Carver that lays out effect states).
+// Generic alignment comes from base (A1-12); Carver is used by dsp only.
 #ifndef SND_DSP_SRC_DETAIL_HPP
 #define SND_DSP_SRC_DETAIL_HPP
 
@@ -8,6 +8,8 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+
+#include "snd/base/atomic.hpp"
 
 namespace snd::dsp::detail {
 
@@ -29,9 +31,7 @@ constexpr T Min(T a, T b) noexcept {
   return a < b ? a : b;
 }
 
-constexpr std::size_t AlignUp(std::size_t n, std::size_t a) noexcept {
-  return (n + (a - 1)) & ~(a - 1);
-}
+using base::AlignUp;  // generic alignment lives in base (A1-12)
 
 inline float Flush(float x) noexcept { return std::fabs(x) < kFlushThreshold ? 0.0f : x; }
 // Per-sample flush for recursive state fed by silence: keeps values far from

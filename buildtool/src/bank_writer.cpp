@@ -5,13 +5,14 @@
 #include <cstdlib>
 #include <cstring>
 
-#include "detail/fnv.hpp"
+#include "snd/base/atomic.hpp"
+#include "snd/base/hash.hpp"
 
 namespace snd::buildtool {
 namespace bf = snd::bank_format;
 namespace {
 
-std::uint64_t Align64(std::uint64_t v) { return (v + 63) & ~std::uint64_t{63}; }
+std::uint64_t Align64(std::uint64_t v) { return base::AlignUp64(v, 64); }  // base (A1-12)
 
 std::vector<std::uint8_t> DefaultBits(const bf::ColumnInfo& c) {
   std::vector<std::uint8_t> b(bf::ColumnTypeBytes(c.type));
@@ -198,7 +199,7 @@ std::vector<std::uint8_t> BankWriter::Layout(const BankHeaderInfo& h, std::uint6
 
 std::uint64_t BankWriter::ContentHash(const BankHeaderInfo& h) const {
   const std::vector<std::uint8_t> f = Layout(h, 0);
-  detail::Fnv64 fnv;
+  base::Fnv1a64 fnv;
   fnv.U64(h.platform).U64(h.flags).U64(h.bankId).U64(h.languageId);
   fnv.Bytes(f.data() + 128, f.size() - 128);
   return fnv.value();

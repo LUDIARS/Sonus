@@ -1,6 +1,4 @@
-// Private helpers of the codec module (snd::codec::detail). Some of these are
-// generic (little-endian access, alignment) and belong to base once base has
-// them; see codec/README.md "Generic parts kept in codec".
+// Private helpers of the codec module (snd::codec::detail).
 #ifndef SND_CODEC_SRC_DETAIL_HPP
 #define SND_CODEC_SRC_DETAIL_HPP
 
@@ -9,30 +7,14 @@
 #include <cstdint>
 #include <cstring>
 
+#include "snd/base/atomic.hpp"
+#include "snd/base/endian.hpp"
 #include "snd/codec/codec.hpp"
 
 namespace snd::codec::detail {
 
-// --- generic ------------------------------------------------------------------
-constexpr std::uint64_t AlignUp(std::uint64_t v, std::uint64_t a) noexcept { return (v + (a - 1)) & ~(a - 1); }
-
-inline std::uint16_t LoadLE16(const std::uint8_t* p) noexcept {
-  return static_cast<std::uint16_t>(p[0] | (p[1] << 8));
-}
-inline std::uint32_t LoadLE32(const std::uint8_t* p) noexcept {
-  return static_cast<std::uint32_t>(p[0]) | (static_cast<std::uint32_t>(p[1]) << 8) |
-         (static_cast<std::uint32_t>(p[2]) << 16) | (static_cast<std::uint32_t>(p[3]) << 24);
-}
-inline void StoreLE16(std::uint8_t* p, std::uint16_t v) noexcept {
-  p[0] = static_cast<std::uint8_t>(v);
-  p[1] = static_cast<std::uint8_t>(v >> 8);
-}
-inline void StoreLE32(std::uint8_t* p, std::uint32_t v) noexcept {
-  p[0] = static_cast<std::uint8_t>(v);
-  p[1] = static_cast<std::uint8_t>(v >> 8);
-  p[2] = static_cast<std::uint8_t>(v >> 16);
-  p[3] = static_cast<std::uint8_t>(v >> 24);
-}
+// Generic parts (alignment, little-endian access) come from base (A1-12):
+// base::AlignUp64, base::LoadLE16/32, base::StoreLE16/32.
 
 // --- IMA ADPCM ----------------------------------------------------------------
 inline constexpr std::int16_t kImaStep[89] = {
@@ -92,7 +74,7 @@ struct DecoderState {
   std::int32_t stepIndex[SND_MAX_CHANNELS];
 };
 inline constexpr std::uint32_t kStateHeaderBytes =
-    static_cast<std::uint32_t>(AlignUp(sizeof(DecoderState), kStateAlignment));
+    static_cast<std::uint32_t>(base::AlignUp64(sizeof(DecoderState), kStateAlignment));
 static_assert(kStateHeaderBytes <= kMinStateBytes);
 
 inline std::uint8_t* HoldBuffer(DecoderState* s) noexcept {

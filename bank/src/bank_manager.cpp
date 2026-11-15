@@ -8,7 +8,7 @@
 #include <string_view>
 
 #include "bank_io.hpp"
-#include "detail/mutex.hpp"
+#include "snd/base/mutex.hpp"
 
 namespace snd::bank {
 namespace {
@@ -65,7 +65,7 @@ struct BankManager::Impl {
 
   BankManagerDesc desc;
   IAllocator* alloc = nullptr;
-  mutable detail::Mutex mutex;
+  mutable base::Mutex mutex;
   Slot* slots = nullptr;
   notify::BankSlotState* states = nullptr;
   bool ownStates = false;
@@ -341,7 +341,7 @@ void BankManager::Destroy(BankManager* manager) noexcept {
   IAllocator& a = *impl->alloc;
   bool anyJob = false;
   {
-    detail::LockGuard lock(impl->mutex);
+    base::LockGuard lock(impl->mutex);
     for (std::uint32_t i = 0; i < impl->desc.maxBanks; ++i) {
       Impl::Slot& s = impl->slots[i];
       if (s.stage == Stage::Validating && impl->JobPending(s)) {
@@ -381,7 +381,7 @@ HandleRef BankManager::RequestLoad(const char* path, snd_result* result) noexcep
     r = SND_ERR_INVALID_ARGUMENT;
     return HandleRef{0, 0};
   }
-  detail::LockGuard lock(impl_->mutex);
+  base::LockGuard lock(impl_->mutex);
   Impl::Slot* freeSlot = nullptr;
   for (std::uint32_t i = 0; i < impl_->desc.maxBanks; ++i) {
     Impl::Slot& s = impl_->slots[i];
@@ -410,7 +410,7 @@ HandleRef BankManager::RequestLoad(const char* path, snd_result* result) noexcep
 }
 
 void BankManager::PumpIo() noexcept {
-  detail::LockGuard lock(impl_->mutex);
+  base::LockGuard lock(impl_->mutex);
   impl_->PumpIoLocked();
 }
 
@@ -476,7 +476,7 @@ void Impl::PumpIoLocked() noexcept {
 }
 
 void BankManager::Pump() noexcept {
-  detail::LockGuard lock(impl_->mutex);
+  base::LockGuard lock(impl_->mutex);
   while (impl_->PumpLocked()) {
   }
   // Nothing is in IO / validation any more but banks still wait for
@@ -616,7 +616,7 @@ bool Impl::Decide(Slot& s) noexcept {
 
 bool BankManager::PopRegistration(cmd::BankRegister* out) noexcept {
   if (out == nullptr) return false;
-  detail::LockGuard lock(impl_->mutex);
+  base::LockGuard lock(impl_->mutex);
   while (impl_->queueCount > 0) {
     const std::uint32_t idx = impl_->queue[impl_->queueHead];
     impl_->queueHead = (impl_->queueHead + 1) % impl_->desc.maxBanks;
@@ -634,7 +634,7 @@ bool BankManager::PopRegistration(cmd::BankRegister* out) noexcept {
 }
 
 void BankManager::MarkRegistered(HandleRef bank) noexcept {
-  detail::LockGuard lock(impl_->mutex);
+  base::LockGuard lock(impl_->mutex);
   Impl::Slot* s = impl_->Get(bank);
   if (s != nullptr && s->stage == Stage::Registered) impl_->SetState(*s, SND_BANK_STATE_LOADED, SND_OK);
 }
@@ -643,25 +643,25 @@ void BankManager::MarkRegistered(HandleRef bank) noexcept {
 // Queries
 // ---------------------------------------------------------------------------
 snd_bank_state BankManager::State(HandleRef bank) const noexcept {
-  detail::LockGuard lock(impl_->mutex);
+  base::LockGuard lock(impl_->mutex);
   const Impl::Slot* s = impl_->Get(bank);
   return s != nullptr ? impl_->AtomicState(*s) : SND_BANK_STATE_UNLOADED;
 }
 
 snd_result BankManager::Result(HandleRef bank) const noexcept {
-  detail::LockGuard lock(impl_->mutex);
+  base::LockGuard lock(impl_->mutex);
   const Impl::Slot* s = impl_->Get(bank);
   return s != nullptr ? s->result : SND_ERR_INVALID_HANDLE;
 }
 
 const char* BankManager::FailureReason(HandleRef bank) const noexcept {
-  detail::LockGuard lock(impl_->mutex);
+  base::LockGuard lock(impl_->mutex);
   const Impl::Slot* s = impl_->Get(bank);
   return s != nullptr ? s->reason : "";
 }
 
 const PreparedBank* BankManager::Prepared(HandleRef bank) const noexcept {
-  detail::LockGuard lock(impl_->mutex);
+  base::LockGuard lock(impl_->mutex);
   const Impl::Slot* s = impl_->Get(bank);
   if (s == nullptr) return nullptr;
   return (s->stage == Stage::Ready || s->stage == Stage::Registered || s->stage == Stage::Unloading)
@@ -670,13 +670,13 @@ const PreparedBank* BankManager::Prepared(HandleRef bank) const noexcept {
 }
 
 HandleRef BankManager::FindBank(Id bankId, std::uint32_t languageId) const noexcept {
-  detail::LockGuard lock(impl_->mutex);
+  base::LockGuard lock(impl_->mutex);
   const Impl::Slot* s = const_cast<Impl*>(impl_)->FindLoaded(bankId, languageId);
   return s != nullptr ? impl_->HandleOf(*s) : HandleRef{0, 0};
 }
 
 std::uint32_t BankManager::DependentCount(HandleRef bank) const noexcept {
-  detail::LockGuard lock(impl_->mutex);
+  base::LockGuard lock(impl_->mutex);
   const Impl::Slot* s = impl_->Get(bank);
   return s != nullptr ? s->dependents : 0u;
 }
@@ -688,7 +688,7 @@ std::uint32_t BankManager::MaxBanks() const noexcept { return impl_->desc.maxBan
 // Unload
 // ---------------------------------------------------------------------------
 snd_result BankManager::CheckUnload(HandleRef bank, std::uint32_t mode, bool referencedByPlaybacks) const noexcept {
-  detail::LockGuard lock(impl_->mutex);
+  base::LockGuard lock(impl_->mutex);
   const Impl::Slot* s = impl_->Get(bank);
   if (s == nullptr || s->cancel) return SND_ERR_INVALID_HANDLE;
   if (mode != SND_UNLOAD_STOP_AND_UNLOAD && mode != SND_UNLOAD_IF_UNUSED) return SND_ERR_INVALID_ARGUMENT;
@@ -700,7 +700,7 @@ snd_result BankManager::CheckUnload(HandleRef bank, std::uint32_t mode, bool ref
 snd_result BankManager::BeginUnload(HandleRef bank, std::uint32_t mode, bool referencedByPlaybacks) noexcept {
   const snd_result r = CheckUnload(bank, mode, referencedByPlaybacks);
   if (r != SND_OK) return r;
-  detail::LockGuard lock(impl_->mutex);
+  base::LockGuard lock(impl_->mutex);
   Impl::Slot* s = impl_->Get(bank);
   if (s == nullptr) return SND_ERR_INVALID_HANDLE;
   switch (s->stage) {
@@ -733,7 +733,7 @@ snd_result BankManager::BeginUnload(HandleRef bank, std::uint32_t mode, bool ref
 }
 
 void BankManager::AbortUnload(HandleRef bank) noexcept {
-  detail::LockGuard lock(impl_->mutex);
+  base::LockGuard lock(impl_->mutex);
   Impl::Slot* s = impl_->Get(bank);
   if (s == nullptr || s->stage != Stage::Unloading) return;
   s->stage = Stage::Registered;
@@ -741,7 +741,7 @@ void BankManager::AbortUnload(HandleRef bank) noexcept {
 }
 
 snd_result BankManager::Release(HandleRef bank) noexcept {
-  detail::LockGuard lock(impl_->mutex);
+  base::LockGuard lock(impl_->mutex);
   Impl::Slot* s = impl_->Get(bank);
   if (s == nullptr) return SND_ERR_INVALID_HANDLE;
   if (s->stage != Stage::Unloading && s->stage != Stage::Registered) return SND_ERR_INVALID_ARGUMENT;
@@ -762,12 +762,12 @@ snd_result BankManager::DeclareLanguage(const char* name) noexcept {
   for (std::size_t i = 0; i < n; ++i) {
     if (name[i] == '/' || name[i] == '.' || name[i] == '\\') return SND_ERR_INVALID_ARGUMENT;
   }
-  detail::LockGuard lock(impl_->mutex);
+  base::LockGuard lock(impl_->mutex);
   return impl_->AddLanguage(name, n);
 }
 
 Id BankManager::CurrentLanguage() const noexcept {
-  detail::LockGuard lock(impl_->mutex);
+  base::LockGuard lock(impl_->mutex);
   return impl_->currentLanguage;
 }
 
@@ -776,7 +776,7 @@ std::uint32_t BankManager::PlanLanguageSwitch(Id language, LanguageSwitch* out, 
   snd_result dummy;
   snd_result& r = result != nullptr ? *result : dummy;
   r = SND_OK;
-  detail::LockGuard lock(impl_->mutex);
+  base::LockGuard lock(impl_->mutex);
   const char* name = impl_->LanguageName(language);
   if (name == nullptr) {
     r = SND_ERR_NOT_FOUND;
@@ -813,7 +813,7 @@ std::uint32_t BankManager::SetLanguage(Id language, LanguageSwitch* out, std::ui
   const std::uint32_t n = PlanLanguageSwitch(language, out, capacity, &r);
   if (r != SND_ERR_NOT_FOUND) {
     {
-      detail::LockGuard lock(impl_->mutex);
+      base::LockGuard lock(impl_->mutex);
       impl_->currentLanguage = language;
     }
     for (std::uint32_t i = 0; i < n; ++i) {

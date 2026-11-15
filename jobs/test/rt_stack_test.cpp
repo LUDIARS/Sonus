@@ -4,6 +4,7 @@
 
 #include "snd/base/allocator.hpp"
 #include "snd/jobs/rt_workers.hpp"
+#include "snd/platform/clock.hpp"
 #include "snd/platform/thread.hpp"
 #include "snd/test/test.hpp"
 
@@ -30,8 +31,9 @@ void Record(void* p, const RtChunkContext& c) noexcept {
     s->flags[i].store(1u, std::memory_order_release);
   }
   // Spend a little time so that the workers take chunks too.
-  volatile std::uint32_t spin = 0;
-  for (std::uint32_t k = 0; k < 20000u; ++k) spin = spin + k;
+  const std::uint64_t until = snd::platform::MonotonicNanoseconds() + 200000u;  // 200 us
+  while (snd::platform::MonotonicNanoseconds() < until) {
+  }
 }
 
 std::size_t StackOf(pthread_t t) {
@@ -54,7 +56,9 @@ SND_TEST(RtStack, WorkersHaveAtLeastTheContractStack) {
     cfg.minStackBytes = asked;
     SND_REQUIRE(pool.Init(snd::base::DefaultAllocator(), cfg));
     Seen seen;
-    for (int round = 0; round < 200 && seen.count.load() == 0u; ++round) pool.Run(16, &Record, &seen);
+    // Under load the caller may take every chunk for a while: retry up to 10 s.
+    const std::uint64_t giveUp = snd::platform::MonotonicNanoseconds() + 10000000000ull;
+    while (seen.count.load() == 0u && snd::platform::MonotonicNanoseconds() < giveUp) pool.Run(16, &Record, &seen);
     while (!pool.IsQuiescent()) {
     }
     const std::uint32_t n = seen.count.load() < 64u ? seen.count.load() : 64u;

@@ -28,11 +28,11 @@ struct Layout {
 };
 
 bool ComputeLayout(std::uint32_t maxDecoders, std::uint32_t slotBytes, Layout* out) noexcept {
-  const std::uint64_t slot = detail::AlignUp(slotBytes, kStateAlignment);
+  const std::uint64_t slot = base::AlignUp64(slotBytes, kStateAlignment);
   if (slot > UINT32_MAX) return false;
   const std::uint64_t slots = slot * maxDecoders;  // < 2^64: both factors < 2^32
-  const std::uint64_t links = detail::AlignUp(static_cast<std::uint64_t>(maxDecoders) * 4u, kStateAlignment);
-  const std::uint64_t words = detail::AlignUp(static_cast<std::uint64_t>(maxDecoders) * 8u, kStateAlignment);
+  const std::uint64_t links = base::AlignUp64(static_cast<std::uint64_t>(maxDecoders) * 4u, kStateAlignment);
+  const std::uint64_t words = base::AlignUp64(static_cast<std::uint64_t>(maxDecoders) * 8u, kStateAlignment);
   out->slotBytes = slot;
   out->slotsBytes = slots;
   out->nextOffset = slots;

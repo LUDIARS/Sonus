@@ -3,7 +3,7 @@
 設計書 `spec/architecture/design.md`（版 0.2）の 12.2 で凍結すると決めた 7 項目を、このリポジトリのどのファイルが表すか、
 どう変えるか、段階0で何を決めたかをまとめる。段階1以降の並列実装はこの文書と下記のファイルだけを入力にする。
 
-- 契約の版: **1.1**（`SND_CONTRACT_VERSION_MAJOR = 1`, `SND_CONTRACT_VERSION_MINOR = 1`、`contract/public/include/snd/version.h`）。1.1 の変更は 3 節の D-43〜D-52 と 7 節
+- 契約の版: **1.1**（`SND_CONTRACT_VERSION_MAJOR = 1`, `SND_CONTRACT_VERSION_MINOR = 1`、`contract/public/include/snd/version.h`）。1.1 の変更は 3 節の D-43〜D-53 と 7 節
 - バンク形式: **2.0**（`snd::bank_format::kFormatMajor/Minor`）
 - ライブリンク: **1.0**（`snd::livelink::kProtocolMajor/Minor`）
 
@@ -17,7 +17,7 @@
 | 2 | core ⇄ source / music | `contract/internal/include/snd/internal/source_if.hpp`, `music_if.hpp` |
 | 3 | テーブルと列の所有者 | `contract/internal/include/snd/internal/schema.hpp`, `common.hpp` |
 | 4 | コマンドとイベント | `contract/internal/include/snd/internal/commands.hpp`, `notify.hpp` |
-| 5 | バンク | `contract/internal/include/snd/format/bank_format.hpp`, `spec/interface/bank-format.md` |
+| 5 | バンク | `contract/internal/include/snd/format/bank_format.hpp`, `bank_check.hpp`（1.1: §8 の検証規則、ヘッダのみ。bank と buildtool が共有）, `spec/interface/bank-format.md` |
 | 5 | ライブリンク | `contract/internal/include/snd/format/livelink_protocol.hpp`, `spec/interface/livelink-protocol.md` |
 | 6 | モック | `tests/mocks/`（`snd::mock::NullOutputDevice`, `MemoryFileSystem`, `DeterministicJobSystem`） |
 | 7 | テスト枠組み | `tests/framework/`（ランナー、ゴールデン音声、RT 安全性）、`contract/internal/include/snd/internal/rt_check.hpp` |
@@ -145,6 +145,7 @@ minor（追加のみ）として扱ってよいもの: 新しい関数、列挙�
 | D-50 | `snd_result` に `SND_ERR_BANK_ALREADY_LOADED`（-18）を末尾追加: 同じバンク（bankId＋言語）が別のパスからロード済み・ロード中のとき、後のロードはこの結果で失敗する。`snd_declare_language(sys, name)` を追加: 言語名をランタイムに伝える（登録スレッド、必達コマンド `DeclareLanguage`、名前はコマンドに複製。1〜31 バイト、`/` `.` `\` を含まない、最大 `SND_MAX_LANGUAGES` = 32 個）。`snd_set_language` の ID は `snd_hash_id(name)`。言語別バンクのファイル名は `<base>.<name>.sndb`。未宣言の ID を `snd_set_language` に渡すと記録せず `SND_ERR_NOT_FOUND` | A1-7。二重読み込みを引数の誤りと区別する。言語名が無いと言語別バンクのパスを作れない |
 | D-51 | `snd_codec.decode` の約束を明記: `src == NULL` の吐き出しは終端を意味しない（終端は `total_frames`）、保持できる未消費データには上限がある（組み込みは 16 KiB ＋ 1 パケット、超えると `SND_DECODE_ERROR`）、`max_frames` が返ったら未満が返るまで吐き出してから次を渡す | A1-8。codec の実装で決めたことを契約の正にする |
 | D-52 | `notify.hpp`: トリプルバッファのフレームへの書き込みは `base::notify::SnapshotStore` / `SetFrameHeader` を通す。`SnapshotFrame::reserved` は base が「front になったときの seq」に使う。`snd::CCodec` を既定構築できるようにした（`Assign` / `Table`）。codec の登録表はこれを使う | 読み手の relaxed アトミックな読み出しと対になる書き込みが必要。codec が独自のアダプタを持たずに済む |
+| D-53 | バンクの検証規則（bank-format.md §8）を契約側のヘッダだけの部品 `snd/format/bank_check.hpp`（`bank_format::check::CheckBank`）に置き、bank の `ParseBank` と buildtool の自己検査の両方がこれを使う。CRC は関数ポインタで差し替えられる（ランタイムは base の高速版、ビルドツールは契約の参照実装）。生成スクリプトと同期テストは削除 | 2 つの実装が食い違う余地を無くす（A1-13）。buildtool は bank に依存できない（D-02） |
 
 ### `Config` の項目（13.2 と本文の上限・「仮」の値）
 
@@ -247,4 +248,4 @@ bank / buildtool:
 | --- | --- | --- |
 | 1.0 | 2026-11-15 | 段階0で凍結 |
 | 1.0（バンク形式 2.0） | 2026-11-15 | バンク形式 2.0: headerChecksum をヘッダ全体に、予約バイト 0 を検証、`ALIS` チャンク、行の並びの規則、`loopEnd`/`SEEK`/ストリームファイル/エンディアン/`fileBytes` の明文化（bank-format.md §7） |
-| 1.1 | 2026-11-15 | 段階1の持ち越し A1-1〜A1-10 を反映（D-43〜D-52）: 遅れたチャンクの規則と `Voice.renderHold`、`RealVoice.resamplerState` の廃止と `Config.maxVoiceChannels` / `maxPitchRatio`、Stream を Direct 表に、`snd_effect_desc.sample_rate`、依存表の buildtool に dsp、bank-format.md の追記（形式 2.0 のまま）、`SND_ERR_BANK_ALREADY_LOADED` と `snd_declare_language`（コマンド `DeclareLanguage`）、`decode` の約束、ハンドルの払い出し、RT スレッドのスタック、`notify.hpp` の注記、`CCodec` の既定構築。列の削除と Stream の索引方式の変更は厳密には追加ではないが、段階0以降にそれらを使う実装が無いため minor として扱った |
+| 1.1 | 2026-11-15 | 段階1の持ち越し A1-1〜A1-10 を反映（D-43〜D-53）: 遅れたチャンクの規則と `Voice.renderHold`、`RealVoice.resamplerState` の廃止と `Config.maxVoiceChannels` / `maxPitchRatio`、Stream を Direct 表に、`snd_effect_desc.sample_rate`、依存表の buildtool に dsp、bank-format.md の追記（形式 2.0 のまま）、`SND_ERR_BANK_ALREADY_LOADED` と `snd_declare_language`（コマンド `DeclareLanguage`）、`decode` の約束、ハンドルの払い出し、RT スレッドのスタック、`notify.hpp` の注記、`CCodec` の既定構築、検証規則の共有ヘッダ `bank_check.hpp`（D-53）。列の削除と Stream の索引方式の変更は厳密には追加ではないが、段階0以降にそれらを使う実装が無いため minor として扱った |

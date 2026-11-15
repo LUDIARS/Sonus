@@ -60,14 +60,14 @@ bool RunPcm(DecoderState* s, const std::uint8_t* buf, std::uint32_t avail, Outpu
       if constexpr (kFloat) {
         const std::uint8_t* q = p + c * 4u;
         for (std::uint32_t f = 0; f < k; ++f, q += frameBytes) {
-          const std::uint32_t bits = detail::LoadLE32(q);
+          const std::uint32_t bits = base::LoadLE32(q);
           // NaN / +-Inf (exponent all ones) -> 0: corrupt data must not reach feedback DSP.
           d[f] = (bits & 0x7F800000u) == 0x7F800000u ? 0.0f : std::bit_cast<float>(bits);
         }
       } else {
         const std::uint8_t* q = p + c * 2u;
         for (std::uint32_t f = 0; f < k; ++f, q += frameBytes) {
-          d[f] = static_cast<float>(static_cast<std::int16_t>(detail::LoadLE16(q))) * (1.0f / 32768.0f);
+          d[f] = static_cast<float>(static_cast<std::int16_t>(base::LoadLE16(q))) * (1.0f / 32768.0f);
         }
       }
     }
@@ -108,7 +108,7 @@ bool RunAdpcm(DecoderState* s, const std::uint8_t* buf, std::uint32_t avail, Out
         const std::uint8_t* h = blk + 4u * c;
         const std::uint32_t index = h[2];
         if (index > kAdpcmMaxStepIndex) return false;
-        s->predictor[c] = static_cast<std::int16_t>(detail::LoadLE16(h));
+        s->predictor[c] = static_cast<std::int16_t>(base::LoadLE16(h));
         s->stepIndex[c] = static_cast<std::int32_t>(index);
       }
     }
@@ -221,7 +221,7 @@ std::uint32_t DecodeImpl(void* state, const std::uint8_t* src, std::uint32_t n, 
 std::uint32_t StateBytesImpl(const CodecHeader& h) noexcept {
   if (ValidateHeader(h) != HeaderError::None) return kMinStateBytes;
   return detail::kStateHeaderBytes +
-         static_cast<std::uint32_t>(detail::AlignUp(HoldCapacityBytes(h), kStateAlignment));
+         static_cast<std::uint32_t>(base::AlignUp64(HoldCapacityBytes(h), kStateAlignment));
 }
 
 void InitImpl(void* state, const CodecHeader& h) noexcept {

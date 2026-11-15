@@ -23,7 +23,7 @@ target_compile_definitions(bank_roundtrip_test PRIVATE
 snd_add_test(bank_struct_fuzz_test
   SOURCES struct_fuzz_test.cpp fixture_bank.cpp
   LINK sonus_bank sonus_buildtool sonus_mocks)
-# Differential check against buildtool's generated self-check (buildtool/src/self_check.hpp).
+# Differential check against buildtool's self-check (buildtool/src/self_check.hpp; since contract 1.1 both run snd/format/bank_check.hpp).
 target_include_directories(bank_struct_fuzz_test PRIVATE ${PROJECT_SOURCE_DIR}/buildtool/src)
 set_tests_properties(bank_struct_fuzz_test PROPERTIES TIMEOUT 1200)
 

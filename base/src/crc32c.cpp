@@ -1,8 +1,9 @@
-#include "detail/crc32c.hpp"
+// CRC-32C slicing-by-8 (moved from bank/src/detail, A1-12).
+#include "snd/base/crc32c.hpp"
 
-#include <cstring>
+#include "snd/base/endian.hpp"
 
-namespace snd::bank::detail {
+namespace snd::base {
 namespace {
 
 struct Tables {
@@ -26,13 +27,11 @@ constexpr Tables kTables = MakeTables();
 
 }  // namespace
 
-std::uint32_t Crc32cFast(std::uint32_t crc, const std::uint8_t* data, std::size_t n) noexcept {
+std::uint32_t Crc32cUpdate(std::uint32_t crc, const std::uint8_t* data, std::size_t n) noexcept {
   std::uint32_t c = ~crc;
   while (n >= 8) {
-    std::uint32_t lo;
-    std::uint32_t hi;
-    std::memcpy(&lo, data, 4);  // little endian (bank-format.md §1)
-    std::memcpy(&hi, data + 4, 4);
+    std::uint32_t lo = LoadLE32(data);  // little endian (bank-format.md §1)
+    std::uint32_t hi = LoadLE32(data + 4);
     lo ^= c;
     c = kTables.t[7][lo & 0xFFu] ^ kTables.t[6][(lo >> 8) & 0xFFu] ^ kTables.t[5][(lo >> 16) & 0xFFu] ^
         kTables.t[4][lo >> 24] ^ kTables.t[3][hi & 0xFFu] ^ kTables.t[2][(hi >> 8) & 0xFFu] ^
@@ -44,4 +43,4 @@ std::uint32_t Crc32cFast(std::uint32_t crc, const std::uint8_t* data, std::size_
   return ~c;
 }
 
-}  // namespace snd::bank::detail
+}  // namespace snd::base
