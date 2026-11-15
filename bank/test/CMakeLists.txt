@@ -100,3 +100,9 @@ snd_add_test(Defect_bank_duplicate_order_test SOURCES defect_bank_duplicate_orde
 snd_add_test(bank_indep_io11_thread_test SOURCES indep_bank_io11_thread_test.cpp fixture_bank.cpp
   LINK sonus_bank sonus_io sonus_jobs sonus_mocks)
 target_link_libraries(bank_indep_io11_thread_test PRIVATE Threads::Threads)
+# The shared validator snd/format/bank_check.hpp (D-53): truncations, flips, re-signed lies.
+snd_add_test(bank_indep_check11_test SOURCES indep_bank_check11_test.cpp fixture_bank.cpp LINK sonus_bank sonus_mocks)
+set_tests_properties(bank_indep_check11_test PROPERTIES TIMEOUT 600)
+# Fails on purpose: reloading the same path while the old slot is UNLOADING fails with BANK_ALREADY_LOADED.
+snd_add_test(Defect_bank_reload_unloading_test SOURCES defect_bank_reload_unloading_test.cpp fixture_bank.cpp
+  LINK sonus_bank sonus_io sonus_mocks)
