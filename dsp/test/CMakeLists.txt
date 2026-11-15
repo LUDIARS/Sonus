@@ -4,7 +4,14 @@ set(SND_DSP_TEST_SOURCES
   resampler_test.cpp
   filter_meter_test.cpp
   effects_test.cpp
-  pipeline_bench_test.cpp)
+  pipeline_bench_test.cpp
+  # Independent tests (analytic expectations, guards, edge cases).
+  indep_kernels_test.cpp
+  indep_resampler_test.cpp
+  indep_filter_test.cpp
+  indep_pan_meter_test.cpp
+  indep_effects_test.cpp
+  indep_effects_behaviour_test.cpp)
 
 snd_add_test(dsp_test
   SOURCES ${SND_DSP_TEST_SOURCES}

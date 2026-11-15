@@ -11,3 +11,13 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64|amd64")
   set_source_files_properties(simd_kernels_avx2.cpp PROPERTIES COMPILE_OPTIONS "-mavx2;-mfma")
   target_compile_definitions(platform_simd_test PRIVATE SND_SIMD_TEST_HAVE_AVX2=1)
 endif()
+
+# Independent SIMD tests: every path against plain C++ references.
+snd_add_test(platform_simd_indep_test
+  SOURCES simd_indep_test.cpp simd_indep_scalar.cpp simd_indep_native.cpp
+  LINK sonus_platform)
+if(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64|amd64")
+  target_sources(platform_simd_indep_test PRIVATE simd_indep_avx2.cpp)
+  set_source_files_properties(simd_indep_avx2.cpp PROPERTIES COMPILE_OPTIONS "-mavx2;-mfma")
+  target_compile_definitions(platform_simd_indep_test PRIVATE SND_SIMD_TEST_HAVE_AVX2=1)
+endif()
