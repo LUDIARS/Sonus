@@ -75,7 +75,12 @@ SND_TEST(AdvWorkerPool, SingleWorkerStrictPriorityThenFifoWithinLaneAndPrefetchF
   // observable exactly: higher priority first, FIFO among equals, and the
   // prefetch lane before the background lane.
   WorkerPool pool;
-  SND_REQUIRE(pool.Init(snd::base::DefaultAllocator(), PoolCfg(1)));
+  // The lane ratio (one background job after every `prefetchBurst` prefetch
+  // jobs) is tested separately; switch it off here so that the strict
+  // "prefetch lane first" order below is the expected one.
+  WorkerPoolConfig cfg = PoolCfg(1);
+  cfg.prefetchBurst = 1000;
+  SND_REQUIRE(pool.Init(snd::base::DefaultAllocator(), cfg));
   Gate gate;
   snd::JobDesc g{&GateFn, &gate, nullptr, nullptr, 0, 0};
   pool.Submit(&g, 1, snd::JobLane::Prefetch);

@@ -155,6 +155,16 @@ struct BlockCtx {
 void BlockFn(void* p, const RtChunkContext& c) noexcept {
   auto* x = static_cast<BlockCtx*>(p);
   x->runs[c.chunkIndex].fetch_add(1);
+  // The caller (threadIndex 0) holds its chunk until a worker has taken one.
+  // Without this the caller often finishes a batch of trivial chunks before
+  // any worker wakes up, and the test never gets its late chunk (it did not,
+  // in about one run in four). Bounded so a pool without workers cannot hang.
+  if (c.threadIndex == 0u) {
+    const std::uint64_t t0 = MonotonicNanoseconds();
+    while (x->blockArmed.load(std::memory_order_acquire) && MonotonicNanoseconds() - t0 < 2000 * kMs) {
+      std::this_thread::yield();
+    }
+  }
   if (c.threadIndex != 0u && x->blockArmed.exchange(false)) {
     x->blockedGen.store(c.generation);
     x->blockedChunk.store(c.chunkIndex);
