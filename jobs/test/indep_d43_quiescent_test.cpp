@@ -161,7 +161,11 @@ SND_TEST(IndepD43, CoreLoopFollowingTheRuleNeverTouchesASetInUse) {
     if (busy0 && busy1) ++inUseViolations;  // "at most one set in use"
     if (pool.IsQuiescent()) {
       // Parallel into the other set; both sets are free (and the holds can be released).
-      if (busy0 || busy1) ++parallelWhileBusy;
+      // (Sampled after IsQuiescent(): a chunk may have finished between the two reads above.)
+      if (core->sets[0].writers.load(std::memory_order_acquire) != 0 ||
+          core->sets[1].writers.load(std::memory_order_acquire) != 0) {
+        ++parallelWhileBusy;
+      }
       const std::uint32_t target = lastParallelSet ^ 1u;
       core->setOfRun = target;
       const RtRunResult r = pool.Run(kChunks, &CoreChunk, core);
