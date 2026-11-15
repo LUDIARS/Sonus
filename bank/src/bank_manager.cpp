@@ -1,6 +1,7 @@
 #include "snd/bank/bank_manager.hpp"
 
 #include <atomic>
+#include <cstdlib>
 #include <cstdio>
 #include <cstring>
 #include <new>
@@ -39,6 +40,7 @@ struct BankManager::Impl {
     std::uint32_t generation = 1;
     char* path = nullptr;
     std::uint32_t baseLen = 0;  // language banks: length of "<base>" in "<base>.<lang>.sndb", 0 unknown
+    Id langId = 0;              // language of the bank: from the path at request, confirmed by the header
     std::uint8_t* image = nullptr;
     std::uint64_t imageBytes = 0;
     detail::FileRead read;
@@ -105,6 +107,10 @@ struct BankManager::Impl {
     return p;
   }
   void Fail(Slot& s, snd_result r, const char* why) noexcept {
+    if (s.cancel) {  // a cancelled load ends UNLOADED whatever happened to it (never FAILED)
+      FreeSlot(s);
+      return;
+    }
     FreeLoadMemory(s);
     s.stage = Stage::Failed;
     s.result = r;
@@ -146,6 +152,7 @@ struct BankManager::Impl {
     if (s.path != nullptr) alloc->Free(s.path, MemTag::Misc);
     s.path = nullptr;
     s.baseLen = 0;
+    s.langId = 0;
     s.cancel = false;
     s.result = SND_OK;
     s.reason[0] = '\0';
@@ -161,7 +168,10 @@ struct BankManager::Impl {
     s.result = SND_OK;
     s.reason[0] = '\0';
     s.dependents = 0;
+    // A retry reports through on_bank_loaded again (CONTRACTS decision c).
+    states[&s - slots].notified.store(0, std::memory_order_relaxed);
     SetState(s, SND_BANK_STATE_LOADING, SND_OK);
+    GuessLanguage(s);
   }
   Slot* FindLoaded(Id bankId, std::uint32_t languageId) noexcept {
     for (std::uint32_t i = 0; i < desc.maxBanks; ++i) {
@@ -188,22 +198,73 @@ struct BankManager::Impl {
     languages[languageCount++] = Language{id, copy};
     return SND_OK;
   }
-  // "<base>.<lang>.sndb" whose <lang> hashes to languageId: remember base and the name.
-  void LearnLanguagePath(Slot& s) noexcept {
-    s.baseLen = 0;
-    if (s.prepared == nullptr || s.prepared->languageId == 0 || s.path == nullptr) return;
-    const std::size_t n = std::strlen(s.path);
+  // Splits "<base>.<lang>.sndb"; false if the path does not have that shape.
+  static bool SplitLanguagePath(const char* path, std::size_t* baseLen, std::string_view* lang) noexcept {
+    if (path == nullptr) return false;
+    const std::size_t n = std::strlen(path);
     static constexpr char kExt[] = ".sndb";
     const std::size_t ext = sizeof(kExt) - 1;
-    if (n <= ext || std::strcmp(s.path + n - ext, kExt) != 0) return;
-    std::size_t end = n - ext;
+    if (n <= ext || std::strcmp(path + n - ext, kExt) != 0) return false;
+    const std::size_t end = n - ext;
     std::size_t dot = end;
-    while (dot > 0 && s.path[dot - 1] != '.' && s.path[dot - 1] != '/') --dot;
-    if (dot == 0 || s.path[dot - 1] != '.') return;
-    const std::string_view lang(s.path + dot, end - dot);
-    if (lang.empty() || HashId(lang) != s.prepared->languageId) return;
-    s.baseLen = static_cast<std::uint32_t>(dot - 1);
+    while (dot > 0 && path[dot - 1] != '.' && path[dot - 1] != '/') --dot;
+    if (dot == 0 || path[dot - 1] != '.' || dot == end) return false;
+    *baseLen = dot - 1;
+    *lang = std::string_view(path + dot, end - dot);
+    return true;
+  }
+  // At request time: a path "<base>.<lang>.sndb" with a known language name is
+  // taken as that language bank until the header says otherwise (so a bank that
+  // is still loading takes part in a language switch, 10.4).
+  void GuessLanguage(Slot& s) noexcept {
+    s.baseLen = 0;
+    s.langId = 0;
+    std::size_t base = 0;
+    std::string_view lang;
+    if (!SplitLanguagePath(s.path, &base, &lang)) return;
+    const Id id = HashId(lang);
+    if (LanguageName(id) == nullptr) return;
+    s.baseLen = static_cast<std::uint32_t>(base);
+    s.langId = id;
+  }
+  // After validation the header is authoritative.
+  void LearnLanguagePath(Slot& s) noexcept {
+    s.baseLen = 0;
+    s.langId = s.prepared != nullptr ? s.prepared->languageId : 0;
+    if (s.langId == 0) return;
+    std::size_t base = 0;
+    std::string_view lang;
+    if (!SplitLanguagePath(s.path, &base, &lang) || HashId(lang) != s.langId) return;
+    s.baseLen = static_cast<std::uint32_t>(base);
     (void)AddLanguage(lang.data(), lang.size());
+  }
+  // Registration queue (FIFO ring of slot indices).
+  void PushQueue(std::uint32_t idx) noexcept {
+    queue[(queueHead + queueCount) % desc.maxBanks] = idx;
+    ++queueCount;
+    CheckQueue();
+  }
+  void RemoveFromQueue(std::uint32_t idx) noexcept {
+    std::uint32_t kept = 0;
+    for (std::uint32_t i = 0; i < queueCount; ++i) {
+      const std::uint32_t v = queue[(queueHead + i) % desc.maxBanks];
+      if (v != idx) queue[(queueHead + kept++) % desc.maxBanks] = v;
+    }
+    queueCount = kept;
+    CheckQueue();
+  }
+  // Invariants: count <= capacity, each slot at most once and READY (debug builds).
+  void CheckQueue() const noexcept {
+#ifndef NDEBUG
+    if (queueCount > desc.maxBanks) std::abort();
+    for (std::uint32_t i = 0; i < queueCount; ++i) {
+      const std::uint32_t a = queue[(queueHead + i) % desc.maxBanks];
+      if (a >= desc.maxBanks || slots[a].stage != Stage::Ready) std::abort();
+      for (std::uint32_t j = i + 1; j < queueCount; ++j) {
+        if (queue[(queueHead + j) % desc.maxBanks] == a) std::abort();
+      }
+    }
+#endif
   }
 
   static void ValidateJob(void* data) {
@@ -493,6 +554,20 @@ bool Impl::PumpLocked() noexcept {
 // Dependencies (10.3) and the DSP pool (3.3). true if the slot left Validated.
 bool Impl::Decide(Slot& s) noexcept {
   PreparedBank& pb = *s.prepared;
+  // The same bank (bankId + language) from another path: the first one wins.
+  for (std::uint32_t i = 0; i < desc.maxBanks; ++i) {
+    const Slot& o = slots[i];
+    if (&o == &s || o.cancel || o.prepared == nullptr) continue;
+    const bool earlier = o.stage == Stage::Ready || o.stage == Stage::Registered || o.stage == Stage::Unloading ||
+                         (o.stage == Stage::Validated && &o < &s);
+    if (earlier && o.prepared->bankId == pb.bankId && o.prepared->languageId == pb.languageId) {
+      char why[192];
+      std::snprintf(why, sizeof(why), "bank %08x is already loaded or loading from '%.120s'", pb.bankId,
+                    o.path != nullptr ? o.path : "?");
+      Fail(s, SND_ERR_INVALID_ARGUMENT, why);
+      return true;
+    }
+  }
   for (std::uint32_t d = 0; d < pb.dependencyCount; ++d) {
     const bf::Dependency dep = pb.view.dependency(d);
     Slot* target = FindLoaded(dep.bankId, 0);
@@ -520,8 +595,7 @@ bool Impl::Decide(Slot& s) noexcept {
   }
   pb.handle = HandleOf(s);
   s.stage = Stage::Ready;
-  queue[(queueHead + queueCount) % desc.maxBanks] = static_cast<std::uint32_t>(&s - slots);
-  ++queueCount;
+  PushQueue(static_cast<std::uint32_t>(&s - slots));
   return true;
 }
 
@@ -623,7 +697,11 @@ snd_result BankManager::BeginUnload(HandleRef bank, std::uint32_t mode, bool ref
       std::atomic_ref<std::uint32_t>(s->cancelFlag).store(1u, std::memory_order_release);
       impl_->SetState(*s, SND_BANK_STATE_UNLOADING, SND_OK);
       return SND_OK;
-    case Stage::Ready:  // never handed to core
+    case Stage::Ready:  // never handed to core: also leaves the registration queue
+      s->stage = Stage::Failed;  // not READY any more while the queue is compacted
+      impl_->RemoveFromQueue(bank.slot);
+      impl_->FreeSlot(*s);
+      return SND_OK;
     case Stage::Failed:
       impl_->FreeSlot(*s);
       return SND_OK;
@@ -685,8 +763,9 @@ std::uint32_t BankManager::PlanLanguageSwitch(Id language, LanguageSwitch* out, 
   std::uint32_t n = 0;
   for (std::uint32_t i = 0; i < impl_->desc.maxBanks; ++i) {
     const Impl::Slot& s = impl_->slots[i];
-    if (s.stage != Stage::Ready && s.stage != Stage::Registered) continue;
-    if (s.prepared == nullptr || s.prepared->languageId == 0 || s.prepared->languageId == language) continue;
+    // Loaded and still loading language banks of another language (10.4).
+    if (s.stage == Stage::Free || s.stage == Stage::Unloading || s.stage == Stage::Failed || s.cancel) continue;
+    if (s.langId == 0 || s.langId == language) continue;
     if (s.baseLen == 0) continue;  // path does not follow "<base>.<lang>.sndb"
     if (n == capacity || out == nullptr) {
       r = SND_ERR_LIMIT_REACHED;

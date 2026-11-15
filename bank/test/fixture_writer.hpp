@@ -24,36 +24,22 @@ struct Column {
   std::int64_t offsetOverride = -1;  // corrupt on purpose
 };
 
-inline Column U32(std::uint16_t id, std::initializer_list<std::uint32_t> v) {
+template <class T>
+inline Column MakeColumn(std::uint16_t id, std::initializer_list<T> v) {
   Column c;
   c.id = id;
-  c.elemBytes = 4;
-  for (std::uint32_t x : v) {
-    const auto* p = reinterpret_cast<const std::uint8_t*>(&x);
-    c.data.insert(c.data.end(), p, p + 4);
+  c.elemBytes = sizeof(T);
+  c.data.resize(v.size() * sizeof(T));  // one allocation: no gcc -O3 stringop false positive
+  std::size_t at = 0;
+  for (T x : v) {
+    std::memcpy(c.data.data() + at, &x, sizeof(T));
+    at += sizeof(T);
   }
   return c;
 }
-inline Column F32(std::uint16_t id, std::initializer_list<float> v) {
-  Column c;
-  c.id = id;
-  c.elemBytes = 4;
-  for (float x : v) {
-    const auto* p = reinterpret_cast<const std::uint8_t*>(&x);
-    c.data.insert(c.data.end(), p, p + 4);
-  }
-  return c;
-}
-inline Column U64(std::uint16_t id, std::initializer_list<std::uint64_t> v) {
-  Column c;
-  c.id = id;
-  c.elemBytes = 8;
-  for (std::uint64_t x : v) {
-    const auto* p = reinterpret_cast<const std::uint8_t*>(&x);
-    c.data.insert(c.data.end(), p, p + 8);
-  }
-  return c;
-}
+inline Column U32(std::uint16_t id, std::initializer_list<std::uint32_t> v) { return MakeColumn(id, v); }
+inline Column F32(std::uint16_t id, std::initializer_list<float> v) { return MakeColumn(id, v); }
+inline Column U64(std::uint16_t id, std::initializer_list<std::uint64_t> v) { return MakeColumn(id, v); }
 
 struct Chunk {
   std::uint32_t fourcc = 0;

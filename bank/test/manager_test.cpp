@@ -446,3 +446,33 @@ SND_TEST(BankManager, DevOverlayLayer) {
   SND_CHECK(!env.m->Prepared(r)->view.writable());
   SND_CHECK_EQ(FindWritableColumn(*env.m->Prepared(r), ch::BUSS, 0, &wc), SND_ERR_UNSUPPORTED);
 }
+
+// Decision b: the same bank (bankId + language) from a second path fails; the first stays.
+SND_TEST(BankManager, SameBankFromAnotherPathFails) {
+  Env env;
+  const std::vector<std::uint8_t> bytes = SimpleBank("Dup").Build();
+  env.fs.AddFile("a/Dup.sndb", bytes);
+  env.fs.AddFile("b/Dup.sndb", bytes);
+  const HandleRef a = env.m->RequestLoad("a/Dup.sndb");
+  env.Settle(2);
+  const HandleRef b = env.m->RequestLoad("b/Dup.sndb");
+  env.Settle(2);
+  SND_CHECK_EQ(env.m->State(a), SND_BANK_STATE_LOADED);
+  SND_CHECK_EQ(env.m->State(b), SND_BANK_STATE_FAILED);
+  SND_CHECK_EQ(env.m->Result(b), SND_ERR_INVALID_ARGUMENT);
+  SND_CHECK(std::strstr(env.m->FailureReason(b), "already loaded") != nullptr);
+}
+
+// Decision c: a retry of a failed slot resets `notified` so on_bank_loaded is delivered again.
+SND_TEST(BankManager, RetryResetsNotified) {
+  Env env;
+  const HandleRef h = env.m->RequestLoad("late.sndb");
+  env.Settle(2);
+  SND_REQUIRE_EQ(env.m->State(h), SND_BANK_STATE_FAILED);
+  env.m->SlotStates()[h.slot].notified.store(1);  // core delivered on_bank_loaded(FAILED)
+  env.fs.AddFile("late.sndb", SimpleBank("Late").Build());
+  SND_CHECK_EQ(env.m->RequestLoad("late.sndb").Value(), h.Value());
+  SND_CHECK_EQ(env.m->SlotStates()[h.slot].notified.load(), 0u);
+  env.Settle(2);
+  SND_CHECK_EQ(env.m->State(h), SND_BANK_STATE_LOADED);
+}
