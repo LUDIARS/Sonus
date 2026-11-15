@@ -632,3 +632,46 @@ SND_TEST(Effects, RampedBlockSplitDifference) {
     SND_CHECK_MSG(d < 2e-4f, "%s ramped split diff %g (documented < 2e-4)", ShortName(kind), static_cast<double>(d));
   }
 }
+
+// Every effect with a non-zero EffectLatencyFrames: at rates where the
+// latency in frames is fractional, the output for transparent settings is the
+// input delayed by exactly the reported latency (bit-exact).
+SND_TEST(Effects, ReportedLatencyIsExactAtAllRates) {
+  for (std::uint32_t rate : {22050u, 44100u, 48000u, 88200u, 96000u, 192000u}) {
+    struct Case {
+      EffectKind kind;
+      float ov[4];
+      std::uint32_t count;
+      const char* what;
+    };
+    const Case cases[] = {
+        {EffectKind::PitchShifter, {1.0f, 50.0f, 1.0f, 0.0f}, 3, "pitch 1 mix 1"},
+        {EffectKind::PitchShifter, {1.0f, 33.3f, 0.37f, 0.0f}, 3, "pitch 1 mix 0.37"},
+        {EffectKind::PitchShifter, {1.0f, 10.0f, 0.0f, 0.0f}, 3, "pitch 1 mix 0"},
+        {EffectKind::Limiter, {0.0f, 50.0f, 2.0f, 0.0f}, 4, "quiet, 2 ms"},
+        {EffectKind::Limiter, {0.0f, 50.0f, 0.73f, 0.0f}, 4, "quiet, 0.73 ms"},
+    };
+    for (const Case& cs : cases) {
+      float params[kMaxEffectParams];
+      EffectDefaultParams(cs.kind, params);
+      for (std::uint32_t i = 0; i < cs.count; ++i) params[i] = cs.ov[i];
+      snd::EffectDesc d{GetEffectInfo(cs.kind).typeId, 1, kBlock, GetEffectInfo(cs.kind).paramCount, params, nullptr, 0};
+      dsptest::AlignedMem mem(EffectStateBytes(d, rate), dsptest::kDirty);
+      SND_REQUIRE(EffectInit(mem.get(), mem.size(), d, rate));
+      const std::uint32_t lat = EffectLatencyFrames(mem.get());
+      std::vector<float> in, out;
+      Audio m(1, kBlock);
+      dsptest::Noise nz(rate);
+      const std::uint32_t blocks = (lat / kBlock) + 4;
+      for (std::uint32_t b = 0; b < blocks; ++b) {
+        for (std::uint32_t i = 0; i < kBlock; ++i) m.ch(0)[i] = nz.Next(0.25f);
+        in.insert(in.end(), m.ch(0), m.ch(0) + kBlock);
+        Process(mem.get(), m, kBlock);
+        out.insert(out.end(), m.ch(0), m.ch(0) + kBlock);
+      }
+      const float diff = dsptest::MaxAbsDiff(in.data(), out.data() + lat, blocks * kBlock - lat);
+      SND_CHECK_MSG(diff == 0.0f, "%s %s at %u Hz: latency %u, differs from the delayed input by %g",
+                    ShortName(cs.kind), cs.what, rate, lat, static_cast<double>(diff));
+    }
+  }
+}
