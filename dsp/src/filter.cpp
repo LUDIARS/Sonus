@@ -49,9 +49,12 @@ float ClampHz(float hz, float sr) noexcept {
 
 // Runs one SVF over the block. The prewarped gain g = tan(pi f / fs) moves
 // linearly from g(f0) to g(f1) (two tan() per block, one division per 16 frames).
+// fadeToDry: the output crossfades linearly from the filter to the input over
+// the block (switching a filter off without a step).
 template <bool kLowpass>
 void RunSvf(float* ic1, float* ic2, float* const* buf, std::uint32_t channels,
-            std::uint32_t frames, float f0, float f1, float sr) noexcept {
+            std::uint32_t frames, float f0, float f1, float sr, bool fadeToDry = false) noexcept {
+  const float invFrames = 1.0f / static_cast<float>(frames);
   const bool sweep = f0 != f1;
   const float g0 = SvfG(f0, sr);
   const float g1 = sweep ? SvfG(f1, sr) : g0;
@@ -72,7 +75,8 @@ void RunSvf(float* ic1, float* ic2, float* const* buf, std::uint32_t channels,
         const float v2 = i2 + cf.a2 * i1 + cf.a3 * v3;
         i1 = detail::FlushState(2.0f * v1 - i1);
         i2 = detail::FlushState(2.0f * v2 - i2);
-        x[k] = kLowpass ? v2 : (v0 - kSqrt2 * v1 - v2);
+        const float y = kLowpass ? v2 : (v0 - kSqrt2 * v1 - v2);
+        x[k] = fadeToDry ? y + (v0 - y) * (static_cast<float>(s + k) * invFrames) : y;
       }
       ic1[c] = i1;
       ic2[c] = i2;
@@ -81,6 +85,10 @@ void RunSvf(float* ic1, float* ic2, float* const* buf, std::uint32_t channels,
   for (std::uint32_t c = 0; c < channels; ++c) {
     ic1[c] = detail::Flush(ic1[c]);
     ic2[c] = detail::Flush(ic2[c]);
+    if (!std::isfinite(ic1[c]) || !std::isfinite(ic2[c])) {  // NaN / Inf went in: reset
+      ic1[c] = 0.0f;
+      ic2[c] = 0.0f;
+    }
   }
 }
 
@@ -150,9 +158,11 @@ void VoiceFilterProcessRamp(FilterState& state, float* const* buffers, std::uint
           d[kHpIc2 + c] = 0.0f;
         }
       }
+      // Switching off: hold the cutoff and crossfade to the input over the block
+      // (the DC the highpass removed comes back as a ramp, not a step).
       const float f0 = on0 ? ClampHz(start.highpassHz, sr) : 10.0f;
-      const float f1 = on1 ? ClampHz(end.highpassHz, sr) : 10.0f;
-      RunSvf<false>(d + kHpIc1, d + kHpIc2, buffers, channels, frames, f0, f1, sr);
+      const float f1 = on1 ? ClampHz(end.highpassHz, sr) : f0;
+      RunSvf<false>(d + kHpIc1, d + kHpIc2, buffers, channels, frames, f0, f1, sr, on0 && !on1);
       d[kHpOn] = on1 ? 1.0f : 0.0f;
     } else {
       d[kHpOn] = 0.0f;
@@ -162,7 +172,54 @@ void VoiceFilterProcessRamp(FilterState& state, float* const* buffers, std::uint
 
 // ---------------------------------------------------------------------------
 // Biquads
+//
+// Design in double precision (RBJ cookbook). Processing uses the equivalent
+// trapezoidal state-variable form (A. Simper, "linear trapezoidal SVF"): the
+// poles are set by g = tan(pi f / fs) and k = 1 / Q, which stay well conditioned
+// down to 1 Hz at 192 kHz, where float direct-form coefficients lose
+// 1 + a1 + a2 (~w0^2) to rounding.
 // ---------------------------------------------------------------------------
+namespace {
+
+struct SvfDesign {
+  double g, k, m0, m1, m2;
+};
+
+SvfDesign SvfFor(BiquadType type, double f, double fs, double q, bool shelfSlope1, double A) {
+  const double t = std::tan(detail::kPi * f / fs);
+  const double k = shelfSlope1 ? std::sqrt(2.0) : 1.0 / q;
+  switch (type) {
+    case BiquadType::Lowpass: return {t, k, 0.0, 0.0, 1.0};
+    case BiquadType::Highpass: return {t, k, 1.0, -k, -1.0};
+    case BiquadType::Bandpass: return {t, k, 0.0, k, 0.0};
+    case BiquadType::Notch: return {t, k, 1.0, -k, 0.0};
+    case BiquadType::Allpass: return {t, k, 1.0, -2.0 * k, 0.0};
+    case BiquadType::Peaking: {
+      const double kp = 1.0 / (q * A);
+      return {t, kp, 1.0, kp * (A * A - 1.0), 0.0};
+    }
+    case BiquadType::LowShelf: return {t / std::sqrt(A), k, 1.0, k * (A - 1.0), A * A - 1.0};
+    case BiquadType::HighShelf: return {t * std::sqrt(A), k, A * A, k * (1.0 - A) * A, 1.0 - A * A};
+  }
+  return {t, k, 1.0, 0.0, 0.0};
+}
+
+// Rounds the double direct-form denominator to floats strictly inside the
+// stability triangle (|a2| < 1, |a1| < 1 + a2), as close as possible.
+void StableFloatDenominator(double a1, double a2, float* fa1, float* fa2) {
+  float f2 = static_cast<float>(a2);
+  if (!(f2 < 1.0f)) f2 = std::nextafter(1.0f, 0.0f);
+  if (!(f2 > -1.0f)) f2 = std::nextafter(-1.0f, 0.0f);
+  float f1 = static_cast<float>(a1);
+  // 1 + a1 + a2 > 0 and 1 - a1 + a2 > 0, evaluated exactly in double.
+  for (int i = 0; i < 64 && !(1.0 + static_cast<double>(f1) + f2 > 0.0); ++i) f1 = std::nextafter(f1, 4.0f);
+  for (int i = 0; i < 64 && !(1.0 - static_cast<double>(f1) + f2 > 0.0); ++i) f1 = std::nextafter(f1, -4.0f);
+  *fa1 = f1;
+  *fa2 = f2;
+}
+
+}  // namespace
+
 BiquadCoefs DesignBiquad(BiquadType type, float freqHz, float q, float gainDb,
                          float sampleRate) noexcept {
   if (!(sampleRate > 0.0f)) return kBiquadIdentity;
@@ -171,16 +228,14 @@ BiquadCoefs DesignBiquad(BiquadType type, float freqHz, float q, float gainDb,
   f = detail::Clamp(f, 1.0, 0.49 * fs);
   const bool shelf = type == BiquadType::LowShelf || type == BiquadType::HighShelf;
   double qq = q == q ? q : 0.7071;
-  if (!shelf || qq > 0.0) qq = detail::Clamp(qq, 0.05, 100.0);
+  const bool slope1 = shelf && !(qq > 0.0);
+  qq = detail::Clamp(qq, 0.05, 100.0);
   const double gdb = gainDb == gainDb ? detail::Clamp(static_cast<double>(gainDb), -60.0, 60.0) : 0.0;
   const double w0 = 2.0 * detail::kPi * f / fs;
   const double cw = std::cos(w0), sw = std::sin(w0);
   const double A = std::pow(10.0, gdb / 40.0);
-  double alpha = sw / (2.0 * qq);
-  if (shelf && !(qq > 0.0)) {
-    // Shelf slope S = 1: alpha = sin(w0)/2 * sqrt((A + 1/A)(1/S - 1) + 2).
-    alpha = sw / 2.0 * std::sqrt(2.0);
-  }
+  // Shelf slope S = 1: alpha = sin(w0)/2 * sqrt((A + 1/A)(1/S - 1) + 2) = sin(w0)/sqrt(2).
+  const double alpha = slope1 ? sw / 2.0 * std::sqrt(2.0) : sw / (2.0 * qq);
   double b0 = 1, b1 = 0, b2 = 0, a0 = 1, a1 = 0, a2 = 0;
   switch (type) {
     case BiquadType::Lowpass:
@@ -232,12 +287,27 @@ BiquadCoefs DesignBiquad(BiquadType type, float freqHz, float q, float gainDb,
   c.b0 = static_cast<float>(b0 / a0);
   c.b1 = static_cast<float>(b1 / a0);
   c.b2 = static_cast<float>(b2 / a0);
-  c.a1 = static_cast<float>(a1 / a0);
-  c.a2 = static_cast<float>(a2 / a0);
+  StableFloatDenominator(a1 / a0, a2 / a0, &c.a1, &c.a2);
+  const SvfDesign s = SvfFor(type, f, fs, qq, slope1, A);
+  c.g = static_cast<float>(s.g);
+  c.k = static_cast<float>(s.k);
+  c.m0 = static_cast<float>(s.m0);
+  c.m1 = static_cast<float>(s.m1);
+  c.m2 = static_cast<float>(s.m2);
   return c;
 }
 
 double BiquadMagnitude(const BiquadCoefs& c, double freqHz, double sampleRate) noexcept {
+  if (c.g > 0.0f) {
+    // SVF form: H(S) = (m0 (S^2 + k S + 1) + m1 S + m2) / (S^2 + k S + 1), S = j tan(pi f / fs) / g.
+    const double t = std::tan(detail::kPi * detail::Clamp(freqHz / sampleRate, 0.0, 0.5));
+    if (!(t < 1e12)) return std::fabs(static_cast<double>(c.m0));  // Nyquist
+    const double w = t / c.g;  // S = j w
+    const double k = c.k;
+    const double dr = 1.0 - w * w, di = k * w;
+    const double nr = c.m0 * dr + c.m2, ni = c.m0 * di + c.m1 * w;
+    return std::sqrt((nr * nr + ni * ni) / (dr * dr + di * di));
+  }
   const double w = 2.0 * detail::kPi * freqHz / sampleRate;
   const double c1 = std::cos(w), s1 = std::sin(w), c2 = std::cos(2 * w), s2 = std::sin(2 * w);
   const double nr = c.b0 + c.b1 * c1 + c.b2 * c2, ni = -(c.b1 * s1 + c.b2 * s2);
@@ -260,42 +330,101 @@ void BiquadFlush(BiquadState& s, std::uint32_t channels) noexcept {
   }
 }
 
-void BiquadProcess(BiquadState& s, const BiquadCoefs& from, const BiquadCoefs& to,
-                   const float* const* in, float* const* out, std::uint32_t channels,
-                   std::uint32_t frames) noexcept {
-  if (channels > kMaxChannels) channels = kMaxChannels;
+namespace {
+
+void DirectForm(BiquadState& s, const BiquadCoefs& from, const BiquadCoefs& to, const float* const* in,
+                float* const* out, std::uint32_t channels, std::uint32_t frames) noexcept {
   const bool ramp = std::memcmp(&from, &to, sizeof(BiquadCoefs)) != 0;
   for (std::uint32_t c = 0; c < channels; ++c) {
     const float* x = in[c];
     float* y = out[c];
     float z1 = s.z1[c], z2 = s.z2[c];
-    if (!ramp) {
-      const float b0 = from.b0, b1 = from.b1, b2 = from.b2, a1 = from.a1, a2 = from.a2;
-      for (std::uint32_t i = 0; i < frames; ++i) {
-        const float xi = x[i];
-        const float yi = b0 * xi + z1;
-        z1 = detail::FlushState(b1 * xi - a1 * yi + z2);
-        z2 = detail::FlushState(b2 * xi - a2 * yi);
-        y[i] = yi;
-      }
-    } else {
-      const float inv = 1.0f / static_cast<float>(frames);
-      const float db0 = (to.b0 - from.b0) * inv, db1 = (to.b1 - from.b1) * inv,
-                  db2 = (to.b2 - from.b2) * inv, da1 = (to.a1 - from.a1) * inv,
-                  da2 = (to.a2 - from.a2) * inv;
-      for (std::uint32_t i = 0; i < frames; ++i) {
-        const float t = static_cast<float>(i);
-        const float b0 = from.b0 + db0 * t, b1 = from.b1 + db1 * t, b2 = from.b2 + db2 * t;
-        const float a1 = from.a1 + da1 * t, a2 = from.a2 + da2 * t;
-        const float xi = x[i];
-        const float yi = b0 * xi + z1;
-        z1 = detail::FlushState(b1 * xi - a1 * yi + z2);
-        z2 = detail::FlushState(b2 * xi - a2 * yi);
-        y[i] = yi;
-      }
+    const float inv = 1.0f / static_cast<float>(frames);
+    for (std::uint32_t i = 0; i < frames; ++i) {
+      const float t = ramp ? static_cast<float>(i) * inv : 0.0f;
+      const float b0 = from.b0 + (to.b0 - from.b0) * t, b1 = from.b1 + (to.b1 - from.b1) * t;
+      const float b2 = from.b2 + (to.b2 - from.b2) * t, a1 = from.a1 + (to.a1 - from.a1) * t;
+      const float a2 = from.a2 + (to.a2 - from.a2) * t;
+      const float xi = x[i];
+      const float yi = b0 * xi + z1;
+      z1 = detail::FlushState(b1 * xi - a1 * yi + z2);
+      z2 = detail::FlushState(b2 * xi - a2 * yi);
+      y[i] = yi;
     }
     s.z1[c] = z1;
     s.z2[c] = z2;
+  }
+}
+
+struct SvfStep {
+  float a1, a2, a3, m0, m1, m2;
+};
+inline SvfStep MakeStep(float g, float k, float m0, float m1, float m2) noexcept {
+  SvfStep st;
+  st.a1 = 1.0f / (1.0f + g * (g + k));
+  st.a2 = g * st.a1;
+  st.a3 = g * st.a2;
+  st.m0 = m0;
+  st.m1 = m1;
+  st.m2 = m2;
+  return st;
+}
+
+}  // namespace
+
+void BiquadProcess(BiquadState& s, const BiquadCoefs& from, const BiquadCoefs& to,
+                   const float* const* in, float* const* out, std::uint32_t channels,
+                   std::uint32_t frames) noexcept {
+  if (channels > kMaxChannels) channels = kMaxChannels;
+  if (frames == 0) return;
+  if (!(to.g > 0.0f)) {
+    DirectForm(s, from.g > 0.0f ? to : from, to, in, out, channels, frames);
+  } else if (!(from.g > 0.0f) || std::memcmp(&from, &to, sizeof(BiquadCoefs)) == 0) {
+    // Constant SVF (also when switching from a direct-form design).
+    const SvfStep st = MakeStep(to.g, to.k, to.m0, to.m1, to.m2);
+    for (std::uint32_t c = 0; c < channels; ++c) {
+      const float* x = in[c];
+      float* y = out[c];
+      float i1 = s.z1[c], i2 = s.z2[c];
+      for (std::uint32_t i = 0; i < frames; ++i) {
+        const float v0 = x[i];
+        const float v3 = v0 - i2;
+        const float v1 = st.a1 * i1 + st.a2 * v3;
+        const float v2 = i2 + st.a2 * i1 + st.a3 * v3;
+        i1 = detail::FlushState(2.0f * v1 - i1);
+        i2 = detail::FlushState(2.0f * v2 - i2);
+        y[i] = st.m0 * v0 + st.m1 * v1 + st.m2 * v2;
+      }
+      s.z1[c] = i1;
+      s.z2[c] = i2;
+    }
+  } else {
+    // Ramped SVF: g, k and the mix interpolate linearly per frame (g, k > 0 on
+    // the whole path, so every intermediate filter is stable).
+    const float inv = 1.0f / static_cast<float>(frames);
+    for (std::uint32_t i = 0; i < frames; ++i) {
+      const float t = static_cast<float>(i) * inv;
+      const SvfStep st = MakeStep(from.g + (to.g - from.g) * t, from.k + (to.k - from.k) * t,
+                                  from.m0 + (to.m0 - from.m0) * t, from.m1 + (to.m1 - from.m1) * t,
+                                  from.m2 + (to.m2 - from.m2) * t);
+      for (std::uint32_t c = 0; c < channels; ++c) {
+        const float v0 = in[c][i];
+        const float i1 = s.z1[c], i2 = s.z2[c];
+        const float v3 = v0 - i2;
+        const float v1 = st.a1 * i1 + st.a2 * v3;
+        const float v2 = i2 + st.a2 * i1 + st.a3 * v3;
+        s.z1[c] = detail::FlushState(2.0f * v1 - i1);
+        s.z2[c] = detail::FlushState(2.0f * v2 - i2);
+        out[c][i] = st.m0 * v0 + st.m1 * v1 + st.m2 * v2;
+      }
+    }
+  }
+  // Non-finite state (a NaN / Inf sample went in): reset at the end of the call.
+  for (std::uint32_t c = 0; c < channels; ++c) {
+    if (!std::isfinite(s.z1[c]) || !std::isfinite(s.z2[c])) {
+      s.z1[c] = 0.0f;
+      s.z2[c] = 0.0f;
+    }
   }
 }
 

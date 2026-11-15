@@ -7,8 +7,9 @@
 //   Surround51  L R C LFE SL SR
 //   Surround71  L R C LFE BL BR SL SR
 // Azimuth: radians, 0 = front, positive = to the right (clockwise seen from
-// above), +-pi = behind. Speaker azimuths: L/R +-30 deg, C 0, SL/SR +-110 deg
-// (5.1) or +-90 deg (7.1), BL/BR +-135 deg (quad) / +-150 deg (7.1).
+// above), +-pi = behind. Speaker azimuths:
+//   Stereo, 5.1, 7.1: L/R +-30 deg, C 0;  Quad: L/R +-45 deg, BL/BR +-135 deg
+//   5.1: SL/SR +-110 deg;  7.1: SL/SR +-90 deg, BL/BR +-150 deg.
 //
 // All gains computed here are energy preserving for a point source (sum of
 // squared gains = 1) unless stated otherwise. Matrices are snd::PanMatrix
@@ -53,7 +54,10 @@ void ComputePanGains(SpeakerLayout layout, float azimuth, float spread, float* g
 
 // 3D pan matrix for a voice with `inChannels` channels: every input channel is
 // placed at azimuth + offset, offsets spread evenly over spread * 90 degrees
-// (multi-channel sources widen with spread), then panned with ComputePanGains.
+// (multi-channel sources widen with spread), then panned with ComputePanGains;
+// rows are scaled by 1 / sqrt(positioned channels). The LFE channel of a 6 / 8
+// channel source is not positioned: it goes to the LFE of `out` (gain 1) if
+// `out` has one, otherwise it is dropped.
 // Rows >= inChannels and columns >= LayoutChannels(out) are zero.
 void ComputePanMatrix(std::uint32_t inChannels, SpeakerLayout out, float azimuth, float spread,
                       PanMatrix* m) noexcept;
@@ -67,9 +71,12 @@ void ComputeStereoPanMatrix(std::uint32_t inChannels, SpeakerLayout out, float p
 // Downmix / upmix matrix between layouts (ITU-R BS.775 style):
 //   5.1 -> stereo: L' = L + 0.7071 C + 0.7071 SL, R' = R + 0.7071 C + 0.7071 SR
 //   7.1 -> 5.1: SL' = 0.7071 (SL + BL), SR' = 0.7071 (SR + BR)
-//   quad -> stereo: L' = L + 0.7071 BL ...;  any -> mono: 0.7071 L + 0.7071 R + C + 0.5 surrounds
+//   quad -> stereo: L' = L + 0.7071 BL ...
+//   any -> mono: 0.7071 L + 0.7071 R + C; surrounds 0.5 each for quad and 5.1,
+//            0.3536 each for the 7.1 sides and rears (7.1 goes through 5.1: same power)
 //   mono -> stereo: 0.7071 each; mono -> 5.1/7.1: C; stereo -> 5.1/7.1: L, R only
-// LFE is dropped unless includeLfe (then mixed at 0.7071 into L and R / C).
+// LFE: passed through when `to` has an LFE (5.1 and 7.1 both ways); otherwise
+// dropped, unless includeLfe (then mixed at 0.7071 into L and R, or into mono).
 // Same layout -> identity.
 void ComputeDownmixMatrix(SpeakerLayout from, SpeakerLayout to, PanMatrix* m,
                           bool includeLfe = false) noexcept;

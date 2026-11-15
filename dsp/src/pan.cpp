@@ -260,11 +260,24 @@ void ComputePanMatrix(std::uint32_t inChannels, SpeakerLayout out, float azimuth
   }
   // Multi-channel source: channels placed over spread * 90 degrees, each panned
   // as a point; rows scaled by 1/sqrt(n) (power preserving for uncorrelated channels).
+  // The source LFE (6 / 8 channel layouts) is not positioned: output LFE or dropped.
+  SpeakerLayout inLayout;
+  int inLfe = -1;
+  if (LayoutForChannels(inChannels, &inLayout)) inLfe = LayoutLfeChannel(inLayout);
+  const int outLfe = LayoutLfeChannel(out);
+  const std::uint32_t positioned = inChannels - (inLfe >= 0 ? 1u : 0u);
   const float width = spread * detail::kPiF * 0.5f;
-  const float scale = 1.0f / std::sqrt(static_cast<float>(inChannels));
+  const float scale = 1.0f / std::sqrt(static_cast<float>(positioned));
   const std::uint32_t n = LayoutChannels(out);
+  std::uint32_t k = 0;
   for (std::uint32_t c = 0; c < inChannels; ++c) {
-    const float off = (static_cast<float>(c) / static_cast<float>(inChannels - 1) - 0.5f) * width;
+    if (static_cast<int>(c) == inLfe) {
+      if (outLfe >= 0) m->gain[c][outLfe] = 1.0f;
+      continue;
+    }
+    const float off =
+        positioned > 1 ? (static_cast<float>(k) / static_cast<float>(positioned - 1) - 0.5f) * width : 0.0f;
+    ++k;
     PointGains(out, azimuth + off, m->gain[c]);
     for (std::uint32_t o = 0; o < n; ++o) m->gain[c][o] *= scale;
   }

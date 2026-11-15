@@ -37,7 +37,7 @@ struct Spk {
   std::uint32_t ch;
   double az;
 };
-const Spk kQuad[] = {{0, -30}, {1, 30}, {2, -135}, {3, 135}};
+const Spk kQuad[] = {{0, -45}, {1, 45}, {2, -135}, {3, 135}};  // decision (item 8): quad fronts at +-45 deg
 const Spk k51[] = {{0, -30}, {1, 30}, {2, 0}, {4, -110}, {5, 110}};
 const Spk k71[] = {{0, -30}, {1, 30}, {2, 0}, {4, -150}, {5, 150}, {6, -90}, {7, 90}};
 
@@ -125,9 +125,9 @@ SND_TEST(PanIndep, SourceOnSpeakerUsesOnlyThatSpeaker_51And71) {
   SND_CHECK_NEAR(g[1], h[1], 1e-6);
 }
 
-// pan.hpp: "Speaker azimuths: L/R +-30 deg ... BL/BR +-135 deg (quad)". The
-// quad layout places L/R at +-45 deg instead, so a source at +-30 deg is split
-// between L and R.
+// pan.hpp: quad speakers. Decision (dsp fix round, item 8): the implementation
+// (L/R at +-45 deg, BL/BR at +-135 deg) is correct and pan.hpp was corrected;
+// this test now checks those azimuths (it used +-30 deg for the fronts).
 SND_TEST(PanIndep, QuadFrontSpeakersAtDocumentedAzimuth) {
   for (const Spk& s : kQuad) {
     float g[8] = {};
@@ -234,8 +234,10 @@ SND_TEST(PanIndep, DownmixCoefficientsAsDocumented) {
     for (std::uint32_t o = 0; o < 8; ++o) SND_CHECK_NEAR(m.gain[i][o], c.gain[i][o], 1e-6);
 }
 
-// pan.hpp: "any -> mono: 0.7071 L + 0.7071 R + C + 0.5 surrounds". For 7.1 the
-// four surrounds (BL BR SL SR) get 0.3536 (= 0.5 * 0.7071) instead.
+// pan.hpp: "any -> mono". Decision (dsp fix round, item 9): 7.1 goes through 5.1,
+// so its four surrounds (BL BR SL SR) get 0.3536 each (= 0.5 * 0.7071, the same
+// power as the two 5.1 surrounds at 0.5); pan.hpp was corrected and this test
+// now checks 0.3536 (it checked 0.5).
 SND_TEST(PanIndep, Downmix71ToMonoSurroundsAtHalf) {
   snd::PanMatrix m;
   ComputeDownmixMatrix(SpeakerLayout::Surround71, SpeakerLayout::Mono, &m);
@@ -244,7 +246,7 @@ SND_TEST(PanIndep, Downmix71ToMonoSurroundsAtHalf) {
   SND_CHECK_NEAR(m.gain[2][0], 1.0, 1e-5);
   SND_CHECK_EQ(m.gain[3][0], 0.0f);
   for (std::uint32_t c = 4; c < 8; ++c)
-    SND_CHECK_MSG(std::fabs(m.gain[c][0] - 0.5f) < 1e-5f, "7.1->mono surround ch %u gain %.4f, documented 0.5", c,
+    SND_CHECK_MSG(std::fabs(m.gain[c][0] - 0.35355339f) < 1e-5f, "7.1->mono surround ch %u gain %.4f, documented 0.3536", c,
                   static_cast<double>(m.gain[c][0]));
 }
 
