@@ -15,3 +15,6 @@ compile_commands.json
 
 # Generated test output (committed references live in */test/golden/ and tests/selftest/golden/)
 *.sndg.actual
+
+# エージェントの作業ツリー
+.claude/worktrees/
