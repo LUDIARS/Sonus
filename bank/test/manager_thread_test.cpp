@@ -3,6 +3,7 @@
 // calling PumpIo, a "core" thread calling Pump / PopRegistration /
 // MarkRegistered / Release, and a game thread requesting and unloading banks.
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <cstring>
 #include <deque>
@@ -141,7 +142,12 @@ SND_TEST(BankManagerThreads, ConcurrentLoadUnloadWithRealWorkers) {
     });
     testsupport::Rng rng(0x7E57ull);
     std::vector<HandleRef> handles;
-    for (int i = 0; i < 3000; ++i) {
+    const auto start = std::chrono::steady_clock::now();
+    // At least 3000 operations and (bounded by 20 s) at least 20 registrations,
+    // so a loaded machine still exercises the full pipeline.
+    for (int i = 0; i < 3000 || (registered.load() < 20 &&
+                                 std::chrono::steady_clock::now() - start < std::chrono::seconds(20));
+         ++i) {
       const char* n = names[rng.Below(5)];
       if (rng.Below(3) != 0) {
         const HandleRef h = m->RequestLoad((std::string(n) + ".sndb").c_str());
