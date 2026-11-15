@@ -18,3 +18,17 @@ snd_add_test(integration_end_to_end_test
   SOURCES end_to_end_test.cpp
   LINK sonus_buildtool sonus_bank sonus_codec sonus_dsp sonus_io sonus_jobs sonus_platform sonus_base sonus_mocks)
 target_include_directories(integration_end_to_end_test PRIVATE ${PROJECT_SOURCE_DIR}/buildtool/test)
+
+# --- Independent tests (contract 1.1 / stage 1.5) ------------------------------------
+# buildtool output vs bank-format.md 6.3 / 6.5 with reference code written from the
+# spec (PCM bytes, WAV/IMA reference decoder, seek rows, stream files), DSPN vs dsp.
+snd_add_test(integration_indep_format11_test
+  SOURCES indep_format11_test.cpp
+  LINK sonus_buildtool sonus_bank sonus_codec sonus_dsp sonus_io sonus_jobs sonus_platform sonus_base sonus_mocks)
+target_include_directories(integration_indep_format11_test PRIVATE ${PROJECT_SOURCE_DIR}/buildtool/test)
+set_tests_properties(integration_indep_format11_test PROPERTIES TIMEOUT 600)
+# Bus effect parameters from the bank are audible (analytic lowpass response, limiter at its ceiling).
+snd_add_test(integration_indep_bus_effects11_test
+  SOURCES indep_bus_effects11_test.cpp
+  LINK sonus_buildtool sonus_bank sonus_codec sonus_dsp sonus_io sonus_jobs sonus_platform sonus_base sonus_mocks)
+target_include_directories(integration_indep_bus_effects11_test PRIVATE ${PROJECT_SOURCE_DIR}/buildtool/test)
