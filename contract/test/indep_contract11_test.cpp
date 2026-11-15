@@ -85,9 +85,7 @@ SND_TEST(IndepContract11, EffectDescLayout) {
 
 SND_TEST(IndepContract11, DeclareLanguageCommandCarriesTheName) {
   const cmd::CommandInfo* info = nullptr;
-  std::size_t count = 0;
   for (const cmd::CommandInfo& i : cmd::kCommandInfo) {
-    ++count;
     if (i.type == cmd::CommandType::DeclareLanguage) info = &i;
   }
   SND_REQUIRE(info != nullptr);
