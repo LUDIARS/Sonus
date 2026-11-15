@@ -2,7 +2,8 @@
 //   "the same bank (bankId + language) already loaded or loading from ANOTHER
 //    path fails the NEW load with SND_ERR_BANK_ALREADY_LOADED (the first one stays)".
 //
-// Defect_*: fails on purpose. Two paths of the same bank whose validations end
+// (Reported as a defect; fixed in c65fd9a. The test names keep the history.)
+// Formerly failing: Two paths of the same bank whose validations end
 // in the same Pump(): BankManager decides by SLOT INDEX (Decide() only treats
 // a Validated slot as "earlier" when it has a lower slot index), so when the
 // first request sits in a higher slot (slots are reused) the FIRST load fails
@@ -16,7 +17,7 @@ using namespace snd::bank;
 using indep11::Env;
 using indep11::Named;
 
-SND_TEST(BankDuplicate, Defect_FirstRequestedLoadMustWinWhenBothValidateTogether) {
+SND_TEST(BankDuplicate, FirstRequestedLoadMustWinWhenBothValidateTogether) {
   Env e;
   SND_REQUIRE(e.m != nullptr);
   e.fs.AddFile("filler.sndb", Named("Filler").Build());

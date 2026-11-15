@@ -117,7 +117,25 @@ SND_TEST(IndepContract11, SchemaChangesOfOneDotOne) {
   }
   SND_CHECK(s::Column(s::ColumnId::Stream_readPos).writer == s::SystemId::ExternalIo);
   SND_CHECK(s::Column(s::ColumnId::Stream_ringWrite).writer == s::SystemId::ExternalDecode);
-  // Voice and RealVoice stay Sparse (swap-remove): see the D-43 note in the report.
+  // D-43 (decision B): RealVoice is Direct (rows never move) and holds the render
+  // state a chunk writes; Voice stays Sparse and is written by Render's serial part.
   SND_CHECK(s::Table(s::TableId::Voice).indexing == s::Indexing::Sparse);
-  SND_CHECK(s::Table(s::TableId::RealVoice).indexing == s::Indexing::Sparse);
+  SND_CHECK(s::Table(s::TableId::RealVoice).indexing == s::Indexing::Direct);
+  const s::ColumnInfo& rvPlayhead = s::Column(s::ColumnId::RealVoice_playhead);
+  const s::ColumnInfo& rvStatus = s::Column(s::ColumnId::RealVoice_renderStatus);
+  SND_CHECK(rvPlayhead.table == s::TableId::RealVoice && rvStatus.table == s::TableId::RealVoice);
+  SND_CHECK(rvPlayhead.writer == s::SystemId::Render && rvStatus.writer == s::SystemId::Render);
+  SND_CHECK(rvPlayhead.temperature == s::Temperature::Hot && rvStatus.temperature == s::Temperature::Hot);
+  SND_CHECK_EQ(rvPlayhead.elemBytes, static_cast<std::uint32_t>(sizeof(snd::Playhead)));
+  SND_CHECK_EQ(rvStatus.elemBytes, static_cast<std::uint32_t>(sizeof(snd::VoiceRenderStatus)));
+  SND_CHECK(!rvPlayhead.atomic && !rvStatus.atomic);
+  // The Voice copies keep a single writer (Render) and the readers' timing.
+  SND_CHECK(s::Column(s::ColumnId::Voice_playhead).writer == s::SystemId::Render);
+  SND_CHECK(s::Column(s::ColumnId::Voice_renderStatus).writer == s::SystemId::Render);
+  SND_CHECK(s::IsDeclaredRead(s::SystemId::RunEventLogic, s::ColumnId::Voice_renderStatus));
+  // Every RealVoice column is hot and written by its creator (SelectVoices) or Render.
+  for (const s::ColumnInfo& c : s::kColumns) {
+    if (c.table != s::TableId::RealVoice) continue;
+    SND_CHECK_MSG(c.writer == s::SystemId::Render || c.writer == s::SystemId::SelectVoices, "%s", c.name);
+  }
 }

@@ -92,8 +92,8 @@ snd_add_test(bank_contract11_test SOURCES contract11_test.cpp LINK sonus_bank so
 snd_add_test(bank_indep_io11_test SOURCES indep_bank_io11_test.cpp fixture_bank.cpp LINK sonus_bank sonus_io sonus_mocks)
 find_package(Threads REQUIRED)
 target_link_libraries(bank_indep_io11_test PRIVATE Threads::Threads)
-# Fails on purpose: the duplicate-bank decision follows the slot index, not the request order.
-snd_add_test(Defect_bank_duplicate_order_test SOURCES defect_bank_duplicate_order_test.cpp fixture_bank.cpp
+# Was a defect (slot order decided duplicates); fixed in c65fd9a (decision C: request order).
+snd_add_test(bank_indep_duplicate_order_test SOURCES indep_bank_duplicate_order_test.cpp fixture_bank.cpp
   LINK sonus_bank sonus_io sonus_mocks)
 # Real IO thread + worker pool + memory FS faults; content / duplicate / generation
 # invariants checked while it runs. TSan, and ctest --repeat until-fail:20.
@@ -103,6 +103,6 @@ target_link_libraries(bank_indep_io11_thread_test PRIVATE Threads::Threads)
 # The shared validator snd/format/bank_check.hpp (D-53): truncations, flips, re-signed lies.
 snd_add_test(bank_indep_check11_test SOURCES indep_bank_check11_test.cpp fixture_bank.cpp LINK sonus_bank sonus_mocks)
 set_tests_properties(bank_indep_check11_test PROPERTIES TIMEOUT 600)
-# Fails on purpose: reloading the same path while the old slot is UNLOADING fails with BANK_ALREADY_LOADED.
-snd_add_test(Defect_bank_reload_unloading_test SOURCES defect_bank_reload_unloading_test.cpp fixture_bank.cpp
+# Was a defect; fixed in c65fd9a (decision D: wait for the old slot's Release).
+snd_add_test(bank_indep_reload_unloading_test SOURCES indep_bank_reload_unloading_test.cpp fixture_bank.cpp
   LINK sonus_bank sonus_io sonus_mocks)

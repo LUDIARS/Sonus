@@ -3,7 +3,8 @@
 // right after UnloadBank (the old slot is UNLOADING until core's epoch passes
 // and it calls Release) is not that case.
 //
-// Defect_*: fails on purpose. RequestLoad skips the UNLOADING slot of the same
+// (Reported as a defect; fixed in c65fd9a. The test names keep the history.)
+// Formerly failing: RequestLoad skips the UNLOADING slot of the same
 // path and starts a new load; Decide() then counts the UNLOADING slot as an
 // earlier copy of the bank and fails the reload with
 // SND_ERR_BANK_ALREADY_LOADED. A game that unloads and reloads a bank in the
@@ -17,7 +18,7 @@ using namespace snd::bank;
 using indep11::Env;
 using indep11::Named;
 
-SND_TEST(BankReload, Defect_ReloadOfTheSamePathWhileTheOldSlotIsUnloading) {
+SND_TEST(BankReload, ReloadOfTheSamePathWhileTheOldSlotIsUnloading) {
   Env e;
   SND_REQUIRE(e.m != nullptr);
   e.fs.AddFile("level.sndb", Named("Level").Build());

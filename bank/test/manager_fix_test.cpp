@@ -191,6 +191,17 @@ SND_TEST(BankManagerFix, RandomOperationSequences) {
             for (std::uint64_t p : popped) SND_CHECK_MSG(p != reg.bank.Value(), "seed %llu: popped twice",
                                                          static_cast<unsigned long long>(seed));
             popped.push_back(reg.bank.Value());
+            // D-50: never two registered copies of one bank (a.sndb and dup.sndb are both "A").
+            for (std::uint32_t s = 0; s < e.m->MaxBanks(); ++s) {
+              const HandleRef o{s, e.m->SlotStates()[s].generation.load()};
+              if (o.slot == reg.bank.slot) continue;
+              const PreparedBank* other = e.m->Prepared(o);
+              const snd_bank_state ost = e.m->State(o);
+              if (other != nullptr && (ost == SND_BANK_STATE_LOADED || ost == SND_BANK_STATE_UNLOADING)) {
+                SND_CHECK_MSG(other->bankId != reg.bankId, "seed %llu: bank %08x registered twice",
+                              static_cast<unsigned long long>(seed), reg.bankId);
+              }
+            }
             e.m->MarkRegistered(reg.bank);
           }
           break;
@@ -204,6 +215,14 @@ SND_TEST(BankManagerFix, RandomOperationSequences) {
       }
     }
     // Settle: every bank still LOADING must finish (no lost registration).
+    // Decision D: a load of the same bank as an UNLOADING slot waits for that
+    // slot's Release (core's part after its epoch), so release them first; after
+    // that nothing may be left waiting.
+    e.Settle(16);
+    for (std::uint32_t s = 0; s < e.m->MaxBanks(); ++s) {
+      const HandleRef h{s, e.m->SlotStates()[s].generation.load()};
+      if (e.m->State(h) == SND_BANK_STATE_UNLOADING) (void)e.m->Release(h);
+    }
     e.Settle(64);
     for (std::uint32_t s = 0; s < e.m->MaxBanks(); ++s) {
       const std::uint32_t st = e.m->SlotStates()[s].state.load();
@@ -231,14 +250,28 @@ SND_TEST(BankManagerFix, DuplicateBankCheck) {
   SND_CHECK_EQ(e.m->State(b), SND_BANK_STATE_FAILED);
   SND_CHECK_EQ(e.m->Result(b), SND_ERR_BANK_ALREADY_LOADED);  // contract 1.1
   SND_CHECK_EQ(e.m->BeginUnload(a, SND_UNLOAD_STOP_AND_UNLOAD, false), SND_OK);
-  // While the first is UNLOADING, the copy still counts as a duplicate.
-  e.m->RequestLoad("copy/dup.sndb");
+  // Contract 1.1 decision D (D-50): while the first is UNLOADING, a new load of the
+  // same bank (here the failed copy, retried in place) is read and validated but
+  // WAITS for the old slot's Release: it neither fails nor registers meanwhile.
+  const HandleRef b2 = e.m->RequestLoad("copy/dup.sndb");
+  SND_CHECK(b2.slot == b.slot && b2.generation == b.generation);
   e.Settle();
-  SND_CHECK_EQ(e.m->State(b), SND_BANK_STATE_FAILED);
+  SND_CHECK_EQ(e.m->State(b), SND_BANK_STATE_LOADING);
+  SND_CHECK(e.m->Result(b) != SND_ERR_BANK_ALREADY_LOADED);
+  SND_CHECK_EQ(e.m->State(a), SND_BANK_STATE_UNLOADING);
+  SND_CHECK(e.m->FindBank(HashId("Dup")).slot == a.slot);  // only the old copy is registered
   SND_CHECK_EQ(e.m->Release(a), SND_OK);
-  e.m->RequestLoad("copy/dup.sndb");
   e.Settle();
   SND_CHECK_EQ(e.m->State(b), SND_BANK_STATE_LOADED);
+  // The same PATH while its old slot is UNLOADING: also waits, then loads.
+  SND_CHECK_EQ(e.m->BeginUnload(b, SND_UNLOAD_STOP_AND_UNLOAD, false), SND_OK);
+  const HandleRef b3 = e.m->RequestLoad("copy/dup.sndb");
+  SND_CHECK(!b3.IsNone() && b3.slot != b.slot);
+  e.Settle();
+  SND_CHECK_EQ(e.m->State(b3), SND_BANK_STATE_LOADING);
+  SND_CHECK_EQ(e.m->Release(b), SND_OK);
+  e.Settle();
+  SND_CHECK_EQ(e.m->State(b3), SND_BANK_STATE_LOADED);
   // Cancelled first load does not block.
   Env f(JobMode::Manual);
   f.fs.AddFile("dup.sndb", img);
