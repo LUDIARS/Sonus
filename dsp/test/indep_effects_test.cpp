@@ -137,9 +137,22 @@ SND_TEST(EffectsIndep, ExtremeParametersSilenceFiniteTail) {
           Run(fx, a.cp(), a.p(), 2, 256, pbp);
           loud = std::max(loud, MaxAbs(a, 256));
         }
-        // 3. Silence until the tail ends (<= 60 s), then 1 s of exact silence.
+        // 3. Silence until the tail ends, then 1 s of exact silence. Limit: 60 s,
+        // or for the feedback delays the theoretical tail (effects.hpp: about
+        // Delay * ln(peak / 1e-5) / -ln(gain)) for a loop peak of 10 (> any peak
+        // seen here), plus two delays and one ring length, times 1.5.
+        double limitSec = 60.0;
+        if (kind == EffectKind::Echo || kind == EffectKind::Delay) {
+          const double gain = EffectParamValue(fx.state(), 1);
+          const double maxDelay = EffectParamValue(fx.state(), kind == EffectKind::Echo ? 4 : 6) * 1e-3;
+          const double delay = std::max(std::min(static_cast<double>(EffectParamValue(fx.state(), 0)) * 1e-3, maxDelay), 1.0 / 48000.0);
+          if (gain > 0.0) {
+            const double passes = std::log(10.0 / 1e-5) / -std::log(gain);
+            limitSec = std::max(limitSec, 1.5 * (delay * (passes + 2.0) + maxDelay));
+          }
+        }
         std::uint32_t blocks = 0;
-        while (!EffectIsTailDone(fx.state()) && blocks < 48000u * 240u / 256u) {
+        while (!EffectIsTailDone(fx.state()) && blocks < static_cast<std::uint32_t>(48000.0 * limitSec / 256.0)) {
           a.Zero();
           Run(fx, a.cp(), a.p(), 2, 256, pbp);
           loud = std::max(loud, MaxAbs(a, 256));
@@ -155,18 +168,17 @@ SND_TEST(EffectsIndep, ExtremeParametersSilenceFiniteTail) {
         const char* pname = p >= 0 ? info.params[p].name : "(defaults)";
         const char* vname[7] = {"min", "max", "below min", "above max", "NaN", "+Inf", "-Inf"};
         // Bound: 100 x the input peak (+40 dB) covers every documented gain stage.
-        // Echo Decay = 1 is a lossless loop: its tail never ends by definition
-        // (spec gap, reported separately); only boundedness is required there.
-        const bool lossless = kind == EffectKind::Echo && p == 1 && (viaBlock ? pv[1] : fx.params[1]) >= 1.0f;
-        const bool okNow = out == 0.0f && std::isfinite(loud) && loud < 100.0f && (lossless || (tail && after == 0.0f));
-        if (lossless) snd::test::Note("echo Decay=%s: tail done %d after %.0f s (lossless loop)", vname[variant], tail ? 1 : 0,
-                                      blocks * 256.0 / 48000.0);
+        // Decision (dsp fix round): loop gains are capped at 0.98, so every tail ends.
+        const bool okNow = out == 0.0f && std::isfinite(loud) && loud < 100.0f && tail && after == 0.0f;
+        if (limitSec > 60.0)
+          snd::test::Note("%s %s=%s: tail done after %.1f s (limit %.1f s from the parameters)", Short(kind), pname,
+                          p >= 0 ? vname[variant] : "-", blocks * 256.0 / 48000.0, limitSec);
         if (!okNow) {
           if (bad++ < 25)
-            SND_CHECK_MSG(false, "%s %s=%s (%s): silence->%g, loud peak %g, tail %s after %.1f s, after-tail peak %g", Short(kind),
-                          pname, p >= 0 ? vname[variant] : "-", viaBlock ? "ParamBlock" : "bank", static_cast<double>(out),
-                          static_cast<double>(loud), tail ? "done" : "NOT done", blocks * 256.0 / 48000.0,
-                          static_cast<double>(after));
+            SND_CHECK_MSG(false, "%s %s=%s (%s): silence->%g, loud peak %g, tail %s after %.1f s (limit %.1f s), after-tail peak %g",
+                          Short(kind), pname, p >= 0 ? vname[variant] : "-", viaBlock ? "ParamBlock" : "bank",
+                          static_cast<double>(out), static_cast<double>(loud), tail ? "done" : "NOT done",
+                          blocks * 256.0 / 48000.0, limitSec, static_cast<double>(after));
         }
       }
     }
@@ -201,15 +213,25 @@ SND_TEST(EffectsIndep, NeutralSettingsPassTheSignal) {
   for (const Case& cs : cases) {
     Fx fx(cs.kind, 2, 256, 48000, cs.ov);
     SND_REQUIRE(fx.ok);
-    Audio a(2, 256), ref(2, 256);
+    // Compared with the input delayed by the reported latency (decision: the
+    // pitch shifter reports WindowMs / 2 and delays its dry part by as much).
+    const std::uint32_t lat = EffectLatencyFrames(fx.state());
+    constexpr std::uint32_t kTotal = 100 * 256;
+    Audio all(2, kTotal), a(2, 256);
+    Material(all, 0, kTotal, 0.9f);
     float worst = 0.0f;
-    for (int b = 0; b < 100; ++b) {
-      Material(a, static_cast<std::uint64_t>(b) * 256u, 256, 0.9f);
-      Material(ref, static_cast<std::uint64_t>(b) * 256u, 256, 0.9f);
+    for (std::uint32_t b = 0; b < 100; ++b) {
+      for (std::uint32_t c = 0; c < 2; ++c) std::memcpy(a.ch(c), all.ch(c) + b * 256, 256 * sizeof(float));
       Run(fx, a.cp(), a.p(), 2, 256);
-      for (std::uint32_t c = 0; c < 2; ++c) worst = std::max(worst, dsptest::MaxAbsDiff(a.ch(c), ref.ch(c), 256));
+      for (std::uint32_t c = 0; c < 2; ++c)
+        for (std::uint32_t i = 0; i < 256; ++i) {
+          const std::uint32_t t = b * 256 + i;
+          const float want = t >= lat ? all.ch(c)[t - lat] : 0.0f;
+          worst = std::max(worst, std::fabs(a.ch(c)[i] - want));
+        }
     }
-    SND_CHECK_MSG(worst <= cs.tol, "%s %s: differs from the input by %g", Short(cs.kind), cs.what, static_cast<double>(worst));
+    SND_CHECK_MSG(worst <= cs.tol, "%s %s: differs from the input delayed by %u frames by %g", Short(cs.kind), cs.what, lat,
+                  static_cast<double>(worst));
   }
 }
 
@@ -400,11 +422,6 @@ SND_TEST(EffectsIndep, ResumeAfterTailAndResetMatchFreshInstance) {
                                    kind == EffectKind::Limiter || kind == EffectKind::Normalize;
       if (mode == 0 && phaseOrEnvelope) {
         snd::test::Note("%-11s resume after tail vs fresh: max diff %g (state carried over silence)", Short(kind),
-                        static_cast<double>(diff));
-        continue;
-      }
-      if (mode == 1 && (kind == EffectKind::Chorus || kind == EffectKind::Flanger)) {
-        snd::test::Note("%-11s after EffectReset vs fresh: max diff %g (LFO phase is not reset; spec does not say)", Short(kind),
                         static_cast<double>(diff));
         continue;
       }

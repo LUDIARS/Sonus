@@ -140,10 +140,15 @@ SND_TEST(PanIndep, QuadFrontSpeakersAtDocumentedAzimuth) {
   }
 }
 
-// Multi-channel sources: row structure, total power 1, LFE output column 0.
+// Multi-channel sources. Decision (dsp fix round): the LFE channel of a 6 / 8
+// channel source is not panned; it goes to the LFE of `out` with gain 1 if `out`
+// has one, otherwise it is dropped. The positioned rows keep total power 1, never
+// feed the output LFE, and are identical at spread 0.
 SND_TEST(PanIndep, PanMatrixStructure) {
   for (SpeakerLayout out : kLayouts) {
+    const int outLfe = LayoutLfeChannel(out);
     for (std::uint32_t in = 1; in <= 8; ++in) {
+      const int inLfe = (in == 6 || in == 8) ? 3 : -1;
       for (float spread : {0.0f, 0.4f, 1.0f}) {
         for (double az : {0.0, 33.0, -100.0, 180.0}) {
           snd::PanMatrix m;
@@ -152,16 +157,28 @@ SND_TEST(PanIndep, PanMatrixStructure) {
           for (std::uint32_t i = 0; i < 8; ++i)
             for (std::uint32_t o = 0; o < 8; ++o) {
               if (i >= in || o >= LayoutChannels(out)) SND_CHECK_EQ(m.gain[i][o], 0.0f);
-              p += static_cast<double>(m.gain[i][o]) * m.gain[i][o];
+              if (static_cast<int>(i) != inLfe) p += static_cast<double>(m.gain[i][o]) * m.gain[i][o];
             }
-          SND_CHECK_MSG(std::fabs(p - 1.0) < 1e-5, "%u ch -> %s spread %.1f az %.0f: total power %.6f", in, LName(out),
+          SND_CHECK_MSG(std::fabs(p - 1.0) < 1e-5, "%u ch -> %s spread %.1f az %.0f: positioned power %.6f", in, LName(out),
                         static_cast<double>(spread), az, p);
-          const int lfe = LayoutLfeChannel(out);
-          if (lfe >= 0)
-            for (std::uint32_t i = 0; i < in; ++i) SND_CHECK_EQ(m.gain[i][lfe], 0.0f);
+          if (outLfe >= 0)
+            for (std::uint32_t i = 0; i < in; ++i)
+              if (static_cast<int>(i) != inLfe)
+                SND_CHECK_MSG(m.gain[i][outLfe] == 0.0f, "%u ch -> %s: positioned row %u feeds the LFE (%.4f)", in, LName(out), i,
+                              static_cast<double>(m.gain[i][outLfe]));
+          if (inLfe >= 0) {
+            for (std::uint32_t o = 0; o < 8; ++o) {
+              const float want = (static_cast<int>(o) == outLfe) ? 1.0f : 0.0f;
+              SND_CHECK_MSG(m.gain[inLfe][o] == want, "%u ch -> %s: LFE row column %u = %.4f, expected %.0f", in, LName(out), o,
+                            static_cast<double>(m.gain[inLfe][o]), static_cast<double>(want));
+            }
+          }
           if (spread == 0.0f && in > 1) {
-            for (std::uint32_t i = 1; i < in; ++i)
-              for (std::uint32_t o = 0; o < 8; ++o) SND_CHECK_NEAR(m.gain[i][o], m.gain[0][o], 1e-6);
+            const std::uint32_t first = inLfe == 0 ? 1u : 0u;
+            for (std::uint32_t i = 0; i < in; ++i) {
+              if (static_cast<int>(i) == inLfe) continue;
+              for (std::uint32_t o = 0; o < 8; ++o) SND_CHECK_NEAR(m.gain[i][o], m.gain[first][o], 1e-6);
+            }
           }
         }
       }
@@ -193,11 +210,9 @@ SND_TEST(PanIndep, DownmixCoefficientsAsDocumented) {
   expect(m, 6, 2, {{0, 0, 1}, {1, 1, 1}, {2, 0, h}, {2, 1, h}, {4, 0, h}, {5, 1, h}}, "5.1->stereo");
   ComputeDownmixMatrix(L::Surround51, L::Stereo, &m, true);
   expect(m, 6, 2, {{0, 0, 1}, {1, 1, 1}, {2, 0, h}, {2, 1, h}, {3, 0, h}, {3, 1, h}, {4, 0, h}, {5, 1, h}}, "5.1->stereo +LFE");
-  // (LFE -> LFE between layouts that both have one: pan.hpp's "LFE is dropped
-  // unless includeLfe" does not say; the implementation keeps it. Spec gap.)
+  // LFE passes through when `to` has an LFE (pan.hpp, dsp fix round).
   ComputeDownmixMatrix(L::Surround71, L::Surround51, &m);
-  expect(m, 8, 6, {{0, 0, 1}, {1, 1, 1}, {2, 2, 1}, {3, 3, m.gain[3][3]}, {4, 4, h}, {6, 4, h}, {5, 5, h}, {7, 5, h}}, "7.1->5.1");
-  snd::test::Note("7.1->5.1 without includeLfe: LFE->LFE gain %.3f", static_cast<double>(m.gain[3][3]));
+  expect(m, 8, 6, {{0, 0, 1}, {1, 1, 1}, {2, 2, 1}, {3, 3, 1}, {4, 4, h}, {6, 4, h}, {5, 5, h}, {7, 5, h}}, "7.1->5.1");
   ComputeDownmixMatrix(L::Surround71, L::Surround51, &m, true);
   expect(m, 8, 6, {{0, 0, 1}, {1, 1, 1}, {2, 2, 1}, {3, 3, 1}, {4, 4, h}, {6, 4, h}, {5, 5, h}, {7, 5, h}}, "7.1->5.1 +LFE");
   ComputeDownmixMatrix(L::Quad, L::Stereo, &m);

@@ -494,21 +494,39 @@ SND_TEST(ResamplerIndep, LongRunPositionAccumulation) {
   }
 }
 
-// resampler.hpp: "Fractional source position of the next output frame relative
-// to the next unread input frame ... usually in (-1, 1]". Measured here.
+// resampler.hpp (decision of the dsp fix round): after a call whose last output
+// frame used ratio r and look-ahead R = ResamplerLookaheadFrames(q, ...),
+// PendingOffset is in [r - R - 1, r - R) (unless the call consumed no input).
+// Ramps from 0.3 to 4.8 cross the sinc kernel switch at ratio 4; R is taken at the
+// call's largest ratio (the ratio the call chooses its kernel from).
 SND_TEST(ResamplerIndep, PendingOffsetRangeAsDocumented) {
   for (ResamplerQuality q : kQualities) {
     Guarded g(q, 1);
     std::vector<std::vector<float>> out(1);
-    double lo = 1e9, hi = -1e9;
-    for (int b = 0; b < 50; ++b) {
-      g.Run(SineSig(100.0, 48000.0), out, 64, 0.5f + 0.03f * b, 0.5f + 0.03f * (b + 1));
+    std::uint32_t bad = 0, checked = 0;
+    double worstBelow = 0.0, worstAbove = 0.0;
+    for (int b = 0; b < 120; ++b) {
+      const float r0 = 0.3f + 0.075f * static_cast<float>(b % 60 + (b >= 60 ? 60 - 2 * (b % 60) : 0));
+      const float r1 = (b % 7 == 3) ? r0 : r0 + 0.075f;
+      const std::uint32_t n = 1 + (static_cast<std::uint32_t>(b) * 37u) % 200u;
+      const std::uint32_t used = g.Run(SineSig(100.0, 48000.0), out, n, r0, r1);
+      if (used == 0) continue;
+      const double rLast = r0 + (static_cast<double>(r1) - r0) * (n - 1) / n;
+      const double R = ResamplerLookaheadFrames(q, std::max(r0, r1));
       const double off = ResamplerPendingOffset(g.st());
-      lo = std::min(lo, off);
-      hi = std::max(hi, off);
+      const double lo = rLast - R - 1.0, hi = rLast - R;
+      ++checked;
+      if (off < lo - 1e-6 || off >= hi + 1e-6) {
+        worstBelow = std::min(worstBelow, off - lo);
+        worstAbove = std::max(worstAbove, off - hi);
+        if (bad++ < 5)
+          SND_CHECK_MSG(false, "%s ratio %.3f -> %.3f (%u frames): offset %.4f outside [%.4f, %.4f) (R = %.0f)", QName(q),
+                        static_cast<double>(r0), static_cast<double>(r1), n, off, lo, hi, R);
+      }
     }
-    snd::test::Note("%s: PendingOffset range [%.3f, %.3f]", QName(q), lo, hi);
-    SND_CHECK_MSG(lo > -1.0 && hi <= 1.0, "%s: PendingOffset in [%.3f, %.3f], documented (-1, 1]", QName(q), lo, hi);
+    snd::test::Note("%s: %u calls checked, %u outside the documented range", QName(q), checked, bad);
+    SND_CHECK_EQ(bad, 0u);
+    SND_CHECK_EQ(g.violations, 0u);
   }
 }
 
