@@ -1,9 +1,13 @@
 // platform module (design.md 12.1): output devices, thread priority and work groups, clocks, FTZ/DAZ, SIMD abstraction.
 // Dependencies (frozen, root CMakeLists.txt): base.
 //
-// Stage-0 stub. The owner of this module adds its headers under
-// platform/include/snd/platform/ and its sources under platform/src/. Only types from the
-// contract (contract/), base and platform may appear in headers here.
+// Headers owned by the base/platform/jobs team (all under snd/platform/):
+//   clock.hpp          MonotonicNanoseconds (RT-safe), SleepFor/SleepUntil (non-RT)
+//   thread.hpp         Thread (pthread), ThreadPriority / PriorityResult (SCHED_FIFO with fallback)
+//   semaphore.hpp      Semaphore created up front (futex): the RT-allowed wake/wait primitive
+//   cpu.hpp            CpuFeatures, SetFlushDenormals / ScopedFlushDenormals (FTZ/DAZ)
+//   output_device.hpp  TimerOutputDevice (silent, timer driven), CreateOutputDevice factory
+// The SIMD abstraction (simd*.hpp) is owned by the dsp team.
 #ifndef SND_PLATFORM_PLATFORM_MODULE_HPP
 #define SND_PLATFORM_PLATFORM_MODULE_HPP
 
