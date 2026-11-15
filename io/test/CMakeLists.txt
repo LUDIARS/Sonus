@@ -23,4 +23,7 @@ snd_add_test(io_adv_test
   SOURCES
     io_model_test.cpp
     io_scheduler_edge_test.cpp
+    stream_planner_model_test.cpp
+    stream_pool_edge_test.cpp
+    default_fs_edge_test.cpp
   LINK sonus_io sonus_jobs sonus_mocks)
