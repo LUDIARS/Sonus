@@ -1,0 +1,732 @@
+// core internals: the state of one System (tables, queues, system-private
+// state) and the declarations shared by the system implementations.
+//
+// Ownership inside core follows the schema (3.2): every table column is
+// written by one system only, through schema::WriteColumn<System, Column> /
+// ReadColumn (see access.hpp). Data that is not a table column is grouped by
+// the system that writes it (the "*Priv" structs below); a few of those are
+// read by later systems of the same block, which is noted at each field
+// (proposed as schema columns in the stage-2 report).
+#ifndef SND_CORE_SRC_CORE_IMPL_HPP
+#define SND_CORE_SRC_CORE_IMPL_HPP
+
+#include <atomic>
+#include <cstddef>
+#include <cstdint>
+
+#include "id_map.hpp"
+#include "snd/bank/bank_manager.hpp"
+#include "snd/bank/prepared.hpp"
+#include "snd/base/arena.hpp"
+#include "snd/base/handle.hpp"
+#include "snd/base/mpmc.hpp"
+#include "snd/base/mutex.hpp"
+#include "snd/base/notify.hpp"
+#include "snd/base/pool.hpp"
+#include "snd/base/sparse_set.hpp"
+#include "snd/base/spsc.hpp"
+#include "snd/core/core.hpp"
+#include "snd/dsp/effects.hpp"
+#include "snd/dsp/filter.hpp"
+#include "snd/dsp/meter.hpp"
+#include "snd/dsp/pan.hpp"
+#include "snd/dsp/resampler.hpp"
+#include "snd/internal/commands.hpp"
+#include "snd/internal/notify.hpp"
+#include "snd/internal/schema.hpp"
+#include "snd/jobs/rt_workers.hpp"
+
+namespace snd::core {
+
+namespace bf = ::snd::bank_format;
+namespace bk = ::snd::bank;
+
+inline constexpr std::uint32_t kNoSlot = kInvalidSlot;
+inline constexpr std::uint16_t kNoBank = kUnresolvedBank;
+inline constexpr std::uint32_t kMaxBusEffects = 16;       // effects processed per bus
+inline constexpr std::uint32_t kMaxNestedDepth = 4;       // nested events (4.2)
+inline constexpr std::uint32_t kUnloadWhenUnused = 0x100u;  // core-internal BankUnload mode (language switch, 10.4)
+inline constexpr std::uint32_t kMaxLanguageSwitches = 64;
+
+// ---------------------------------------------------------------------------
+// Configuration derived once at Create
+// ---------------------------------------------------------------------------
+struct Cfg {
+  std::uint32_t sampleRate, blockFrames, outChannels;
+  std::uint32_t maxReal, fadeReserve, realTotal, maxVirtual;
+  std::uint32_t maxPlaybacks, maxEmitters, maxListeners, maxTransports, maxReservations, maxStreams;
+  std::uint32_t maxBanks, maxUserBuffers, maxGlobalParams, paramOverflowBlocks;
+  std::uint32_t emitterParamRows, playbackParamRows;
+  std::uint32_t voicesPerChunk, maxChunks;
+  std::uint32_t busCap, catCap, snapCap, groupCap, paramDefCap, duckCap;
+  std::uint32_t arenaBytes, reserveBytes, arenasPerThread, maxThreads;
+  std::uint32_t criticalPriority, overflowParamSlots, eventRingCapacity;
+  std::uint32_t shortFadeFrames, maxVoiceChannels, maxVoicesPerPlay;
+  std::uint32_t extrapolateFrames, loadTargetPercent, lodDownBlocks, lodUpBlocks;
+  float maxPitchRatio, stealHysteresisDb, shortFadeSeconds;
+  std::uint32_t listenerMode, seed;
+  std::size_t resamplerSlotBytes;
+};
+
+// ---------------------------------------------------------------------------
+// Game side: command producers (2.1, commands.hpp)
+// ---------------------------------------------------------------------------
+struct ArenaView {
+  cmd::ArenaHeader* header = nullptr;
+  std::uint8_t* normal = nullptr;
+  std::uint8_t* reserve = nullptr;
+  cmd::OverflowFallback fallback{};
+};
+
+struct Producer {
+  std::atomic<std::uint32_t> active{0};  // 1 while a thread owns it
+  base::ArenaCycle cycle;
+  ArenaView* arenas = nullptr;  // [arenasPerThread]
+  std::uint32_t seq = 0;        // producer private
+  std::uint64_t publishSeq = 0;
+  std::uint32_t index = 0;
+};
+
+struct RejectedPlay {
+  std::uint64_t handle;
+  std::uint32_t oneShot;
+  std::uint32_t reserved;
+};
+
+// Source services (D-08): requests posted by RT code, drained by PumpServices.
+struct PostedJob {
+  JobDesc job;
+  JobLane lane;
+  std::uint32_t reserved;
+};
+struct JobWrap {  // trampoline record: counts the job for the bank epoch (3.3)
+  JobDesc original;
+  System::Impl* owner;
+  std::uint32_t index;
+  std::uint32_t epochBucket;
+  std::uint32_t done;  // the wrapper's own done counter (submitted desc)
+  std::uint32_t reserved;
+};
+
+// Audio -> game bank events.
+enum class BankEventKind : std::uint32_t { Release = 0, UnloadRefused = 1, RegisterFailed = 2 };
+struct BankEvent {
+  BankEventKind kind;
+  std::uint32_t slot;
+  std::uint32_t generation;
+  std::uint32_t reserved;
+};
+
+// ---------------------------------------------------------------------------
+// Banks: core's record of a registered bank (prepared on the owner thread at
+// PopRegistration, read by the audio thread after the BankRegister command).
+// ---------------------------------------------------------------------------
+struct EffectInstance {
+  Id type = 0;
+  const snd_dsp_effect* plugin = nullptr;  // Config.plugins entry, or null (standard)
+  void* state = nullptr;
+  float* params = nullptr;   // current values (ParamBlock start = end)
+  std::uint32_t paramCount = 0;
+  std::uint32_t channels = 0;
+  std::uint32_t ok = 0;      // 1 when initialised
+  std::uint32_t reserved = 0;
+};
+
+struct EventState {  // RunEventLogic private, per EVNT row (4.2, 4.4)
+  std::uint32_t instances;
+  std::uint32_t cursor;
+  std::uint32_t lastChoice;
+  std::uint32_t reserved;
+  std::uint64_t shuffleMask;
+  ClockSample lastStartClock;
+  ClockSample comboClock;
+};
+
+struct BankRecord {
+  HandleRef handle{};
+  const bk::PreparedBank* prepared = nullptr;
+  const bk::BankView* view = nullptr;
+  Id bankId = 0;
+  std::uint32_t languageId = 0;
+  // Event index, sorted by id (binary search, apply time).
+  std::uint32_t eventCount = 0;
+  std::uint32_t* eventIds = nullptr;
+  std::uint32_t* eventRows = nullptr;
+  // Sources (stable while registered).
+  std::uint32_t assetCount = 0;
+  source::SourceAsset* assets = nullptr;
+  std::uint32_t synthCount = 0;
+  source::OscillatorParams* osc = nullptr;
+  source::NoiseParams* noise = nullptr;
+  // Mappings bank row -> core slot (filled by ApplyCommands at registration).
+  std::uint32_t busCount = 0, catCount = 0, snapCount = 0, groupCount = 0, duckCount = 0;
+  std::uint32_t* busSlot = nullptr;
+  std::uint32_t* catSlot = nullptr;
+  std::uint32_t* snapSlot = nullptr;
+  std::uint32_t* groupSlot = nullptr;
+  std::uint32_t* duckSlot = nullptr;
+  std::uint32_t* busChannels = nullptr;  // resolved channel count per BUSS row (D-54 rule)
+  // RunEventLogic per-event state.
+  EventState* events = nullptr;
+  // Effects (EFFX rows), instance memory from MemTag::DspPool.
+  std::uint32_t effectCount = 0;
+  EffectInstance* effects = nullptr;
+  std::uint8_t* dspMemory = nullptr;
+  std::uint64_t dspBytes = 0;
+  void* memory = nullptr;  // one block for everything above except dspMemory
+};
+
+enum class BankAudioState : std::uint8_t { Free = 0, Registered = 1, Unloading = 2, AwaitEpoch = 3 };
+struct BankAudio {  // ApplyCommands private, per bank slot
+  BankRecord* rec = nullptr;
+  std::uint32_t generation = 0;
+  BankAudioState state = BankAudioState::Free;
+  std::uint32_t unloadMode = 0;
+  std::uint32_t discardSent = 0;
+  std::uint32_t pendingUnload = 0;   // BankUnload arrived before BankRegister
+  std::uint32_t pendingMode = 0;
+  std::uint32_t pendingGeneration = 0;
+  BlockIndex unregisterBlock = 0;
+  std::uint32_t jobEpoch = 0;
+  std::uint32_t order = 0;           // registration order (lookup precedence)
+};
+
+// ---------------------------------------------------------------------------
+// Shared objects unified by id (A1-16). Written by ApplyCommands at bank
+// registration / unregistration; read by later systems (definitions only).
+// ---------------------------------------------------------------------------
+struct BusDef {
+  Id id = 0;
+  std::uint32_t refCount = 0;
+  std::uint16_t defBank = kNoBank;
+  std::uint16_t reserved = 0;
+  std::uint32_t defRow = 0;
+  std::uint32_t channels = 2;
+  std::uint32_t flags = 0;
+  float baseVolumeDb = 0;
+  std::uint32_t depth = 0;
+};
+struct CatDef {
+  Id id = 0;
+  std::uint32_t refCount = 0;
+  std::uint32_t parentSlot = kNoSlot;
+  std::uint32_t flags = 0;
+  float baseVolumeDb = 0;
+};
+struct SnapDef {
+  Id id = 0;
+  std::uint32_t refCount = 0;
+  std::uint16_t defBank = kNoBank;
+  std::uint16_t reserved = 0;
+  std::uint32_t defRow = 0;
+};
+struct GroupDef {
+  Id id = 0;
+  std::uint32_t refCount = 0;
+  std::uint32_t maxVoices = 0;
+  std::uint32_t stealMode = 0;  // 0 oldest, 1 quietest, 2 lowest priority, 3 never
+};
+struct ParamDef {
+  Id id = 0;
+  std::uint32_t refCount = 0;
+  std::uint32_t kind = 0;
+  std::uint32_t scopeMask = 7;
+  float minValue = 0, maxValue = 1, defaultValue = 0, rampRate = 0;
+};
+struct DuckRule {
+  std::uint32_t refCount = 0;
+  std::uint32_t kind = 0;          // 0 sidechain (bus), 1 rule (category)
+  std::uint32_t sourceSlot = kNoSlot;
+  std::uint32_t targetBus = kNoSlot;
+  Id sourceId = 0, targetId = 0;
+  float amountDb = 0, attackMs = 10, releaseMs = 200, thresholdDb = 0;
+};
+
+// ---------------------------------------------------------------------------
+// ApplyCommands private state
+// ---------------------------------------------------------------------------
+struct ParamChain {  // per owner (emitter / playback slot)
+  std::uint32_t count = 0;
+  std::uint32_t tail = kNoSlot;
+  std::uint32_t firstBlock = kNoSlot;  // overflow blocks chained through blockNext
+  std::uint32_t lastBlock = kNoSlot;
+};
+struct DynamicDesc {  // what a dynamic playback plays (Playback.dynamicSource.descIndex = playback slot)
+  snd_synth_desc synth;
+  snd_input_desc input;
+  HandleRef userBuffer;
+  Id bus;
+  std::uint32_t kind;  // SourceKind
+};
+struct LiveOverride {
+  std::uint32_t kind;
+  Id id;
+  std::uint32_t value;
+  std::uint32_t used;
+};
+struct ApplyPriv {
+  ParamChain* emitterChain = nullptr;   // [maxEmitters]
+  ParamChain* playbackChain = nullptr;  // [maxPlaybacks]
+  base::IndexFreeList emitterBlocks, playbackBlocks;
+  std::uint32_t* emitterBlockNext = nullptr;
+  std::uint32_t* playbackBlockNext = nullptr;
+  IdMap globalParams;                   // param id -> ParamGlobal slot (read by later systems)
+  std::uint32_t* globalParamStorage = nullptr;
+  base::IndexFreeList globalFree;
+  DynamicDesc* dynamic = nullptr;       // [maxPlaybacks]
+  std::uint32_t* implicitEmitter = nullptr;  // [maxPlaybacks] PlayAt emitter slot
+  std::uint32_t* implicitOwnerGen = nullptr; // [maxEmitters] playback generation owning an implicit emitter, 0 none
+  std::uint32_t* userBufferRefs = nullptr;   // [maxUserBuffers]
+  std::uint32_t* userBufferDestroy = nullptr;// [maxUserBuffers] 1 = destroy requested
+  std::uint32_t reservationCursor = 0;
+  std::uint64_t reservationSeq = 0;
+  std::uint32_t playCounter = 0;
+  Id language = 0;
+  std::uint32_t registrationOrder = 0;
+  BankAudio* banks = nullptr;           // [maxBanks]
+  LiveOverride* overrides = nullptr;    // [maxLiveOverrides]
+  std::uint32_t overrideCount = 0;
+  std::uint32_t suspended = 0;
+  std::uint32_t graphDirty = 0;
+};
+
+// ---------------------------------------------------------------------------
+// RunEventLogic private state
+// ---------------------------------------------------------------------------
+// Core-internal PlaybackRequest flag bits (above the contract's, D-17 request column).
+inline constexpr std::uint32_t kRequestRejectReservationFull = 1u << 16;  // no reservation slot: end REJECTED
+
+enum PlaybackPrivFlags : std::uint32_t {
+  kPbStarted = 1u << 0,
+  kPbPausedUser = 1u << 1,
+  kPbPausedCategory = 1u << 2,
+  kPbStopping = 1u << 3,
+  kPbEndPending = 1u << 4,   // end once the last voice is gone
+  kPbInstanceCounted = 1u << 5,
+  kPbMusic = 1u << 6,
+  kPbPausedState = 1u << 7,  // currently in Paused state (voices paused)
+};
+struct PlaybackPriv {
+  std::uint32_t flags;
+  std::uint32_t endReason;
+  std::uint32_t endDetail;
+  std::uint32_t rng;
+  std::uint32_t categorySlot;
+  std::uint32_t generation;
+  float fadeTarget;     // fade gain the fade is heading to (0 stop/pause, 1 resume)
+  float fadeRate;       // gain per block (> 0)
+  ClockSample stopClock;   // scheduled stop from a fired reservation
+  float stopFadeSeconds;
+  std::uint32_t voiceListHead;  // first voice slot of the playback (linked through VoiceStatic.nextInPlayback)
+};
+
+enum VoiceStaticFlags : std::uint32_t {
+  kVs3D = 1u << 0,
+  kVsLayer = 1u << 1,
+  kVsSourceRate = 1u << 2,   // source-rate kind: core resamples
+  kVsFadeIn = 1u << 3,
+  kVsSourceStarted = 1u << 4,
+  kVsReleased = 1u << 5,     // source released
+  kVsWasReal = 1u << 6,      // RunEventLogic's view of the previous block's realSlot
+  kVsPaused = 1u << 7,
+  kVsMusic = 1u << 8,
+  kVsStopped = 1u << 9,      // stop requested (fade then end)
+};
+// Static per-voice values set by RunEventLogic at creation; read by
+// EvaluateDspParams, SelectVoices, BuildRenderList and Render (proposed schema
+// columns: Voice.clipGainDb, Voice.pitchCents, Voice.pan, Voice.channels ...).
+struct VoiceStatic {
+  std::uint32_t generation;  // Voice row generation
+  std::uint32_t flags;       // VoiceStaticFlags
+  std::uint32_t channels;    // source channels
+  std::uint32_t categorySlot;
+  std::uint32_t eventRow;
+  std::uint32_t trackRow;
+  float gainDb;              // clip volume + random volume
+  float pitchCents;          // clip pitch + random pitch
+  float pan;                 // random pan [-1, 1]
+  float lowpassHz;           // random filter (lowpass target), 0 = none
+  float linearGain;          // synth / user buffer volume
+  float sourceRate;          // source-rate kinds: frames per second of the source
+  float musicGain;           // music SetGain target (1 default)
+  float musicGainStep;       // per block
+  float fadeInSeconds;       // clip fade-in
+  std::uint32_t nextInPlayback;  // voice list of a playback
+  std::uint32_t musicTag;
+  ClockSample firstClock;    // creation clock (oldest steal)
+  std::uint64_t startFrame;  // first source frame (Render initialises Voice.playhead with it)
+};
+
+struct StartBatch {  // RunEventLogic: Start() requests per kind, issued once per block
+  source::SourceStartRequest* req = nullptr;
+  source::SourceStartResult* res = nullptr;
+  std::uint32_t count = 0;
+};
+
+// Work RunEventLogic hands to the next block's ApplyCommands (rows it may not create:
+// child playbacks of action tracks / music PlayEvent, parameter and snapshot actions).
+enum class DeferredKind : std::uint32_t { Play = 0, StopEvent = 1, SetParam = 2, ApplySnapshot = 3 };
+struct Deferred {
+  DeferredKind kind;
+  Id id;
+  HandleRef handle;    // Play: the child playback; SetParam: the owner playback
+  EventRef ref;        // Play
+  SlotIndex emitter;   // Play
+  std::uint32_t emitterGen;
+  float value;
+  std::uint32_t reserved;
+};
+inline constexpr std::uint32_t kVoicePausedFlag = 1u << 4;  // core-internal VoiceLifecycle.flags bit (paused)
+
+struct EventPriv {
+  PlaybackPriv* pb = nullptr;      // [maxPlaybacks]
+  VoiceStatic* vs = nullptr;       // [maxVirtual] (read by later systems, see above)
+  base::IndexFreeList voiceFree;
+  std::uint32_t* groupLive = nullptr;  // [groupCap] live voices per limit group
+  StartBatch start[static_cast<std::size_t>(SourceKind::Count)];
+  SlotIndex* releaseSlots = nullptr;   // per kind scratch [maxVirtual]
+  source::SourceControlOp* controls = nullptr;  // [maxVirtual]
+  std::uint32_t* controlKind = nullptr;
+  std::uint32_t controlCount = 0;
+  music::MusicInput* musicInputs = nullptr;
+  std::uint32_t musicInputCount = 0, musicInputCap = 0;
+  music::MusicVoiceRequest* musicRequests = nullptr;
+  music::MusicVoiceResult* musicResults = nullptr;
+  std::uint32_t musicRequestCap = 0;
+  Deferred* deferred = nullptr;  // [deferredCap]
+  std::uint32_t deferredCount = 0, deferredCap = 0;
+  std::uint32_t* releaseKind = nullptr;  // [maxVirtual]
+  std::uint32_t releaseCount = 0;
+};
+
+// ---------------------------------------------------------------------------
+// EvaluateDspParams / SelectVoices / Render / Publish private
+// ---------------------------------------------------------------------------
+struct LogicPriv {  // EvaluateLogicParams: generation seen per row slot (new rows start at the default)
+  std::uint32_t* globalGen = nullptr;
+  std::uint32_t* emitterGen = nullptr;
+  std::uint32_t* playbackGen = nullptr;
+};
+
+struct DspPriv {
+  float* duckDb = nullptr;           // [duckCap] current reduction (dB, <= 0)
+  std::uint32_t* catPlaying = nullptr;  // [catCap] voices playing per category this block
+  float* catGainPrev = nullptr;
+};
+
+struct SelectPriv {
+  base::IndexFreeList realFree;
+  std::uint32_t* voiceGen = nullptr;     // [realTotal] generation of the voice in the real slot
+  std::int32_t* fadeRemaining = nullptr; // [realTotal] frames left of a steal fade
+  std::uint32_t fadingCount = 0;
+  std::uint32_t assignSeq = 0;
+};
+
+// Per-item render inputs (chunk-owned, written in Render's serial part).
+struct ItemInput {
+  std::uint32_t kind;        // SourceKind
+  std::uint32_t flags;       // ItemFlags
+  std::uint32_t channels;    // source channels
+  std::uint32_t outChannels; // bus channels
+  std::uint32_t segment;     // accumulator segment within the chunk
+  std::uint32_t frameOffset; // first frame written (sample-accurate start)
+  std::uint32_t frameEnd;    // frames after this are silent (sample-accurate stop)
+  float ratio0, ratio1;      // source-rate: source frames per output frame
+  float gain0, gain1;        // total gain ramp across [frameOffset, blockFrames)
+  FilterTarget filter;
+  std::uint32_t filterActive;
+  std::uint32_t reserved;
+  PanMatrix pan;             // target matrix (unscaled) at block end
+  // Outputs (chunk writes):
+  float tail[kMaxChannels];  // last output frame per bus channel (late-chunk fade, D-15)
+  VoiceRenderStatus status;
+};
+enum ItemFlags : std::uint32_t {
+  kItemSourceRate = 1u << 0,
+  kItemInitPan = 1u << 1,  // first block of this assignment: no pan ramp
+};
+
+struct ChunkSeg {
+  std::uint32_t bus;
+  std::uint32_t channels;
+};
+struct ChunkInfo {
+  std::uint32_t firstItem;
+  std::uint32_t itemCount;
+  std::uint32_t segCount;
+  std::uint32_t reserved;
+};
+struct RenderSet {
+  source::RenderItem* items = nullptr;  // [realTotal]
+  ItemInput* inputs = nullptr;          // [realTotal]
+  ChunkInfo* chunks = nullptr;          // [maxChunks]
+  ChunkSeg* segs = nullptr;             // [maxChunks * voicesPerChunk]
+  float* accum = nullptr;               // [maxChunks * voicesPerChunk * kMaxChannels * blockFrames]
+  std::uint32_t itemCount = 0;
+  std::uint32_t chunkCount = 0;
+  std::uint32_t inUseLate = 0;          // a late chunk of this set may still run
+};
+
+struct RenderPriv {
+  std::uint8_t* resamplerPool = nullptr;  // [realTotal] slots of resamplerSlotBytes (D-44)
+  std::uint32_t* lastAssign = nullptr;    // [realTotal] assignSeq seen at the last init
+  std::uint32_t* stateChannels = nullptr; // [realTotal]
+  float* fade = nullptr;                  // [realTotal] assignment fade gain at the end of the last block
+  float* tail = nullptr;                  // [realTotal * kMaxChannels] last output (D-15 fade of held voices)
+  std::uint32_t* tailBus = nullptr;       // [realTotal]
+  std::uint32_t* tailChannels = nullptr;
+  std::uint32_t* busGen = nullptr;        // [busCap] generation of the bus row seen (new rows: reset state)
+  std::uint32_t* voiceGen = nullptr;      // [maxVirtual] generation of the voice row initialised
+  RenderSet sets[2];
+  std::uint32_t lastParallelSet = 1;
+  std::uint32_t currentSet = 0;
+  std::uint32_t parallel = 0;
+  float* busBuf = nullptr;                // [busCap * kMaxChannels * blockFrames]
+  std::uint32_t* busOrder = nullptr;      // [busCap] processing order (children, sends first)
+  std::uint32_t busOrderCount = 0;
+  dsp::PeakMeterState* peak = nullptr;    // [busCap]
+  dsp::RmsMeterState* rms = nullptr;      // [busCap]
+  dsp::LoudnessMeterState* loudness = nullptr;  // master only
+  std::uint32_t masterSlot = kNoSlot;
+  float* outBuf = nullptr;                // [kMaxChannels * blockFrames] master output
+  std::uint32_t lateTotal = 0;
+  std::uint32_t lod = 0;
+};
+
+struct TransportPriv {  // core's UpdateTransport when no music system is present
+  std::uint64_t* seenSeq = nullptr;  // [maxReservations] Reservation.sequence initialised
+  std::uint32_t* transportGen = nullptr;  // [maxTransports] row generation initialised
+};
+inline constexpr std::uint8_t kFireTransportGone = 0xFEu;  // core-internal FireEntry::lateRuleApplied
+
+struct PublishPriv {
+  std::uint32_t* transportGen = nullptr;  // [maxTransports] generation seen live last block
+  std::uint32_t* playbackGen = nullptr;   // [3 * maxPlaybacks] generation written per snapshot frame
+};
+
+// Frame lists (one block; the producer system clears them).
+struct EndedPlayback {
+  SlotIndex slot;
+  std::uint32_t generation;
+  std::uint32_t reason;
+  std::uint32_t detail;
+};
+struct Released {
+  SlotIndex slot;
+  std::uint32_t generation;
+};
+
+}  // namespace snd::core
+
+// ===========================================================================
+// System::Impl
+// ===========================================================================
+namespace snd::core {
+
+struct System::Impl {
+  CoreDesc desc{};
+  snd_config config{};
+  Cfg cfg{};
+  IAllocator* alloc = nullptr;
+  std::uint64_t serial = 0;
+
+  // Allocation log (freed in reverse order by Destroy).
+  struct Allocation {
+    void* p;
+    MemTag tag;
+    std::size_t bytes;
+  };
+  Allocation* allocations = nullptr;
+  std::uint32_t allocationCount = 0, allocationCap = 0;
+
+  // --- game side ---------------------------------------------------------------
+  Producer* producers = nullptr;  // [maxThreads]
+  base::HandleAllocator playbackSlots, emitterSlots, transportSlots, userBufferSlots;
+  std::atomic<std::uint8_t>* oneShot = nullptr;  // [maxPlaybacks]
+  base::MpmcRing<RejectedPlay> rejected;
+  std::atomic<std::uint64_t>* eventPriority = nullptr;  // [eventPriorityEntries] (id << 32) | priority
+  std::uint32_t eventPriorityMask = 0;
+  source::UserBufferControl* userBuffers = nullptr;  // [maxUserBuffers]
+  snd_callbacks callbacks{};
+  std::atomic<std::uint32_t> rejectedCommands{0};
+  std::atomic<std::uint32_t> reserveOverflows{0};
+  base::Mutex gameMutex;  // language switches, pending registrations (non-RT threads only)
+  bk::LanguageSwitch* languagePlan = nullptr;  // [kMaxLanguageSwitches]
+  struct PendingSwitch {
+    HandleRef oldBank;
+    HandleRef newBank;
+  };
+  PendingSwitch* switches = nullptr;  // [kMaxLanguageSwitches]
+  std::uint32_t switchCount = 0;
+  cmd::BankRegister* pendingRegs = nullptr;  // [maxBanks] registrations not recorded yet (arena full)
+  std::uint32_t pendingRegCount = 0;
+  BankRecord** records = nullptr;  // [maxBanks] written by the owner thread, read by ApplyCommands
+  struct ReleaseCandidate {  // unregistered banks waiting for source jobs (owner thread)
+    std::uint32_t slot, generation, ticket, used;
+  };
+  ReleaseCandidate* releaseCandidates = nullptr;  // [maxBanks]
+
+  // --- banks ---------------------------------------------------------------------
+  bk::BankManager* banks = nullptr;
+  notify::BankSlotState* bankStates = nullptr;
+  base::SpscRing<BankEvent> bankEvents;  // audio -> owner
+  std::atomic<std::uint64_t> dspReserved{0};
+
+  // --- services ------------------------------------------------------------------
+  base::MpmcRing<PostedJob> jobQueue;
+  base::MpmcRing<source::IoReadRequest> ioQueue;
+  JobWrap* jobWraps = nullptr;
+  base::ConcurrentIndexFreeList jobWrapFree;
+  std::atomic<std::uint32_t> jobEpoch{0};
+  std::atomic<std::uint32_t> jobsInFlight[2];
+  std::atomic<std::uint32_t> droppedJobs{0}, droppedIo{0};
+  base::Mutex serviceMutex;  // serialises PumpServices (epoch flips)
+  source::SourceServices services{};
+
+  // --- notifications ---------------------------------------------------------------
+  notify::EndFlags endFlags{};
+  notify::ReleaseFlags emitterRelease{}, transportRelease{}, userBufferRelease{};
+  notify::EventRing* eventRing = nullptr;
+  notify::SnapshotTripleBuffer* triple = nullptr;
+
+  // --- audio side ------------------------------------------------------------------
+  schema::Tables tables{};
+  BlockIndex block = 0;
+  ClockSample clock = 0;
+  base::LinearArena frameArena;
+  jobs::RtWorkerPool rt;
+  bool blockQuiescent = true;
+  source::ISourceKind* kinds[static_cast<std::size_t>(SourceKind::Count)] = {};
+  music::IMusicSystem* music = nullptr;
+  music::FireList fire{};
+  music::MusicFrame musicFrame{};
+
+  // Shared definitions (A1-16), written by ApplyCommands.
+  BusDef* busDefs = nullptr;
+  CatDef* catDefs = nullptr;
+  SnapDef* snapDefs = nullptr;
+  GroupDef* groupDefs = nullptr;
+  ParamDef* paramDefs = nullptr;
+  DuckRule* duckRules = nullptr;
+  IdMap busMap, catMap, snapMap, groupMap, paramDefMap;
+  base::IndexFreeList busFree, catFree, snapFree, groupFree, paramDefFree, duckFree;
+  std::uint32_t globalCategory = kNoSlot;  // Category row of SND_ID_NONE (D-30)
+
+  ApplyPriv ap;
+  LogicPriv lp;
+  EventPriv ev;
+  DspPriv dp;
+  SelectPriv sel;
+  RenderPriv rd;
+  TransportPriv tp;
+  PublishPriv pub;
+
+  // Frame lists.
+  EndedPlayback* ended = nullptr;      // [maxPlaybacks] RunEventLogic -> Publish
+  std::uint32_t endedCount = 0;
+  Released* releasedEmitters = nullptr;     // [maxEmitters] ApplyCommands -> Publish
+  std::uint32_t releasedEmitterCount = 0;
+  Released* releasedUserBuffers = nullptr;  // [maxUserBuffers]
+  std::uint32_t releasedUserBufferCount = 0;
+  notify::EventRecord* events = nullptr;    // [eventRingCapacity] any system -> Publish
+  std::uint32_t eventCount = 0, eventCap = 0;
+
+  // Statistics (audio thread).
+  snd_stats stats{};
+  BlockProfile profile{};
+  std::uint64_t timeSumNs = 0;
+  std::uint32_t timeSamples = 0;
+  std::uint32_t lodOver = 0, lodUnder = 0;
+  std::uint32_t streamStalls = 0;
+
+  // Render(out, frames) FIFO.
+  float* fifo = nullptr;  // [blockFrames * outChannels]
+  std::uint32_t fifoPos = 0, fifoFill = 0;
+};
+
+// ---------------------------------------------------------------------------
+// Shared helpers (core_util.cpp)
+// ---------------------------------------------------------------------------
+using Impl = System::Impl;
+
+// Event records for Publish (dropped and counted when the frame list is full).
+void PostEvent(Impl& im, notify::EventType type, std::uint32_t a, std::uint64_t object, std::uint16_t detail = 0,
+               std::uint32_t b = 0) noexcept;
+inline void PostWarning(Impl& im, snd_result code, std::uint32_t detail, std::uint64_t object) noexcept {
+  PostEvent(im, notify::EventType::Warning, static_cast<std::uint32_t>(code), object,
+            static_cast<std::uint16_t>(detail));
+}
+inline void PostError(Impl& im, snd_result code, std::uint32_t detail, std::uint64_t object) noexcept {
+  PostEvent(im, notify::EventType::Error, static_cast<std::uint32_t>(code), object,
+            static_cast<std::uint16_t>(detail));
+}
+
+// Bank lookups (audio thread).
+const BankRecord* RegisteredBank(const Impl& im, std::uint16_t bankSlot) noexcept;
+EventRef ResolveEvent(const Impl& im, Id event) noexcept;
+
+// Curve evaluation (CURV/CPNT of `bank`), x clamped to the end points.
+float EvaluateCurve(const bk::BankView& v, std::uint32_t curveRow, float x) noexcept;
+
+// Deterministic random (xorshift32); returns [0, 1).
+inline float NextRandom(std::uint32_t& state) noexcept {
+  std::uint32_t x = state != 0u ? state : 0x9E3779B9u;
+  x ^= x << 13;
+  x ^= x >> 17;
+  x ^= x << 5;
+  state = x;
+  return static_cast<float>(x >> 8) * (1.0f / 16777216.0f);
+}
+
+inline float DbToGain(float db) noexcept { return dsp::DbToGain(db); }
+
+// Value of a TimedRamp at `clock`.
+inline float RampValue(const TimedRamp& r, ClockSample clock) noexcept {
+  if (r.durationSamples == 0u || clock >= r.startClock + r.durationSamples) return r.to;
+  if (clock <= r.startClock) return r.from;
+  const float t = static_cast<float>(clock - r.startClock) / static_cast<float>(r.durationSamples);
+  return r.from + (r.to - r.from) * t;
+}
+
+// Systems (one per file, design 3.2 order).
+void ApplyCommands(Impl& im) noexcept;
+void UpdateTransport(Impl& im) noexcept;
+void EvaluateLogicParams(Impl& im) noexcept;
+void RunEventLogic(Impl& im) noexcept;
+void Compute3D(Impl& im) noexcept;
+void EvaluateDspParams(Impl& im) noexcept;
+void SelectVoices(Impl& im) noexcept;
+void BuildRenderList(Impl& im) noexcept;
+void Render(Impl& im) noexcept;
+void MixBuses(Impl& im) noexcept;  // part of Render (serial)
+void Publish(Impl& im) noexcept;
+
+// Bank registration (ApplyCommands) and its owner-thread preparation.
+bool PrepareBankRecord(Impl& im, const cmd::BankRegister& reg) noexcept;  // owner thread
+void FreeBankRecord(Impl& im, std::uint32_t slot) noexcept;               // owner thread
+void ApplyBankRegister(Impl& im, const cmd::BankRegister& reg) noexcept;  // audio thread
+void UnregisterBank(Impl& im, std::uint32_t slot) noexcept;               // audio thread
+void RebuildBusGraph(Impl& im) noexcept;                                  // audio thread
+
+// Game-side producer helpers.
+std::uint32_t CurrentProducer(const Impl& im) noexcept;  // kNoSlot when not registered
+bool IsOwnerThread(const Impl& im) noexcept;
+bool TlsRegister(const Impl& im, std::uint32_t producer) noexcept;
+void TlsUnregister(const Impl& im) noexcept;
+
+// Row removal moving every column of the swapped row (row lifecycle, not a column write).
+base::rows::RemoveResult RemovePlaybackRow(schema::Tables& t, SlotIndex slot) noexcept;
+base::rows::RemoveResult RemoveVoiceRow(schema::Tables& t, SlotIndex slot) noexcept;
+base::rows::RemoveResult RemoveEmitterRow(schema::Tables& t, SlotIndex slot) noexcept;
+base::rows::RemoveResult RemoveParamGlobalRow(schema::Tables& t, SlotIndex slot) noexcept;
+base::rows::RemoveResult RemoveParamEmitterRow(schema::Tables& t, SlotIndex slot) noexcept;
+base::rows::RemoveResult RemoveParamPlaybackRow(schema::Tables& t, SlotIndex slot) noexcept;
+base::rows::RemoveResult RemoveBusRow(schema::Tables& t, SlotIndex slot) noexcept;
+base::rows::RemoveResult RemoveTransportRow(schema::Tables& t, SlotIndex slot) noexcept;
+base::rows::RemoveResult RemoveReservationRow(schema::Tables& t, SlotIndex slot) noexcept;
+base::rows::RemoveResult RemoveCategoryRow(schema::Tables& t, SlotIndex slot) noexcept;
+base::rows::RemoveResult RemoveSnapshotRow(schema::Tables& t, SlotIndex slot) noexcept;
+
+}  // namespace snd::core
+
+#endif  // SND_CORE_SRC_CORE_IMPL_HPP
