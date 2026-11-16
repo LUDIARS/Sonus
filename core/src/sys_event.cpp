@@ -666,7 +666,9 @@ bool StartPlayback(Ctx& c, std::uint32_t d, ClockSample startClock) noexcept {
     const std::uint32_t grp = v.Column<bk::col::EVNT_limitGroup>()[row];
     sc.groupSlot = grp < br->groupCount ? br->groupSlot[grp] : kNoSlot;
     sc.threeD = (flags & bf::kEvent3D) != 0u && sc.emitter != kNoSlot;
-    StartEventTracks(c, sc, *br, row, kNoSlot, 0u, rng);
+    // Music events are driven by the music system (segments, 8.3): it starts their voices
+    // through RunMusicLogic. Without one, their tracks play like any event.
+    if ((flags & bf::kEventMusic) == 0u || im.music == nullptr) StartEventTracks(c, sc, *br, row, kNoSlot, 0u, rng);
     es.lastStartClock = c.clock + 1u;
     ++es.instances;
     pp.flags |= kPbInstanceCounted;
