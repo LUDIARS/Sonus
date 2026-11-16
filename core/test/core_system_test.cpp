@@ -261,3 +261,37 @@ SND_TEST(CoreRt, RenderPathHasNoRtViolations) {
   }
   SND_CHECK_EQ(snd::test::rt::UnexpectedTotal(), 0u);
 }
+
+SND_TEST(CoreBanks, LanguageSwitchKeepsPlayingVoicesAndResolvesTheNewLanguage) {
+  Harness h;
+  auto voiceBank = [](const char* lang, float level, std::size_t frames) {
+    TestBank b = BasicBank();
+    b.assets.push_back(TAsset{HashId("line"), 1, 48000, Constant(frames, level), 0, 0});
+    b.events.push_back(SimpleEvent("Line", 0));
+    return b.Build(HashId("Voice"), HashId(lang));
+  };
+  SND_CHECK_EQ(h.sys->DeclareLanguage("en"), SND_OK);
+  SND_CHECK_EQ(h.sys->DeclareLanguage("ja"), SND_OK);
+  SND_CHECK_EQ(h.sys->SetLanguage(HashId("fr")), SND_ERR_NOT_FOUND);
+  h.fs.AddFile("Voice.ja.sndb", voiceBank("ja", 0.2f, 480000));
+  const snd_bank_handle en = h.Load("Voice.en.sndb", voiceBank("en", 0.1f, 20000));
+  SND_REQUIRE_EQ(h.sys->GetBankState(en), SND_BANK_STATE_LOADED);
+  const snd_playback_handle old = h.sys->Play(HashId("Line"), snd_emitter_handle{0}, nullptr);
+  h.Steps(2);
+  SND_CHECK_EQ(h.sys->SetLanguage(HashId("ja")), SND_OK);
+  h.Clear();
+  h.Steps(10);
+  // The playing English line keeps playing (10.4) ...
+  SND_CHECK_EQ(h.ends.CountOf(old), 0u);
+  SND_CHECK_NEAR(h.At(9 * 256, 0), 0.1f * kCenter, 1e-4f);
+  // ... while new plays resolve to the Japanese bank.
+  const snd_playback_handle neu = h.sys->Play(HashId("Line"), snd_emitter_handle{0}, nullptr);
+  h.Clear();
+  h.Steps(3);
+  SND_CHECK_NEAR(h.At(2 * 256 + 10, 0), (0.1f + 0.2f) * kCenter, 1e-4f);
+  // Once the old line ended, the English bank goes away.
+  h.Steps(100);
+  SND_CHECK(h.ends.Has(old, SND_END_COMPLETED));
+  SND_CHECK_EQ(h.sys->GetBankState(en), SND_BANK_STATE_UNLOADED);
+  SND_CHECK_EQ(h.ends.CountOf(neu), 0u);
+}
