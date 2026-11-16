@@ -71,12 +71,13 @@ struct Ends {
 class Harness {
  public:
   explicit Harness(const snd_config& cfg = SmallConfig(), snd::core::CoreLimits limits = {},
-                   snd::music::IMusicSystem* music = nullptr, std::uint32_t claimDelayUs = 0) {
+                   snd::music::IMusicSystem* music = nullptr, std::uint32_t claimDelayUs = 0,
+                   snd::IAllocator* allocator = nullptr) {
     kinds_.kinds[static_cast<int>(snd::SourceKind::Sample)] = &sample;
     kinds_.kinds[static_cast<int>(snd::SourceKind::Oscillator)] = &osc;
     snd::core::CoreDesc d;
     d.config = &cfg;
-    d.allocator = &snd::base::DefaultAllocator();
+    d.allocator = allocator != nullptr ? allocator : &snd::base::DefaultAllocator();
     d.sources = &kinds_;
     d.music = music;
     d.jobs = &jobs;
@@ -141,6 +142,20 @@ class Harness {
 
  private:
   snd::source::SourceKindSet kinds_{};
+};
+
+// Counts every allocation (initialisation vs steady state, 3.3).
+class CountingAllocator final : public snd::IAllocator {
+ public:
+  void* Allocate(std::size_t bytes, std::size_t align, snd::MemTag tag) override {
+    allocations.fetch_add(1, std::memory_order_relaxed);
+    return snd::base::DefaultAllocator().Allocate(bytes, align, tag);
+  }
+  void Free(void* p, snd::MemTag tag) override {
+    frees.fetch_add(1, std::memory_order_relaxed);
+    snd::base::DefaultAllocator().Free(p, tag);
+  }
+  std::atomic<std::uint64_t> allocations{0}, frees{0};
 };
 
 // Standard test bank: master bus (row 1, stereo) <- "Sfx" (row 0), and the
