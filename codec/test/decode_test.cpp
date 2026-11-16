@@ -318,7 +318,9 @@ SND_TEST(Decode, InvalidHeadersFailCleanly) {
   t = base; t.block_align = 3; add(t, snd::codec::HeaderError::BadBlockAlign);
   t = base; t.block_align = 8; t.frames_per_packet = 3; add(t, snd::codec::HeaderError::BadFramesPerPacket);
   t = base; t.total_frames = UINT64_MAX; t.pre_skip = 1; add(t, snd::codec::HeaderError::FrameCountOverflow);
-  t = base; t.codec = SND_CODEC_OPUS; add(t, snd::codec::HeaderError::CodecUnavailable);
+  // Opus (D-56): built in unless SND_CODEC_OPUS=OFF; a PCM-shaped header is not a valid Opus header.
+  t = base; t.codec = SND_CODEC_OPUS;
+  add(t, snd::codec::OpusAvailable() ? snd::codec::HeaderError::BadBlockAlign : snd::codec::HeaderError::CodecUnavailable);
   t = base; t.codec = snd::Fourcc('X', 'Y', 'Z', 'W'); add(t, snd::codec::HeaderError::UnknownCodec);
   t = adp; t.block_align = 0; add(t, snd::codec::HeaderError::BadBlockAlign);
   t = adp; t.block_align = 8; add(t, snd::codec::HeaderError::BadBlockAlign);           // header only

@@ -49,13 +49,16 @@ SND_TEST(Registry, BuiltinsAndOpus) {
   SND_CHECK(why == LookupFailure::None);
   SND_CHECK(reg.Find(SND_CODEC_PCM_S16) != nullptr);
   SND_CHECK(reg.Find(SND_CODEC_ADPCM) != nullptr);
-  SND_CHECK(reg.Find(SND_CODEC_OPUS, &why) == nullptr);
-  SND_CHECK(why == LookupFailure::OpusUnavailable);
+  // Opus is built in (D-56) unless the build has SND_CODEC_OPUS=OFF.
+  const bool opus = snd::codec::OpusAvailable();
+  SND_CHECK(reg.Find(SND_CODEC_OPUS, &why) == snd::codec::BuiltinCodec(SND_CODEC_OPUS));
+  SND_CHECK(why == (opus ? LookupFailure::None : LookupFailure::OpusUnavailable));
+  SND_CHECK((snd::codec::BuiltinCodec(SND_CODEC_OPUS) != nullptr) == opus);
   SND_CHECK(reg.Find(snd::Fourcc('N', 'O', 'P', 'E'), &why) == nullptr);
   SND_CHECK(why == LookupFailure::NotRegistered);
   SND_CHECK(snd::codec::LookupFailureName(LookupFailure::OpusUnavailable)[0] != '?');
   SND_CHECK(snd::codec::ValidateHeader(snd::CodecHeader{SND_CODEC_OPUS, 2, 48000, 960, 1000, 312, 3840, 0, 0, nullptr}) ==
-            snd::codec::HeaderError::CodecUnavailable);
+            (opus ? snd::codec::HeaderError::BadCodecSetup : snd::codec::HeaderError::CodecUnavailable));
   SND_CHECK(CodecRegistry::FindForSource(&reg, SND_CODEC_ADPCM) == snd::codec::BuiltinCodec(SND_CODEC_ADPCM));
   SND_CHECK(CodecRegistry::FindForSource(nullptr, SND_CODEC_ADPCM) == snd::codec::BuiltinCodec(SND_CODEC_ADPCM));
 }

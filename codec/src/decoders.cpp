@@ -16,8 +16,8 @@ namespace {
 
 using detail::DecoderState;
 
-constexpr std::uint32_t kFailedRuntime = 1u;  // cleared by Seek / Init
-constexpr std::uint32_t kFailedHeader = 2u;   // cleared by Init with a valid header only
+using detail::kFailedHeader;
+using detail::kFailedRuntime;
 
 struct Output {
   float* const* dst;
@@ -316,6 +316,7 @@ ICodec* BuiltinCodec(std::uint32_t fourcc) noexcept {
     case SND_CODEC_PCM_F32: return &gPcmF32;
     case SND_CODEC_PCM_S16: return &gPcmS16;
     case SND_CODEC_ADPCM: return &gAdpcm;
+    case SND_CODEC_OPUS: return detail::OpusCodec();  // nullptr without SND_CODEC_OPUS
     default: return nullptr;
   }
 }
