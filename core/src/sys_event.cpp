@@ -936,6 +936,18 @@ void RunMusic(Ctx& c) noexcept {
 void FlushSourceCalls(Ctx& c) noexcept {
   Impl& im = c.im;
   schema::Tables& t = c.t;
+  // Release first (batched per kind): a source slot freed this block may be reused by a Start below.
+  if (im.ev.releaseCount != 0u) {
+    SlotIndex* tmp = im.frameArena.AllocateArray<SlotIndex>(im.ev.releaseCount);
+    for (std::size_t k = 0; k < static_cast<std::size_t>(SourceKind::Count) && tmp != nullptr; ++k) {
+      std::uint32_t n = 0;
+      for (std::uint32_t i = 0; i < im.ev.releaseCount; ++i) {
+        if (im.ev.releaseKind[i] == k) tmp[n++] = im.ev.releaseSlots[i];
+      }
+      if (n != 0u && im.kinds[k] != nullptr) im.kinds[k]->Release(tmp, n);
+    }
+    im.ev.releaseCount = 0;
+  }
   // Start, once per kind (5.1: never per voice).
   for (std::size_t k = 0; k < static_cast<std::size_t>(SourceKind::Count); ++k) {
     StartBatch& b = im.ev.start[k];
@@ -966,18 +978,6 @@ void FlushSourceCalls(Ctx& c) noexcept {
       }
     }
     b.count = 0;
-  }
-  // Release (batched per kind).
-  if (im.ev.releaseCount != 0u) {
-    SlotIndex* tmp = im.frameArena.AllocateArray<SlotIndex>(im.ev.releaseCount);
-    for (std::size_t k = 0; k < static_cast<std::size_t>(SourceKind::Count) && tmp != nullptr; ++k) {
-      std::uint32_t n = 0;
-      for (std::uint32_t i = 0; i < im.ev.releaseCount; ++i) {
-        if (im.ev.releaseKind[i] == k) tmp[n++] = im.ev.releaseSlots[i];
-      }
-      if (n != 0u && im.kinds[k] != nullptr) im.kinds[k]->Release(tmp, n);
-    }
-    im.ev.releaseCount = 0;
   }
   // Control (pause / resume / virtualise), batched per kind.
   if (im.ev.controlCount != 0u) {
