@@ -146,8 +146,8 @@ std::uint32_t AdpcmFramesPerBlock(std::uint32_t channels, std::uint32_t blockAli
 // returned as {first playable frame of the packet, byte offset within the codec
 // data}. A packet that starts inside pre_skip maps to {0, 0} (Seek(0) restarts
 // the stream). False if the header is invalid, out is null, target >=
-// total_frames (past the playable range), or the byte offset does not fit in
-// 64 bits.
+// total_frames (past the playable range), the byte offset does not fit in
+// 64 bits, or the packets are variable-size (Opus: use the seek table).
 struct PacketPosition {
   std::uint64_t frame;
   std::uint64_t byteOffset;

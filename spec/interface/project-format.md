@@ -38,7 +38,7 @@
 | --- | --- |
 | `formatVersion` | 1 |
 | `languages` | 言語名の配列（例 `["ja", "en"]`）。言語バンクはこの言語ごとに作る。`.` `/` `\` を含まない |
-| `platforms` | `{ "default": {...}, "LNX_": {...}, ... }`。波形変換の既定（`codec`, `sampleRate`, `channels`）とストリームの `sectorAlign`（既定 2048） |
+| `platforms` | `{ "default": {...}, "LNX_": {...}, ... }`。波形変換の既定（`codec`, `sampleRate`, `channels`, `opus`）とストリームの `sectorAlign`（既定 2048） |
 
 ### bank
 
@@ -83,12 +83,29 @@
 | `languages` | `{ "ja": "パス", ... }`。言語バンクでだけ使える（各言語のバンクにその言語の素材が入る） |
 | `loadForm` | `pcm`（既定）/ `compressed` / `decompressCache` / `stream`（6.2） |
 | `loop` | `{start, end}`（元素材のフレーム、end は含まない）。無ければ WAV の `smpl` チャンク |
-| `convert` | `{ "default": {codec, sampleRate, channels}, "<機種>": {...} }`。優先順は project.platforms.default < project.platforms[機種] < convert.default < convert[機種]。`codec` 既定 `PC16`、`sampleRate`/`channels` 0 = 元のまま |
+| `convert` | `{ "default": {codec, sampleRate, channels, opus}, "<機種>": {...} }`。優先順は project.platforms.default < project.platforms[機種] < convert.default < convert[機種]。`codec` 既定 `PC16`（`PCMF` / `PC16` / `ADPC` / `OPUS`）、`sampleRate`/`channels` 0 = 元のまま。`OPUS` は常に 48000 Hz（下の「Opus の設定」） |
 | `stallPolicy` | `time`（既定）/ `sound` → `kAssetStallSoundPriority` |
 | `virtualReturn` | `continue` / `restart` / `never` → `ASST.flags` |
 | `ioPriority` | `normal` / `music` / `voice` → `ASST.flags` |
 | `preloadMs` | ストリームのプリロード長（既定 100、0 = 無し → その素材を鳴らす Event に「プライム要」） |
 | `seekIntervalMs` | シーク表の間隔（既定: pcm 以外 100、pcm は表なし） |
+
+**Opus の設定**（`codec` が `OPUS` のとき。CONTRACTS.md D-57・D-60、bank-format.md §6.5）: `convert` / `platforms` の各層に
+`"opus": {bitrate, complexity, vbr, signal, independentFrames}` を書ける。`codec` などと同じ優先順で、**メンバごとに**上の層が下の層を上書きする
+（`platforms.default` でビットレートを、アセットの `convert.default` で `signal` だけを、のように分けて書ける）。
+
+| メンバ | 既定 | 内容 |
+| --- | --- | --- |
+| `bitrate` | 0 | 全チャンネル合計のビット毎秒。0 = 64000 × チャンネル数。0 以外は 6000〜4080000（範囲外はエラー。チャンネル数あたり 510000 を超える値は符号化時にエラー） |
+| `complexity` | 10 | 0〜10（libopus の `OPUS_SET_COMPLEXITY`。範囲外はエラー） |
+| `vbr` | `vbr` | `vbr` / `constrained` / `cbr` |
+| `signal` | `auto` | `auto` / `music` / `voice`（libopus の `OPUS_SET_SIGNAL`。`voice` と低いビットレートで SILK が選ばれる） |
+| `independentFrames` | true | パケット間の予測をしない（`OPUS_SET_PREDICTION_DISABLED`）。true ならシーク・ループの再開がサンプル単位で正確（CELT）。false は同じビットレートで少し高音質だが、シーク後は収束するだけ |
+
+- `sampleRate` に 48000 以外（0 以外）を指定すると警告して無視し、48 kHz に変換して符号化する（`--werror` ではエラー）。
+- `channels` は 1〜8。3 以上は WAV のチャンネル順（L R C LFE BL BR SL SR）とみなしてサラウンドとして符号化する。
+- 設定とエンコーダの版（libopus の版を含む）は差分ビルドのキャッシュキーに入る。
+- `SND_CODEC_OPUS=OFF` でビルドしたツールでは `OPUS` はエラー（エンコーダが無い）。
 
 ### event → `EVNT`, `TRAK`, `CLIP`, `ACTN`, `CURV`, `CPNT`, `SYNP`（音楽は 2.x）
 

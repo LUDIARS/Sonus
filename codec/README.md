@@ -19,7 +19,7 @@
 
 ```cpp
 // デコード（source の先読みジョブ）
-snd::ICodec* c = registry.Find(asset.codec.codec, &why);    // nullptr なら why = NotRegistered / OpusUnavailable
+snd::ICodec* c = registry.Find(asset.codec.codec, &why);    // nullptr なら why = NotRegistered / OpusUnavailable（OFF のビルド）
 std::uint32_t bytes = c->StateBytes(asset.codec);           // バンク準備時に計算して覚えておくのを推奨
 snd::codec::DecoderSlot slot;
 if (pool.Acquire(bytes, &slot) != snd::codec::DecoderPoolStatus::Ok)
@@ -123,35 +123,65 @@ ASST の列との対応: `codec, channels, sampleRate, totalFrames, preSkip, pre
   ただの C の表は契約の `snd::CCodec`（1.1 で既定構築可、D-52）越し。
 - `Find` は固定配列の線形探索で、どのスレッドからでも呼べる。`SourceServices::findCodec` には `&CodecRegistry::FindForSource`、
   `codecCtx` に登録表を渡す。
-- `SND_CODEC_OPUS` はプラグインが無ければ `nullptr` と `LookupFailure::OpusUnavailable` を返す。
+- `SND_CODEC_OPUS` は組み込み（D-56）。`SND_CODEC_OPUS=OFF` のビルドでプラグインも無ければ `nullptr` と `LookupFailure::OpusUnavailable` を返す。
 
-## Opus（未実装）
+## Opus（CONTRACTS.md D-56〜D-60、bank-format.md §6.5）
 
-この環境に libopus が無く、サードパーティを取り込まない方針なので段階1では実装しない（A0-3）。`OPUS` の要求は
-`Find` → `OpusUnavailable`、`ValidateHeader` → `CodecUnavailable`、`encode::Encode` → `BadHeader` で、どれも理由が分かる形で失敗する。
-ゲームが自前の Opus を `Config.plugins.codecs` に fourcc `OPUS` で登録すれば、今の登録表のまま使える。
+同梱の libopus 1.5.2（`third_party/opus/`、`SND_CODEC_OPUS`、既定 ON）で組み込みにした。OFF のビルドでは `opus_decoder.cpp` /
+`encode_opus.cpp` はスタブになり、`OPUS` の要求は従来どおり `Find` → `OpusUnavailable`、`ValidateHeader` → `CodecUnavailable`、
+`EncodeOpus` → `CodecUnavailable` で失敗する（`OpusAvailable()` / `encode::OpusEncoderAvailable()` で判定できる）。
+ゲームが自前の Opus を `Config.plugins.codecs` に fourcc `OPUS` で登録すれば、組み込みより優先される（D-31）。
 
-後から組み込みにするときの場所と注意:
+| ファイル | 中身 | ランタイム |
+| --- | --- | --- |
+| `src/header.cpp` | `ParseOpusSetup`, `OpusMaxPacketBytes`、`ValidateHeader` の Opus 分（libopus を使わない） | 入る |
+| `src/opus_decoder.cpp` | `ICodec` の実装（libopus の `opus_multistream_decode_float`） | 入る |
+| `src/encode_opus.cpp` | `encode::EncodeOpus`, `BuildOpusSeekTable`（libopus のエンコーダ） | 入らない（`codec_runtime_has_no_encoder` が libopus のエンコーダの記号も検査） |
 
-- **差し込み方**: `codec/src/opus.cpp` に `BuiltinDecoder` と同じ形の `ICodec` を置き、`BuiltinCodec()` の switch と
-  `IsBuiltinCodec` / `ValidateHeader` に 1 行ずつ足す。ライブラリは `codec/CMakeLists.txt` の任意のオプション
-  （例 `SND_CODEC_OPUS=ON` で `find_package` / ベンダー化）で入れ、見つからなければ今の振る舞い（`OpusUnavailable`）のまま。
-  エンコーダは `encode.cpp` と同じく別オブジェクトにしてランタイムに入れない。
-- **プリスキップ**: 標準はエンコーダ遅延 312 フレーム（48 kHz、OpusHead の pre-skip）。ヘッダの `pre_skip` に入れ、`Init` / `Seek(0)` の後に
-  捨てる（今の駆動部の `pos < preSkip` の処理がそのまま使える）。`total_frames` はプリスキップ後の長さ。ループ点はサンプル精度（6.4）。
-- **プリロール**: RFC 7845 の推奨は 80 ms（3840 フレーム）。ヘッダの `pre_roll` に入れ、`FindSeekPoint(…, pre_roll)` で前のパケットから
-  デコードして捨てる。シーク表はパケット境界（可変長なのでビルド時に実際の位置を記録する。`BuildSeekTable` の固定長用の計算は使えない）。
-- **余りの保持（D-23）とスロット**: libopus はパケットを丸ごと 1 回で展開するので、ADPCM のように途中から再開できない。書ききれない
-  フレームは展開済みの float で持つ必要がある。見積もり（libopus が無いので実測ではない）:
-  - libopus の状態: `opus_decoder_get_size` はモノラル約 18 KB、ステレオ約 26 KB（版で変わる）。3ch 以上は multistream で
-    ストリーム数ぶん増える（5.1 で 4 ストリーム ≒ 80 KB 超）。
-  - 展開結果の保持: 1 パケットの最大は 120 ms = 5760 フレーム。ステレオで 46 KB、20 ms フレームに限れば 960 × 2 × 4 = 7.5 KB。
-  - 入力の保持: 1 パケット最大 1275 バイト × フレーム数＋上の 16 KiB。
-  - 合計はステレオ 20 ms でも 26 + 7.5 + 17 ≒ 50 KB で、**既定の `decoderSlotBytes` 32 KiB に収まらない**。対応案: (a) buildtool で
-    20 ms 単一フレームのパケットに限り、Opus 用の保持を「1 パケットの展開結果」に固定（入力の 16 KiB 保持は小さくする）、(b) Opus を使う
-    プロジェクトは `decoderSlotBytes` を 64 KiB にする、(c) スロットの大きさを 2 種類持つ（契約変更）。3ch 以上の Opus は (c) か
-    チャンネル数の上限が要る。
-- `extra`（バンクの `extraOffset/extraBytes`）に OpusHead 相当（チャンネル写像、ストリーム数）を入れる。
+形式（bank-format.md §6.5 が正）: 48 kHz、20 ms（960 フレーム）のパケットを `u16 LE の長さ + パケット` で並べる。
+setup（`extra`、`4 + ch` バイト）に版・チャンネル数・ストリーム数・結合ストリーム数・マッピング。1〜2ch は 1 ストリーム、
+3〜8ch はサラウンドのマルチストリーム。`preSkip` 312（エンコーダの先読み）、`preRoll` 3840（80 ms）。
+
+### デコーダ（D-23 の実装）
+
+- 状態: `[頭 128 B][入力の保持][デコード済み 960 × ch の float][OpusMSDecoder]`（各 64 バイト境界）。`opus_multistream_decoder_init`
+  でスロットの中に置き、確保しない。頭の 4 語（印・fourcc・ch・失敗）は他の組み込みと同じ並びなので、別のコーデックの状態を渡されると
+  見分けられる（README の 9）。
+- 保持: 未デコードの入力は圧縮のまま（上限 `HoldCapacityBytes` = 16 KiB + 2 + ストリーム数 × 1277。D-51 の「16 KiB ＋ 1 パケット」）。
+  libopus はパケットの途中から再開できないので、`max_frames` に入りきらなかった 1 パケット分はデコード済みの float で持ち、次の呼び出しで
+  先に返す。パケットは出力に空きがあるときだけデコードする（満杯で止まった後にシークされても無駄にならない）。
+- 刻みの不変性: パケットが揃った時点で 1 パケットずつデコードするので、入力の刻み方と `max_frames` によらず出力はビット単位で同じ。
+- プリスキップと終端: `Init` / `Seek(0)` の後、先頭 `pre_skip` フレームを捨てる。`total_frames` を超える分は出さず、終端より後で始まる
+  パケットはデコードせずに消費する。
+- シーク: `Seek(f)` は libopus の状態を `OPUS_RESET_STATE` で戻し、次のバイトをデコード位置 `f + pre_skip` のパケットの前置とみなす。
+  `f + pre_skip` が 960 の倍数でなければ次の `Decode` が失敗する。シーク表は buildtool が `BuildOpusSeekTable` で作る
+  （`PacketForFrame` は固定長用なので Opus では false）。
+- 壊れた入力: 長さ 0・上限超え、libopus のエラー、960 フレームでないパケットは `SND_DECODE_ERROR`（`Init` / `Seek` まで継続）。
+- `StateBytes`（libopus 1.5.2 の実測）: 1ch 40,192 / 2ch 52,800 / 3ch 76,160 / 4ch 88,768 / 5ch 112,192 / 6ch 135,552 /
+  7ch 148,160 / 8ch 171,584 バイト。**既定の `decoderSlotBytes` 32 KiB には入らない**。D-58 で既定を 64 KiB（1〜2ch が入る）に
+  上げると決めた（`config.h` への反映は受け入れ側）。3ch 以上は 192 KiB 以上のスロットが要る。足りなければ `DECODER_POOL_FULL`。
+- RT: `Init` / `Decode` / `Seek` は確保・ロック・IO をしない（libopus は `VAR_ARRAYS` でビルド、作業領域はスタック）。スタックは
+  スレッド全体で 25〜32 KB（1〜8ch）、D-47 の 256 KiB に収まる。デコードは 1ch・20 ms あたり約 0.1 ms（Debug）。
+
+### エンコーダ（buildtool）
+
+```cpp
+namespace ce = snd::codec::encode;
+ce::OpusSettings st;              // bitrate 0 = 64 kbit/s × ch、complexity 10、VBR、signal auto、independentFrames true
+std::vector<uint8_t> out(ce::OpusMaxEncodedBytes(ch, frames));
+ce::OpusEncoded e;                // e.header（extra は e.setup を指す）、e.setup / e.setupBytes、e.bytes、e.packets
+ce::EncodeOpus(st, planar, ch, 48000, frames, out.data(), out.size(), &e);
+uint32_t n = ce::BuildOpusSeekTable(e.header, out.data(), e.bytes, intervalFrames, nullptr, nullptr, 0);  // 個数
+ce::BuildOpusSeekTable(e.header, out.data(), e.bytes, intervalFrames, seekFrames, seekOffsets, n);
+```
+
+- 入力は 48 kHz（それ以外は `BadArguments`。buildtool が変換する）、チャンネルは WAV の順。3ch 以上は Vorbis の順に並べ替えて
+  `opus_multistream_surround_encoder` で符号化し、`mapping` を WAV の順で書く。
+- `independentFrames`（既定 true）は `OPUS_SET_PREDICTION_DISABLED`。CELT のパケットではシーク点から 2 パケット後以降の出力が
+  通しのデコードとビット単位で一致する（80 ms のプリロールでシーク・ループがサンプル単位で正確）。SILK / ハイブリッド（低ビットレートの
+  音声）は近似。false にすると予測ありで、80 ms 後の誤差は ~1e-1。
+- `Encode()` / `EncodedBytes()` / `BuildSeekTable()` は固定長の組み込み用で、Opus には `BadHeader` / 0 を返す。
+- 差分ビルド: `kOpusEncoderVersion`（libopus の版を含む）。libopus を更新したら上げる（`third_party/opus/SONUS_README.md`）。
 
 ## A0-2: `StateBytes` の実測
 
@@ -170,7 +200,7 @@ ASST の列との対応: `codec, channels, sampleRate, totalFrames, preSkip, pre
   各 `max_frames` のデコードを行い、はみ出しが無いことを確かめている。
 - 結論: PCM と、1 チャンネルあたり 1024 バイト以下のブロックの ADPCM は 8ch まで既定の 32 KiB に収まる。**既定値の見直しは不要**。
   buildtool は ADPCM のブロックを 1 チャンネルあたり 1024 バイト以下にすること（超えると `DECODER_POOL_FULL` で再生拒否になる）。
-- Opus は上の見積もりのとおり 32 KiB に収まらない見込み。組み込むときに再測定する。
+- Opus は 32 KiB に収まらない（上の「Opus」の実測。D-58）。
 
 ## 汎用部品（統合で base へ移した、A1-12）
 
@@ -179,7 +209,12 @@ ASST の列との対応: `codec, channels, sampleRate, totalFrames, preSkip, pre
 
 ## テスト
 
-`codec/test/`（`codec_test`、`codec_runtime_test`、`codec_runtime_has_no_encoder`）。
+`codec/test/`（`codec_test`、`codec_opus_test`、`codec_runtime_test`、`codec_runtime_has_no_encoder`）。
+
+- Opus（`codec_opus_test`、全構成でビルド。OFF では「無い」ことだけを確かめる）: 往復（100〜8000 Hz の正弦波で基本波 ±0.5 dB・
+  THD < −40 dB・THD+N < −30 dB・位相から遅延ゼロ（エンコーダの 3 Hz の DC 除去の位相進みを差し引く）、白色雑音の帯域エネルギー ±1.5 dB と
+  相互相関の遅延 0、無音、2/3/6/8ch のチャンネルごとの別信号と漏れ）、刻みと `max_frames` の不変性、終端、シーク（サンプル単位の一致）、
+  保持の上限、別コーデックの状態、壊れた入力のファズ、RT スコープ、スタック使用量と処理時間、`StateBytes` とプール。
 
 - 往復: PCM f32 はビット一致、s16 は ±0.5 LSB、ADPCM は 1/2/6/8ch × 64〜1024 B/ch で SNR > 25 dB（ステレオ既定で約 29 dB）。
 - 刻みの不変性: 3 コーデック × 1/2/3/8ch × 刻み（1 バイト、2,3,5、パケット±1、パケット×3+7、7000、乱数）× `max_frames`（1, 7, 256, 4096）で、
