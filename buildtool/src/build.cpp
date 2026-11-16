@@ -20,6 +20,8 @@
 #include "self_check.hpp"
 #include "snd/buildtool/bank_writer.hpp"
 #include "snd/buildtool/json.hpp"
+#include "snd/codec/codec.hpp"
+#include "snd/codec/encode.hpp"
 #include "snd/dsp/effects.hpp"
 #include "snd/ext.h"
 
@@ -41,6 +43,8 @@ const char* const kSequence[] = {"polyphonic", "random", "randomNoRepeat", "sequ
                                  "switch", "comboSequential", "layerCrossfade", nullptr};
 const char* const kVirtualReturn[] = {"continue", "restart", "never", nullptr};
 const char* const kLoadForm[] = {"pcm", "compressed", "decompressCache", "stream", nullptr};
+const char* const kOpusVbr[] = {"vbr", "constrained", "cbr", nullptr};
+const char* const kOpusSignal[] = {"auto", "music", "voice", nullptr};
 const char* const kStall[] = {"time", "sound", nullptr};
 const char* const kIoPriority[] = {"normal", "music", "voice", nullptr};
 const char* const kAction[] = {"play", "stop", "setParameter", "applySnapshot", nullptr};
@@ -749,13 +753,37 @@ bool Builder::ConvertAsset(const Object& a, const std::string& language, Convert
     layers[2] = conv->Find("default");
     layers[3] = conv->Find(CodecName(opt_.platform));
   }
+  const Value* rateAt = &a.doc;    // where the effective sampleRate was written (diagnostics)
+  const Object* rateOwner = &a;
   for (int i = 0; i < 4; ++i) {
     const Value* l = layers[i];
     if (l == nullptr || !l->IsObject()) continue;
     const Object& owner = i < 2 ? *p_.project() : a;
     codec = p_.Str(owner, *l, "codec", codec, d_);
     rate = p_.U64(owner, *l, "sampleRate", rate, d_);
+    if (const Value* rv = l->Find("sampleRate"); rv != nullptr) {
+      rateAt = rv;
+      rateOwner = &owner;
+    }
     chans = p_.U64(owner, *l, "channels", chans, d_);
+    // Opus settings: each member is layered on its own (project-format.md).
+    if (const Value* ov = l->Find("opus"); ov != nullptr && ov->IsObject()) {
+      s.opus.bitrate = static_cast<std::uint32_t>(
+          std::min<std::uint64_t>(p_.U64(owner, *ov, "bitrate", s.opus.bitrate, d_), 0xFFFFFFFFu));
+      s.opus.complexity = static_cast<std::uint32_t>(
+          std::min<std::uint64_t>(p_.U64(owner, *ov, "complexity", s.opus.complexity, d_), 0xFFFFFFFFu));
+      s.opus.vbr = p_.Enum(owner, *ov, "vbr", kOpusVbr, s.opus.vbr, d_);
+      s.opus.signal = p_.Enum(owner, *ov, "signal", kOpusSignal, s.opus.signal, d_);
+      s.opus.independentFrames = p_.Bool(owner, *ov, "independentFrames", s.opus.independentFrames, d_);
+      if (const Value* bv = ov->Find("bitrate"); bv != nullptr && s.opus.bitrate != 0 &&
+                                                 (s.opus.bitrate < codec::encode::kOpusMinBitrate ||
+                                                  s.opus.bitrate > codec::encode::kOpusMaxBitratePerChannel * 8u)) {
+        p_.ErrorAt(owner, *bv, "opus.bitrate must be 0 (default) or 6000..4080000 bit/s", d_);
+      }
+      if (const Value* cv = ov->Find("complexity"); cv != nullptr && s.opus.complexity > 10u) {
+        p_.ErrorAt(owner, *cv, "opus.complexity must be 0..10", d_);
+      }
+    }
   }
   const std::uint32_t form = p_.Enum(a, a.doc, "loadForm", kLoadForm, 0, d_);
   if (!ParseCodec(codec, &s.codec)) {
@@ -766,7 +794,7 @@ bool Builder::ConvertAsset(const Object& a, const std::string& language, Convert
   if (encoder == nullptr) {
     p_.ErrorAt(a, a.doc,
                "asset '" + a.name + "': no encoder for codec '" + codec +
-                   "' in this build (built in: PCMF, PC16, ADPC; Opus / custom codecs need an encoder registered with EncoderRegistry::Register)",
+                   "' in this build (built in: PCMF, PC16, ADPC, and OPUS unless built with SND_CODEC_OPUS=OFF; custom codecs need an encoder registered with EncoderRegistry::Register)",
                d_);
     return false;
   }
@@ -776,6 +804,16 @@ bool Builder::ConvertAsset(const Object& a, const std::string& language, Convert
   }
   s.sampleRate = static_cast<std::uint32_t>(rate);
   s.channels = static_cast<std::uint32_t>(chans);
+  if (s.codec == SND_CODEC_OPUS) {
+    // Opus assets are always 48 kHz (D-57): other rates are converted.
+    if (rate != 0 && rate != codec::kOpusSampleRate) {
+      p_.WarnAt(*rateOwner, *rateAt,
+                "asset '" + a.name + "': Opus is always encoded at 48000 Hz; sampleRate " + std::to_string(rate) +
+                    " is ignored",
+                d_);
+    }
+    s.sampleRate = codec::kOpusSampleRate;
+  }
   const std::uint64_t defSeek = form == static_cast<std::uint32_t>(bf::LoadForm::PcmResident) ? 0 : 100;
   s.seekIntervalMs = static_cast<std::uint32_t>(p_.U64(a, a.doc, "seekIntervalMs", defSeek, d_));
   if (const Value* lp = a.doc.Find("loop"); lp != nullptr && lp->IsObject()) {

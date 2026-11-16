@@ -20,6 +20,7 @@ struct ConvertSettings {
   bool loop = false;             // use loop points (source frames below)
   std::uint64_t loopStart = 0;
   std::uint64_t loopEnd = 0;
+  OpusOptions opus;              // codec OPUS only (part of the cache key then)
 };
 
 struct Converted {

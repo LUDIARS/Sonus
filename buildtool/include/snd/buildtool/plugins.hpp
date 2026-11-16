@@ -3,8 +3,9 @@
 //     module (A1-11). A default-constructed registry (and BuildOptions with
 //     encoders == nullptr) has PCM float32 (PCMF) and PCM s16 (PC16);
 //     CodecEncoders() / RegisterCodecEncoders() add IMA ADPCM (ADPC,
-//     kAdpcmBlockBytesPerChannel bytes per channel and block). sonus-build
-//     uses CodecEncoders() by default. Opus / custom codecs come through
+//     kAdpcmBlockBytesPerChannel bytes per channel and block) and, when the
+//     build has Opus (SND_CODEC_OPUS, CONTRACTS.md D-56), Opus (OPUS).
+//     sonus-build uses CodecEncoders() by default. Custom codecs come through
 //     Register(). A codec without an encoder is a build error naming the codec.
 //   - DspSizer: per-effect instance state size for EFFX.stateBytes / DSPN.
 //     The default is the dsp module's sizing (dsp::EffectInstanceBytes, the
@@ -18,6 +19,17 @@
 
 namespace snd::buildtool {
 
+// Opus settings of one asset (project-format.md "convert" / "platforms":
+// "opus": {bitrate, complexity, vbr, signal, independentFrames}). Encoders of
+// other codecs ignore them. Values map to snd::codec::encode::OpusSettings.
+struct OpusOptions {
+  std::uint32_t bitrate = 0;      // bit/s for all channels; 0 = 64000 x channels
+  std::uint32_t complexity = 10;  // 0..10
+  std::uint32_t vbr = 0;          // 0 vbr, 1 constrained vbr, 2 cbr
+  std::uint32_t signal = 0;       // 0 auto, 1 music, 2 voice
+  bool independentFrames = true;  // sample-exact seeks (no prediction across packets)
+};
+
 struct EncodeInput {
   const float* samples = nullptr;  // interleaved
   std::uint64_t frames = 0;
@@ -26,6 +38,7 @@ struct EncodeInput {
   std::uint32_t seekIntervalFrames = 0;  // desired spacing of seek points (0 = none needed)
   std::uint64_t loopStart = 0;            // loop (0/0 = none); encoders may align packets to it
   std::uint64_t loopEnd = 0;
+  OpusOptions opus;                       // used by the Opus encoder only
 };
 
 struct SeekPoint {
@@ -70,7 +83,9 @@ class EncoderRegistry {
   std::vector<Encoder> encoders_;
 };
 
-// Registers the codec module's PCMF, PC16 and ADPC encoders (replacing those codecs).
+// Registers the codec module's PCMF, PC16 and ADPC encoders (replacing those
+// codecs), and OPUS when snd::codec::encode::OpusEncoderAvailable(). The Opus
+// encoder's version is snd::codec::encode::kOpusEncoderVersion.
 void RegisterCodecEncoders(EncoderRegistry& registry);
 // A registry with every codec module encoder (sonus-build's default).
 const EncoderRegistry& CodecEncoders();
