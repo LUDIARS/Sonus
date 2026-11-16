@@ -170,7 +170,7 @@ SND_TEST(CoreMix, OscillatorFollowsPitchCurveOnAParameter) {
                             static_cast<std::uint32_t>(bf::CurveCompose::AddCents), {{0.0f, 0.0f}, {1.0f, 1200.0f}}});
   TEvent e;
   e.id = HashId("Osc");
-  e.curves = {0};
+  e.curves.assign(1, 0u);
   TTrack t;
   TClip c;
   c.kind = 2;
@@ -197,7 +197,7 @@ SND_TEST(CoreMix, ParameterScopesPlaybackOverEmitterOverGlobal) {
   b.curves.push_back(TCurve{HashId("Vol"), static_cast<std::uint32_t>(bf::CurveTarget::Volume),
                             static_cast<std::uint32_t>(bf::CurveCompose::AddDb), {{-60.0f, -60.0f}, {0.0f, 0.0f}}});
   TEvent e = SimpleEvent("E", 0);
-  e.curves = {0};
+  e.curves.assign(1, 0u);
   b.events.push_back(e);
   h.Load("b", b.Build(HashId("B")));
   const snd_emitter_handle em = h.sys->CreateEmitter();
@@ -227,7 +227,7 @@ SND_TEST(CoreMix, ParameterRampRate) {
   b.curves.push_back(TCurve{HashId("P"), static_cast<std::uint32_t>(bf::CurveTarget::Volume),
                             static_cast<std::uint32_t>(bf::CurveCompose::AddDb), {{0.0f, -40.0f}, {1.0f, 0.0f}}});
   TEvent e = SimpleEvent("E", 0);
-  e.curves = {0};
+  e.curves.assign(1, 0u);
   b.events.push_back(e);
   h.Load("b", b.Build(HashId("B")));
   h.sys->Play(HashId("E"), snd_emitter_handle{0}, nullptr);
@@ -342,7 +342,7 @@ SND_TEST(CoreMix, BusLowpassEffectAttenuatesHighTones) {
   Harness h;
   TestBank b = BasicBank();
   b.effects.push_back(TEffect{snd::dsp::kEffectLowpass, {500.0f, 0.707f}});
-  b.buses[0].effects = {0};
+  b.buses[0].effects.assign(1, 0u);
   std::vector<float> mix = Sine(96000, 100.0, 48000.0, 0.5f);
   const std::vector<float> hi = Sine(96000, 8000.0, 48000.0, 0.5f);
   for (std::size_t i = 0; i < mix.size(); ++i) mix[i] += hi[i];
@@ -381,7 +381,7 @@ SND_TEST(CoreMix, PanCurveMovesTheMonoSourceRight) {
                             static_cast<std::uint32_t>(bf::CurveCompose::AddDb), {{-1.0f, -1.0f}, {1.0f, 1.0f}}});
   b.params.push_back(TParam{HashId("Pan"), 0, -1.0f, 1.0f, 0.0f, 0.0f});
   TEvent e = SimpleEvent("E", 0);
-  e.curves = {0};
+  e.curves.assign(1, 0u);
   b.events.push_back(e);
   h.Load("b", b.Build(HashId("B")));
   h.sys->SetParamGlobal(HashId("Pan"), 1.0f);
