@@ -340,7 +340,7 @@ bool CreateVoice(Ctx& c, StartContext& sc, SourceKind kind, const void* params, 
   SND_W(Voice_sourceKind)[d] = kind;
   SND_W(Voice_sourceSlot)[d] = kNoSlot;
   SND_W(Voice_busSlot)[d] = busSlot != kNoSlot ? busSlot : im.rd.masterSlot;
-  SND_W(Voice_emitterSlot)[d] = sc.threeD ? sc.emitter : kNoSlot;
+  SND_W(Voice_emitterSlot)[d] = sc.emitter;  // emitter-scope parameters; 3D only with kVs3D
   SND_W(Voice_priority)[d] = sc.priority;
   SND_W(Voice_limitGroup)[d] = sc.groupSlot;
   VoiceLifecycle lc{};
@@ -1038,6 +1038,8 @@ void RunEventLogic(Impl& im) noexcept {
       const SlotIndex v = base::rows::SlotAt(vrows, d);
       VoiceStatic& vs = im.ev.vs[v];
       VoiceLifecycle& lc = SND_W(Voice_lifecycle)[d];
+      // Voices created earlier in this block (fired reservations) have no render status yet.
+      if (SND_W(Voice_createdBlock)[d] == im.block) continue;
       if (lc.state == static_cast<std::uint8_t>(VoiceStateId::Starting) && lc.startClock < blockEnd) {
         lc.state = static_cast<std::uint8_t>(VoiceStateId::Playing);
       }
@@ -1065,6 +1067,10 @@ void RunEventLogic(Impl& im) noexcept {
     for (std::uint32_t d = 0; d < vrows.count;) {
       const SlotIndex v = base::rows::SlotAt(vrows, d);
       const VoiceLifecycle lc = SND_W(Voice_lifecycle)[d];
+      if (SND_W(Voice_createdBlock)[d] == im.block) {
+        ++d;
+        continue;
+      }
       const bool ended = SND_R(Voice_renderStatus)[d].ended != 0u &&
                          lc.state != static_cast<std::uint8_t>(VoiceStateId::Starting);
       const bool released = lc.state == static_cast<std::uint8_t>(VoiceStateId::Releasing) && lc.stopClock <= im.clock;

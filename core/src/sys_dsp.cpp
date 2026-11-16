@@ -196,6 +196,7 @@ void EvaluateDspParams(Impl& im) noexcept {
     vgain[d] = Ramp{fresh ? gEnd : vgain[d].end, gEnd};
     vpitch[d] = Ramp{fresh ? pEnd : vpitch[d].end, pEnd};
     vfilt[d] = FilterTarget{lowpass, highpass};
+    im.dp.pan[v] = pan < -1.0f ? -1.0f : (pan > 1.0f ? 1.0f : pan);
     const SlotIndex bus = vbus[d];
     const std::uint32_t bd = bus == kNoSlot ? kNoSlot : base::rows::DenseOf(t.Bus.rows, bus);
     vaud[d] = gEnd * (bd != kNoSlot ? busGainPrev[bd] : 1.0f);

@@ -56,7 +56,7 @@ void PlainMatrix(std::uint32_t in, std::uint32_t out, PanMatrix* m) noexcept {
   for (std::uint32_t i = 0; i < in; ++i) m->gain[i][i < out ? i : out - 1u] = 1.0f;
 }
 
-void PanFor(const Impl& im, const VoiceStatic& vs, std::uint32_t outChannels, const Vec3* direction, float spread,
+void PanFor(const Impl& im, const VoiceStatic& vs, float pan, std::uint32_t outChannels, const Vec3* direction, float spread,
             float blend3d, PanMatrix* m) noexcept {
   dsp::SpeakerLayout outLayout = dsp::SpeakerLayout::Stereo;
   const bool outKnown = dsp::LayoutForChannels(outChannels, &outLayout);
@@ -67,7 +67,7 @@ void PanFor(const Impl& im, const VoiceStatic& vs, std::uint32_t outChannels, co
     return;
   }
   PanMatrix p2{};
-  dsp::ComputeStereoPanMatrix(vs.channels, outLayout, vs.pan, dsp::PanLaw::ConstantPower, &p2);
+  dsp::ComputeStereoPanMatrix(vs.channels, outLayout, pan, dsp::PanLaw::ConstantPower, &p2);
   if (direction == nullptr || blend3d <= 0.0f) {
     *m = p2;
     return;
@@ -414,7 +414,7 @@ void Render(Impl& im) noexcept {
         }
       }
     }
-    PanFor(im, vs, in.outChannels, dir, spread, blend, &in.pan);
+    PanFor(im, vs, im.dp.pan[v], in.outChannels, dir, spread, blend, &in.pan);
     // Filter.
     in.filter = SND_R(Voice_filterTarget)[d];
     const bool targetOpen = in.filter.lowpassHz >= dsp::kVoiceLowpassOffHz && in.filter.highpassHz <= dsp::kVoiceHighpassOffHz;
