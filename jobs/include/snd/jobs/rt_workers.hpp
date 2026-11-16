@@ -53,6 +53,14 @@
 //    into the set the last parallel block did not use (at most one set is in
 //    use by a late chunk). Voices of a Late chunk stay held (schema
 //    Voice.renderHold) and their set is reused only once IsQuiescent() is true.
+//  - A1-14 (stage 2): a worker may claim a chunk NUMBER (cursor) and be
+//    preempted before it marks the chunk Taken. The chunk is then still
+//    Pending although no Pending number is left in the cursor. Run() therefore
+//    scans the chunk words after its own Participate() and during the bounded
+//    spin, and runs every chunk of its batch that is still Pending on the
+//    calling thread (CAS Pending -> Taken, as a worker would). The delayed
+//    worker's own Pending -> Taken CAS then fails and it skips the chunk. Such
+//    chunks are counted in RtRunResult::stolen / Stats::chunksStolen.
 //  - Stack: workers get at least platform::kRtThreadMinStackBytes (256 KiB,
 //    D-47; RtWorkerConfig::minStackBytes).
 //  - scratch is the calling thread's arena (Config.memory.threadArenaBytes),
@@ -95,6 +103,10 @@ struct RtWorkerConfig {
   // Lower bound of each worker's stack (D-47). Values below
   // platform::kRtThreadMinStackBytes are raised to it.
   std::size_t minStackBytes = 256u << 10;
+  // TEST ONLY (A1-14): a worker busy-waits this long between claiming a chunk
+  // number and marking the chunk Taken, to reproduce a preempted worker. 0 in
+  // production (no effect).
+  std::uint32_t debugClaimDelayMicroseconds = 0;
 };
 
 struct RtRunResult {
@@ -105,6 +117,7 @@ struct RtRunResult {
   std::uint32_t generation = 0;     // batch generation of this run
   std::uint32_t clamped = 0;        // 1 if chunkCount exceeded maxChunks (extra chunks not run)
   std::uint64_t spinNanoseconds = 0;  // time spent waiting for in-flight chunks
+  std::uint32_t stolen = 0;         // A1-14: chunks claimed by a worker that the caller ran instead
 };
 
 class RtWorkerPool {
@@ -147,6 +160,7 @@ class RtWorkerPool {
     std::uint64_t discardedResults;  // late chunks that finished afterwards (discarded by generation)
     std::uint64_t chunksByWorkers;
     std::uint64_t clampedRuns;
+    std::uint64_t chunksStolen;      // A1-14: run by the caller after a worker claimed but stalled
   };
   Stats GetStats() const noexcept;
 
@@ -156,6 +170,8 @@ class RtWorkerPool {
   void WorkerLoop(Worker& w) noexcept;
   // Claims and runs chunks of the current batch. Returns the number run.
   std::uint32_t Participate(std::uint32_t threadIndex, std::uint32_t& lastGeneration) noexcept;
+  // A1-14: runs every chunk of batch `gen` that is still Pending on the calling thread.
+  std::uint32_t RunStillPending(std::uint32_t gen, std::uint32_t chunkCount, RtChunkFn fn, void* ctx) noexcept;
 
   static constexpr std::uint64_t kPending = 0, kTaken = 1, kDone = 2, kLate = 3;
 
@@ -178,7 +194,8 @@ class RtWorkerPool {
   std::atomic<std::uint32_t> count_{0};
 
   std::atomic<bool> stop_{false};
-  std::atomic<std::uint64_t> runs_{0}, chunks_{0}, late_{0}, discarded_{0}, byWorkers_{0}, clampedRuns_{0};
+  std::atomic<std::uint64_t> runs_{0}, chunks_{0}, late_{0}, discarded_{0}, byWorkers_{0}, clampedRuns_{0},
+      stolen_{0};
 };
 
 }  // namespace snd::jobs

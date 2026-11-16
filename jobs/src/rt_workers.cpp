@@ -143,6 +143,11 @@ std::uint32_t RtWorkerPool::Participate(std::uint32_t threadIndex, std::uint32_t
     // fails and the chunk function never runs. Either way IsQuiescent cannot
     // return true while a chunk function of a finished batch runs or is about to.
     if (self != nullptr) self->busyGeneration.store(gen, std::memory_order_seq_cst);
+    if (config_.debugClaimDelayMicroseconds != 0u && self != nullptr) {  // test only (A1-14)
+      const std::uint64_t until =
+          platform::MonotonicNanoseconds() + std::uint64_t{config_.debugClaimDelayMicroseconds} * 1000u;
+      while (platform::MonotonicNanoseconds() < until) base::CpuRelax();
+    }
     std::atomic<std::uint64_t>& state = chunkState_[next];
     std::uint64_t expected = Word(gen, kPending);
     if (!state.compare_exchange_strong(expected, Word(gen, kTaken), std::memory_order_acq_rel,
@@ -201,6 +206,9 @@ RtRunResult RtWorkerPool::Run(std::uint32_t chunkCount, RtChunkFn fn, void* ctx)
   for (std::uint32_t w = 0; w < wake; ++w) workers_[w].wake.Post();
 
   r.byCaller = Participate(0u, callerLastGeneration_);
+  // A1-14: chunks whose number a worker claimed but which it has not marked
+  // Taken yet (preempted in between) are run here instead of waiting for them.
+  r.stolen = RunStillPending(gen, chunkCount, fn, ctx);
 
   // No Pending chunk is left: spin for the ones in flight, bounded (2.3).
   // "All done" is read from this generation's chunk words (Done is final for
@@ -217,6 +225,7 @@ RtRunResult RtWorkerPool::Run(std::uint32_t chunkCount, RtChunkFn fn, void* ctx)
     const std::uint64_t limit = static_cast<std::uint64_t>(config_.spinMicroseconds) * 1000u;
     std::uint64_t now = start;
     while (!allDone() && now - start < limit) {
+      r.stolen += RunStillPending(gen, chunkCount, fn, ctx);
       for (int k = 0; k < 16; ++k) base::CpuRelax();
       now = platform::MonotonicNanoseconds();
     }
@@ -236,7 +245,41 @@ RtRunResult RtWorkerPool::Run(std::uint32_t chunkCount, RtChunkFn fn, void* ctx)
     if (s == Word(gen, kDone)) ++r.done;
   }
   if (r.late != 0u) late_.fetch_add(r.late, std::memory_order_relaxed);
+  if (r.stolen != 0u) {
+    stolen_.fetch_add(r.stolen, std::memory_order_relaxed);
+    r.byCaller += r.stolen;
+  }
   return r;
+}
+
+std::uint32_t RtWorkerPool::RunStillPending(std::uint32_t gen, std::uint32_t chunkCount, RtChunkFn fn,
+                                            void* ctx) noexcept {
+  std::uint32_t ran = 0;
+  for (std::uint32_t i = 0; i < chunkCount; ++i) {
+    std::atomic<std::uint64_t>& state = chunkState_[i];
+    if (state.load(std::memory_order_acquire) != Word(gen, kPending)) continue;
+    // The cursor is past every chunk (Participate returned), so a Pending chunk
+    // was claimed by a worker that has not reached its Pending -> Taken CAS.
+    // Take it as that worker would; whoever wins the CAS runs the chunk.
+    std::uint64_t expected = Word(gen, kPending);
+    if (!state.compare_exchange_strong(expected, Word(gen, kTaken), std::memory_order_acq_rel,
+                                       std::memory_order_relaxed)) {
+      continue;
+    }
+    if (callerLastGeneration_ != gen) {  // first chunk of this batch on the calling thread
+      scratch_[0].used = 0;
+      callerLastGeneration_ = gen;
+    }
+    const RtChunkContext rc{i, gen, 0u, 0u, &scratch_[0]};
+    fn(ctx, rc);
+    expected = Word(gen, kTaken);
+    // Only the audio thread marks Late, and it does so after this returns: the CAS cannot fail.
+    if (state.compare_exchange_strong(expected, Word(gen, kDone), std::memory_order_acq_rel,
+                                      std::memory_order_relaxed)) {
+      ++ran;
+    }
+  }
+  return ran;
 }
 
 bool RtWorkerPool::ChunkDone(std::uint32_t chunk) const noexcept {
@@ -272,6 +315,7 @@ RtWorkerPool::Stats RtWorkerPool::GetStats() const noexcept {
   s.discardedResults = discarded_.load(std::memory_order_relaxed);
   s.chunksByWorkers = byWorkers_.load(std::memory_order_relaxed);
   s.clampedRuns = clampedRuns_.load(std::memory_order_relaxed);
+  s.chunksStolen = stolen_.load(std::memory_order_relaxed);
   return s;
 }
 

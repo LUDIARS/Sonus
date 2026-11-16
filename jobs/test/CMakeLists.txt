@@ -30,3 +30,6 @@ snd_add_test(jobs_rt_stack_test SOURCES rt_stack_test.cpp LINK sonus_jobs sonus_
 # while a late chunk still writes it, at most one set in use. TSan, repeated.
 snd_add_test(jobs_indep_d43_quiescent_test SOURCES indep_d43_quiescent_test.cpp LINK sonus_jobs sonus_mocks)
 snd_add_test(jobs_indep_rt_contract11_test SOURCES indep_rt_contract11_test.cpp LINK sonus_jobs sonus_mocks)
+
+# A1-14 (stage 2, with core): a claimed-but-stalled chunk is run by the caller.
+snd_add_test(jobs_rt_claim_steal_test SOURCES rt_claim_steal_test.cpp LINK sonus_jobs sonus_mocks)
