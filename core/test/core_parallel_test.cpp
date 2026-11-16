@@ -17,7 +17,7 @@ SND_TEST(CoreParallel, LateChunksHoldVoicesAndAlternateSets) {
   snd_config cfg = SmallConfig();
   cfg.jobs.realtime_workers = 2;
   cfg.jobs.voices_per_chunk = 1;
-  cfg.tuning.rt_spin_microseconds = 20;
+  cfg.tuning.rt_spin_microseconds = 2000;  // ordinary blocks are never late, the slowed ones always
   Harness h(cfg);
   TestBank b = BasicBank();
   b.assets.push_back(TAsset{HashId("a"), 1, 48000, Constant(4800000, 0.1f), 0, 0});
@@ -29,7 +29,7 @@ SND_TEST(CoreParallel, LateChunksHoldVoicesAndAlternateSets) {
   SND_CHECK_NEAR(h.out[100 * 2], steady, 1e-4f);
   std::uint32_t lateBlocks = 0, heldBlocks = 0, serialBlocks = 0;
   std::uint32_t lateSet = 2;  // set of the last parallel block that had late chunks
-  h.sample.slowNs.store(2000000);  // 2 ms per batch: far past the 20 us spin
+  h.sample.slowNs.store(20000000);  // 20 ms per batch: far past the 2 ms spin
   for (int i = 0; i < 40; ++i) {
     h.Step();
     const snd::core::BlockProfile& p = h.sys->LastBlock();
@@ -43,7 +43,14 @@ SND_TEST(CoreParallel, LateChunksHoldVoicesAndAlternateSets) {
     if (p.heldVoices != 0u) ++heldBlocks;
   }
   h.sample.slowNs.store(0);
-  h.Steps(30);
+  // Wait for the last late chunk to finish (a block without late chunks and held voices).
+  bool calm = false;
+  for (int i = 0; i < 400 && !calm; ++i) {
+    h.Step();
+    calm = h.sys->LastBlock().heldVoices == 0u && h.sys->LastBlock().lateChunks == 0u && i > 2;
+  }
+  SND_CHECK(calm);
+  h.Steps(2);  // a released voice renders again from the block after its release (D-43)
   snd::test::Note("late blocks %u, blocks with held voices %u, serial blocks while busy %u", lateBlocks, heldBlocks,
                   serialBlocks);
   SND_CHECK(lateBlocks > 0u);
