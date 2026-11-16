@@ -37,3 +37,9 @@ snd_add_test(integration_indep_dsp_reserve11_test
   SOURCES indep_dsp_reserve11_test.cpp
   LINK sonus_buildtool sonus_bank sonus_codec sonus_dsp sonus_io sonus_jobs sonus_platform sonus_base sonus_mocks)
 target_include_directories(integration_indep_dsp_reserve11_test PRIVATE ${PROJECT_SOURCE_DIR}/buildtool/test)
+
+# Stage 2: end to end through core (project -> bank -> IoScheduler -> core -> output).
+snd_add_test(integration_core_end_to_end_test
+  SOURCES core_end_to_end_test.cpp
+  LINK sonus_core sonus_buildtool sonus_bank sonus_codec sonus_dsp sonus_io sonus_jobs sonus_platform sonus_base sonus_mocks)
+target_include_directories(integration_core_end_to_end_test PRIVATE ${PROJECT_SOURCE_DIR}/buildtool/test ${PROJECT_SOURCE_DIR}/core/test)
