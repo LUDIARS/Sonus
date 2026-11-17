@@ -91,7 +91,9 @@ class AudioDriver {
   // prefill cannot be awaited: a short ring is handled as an underrun
   // (fade-in, lostFrames). The SUSPENDED event is forwarded to `listener` as
   // is; api calls this from snd_resume. false if not running or the device
-  // refuses.
+  // refuses. Start, Stop, Resume and Close are owner-thread only: calling
+  // Resume and Stop concurrently from different threads is not supported
+  // (the api serializes snd_resume and snd_shutdown on its owner thread).
   bool Resume() noexcept;
   bool Running() const noexcept { return device_ != nullptr; }
 

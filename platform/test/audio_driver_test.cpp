@@ -91,7 +91,8 @@ bool LoadBelowCoreCount() {
 
 // Waits (bounded) until the audio thread has refilled the ring to its target.
 bool WaitFilled(const AudioDriver& d) {
-  const std::uint64_t deadline = MonotonicNanoseconds() + 2000000000ull;
+  // 20 s: heavily loaded machines (independent test, load 9 with ctest -j12).
+  const std::uint64_t deadline = MonotonicNanoseconds() + 20000000000ull;
   while (MonotonicNanoseconds() < deadline) {
     const DriverStats s = d.Core().Stats();
     if (s.queuedFrames >= s.targetFrames) return true;
