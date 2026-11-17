@@ -15,6 +15,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <thread>
 
 #include "snd/internal/source_if.hpp"
 #include "snd/platform/clock.hpp"
@@ -67,7 +68,8 @@ class TestSampleKind final : public snd::source::ISourceKind {
   }
   void RenderBatch(const snd::source::RenderBatch& b, snd::VoiceRenderStatus* st) noexcept override {
     batches.fetch_add(1, std::memory_order_relaxed);
-    if (slowNs.load(std::memory_order_relaxed) != 0u) {
+    // Slow on RT workers only (the thread that created the kind renders the serial part).
+    if (slowNs.load(std::memory_order_relaxed) != 0u && std::this_thread::get_id() != owner_) {
       const std::uint64_t until = snd::platform::MonotonicNanoseconds() + slowNs.load(std::memory_order_relaxed);
       while (snd::platform::MonotonicNanoseconds() < until) {
       }
@@ -127,6 +129,7 @@ class TestSampleKind final : public snd::source::ISourceKind {
   std::atomic<std::uint64_t> slowNs{0};
 
  private:
+  std::thread::id owner_ = std::this_thread::get_id();
   SampleInstance* inst_ = nullptr;
   std::uint32_t cap_ = 0;
 };

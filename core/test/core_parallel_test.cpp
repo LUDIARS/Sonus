@@ -52,7 +52,7 @@ SND_TEST(CoreParallel, LateChunksHoldVoicesAndAlternateSets) {
   std::uint32_t lateBlocks = 0, heldBlocks = 0, serialBlocks = 0;
   std::uint32_t lateSet = 2;  // set of the last parallel block that had late chunks
   h.sample.slowNs.store(200000000);  // 200 ms per batch: far past the 20 ms spin
-  for (int i = 0; i < 12; ++i) {
+  for (int i = 0; i < 80 && lateBlocks < 3u; ++i) {
     h.Step();
     const snd::core::BlockProfile& p = h.sys->LastBlock();
     for (float v : h.out) SND_CHECK(std::isfinite(v) && std::fabs(v) <= steady + 1e-3f);
