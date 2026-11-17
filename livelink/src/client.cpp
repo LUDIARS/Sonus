@@ -153,7 +153,7 @@ struct Client::Impl final : FrameReader::Handler {
     if (conn == nullptr) return 0;
     const std::uint32_t seq = NextSeq();
     FrameQueue& q = control ? sender.control() : sender.bulk();
-    if (!q.Push(static_cast<std::uint16_t>(type), wantAck ? kFrameWantsAck : 0u, seq, a, na, b, nb)) return 0;
+    if (!q.Push(static_cast<std::uint16_t>(type), static_cast<std::uint16_t>(wantAck ? 1u : 0u), seq, a, na, b, nb)) return 0;
     ++stats.framesOut;
     return seq;
   }
@@ -294,7 +294,7 @@ struct Client::Impl final : FrameReader::Handler {
     SetSt(ClientState::Ready);
     ++stats.connects;
     if (haveMask) {
-      const SetProfilerMask m{profilerMask, profilerHz};
+      const livelink::SetProfilerMask m{profilerMask, profilerHz};
       QueueLocked(false, MessageType::SetProfilerMask, false, &m, sizeof(m));
     }
   }
