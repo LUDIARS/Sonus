@@ -117,10 +117,16 @@ snd_add_test(bank_dep_unloading_test SOURCES dep_unloading_test.cpp fixture_bank
   LINK sonus_bank sonus_io sonus_mocks)
 # Re-check of a228470: ComputeWillCome (chains, diamonds, missing, cycles, copies, cancel, Shutdown, Abort).
 snd_add_test(bank_indep_willcome11_test SOURCES indep_bank_willcome11_test.cpp fixture_bank.cpp LINK sonus_bank sonus_io sonus_mocks)
-# Fails on purpose: the missing-dependency victim is chosen in slot order (a dependant fails although its dependency registers).
-snd_add_test(Defect_bank_victim_order_test SOURCES defect_bank_victim_order_test.cpp fixture_bank.cpp LINK sonus_bank sonus_io sonus_mocks)
+# Was a defect (missing-dependency failures in slot order); fixed in 2743264.
+snd_add_test(bank_indep_victim_order_test SOURCES indep_bank_victim_order_test.cpp fixture_bank.cpp LINK sonus_bank sonus_io sonus_mocks)
 # Unload -> immediate reload + dependants with real threads (a228470); decided-outcome phase. TSan x20.
 snd_add_test(bank_indep_reload11_thread_test SOURCES indep_bank_reload11_thread_test.cpp fixture_bank.cpp
   LINK sonus_bank sonus_io sonus_jobs sonus_mocks)
 target_link_libraries(bank_indep_reload11_thread_test PRIVATE Threads::Threads)
 set_tests_properties(bank_indep_reload11_thread_test PROPERTIES TIMEOUT 600)
+# Re-check of 2743264: outcomes are the same for every permutation of the slot assignment.
+snd_add_test(bank_indep_slotorder11_test SOURCES indep_bank_slotorder11_test.cpp fixture_bank.cpp LINK sonus_bank sonus_io sonus_mocks)
+set_tests_properties(bank_indep_slotorder11_test PROPERTIES TIMEOUT 1200)
+# Fails on purpose: with two copies of a dependency (same bankId, other hash), the slot order decides.
+snd_add_test(Defect_bank_dependency_hash_copy_test SOURCES defect_bank_dependency_hash_copy_test.cpp fixture_bank.cpp
+  LINK sonus_bank sonus_io sonus_mocks)
