@@ -579,9 +579,12 @@ void SampleKind::ExecuteRequest(RingCtx& c, SampleInst& in, const RenderItem& it
   const std::uint32_t q = c.req.load(std::memory_order_acquire);
   if ((q & kReqSeek) != 0u) {
     if ((q & kReqLoop) != 0u) in.loop = c.reqLoop;  // seek target as given, the last loop from here on
-    it.playhead->frame = c.reqTarget;
+    std::uint64_t target = c.reqTarget;
+    // A loop that ends before the target: the voice goes to the loop start (and so does the playhead).
+    if (in.loop.WrapsAfter(it.playhead->loopCount) && target >= in.loop.le) target = in.loop.lb;
+    it.playhead->frame = target;
     it.playhead->fraction = 0;
-    SeekRing(c, c.reqTarget, it.playhead->loopCount, inlineBudget);
+    SeekRing(c, target, it.playhead->loopCount, inlineBudget);
     in.primed = 0;
   } else if ((q & kReqLoop) != 0u) {
     const std::uint64_t pos = it.playhead->frame;

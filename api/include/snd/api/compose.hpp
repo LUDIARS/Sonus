@@ -26,8 +26,9 @@ class SourceKinds {
   SourceKinds& operator=(const SourceKinds&) = delete;
 
   // maxVoiceChannels: Config.maxVoiceChannels (the PCM rings are sized for it, source/runtime.hpp).
+  // maxBanks: Config.maxBanks (one unregistration counter per bank slot).
   bool Init(IAllocator& allocator, io::IoScheduler* io, io::StreamPool* streamPool,
-            std::uint32_t maxVoiceChannels = 8) noexcept;
+            std::uint32_t maxVoiceChannels = 8, std::uint32_t maxBanks = 64) noexcept;
   void Destroy() noexcept;
   // nullptr before Init.
   const source::SourceKindSet* Kinds() const noexcept;

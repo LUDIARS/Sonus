@@ -62,6 +62,11 @@
 // consumer rings, the job's done counter checked by whoever touches the shared
 // decoder state).
 //
+// Control (RunEventLogic) may change a voice's decoder, ring write position
+// and loop in place (a SetLoop that keeps the buffered data): sources rely on
+// core sending no Control op to a held voice (D-43: no system touches a held
+// voice's render state), which core guarantees.
+//
 // Errors after the start (stream IO, decode) can only end a voice through
 // VoiceRenderStatus::ended: core reports such a playback as completed. An end
 // reason in VoiceRenderStatus is planned for contract 1.2 (api stage).

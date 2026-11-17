@@ -99,7 +99,7 @@ class PcmCache {
   std::uint32_t FramesPerPage(std::uint32_t channels) const noexcept { return pageBytes_ / (4u * channels); }
   void Free(std::uint32_t e) noexcept;
   static bool Stale(const CacheEntry& e, const Shared& sh) noexcept {
-    return sh.bankEpoch[e.bankSlot % kBankEpochs].load(std::memory_order_acquire) != e.bankEpoch;
+    return sh.BankEpoch(e.bankSlot).load(std::memory_order_acquire) != e.bankEpoch;
   }
   bool Evict(std::uint32_t pagesNeeded, Shared& sh) noexcept;
 

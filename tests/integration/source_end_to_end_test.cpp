@@ -102,7 +102,7 @@ SND_TEST(SourceEndToEnd, ResidentCompressedAndStreamThroughCore) {
   SND_REQUIRE(io.Init(alloc, fs, streamPool, snd::io::MakeIoSchedulerConfig(cfg)));
   SND_REQUIRE(io.Start());
   snd::compose::SourceKinds kinds;
-  SND_REQUIRE(kinds.Init(alloc, &io, &streamPool, cfg.max_voice_channels));
+  SND_REQUIRE(kinds.Init(alloc, &io, &streamPool, cfg.max_voice_channels, cfg.max_banks));
 
   snd::core::CoreDesc d;
   d.config = &cfg;

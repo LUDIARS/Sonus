@@ -49,12 +49,13 @@ struct FileEntry {
   std::uint64_t lastUse = 0;
   bool used = false;
   bool failed = false;
+  bool stale = false;  // superseded by a fresh open: no new users, closed when the last one goes
 };
 
 struct QueuedRead {
   source::IoReadRequest req;
   std::uint32_t epoch;
-  std::uint32_t pad;
+  std::uint32_t fresh;  // StreamChannel::ReopenFile(): open the file again (a new playback)
 };
 
 std::uint32_t HashPath(const char* p, std::size_t* len) noexcept {
@@ -206,7 +207,7 @@ struct IoScheduler::Impl {
   // fresh (FileRequest): an idle entry of the same path is closed and opened
   // again (with a new size), so a file replaced or rewritten since is read as
   // it is now. Stream reads keep using an open entry.
-  std::uint32_t ResolveFile(const char* path, std::uint64_t now, bool fresh = false) noexcept {
+  std::uint32_t ResolveFile(const char* path, std::uint64_t now, bool fresh = false, bool supersede = false) noexcept {
     if (path == nullptr) return kNil;
     std::size_t len = 0;
     const std::uint32_t h = HashPath(path, &len);
@@ -219,11 +220,21 @@ struct IoScheduler::Impl {
         if (freeEntry == kNil) freeEntry = i;
         continue;
       }
-      if (e.hash == h && std::strcmp(e.path, path) == 0 && !(e.failed && e.refs == 0u)) {
-        if (fresh && e.refs == 0u && e.id != kInvalidFile) {
+      if (e.hash == h && !e.stale && std::strcmp(e.path, path) == 0 && !(e.failed && e.refs == 0u)) {
+        if (fresh && e.refs != 0u) {
+          if (!supersede) {  // a FileRequest shares an entry in use (it is opened now anyway)
+            ++e.refs;
+            e.lastUse = now;
+            return i;
+          }
+          e.stale = true;  // a new stream playback: the earlier user keeps the old file, we open anew
+          continue;
+        }
+        if (fresh && e.id != kInvalidFile) {
           fs->Close(e.id);  // idle: no reads in flight
           e.id = kInvalidFile;
           e.size = UINT64_MAX;
+          e.failed = false;
         }
         ++e.refs;
         e.lastUse = now;
@@ -243,6 +254,7 @@ struct IoScheduler::Impl {
     e.lastUse = now;
     e.used = true;
     e.failed = false;
+    e.stale = false;
     return pick;
   }
   // close: a FileRequest's entry is closed once nothing uses it (bank loads
@@ -251,7 +263,7 @@ struct IoScheduler::Impl {
     if (i == kNil) return;
     FileEntry& e = files[i];
     if (e.refs > 0u) --e.refs;
-    if (e.refs == 0u && close && e.id != kInvalidFile) {
+    if (e.refs == 0u && (close || e.stale) && e.id != kInvalidFile) {
       fs->Close(e.id);
       e = FileEntry{};
     } else if (e.refs == 0u && e.failed) {
@@ -272,6 +284,15 @@ struct IoScheduler::Impl {
     }
     e.size = fs->Size(e.id);
     return true;
+  }
+  // IoScheduler::CloseIdleFiles(): files no request uses are closed (a bank was unloaded).
+  void CloseIdleFiles() noexcept {
+    for (std::uint32_t i = 0; i < fileCount; ++i) {
+      FileEntry& e = files[i];
+      if (!e.used || e.refs != 0u) continue;
+      if (e.id != kInvalidFile) fs->Close(e.id);
+      e = FileEntry{};
+    }
   }
   void CloseAllFiles() noexcept {
     for (std::uint32_t i = 0; i < fileCount; ++i) {
@@ -343,7 +364,7 @@ struct IoScheduler::Impl {
       n.chunk = chunk;
       n.bytes = q.req.bytes;
       n.offset = q.req.offset;
-      n.file = ResolveFile(q.req.path, now);
+      n.file = ResolveFile(q.req.path, now, q.fresh != 0u, q.fresh != 0u);
       ChAppend(idx);
       if (n.file == kNil) {  // bad path or table full: fails in order
         n.state = NodeState::Completed;
@@ -799,6 +820,7 @@ struct IoScheduler::Impl {
     // the producer saw the flag still 1 and did not post: a formal lost wakeup.)
     wakePending.value.exchange(0u, std::memory_order_acq_rel);
     const std::uint64_t now = Now();
+    if (self->closeIdle_.value.exchange(0u, std::memory_order_acq_rel) != 0u) CloseIdleFiles();
     DrainInputs(now, false);
     SweepCancelledFiles();
     PollInFlight();
@@ -1108,7 +1130,7 @@ bool IoScheduler::Post(const source::IoReadRequest& req) noexcept {
     im->streamRejected.Add();
     return false;
   }
-  QueuedRead q{req, ch.Epoch(), 0u};
+  QueuedRead q{req, ch.Epoch(), ch.reopen_.value.exchange(0u, std::memory_order_acq_rel)};
   if (!im->streamQueue.TryPush(q)) {
     ch.Unreserve();
     im->Unhold(chunk);
@@ -1128,6 +1150,11 @@ void IoScheduler::Wake() noexcept {
   Impl* im = impl_;
   if (im == nullptr) return;
   if (im->wakePending.value.exchange(1u, std::memory_order_acq_rel) == 0u) im->wake.Post();
+}
+
+void IoScheduler::CloseIdleFiles() noexcept {
+  closeIdle_.value.store(1u, std::memory_order_release);
+  Wake();
 }
 
 void IoScheduler::WakeThunk(void* ctx) noexcept {

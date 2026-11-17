@@ -38,7 +38,7 @@ const char* const* LinkedModules(unsigned* count) noexcept {
 }
 
 bool SourceKinds::Init(IAllocator& allocator, io::IoScheduler* io, io::StreamPool* streamPool,
-                       std::uint32_t maxVoiceChannels) noexcept {
+                       std::uint32_t maxVoiceChannels, std::uint32_t maxBanks) noexcept {
   Destroy();
   void* mem = allocator.Allocate(sizeof(source::Runtime), 64, MemTag::Misc);
   if (mem == nullptr) return false;
@@ -48,6 +48,7 @@ bool SourceKinds::Init(IAllocator& allocator, io::IoScheduler* io, io::StreamPoo
   d.io = io;
   d.streamPool = streamPool;
   d.maxVoiceChannels = maxVoiceChannels;
+  d.maxBanks = maxBanks;
   if (!rt->Init(d)) {
     rt->~Runtime();
     allocator.Free(mem, MemTag::Misc);

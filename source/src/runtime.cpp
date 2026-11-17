@@ -4,6 +4,7 @@
 #include <new>
 
 #include "detail.hpp"
+#include "snd/io/io_scheduler.hpp"
 #include "sample_kind.hpp"
 #include "stream_kind.hpp"
 
@@ -25,6 +26,17 @@ bool Runtime::Init(const RuntimeDesc& desc) noexcept {
   impl_->shared.allocator = desc.allocator;
   impl_->shared.io = desc.io;
   impl_->shared.streamPool = desc.streamPool;
+  {
+    const std::uint32_t n = desc.maxBanks == 0u ? 64u : desc.maxBanks;
+    void* m = desc.allocator->Allocate(sizeof(std::atomic<std::uint32_t>) * n, 64, MemTag::Misc);
+    if (m == nullptr) {
+      Destroy();
+      return false;
+    }
+    impl_->shared.bankEpochs = static_cast<std::atomic<std::uint32_t>*>(m);
+    for (std::uint32_t i = 0; i < n; ++i) new (&impl_->shared.bankEpochs[i]) std::atomic<std::uint32_t>(0u);
+    impl_->shared.bankEpochCount = n;
+  }
   impl_->shared.maxVoiceChannels =
       desc.maxVoiceChannels == 0u || desc.maxVoiceChannels > kMaxChannels ? kMaxChannels : desc.maxVoiceChannels;
   kinds_ = SourceKindSet{};
@@ -37,6 +49,7 @@ bool Runtime::Init(const RuntimeDesc& desc) noexcept {
 
 void Runtime::Destroy() noexcept {
   if (impl_ == nullptr) return;
+  if (impl_->shared.bankEpochs != nullptr) alloc_->Free(impl_->shared.bankEpochs, MemTag::Misc);
   impl_->~Impl();
   alloc_->Free(impl_, MemTag::Misc);
   impl_ = nullptr;
@@ -47,7 +60,9 @@ void Runtime::Destroy() noexcept {
 void Runtime::BankUnregistered(void* runtime, std::uint16_t bankSlot) noexcept {
   auto* rt = static_cast<Runtime*>(runtime);
   if (rt == nullptr || rt->impl_ == nullptr) return;
-  rt->impl_->shared.bankEpoch[bankSlot % detail::kBankEpochs].fetch_add(1u, std::memory_order_release);
+  rt->impl_->shared.BankEpoch(bankSlot).fetch_add(1u, std::memory_order_release);
+  // Its stream files may be rebuilt: close what no read uses (playing streams keep theirs).
+  if (rt->impl_->shared.io != nullptr) rt->impl_->shared.io->CloseIdleFiles();
 }
 
 RuntimeStats Runtime::Stats() const noexcept {

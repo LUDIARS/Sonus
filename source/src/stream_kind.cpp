@@ -439,6 +439,10 @@ void StreamKind::ResetForSeek(StreamInst& s, std::uint64_t target, std::uint32_t
 void StreamKind::Execute(StreamInst& s, std::uint32_t gen, std::uint32_t kind, std::uint64_t target, std::uint32_t loops,
                          std::uint32_t& inlineBudget) noexcept {
   const std::uint64_t base = RingWrite(s);
+  // A loop (a pending SetLoop included) that ends before the target: the voice
+  // goes to the loop start, and the playhead with it.
+  const LoopRange& lp = s.hasPendingLoop != 0u ? s.pendingLoop : s.loop;
+  if (lp.WrapsAfter(loops) && target >= lp.le) target = lp.lb;
   ResetForSeek(s, target, loops);
   s.execBase = base;
   s.execTarget = target;
@@ -570,6 +574,7 @@ bool StreamKind::StartOne(const SourceStartRequest& r, SourceStartResult& res, s
     return false;
   }
   StreamInst& s = inst_[slot];
+  Channel(slot).ReopenFile();  // a new playback in this slot: the stream file may have been rebuilt
   if (!Channel(slot).Reclaim()) {  // cannot happen: slots are freed only once clean
     free_.Push(slot);
     res.endDetail = SND_END_DETAIL_NO_STREAM_SLOT;

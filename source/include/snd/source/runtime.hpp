@@ -107,6 +107,8 @@ struct RuntimeDesc {
   // streams and maxDecoders per-voice rings can each play this many channels
   // at once (memory below).
   std::uint32_t maxVoiceChannels = 8;
+  // Config.maxBanks: one unregistration counter per bank slot (BankUnregistered).
+  std::uint32_t maxBanks = 64;
   bool enableSample = true;
   bool enableStream = true;
 };

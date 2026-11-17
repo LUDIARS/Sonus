@@ -175,7 +175,7 @@ CacheResult PcmCache::Acquire(const AssetCopy& a, ICodec* codec, Shared& sh, std
   e.assetId = a.assetId;
   e.bankSlot = a.bankSlot;
   e.loadGen = a.loadGen;
-  e.bankEpoch = sh.bankEpoch[a.bankSlot % kBankEpochs].load(std::memory_order_acquire);
+  e.bankEpoch = sh.BankEpoch(a.bankSlot).load(std::memory_order_acquire);
   e.codecId = a.h.codec;
   e.data = a.data;
   e.frames = a.h.total_frames;

@@ -74,6 +74,12 @@
 // place (larger or smaller) is read as it is now. Stream reads keep their file
 // open while they play (and an idle stream file stays open until the table
 // needs the entry); replacing a stream file while it plays is not supported.
+// Two exceptions keep a rebuilt stream file from being read stale: a channel
+// used for a new playback opens its file again (StreamChannel::ReopenFile, the
+// Stream source calls it at every start; loops and seeks of one playback keep
+// the file), and IoScheduler::CloseIdleFiles (called when a bank is
+// unregistered) closes every file no request uses; files still read are
+// closed when their last request is done (playing streams finish first).
 //
 // Notifications the audio thread reads without waiting (all atomics on the
 // StreamChannel, slot-indexed): delivered records (ring), errors, read
@@ -194,6 +200,10 @@ class StreamChannel {
   // Must not race with Post() for the same slot (same thread, as in RunEventLogic).
   // The epoch is 32 bits and wraps after 2^32 Cancel()s; only equality is used.
   void Cancel() noexcept;
+  // The next request of this channel opens its file again instead of using
+  // the open entry (a new playback in this slot: the file may have been
+  // rebuilt). An earlier user of the old entry keeps it until it is done.
+  void ReopenFile() noexcept { reopen_.value.store(1u, std::memory_order_release); }
   std::uint32_t Epoch() const noexcept { return epoch_.value.load(std::memory_order_acquire); }
 
   // --- consumer (one decode job at a time, or the audio thread when no job runs) ---
@@ -250,6 +260,7 @@ class StreamChannel {
 
   base::CachePadded<std::atomic<std::uint32_t>> epoch_;     // written by the audio thread
   base::CachePadded<std::atomic<std::uint32_t>> reserved_;  // Post +1, release / drop -1
+  base::CachePadded<std::atomic<std::uint32_t>> reopen_;    // ReopenFile(): taken by the next Post
   base::SpscRing<ChunkRecord> ring_;                        // IO thread -> consumer
   std::atomic<std::uint64_t> readPos_{UINT64_MAX};          // IO thread; PackReadPos or "none"
   std::atomic<std::uint32_t> delivered_{0};                 // IO thread
@@ -383,6 +394,9 @@ class IoScheduler {
   void Wake() noexcept;
   // Completion hook for file systems that can notify (DefaultFileSystem::SetCompletionNotify).
   static void WakeThunk(void* ctx) noexcept;
+  // RT-safe, any thread: the IO thread closes every open file no request uses
+  // (call when a bank is unregistered: its stream files may be rebuilt).
+  void CloseIdleFiles() noexcept;
 
   // Channel of a stream slot (slot < ChannelCount()). The reference is stable
   // between Init and Destroy.
@@ -424,6 +438,7 @@ class IoScheduler {
   StreamChannel* channels_ = nullptr;
   std::uint32_t channelCount_ = 0;
   base::CachePadded<std::atomic<std::uint64_t>> drainEpoch_;
+  base::CachePadded<std::atomic<std::uint32_t>> closeIdle_;
   IAllocator* alloc_ = nullptr;
 };
 
