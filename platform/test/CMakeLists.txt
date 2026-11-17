@@ -77,3 +77,13 @@ endif()
 # --- Independent tests of stage 2 (output backends and the driver, D-61..D-66) -------------
 snd_add_test(platform_indep_driver_core_test SOURCES indep_driver_core_test.cpp LINK sonus_platform)
 snd_add_test(platform_indep_audio_driver_test SOURCES indep_audio_driver_test.cpp LINK sonus_platform)
+snd_add_test(platform_indep_sample_format_test SOURCES indep_sample_format_test.cpp LINK sonus_platform)
+target_include_directories(platform_indep_sample_format_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src)
+if(SND_PLATFORM_ALSA_ENABLED)
+  # Own main(): exit 77 = SKIP when libasound cannot open a private null PCM.
+  add_executable(platform_indep_alsa_test indep_alsa_test.cpp)
+  snd_apply_options(platform_indep_alsa_test)
+  target_link_libraries(platform_indep_alsa_test PRIVATE sonus_testkit sonus_testkit_rthooks sonus_platform)
+  add_test(NAME platform_indep_alsa_test COMMAND platform_indep_alsa_test)
+  set_tests_properties(platform_indep_alsa_test PROPERTIES TIMEOUT 180 SKIP_RETURN_CODE 77)
+endif()
