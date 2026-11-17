@@ -35,8 +35,13 @@ struct RingCtx {
   std::uint32_t jobCounter;            // done counter of the job in flight (atomic_ref)
   std::uint32_t cancel;                // cancel flag of the job (atomic_ref)
   std::uint32_t inst;                  // owning instance, kNone = free
-  std::uint32_t pendingSeek;           // audio thread: reset to seekTarget when no job runs
-  std::uint64_t seekTarget;
+  // Requests from Control to Render (D-43 / source_if.hpp: the render state of
+  // a voice is changed only by its RenderBatch). req: 0 none, 1 seek to
+  // reqTarget, 2 loop change to reqLoop. Executed at the head of the next
+  // RenderBatch once no job of the context runs; Publish posts no job meanwhile.
+  std::atomic<std::uint32_t> req{0};
+  std::uint64_t reqTarget;
+  LoopRange reqLoop;
   std::uint32_t listPos;               // position in the active list
   SampleKind* kind;
 };
@@ -55,6 +60,7 @@ struct SampleInst {
   std::uint32_t hasOverride;  // render sets the playhead to `overridePos` first
   std::uint64_t overridePos;
   std::uint64_t renderPos;    // render's last position (for Control on the audio thread)
+  std::uint32_t renderLoops;
 };
 
 class SampleKind final : public ISourceKind {
@@ -87,11 +93,14 @@ class SampleKind final : public ISourceKind {
                  std::uint32_t* detail) noexcept;
   void FreeInstance(std::uint32_t i) noexcept;
   void FreeCtx(std::uint32_t c) noexcept;
-  void SeekRing(RingCtx& c, std::uint64_t target, std::uint32_t& inlineBudget) noexcept;
+  void SeekRing(RingCtx& c, std::uint64_t target, std::uint32_t loops, std::uint32_t& inlineBudget) noexcept;
+  bool LoopChangeFits(const RingCtx& c, const SampleInst& in, std::uint64_t pos, std::uint32_t loops,
+                      const LoopRange& to, std::uint64_t* agree) const noexcept;
+  void ExecuteRequest(RingCtx& c, SampleInst& in, const RenderItem& it, std::uint32_t& inlineBudget) noexcept;
   void DecodeRing(RingCtx& c, std::uint64_t limitFrames) noexcept;
   bool Ready(const SampleInst& in) const noexcept;
   void RenderDirect(SampleInst& in, const RenderItem& it, VoiceRenderStatus& st) noexcept;
-  void RenderRing(SampleInst& in, const RenderItem& it, VoiceRenderStatus& st) noexcept;
+  void RenderRing(SampleInst& in, const RenderItem& it, VoiceRenderStatus& st, std::uint32_t& inlineBudget) noexcept;
   void RenderCache(SampleInst& in, const RenderItem& it, VoiceRenderStatus& st) noexcept;
 
   Shared& sh_;

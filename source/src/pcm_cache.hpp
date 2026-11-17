@@ -9,10 +9,14 @@
 // plays them. When every page is pinned the caller falls back to the per-voice
 // ring (6.2), which is refused when no decoder slot is free either.
 //
-// Key: (assetId, bank slot, data pointer, frames, codec). The cached PCM is a
-// copy, so an entry stays valid after its bank is unloaded; a different bank
-// loaded at the same slot and address with the same asset id and length would
-// match too (documented limitation; the asset id names the same asset).
+// Key: (assetId, bank slot, bank load generation, data pointer, frames,
+// codec). The load generation (SourceAsset::reserved, the low 16 bits of the
+// bank handle's generation, set by core; source_if.hpp) differs for every load
+// of a bank, so an entry never serves another load, even one at the same slot
+// and address. Entries of an older load of a slot are freed once unpinned (the
+// first start from the new load). A fill whose last voice went away is
+// cancelled at once (the job stops before its next read of bank memory) and
+// the entry is dropped: no fill job outlives the voices that pin the bank.
 //
 // Threads: everything on the audio thread except the fill job (prefetch lane)
 // and Read / Filled (RenderBatch: RT workers or the audio thread).
@@ -29,6 +33,7 @@ struct CacheEntry {
   std::uint32_t state;  // 0 free, 1 filling, 2 ready, 3 failed
   Id assetId;
   std::uint16_t bankSlot;
+  std::uint16_t loadGen;
   std::uint32_t codecId;
   const std::uint8_t* data;
   std::uint64_t frames;

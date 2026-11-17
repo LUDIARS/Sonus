@@ -122,6 +122,7 @@ struct AssetCopy {
   std::uint8_t virtualReturn;
   std::uint8_t ioPriority;
   std::uint16_t bankSlot;
+  std::uint16_t loadGen;  // SourceAsset::reserved: bank load generation (pcm_cache.hpp)
 };
 inline AssetCopy CopyAsset(const SourceAsset& a) noexcept {
   AssetCopy c{};
@@ -144,6 +145,7 @@ inline AssetCopy CopyAsset(const SourceAsset& a) noexcept {
   c.virtualReturn = a.virtualReturn;
   c.ioPriority = a.ioPriority;
   c.bankSlot = a.bankSlot;
+  c.loadGen = a.reserved;
   return c;
 }
 
@@ -378,6 +380,7 @@ struct Shared {
   IAllocator* allocator = nullptr;
   io::IoScheduler* io = nullptr;
   io::StreamPool* streamPool = nullptr;
+  std::uint32_t maxVoiceChannels = kMaxChannels;  // RuntimeDesc (Config.maxVoiceChannels)
   codec::DecoderPool decoders;
   std::uint32_t decoderUsers = 0;  // kinds that called EnsureDecoders
   bool decodersReady = false;

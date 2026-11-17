@@ -270,3 +270,34 @@ SND_TEST(SourceKind, SetLoopOffRunsOutFromThePosition) {
                   "%s", a.name.c_str());
   }
 }
+
+// PCM cache key (pcm_cache.hpp): another load of the bank (SourceAsset::reserved,
+// the load generation core sets) never hits the entry of the earlier load, even
+// at the same slot and data address, and the earlier load's entry is freed.
+SND_TEST(SourceKind, CacheEntryOfAnEarlierBankLoadIsNotServed) {
+  Built b = Build("kcachegen", {Spec("cad", 20000, "decompressCache", "ADPC")});
+  SND_REQUIRE_MSG(b.ok, "%s", b.diag.c_str());
+  KindDriver d(b, KindDriver::Opt{});
+  SND_REQUIRE(d.Ok());
+  src::SourceAsset a = *d.Asset("cad");
+  a.reserved = 1;
+  KindDriver::Voice v;
+  v.slot = d.Start(d.Sample(), &a, 0, 0);
+  SND_REQUIRE(v.slot != snd::kInvalidSlot);
+  RenderUntil(d, d.Sample(), v, ~std::size_t{0}, 200);
+  d.Release(d.Sample(), v.slot);
+  d.Block(d.Sample(), {}, 256);
+  KindDriver::Voice w;  // same load again: from the cache
+  w.slot = d.Start(d.Sample(), &a, 0, 0);
+  SND_CHECK_EQ(d.runtime.Stats().cacheHits, 1u);
+  d.Release(d.Sample(), w.slot);
+  d.Block(d.Sample(), {}, 256);
+  a.reserved = 2;  // the bank was unloaded and loaded again (same slot, same address)
+  KindDriver::Voice x;
+  x.slot = d.Start(d.Sample(), &a, 0, 0);
+  SND_REQUIRE(x.slot != snd::kInvalidSlot);
+  const snd::source::RuntimeStats s = d.runtime.Stats();
+  SND_CHECK_EQ(s.cacheHits, 1u);
+  SND_CHECK_EQ(s.cacheMisses, 2u);
+  SND_CHECK_EQ(s.cacheEntries, 1u);  // the earlier load's entry is gone
+}

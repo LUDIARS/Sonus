@@ -25,6 +25,8 @@ bool Runtime::Init(const RuntimeDesc& desc) noexcept {
   impl_->shared.allocator = desc.allocator;
   impl_->shared.io = desc.io;
   impl_->shared.streamPool = desc.streamPool;
+  impl_->shared.maxVoiceChannels =
+      desc.maxVoiceChannels == 0u || desc.maxVoiceChannels > kMaxChannels ? kMaxChannels : desc.maxVoiceChannels;
   kinds_ = SourceKindSet{};
   if (desc.enableSample) kinds_.kinds[static_cast<std::size_t>(SourceKind::Sample)] = &impl_->sample;
   if (desc.enableStream && desc.io != nullptr && desc.streamPool != nullptr) {

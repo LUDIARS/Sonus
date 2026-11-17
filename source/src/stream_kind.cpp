@@ -99,7 +99,12 @@ class StreamInput final : public InputSource {
     ch_.Release(rec);
     s_.curValid = 0;
     const std::uint64_t end = rec.offset + rec.bytes;
-    if (rec.bytes < rec.requested) s_.eof = 1;  // end of file
+    const std::uint64_t dataEnd = s_.a.streamDataOffset + s_.dataBytes;
+    if (rec.bytes < rec.requested) {
+      // A short read inside the data: the file is shorter than its header says.
+      if (end < dataEnd) s_.error.store(SND_END_DETAIL_STREAM_IO, std::memory_order_release);
+      s_.eof = 1;
+    }
     if (!s_.loop.WrapsAfter(s_.dec.decLoops) && s_.headerDone.load(std::memory_order_relaxed) != 0u &&
         end >= s_.a.streamDataOffset + s_.dataBytes) {
       s_.eof = 1;
@@ -127,7 +132,7 @@ class StreamSink final : public OutputSink {
       const std::uint32_t at = static_cast<std::uint32_t>(w_ & mask_);
       std::uint32_t k = frames_ - at;
       if (k > n - i) k = n - i;
-      for (std::uint32_t c = 0; c < s_.dec.channels; ++c) std::memcpy(s_.ring[c] + at, src[c] + offset + i, sizeof(float) * k);
+      for (std::uint32_t c = 0; c < s_.channels; ++c) std::memcpy(s_.ring[c] + at, src[c] + offset + i, sizeof(float) * k);
       w_ += k;
       i += k;
     }
@@ -165,6 +170,24 @@ std::uint64_t EndByte(const AssetCopy& a, std::uint64_t end, std::uint64_t dataB
 }
 
 
+// dataBytes the header may give for the asset (bank-format.md 6.3): exact for
+// PCM and ADPCM (whole packets for preSkip + totalFrames), bounded for Opus
+// (packets of 3 .. 2 + streams x 1277 bytes), at least 1 for other codecs.
+bool DataBytesFit(const AssetCopy& a, std::uint64_t bytes) noexcept {
+  const CodecHeader& h = a.h;
+  if (IsPcm(h.codec)) return bytes == h.total_frames * PcmFrameBytes(h);
+  const std::uint32_t pf = codec::PacketFrames(h);
+  const std::uint32_t pb = codec::PacketBytes(h);
+  if (pf == 0u) return bytes != 0u;
+  const std::uint64_t packets = (h.total_frames + h.pre_skip + pf - 1u) / pf;
+  if (pb != 0u) return bytes == packets * pb;
+  if (h.codec == SND_CODEC_OPUS) {
+    const std::uint64_t maxPacket = codec::OpusMaxPacketBytes(h) + codec::kOpusLengthPrefixBytes;
+    return bytes >= packets * (codec::kOpusLengthPrefixBytes + 1u) && (maxPacket <= 2u || bytes <= packets * maxPacket);
+  }
+  return bytes != 0u;
+}
+
 }  // namespace
 
 // ---------------------------------------------------------------------------
@@ -196,8 +219,9 @@ bool StreamKind::ParseHeader(StreamInst& s, const io::ChunkRecord& rec) noexcept
   bool ok = rec.status == io::ChunkStatus::Ok && rec.bytes >= sizeof(h);
   if (ok) std::memcpy(&h, Pool().Data(rec.chunk), sizeof(h));
   ok = ok && h.magic == bf::kStreamMagic && h.version == bf::kStreamVersion && h.codec == s.a.h.codec &&
-       h.channels == s.a.h.channels && h.totalFrames == s.a.h.total_frames &&
-       (s.a.streamDataOffset == 0u || h.dataOffset == s.a.streamDataOffset);
+       h.channels == s.a.h.channels && h.sampleRate == s.a.h.sample_rate && h.assetId == s.a.assetId &&
+       h.totalFrames == s.a.h.total_frames && (s.a.streamDataOffset == 0u || h.dataOffset == s.a.streamDataOffset) &&
+       DataBytesFit(s.a, h.dataBytes);
   if (!ok) {
     s.error.store(SND_END_DETAIL_STREAM_IO, std::memory_order_release);
     return false;
@@ -216,7 +240,7 @@ void StreamKind::Layout(Carver& c, const SourceLimits& l) noexcept {
   const std::uint32_t block = l.blockFrames == 0u ? 256u : l.blockFrames;
   const std::uint64_t target = std::uint64_t{l.streamTargetAheadMs} * rate / 1000u;
   const std::uint32_t frames = NextPow2(static_cast<std::uint32_t>(target + 4u * block > 1024u ? target + 4u * block : 1024u));
-  const std::uint32_t ringCount = l.maxStreams * 2u < 8u ? 8u : l.maxStreams * 2u;
+  const std::uint32_t ringCount = l.maxStreams * sh_.maxVoiceChannels;  // every stream at maxVoiceChannels
   const std::uint32_t n = l.maxStreams;
   if (c.base == nullptr) {
     c.Take<StreamInst>(n);
@@ -294,7 +318,7 @@ void StreamKind::Shutdown() noexcept {
       s.curValid = 0;
       Channel(i).Reclaim();  // what is still in flight comes back at IoScheduler::Shutdown
       if (sh_.decodersReady) sh_.decoders.Release(s.dslot);
-      rings_.Release(s.dec.channels, s.rings);
+      rings_.Release(s.channels, s.rings);
       s.state = 0;
     }
     s.~StreamInst();
@@ -349,12 +373,16 @@ void StreamKind::SetupPlanner(StreamInst& s) noexcept {
   }
   s.planner.Reset(base, base + s.dataBytes, lb, le, chunkBytes_);
   s.planner.Seek(base + s.ioStart);
+  s.lastReadEnd = base + s.ioStart;
   s.wrapsPosted = 0;
   s.plannerSet = 1;
   s.planEnded = 0;
 }
 
-void StreamKind::ResetForSeek(StreamInst& s, std::uint64_t target) noexcept {
+void StreamKind::ResetForSeek(StreamInst& s, std::uint64_t target, std::uint32_t loops) noexcept {
+  // IO and decoder side only (no job of s runs). The PCM ring is not touched:
+  // the new data is appended after the current write position and Render
+  // adopts it (Execute / RenderOne), so nothing Render reads changes here.
   io::StreamChannel& ch = Channel(s.slot);
   if (s.hasPendingLoop != 0u) {
     s.loop = s.pendingLoop;
@@ -363,7 +391,6 @@ void StreamKind::ResetForSeek(StreamInst& s, std::uint64_t target) noexcept {
   s.dec.loop = s.loop;
   ch.Cancel();
   DropCurrent(s);
-  SetRingWrite(s, RingRead(s));
   s.ended.store(0u, std::memory_order_relaxed);
   if (s.error.load(std::memory_order_relaxed) != SND_END_DETAIL_STREAM_IO) s.error.store(0u, std::memory_order_relaxed);
   s.dec.error = 0;
@@ -381,6 +408,7 @@ void StreamKind::ResetForSeek(StreamInst& s, std::uint64_t target) noexcept {
     s.preActive = 0;
     s.ioStart = byte;
   }
+  s.dec.decLoops = loops;
   if (s.headerDone.load(std::memory_order_acquire) != 0u) {
     SetupPlanner(s);
   } else {
@@ -388,6 +416,47 @@ void StreamKind::ResetForSeek(StreamInst& s, std::uint64_t target) noexcept {
     s.headerPosted = 0;  // the cancelled header read is posted again
   }
   if (s.ended.load(std::memory_order_relaxed) != 0u) s.planEnded = 1;
+}
+
+void StreamKind::Execute(StreamInst& s, std::uint32_t gen, std::uint32_t kind, std::uint64_t target, std::uint32_t loops,
+                         std::uint32_t& inlineBudget) noexcept {
+  const std::uint64_t base = RingWrite(s);
+  ResetForSeek(s, target, loops);
+  s.execBase = base;
+  s.execTarget = target;
+  s.execLoops = loops;
+  s.execKind = kind;
+  s.execLoop = s.loop;
+  s.execGen.store(gen, std::memory_order_release);
+  if (s.preActive != 0u && inlineBudget != 0u) {  // bounded: the room the ring has now
+    --inlineBudget;
+    Decode(s);
+  }
+}
+
+// SetLoop without a re-read: the decoder has not wrapped since what Render
+// reads now (ring = decPos - ringPos frames), every posted read is linear
+// (no wrap posted that the decoder has not consumed) and the reads do not go
+// past where the old and the new loop differ.
+bool StreamKind::LoopChangeFits(const StreamInst& s, const LoopRange& to) const noexcept {
+  if (s.plannerSet == 0u || s.dec.awaitWrap || s.skipToWrap != 0u || s.wrapsPosted != s.dec.decLoops ||
+      s.reqGen.load(std::memory_order_relaxed) != s.adoptGen.load(std::memory_order_acquire)) {
+    return false;
+  }
+  const std::uint64_t total = s.a.h.total_frames;
+  const std::uint32_t loops = s.ringLoops;
+  const std::uint64_t oldEnd = s.loop.WrapsAfter(loops) ? s.loop.le : total;
+  const std::uint64_t newEnd = to.WrapsAfter(loops) ? to.le : total;
+  const std::uint64_t agree = oldEnd < newEnd ? oldEnd : newEnd;
+  const std::uint64_t held = RingWrite(s) - RingRead(s);
+  if (s.ringPos >= newEnd || s.dec.decPos < s.ringPos || s.dec.decPos - s.ringPos != held || s.dec.decPos > agree) {
+    return false;
+  }
+  if (to.WrapsAfter(loops)) {  // the reads must not pass the new loop end
+    const std::uint64_t endByte = s.a.streamDataOffset + EndByte(s.a, to.le, s.dataBytes);
+    if (s.lastReadEnd > endByte) return false;
+  }
+  return true;
 }
 
 void StreamKind::PostReads(StreamInst& s) noexcept {
@@ -418,6 +487,7 @@ void StreamKind::PostReads(StreamInst& s) noexcept {
       return;
     }
     if (rd.wrapped) ++s.wrapsPosted;
+    s.lastReadEnd = rd.offset + rd.bytes;
     if (rd.loopEnd && s.loop.count != 0u && s.wrapsPosted + 1u >= s.loop.count) {
       // Finite loop count: after the last loop the reads run on to the data end.
       const std::uint64_t base = s.a.streamDataOffset;
@@ -446,7 +516,7 @@ bool StreamKind::TryFree(StreamInst& s) noexcept {
   if (!Channel(s.slot).Reclaim()) return false;  // reads still in flight: next block
   sh_.decoders.Release(s.dslot);  // generation-checked (A1-15)
   s.dslot = codec::DecoderSlot{};
-  rings_.Release(s.dec.channels, s.rings);
+  rings_.Release(s.channels, s.rings);
   for (std::uint32_t c = 0; c < kMaxChannels; ++c) s.ring[c] = nullptr;
   s.state = 0;
   free_.Push(s.slot);
@@ -487,7 +557,10 @@ bool StreamKind::StartOne(const SourceStartRequest& r, SourceStartResult& res, s
     Count(sh_, kRejectedStreamSlot);
     return false;
   }
-  const std::uint32_t ch = a->codec.channels;
+  const std::uint32_t assetCh = a->codec.channels;
+  // The ring keeps the rendered channels (<= Config.maxVoiceChannels; the pool guarantees maxStreams of them).
+  std::uint32_t ch = r.channels == 0u || r.channels > assetCh ? assetCh : r.channels;
+  if (ch > sh_.maxVoiceChannels) ch = sh_.maxVoiceChannels;
   if (!rings_.Acquire(ch, s.rings)) {
     free_.Push(slot);
     res.endDetail = SND_END_DETAIL_NO_STREAM_SLOT;
@@ -506,7 +579,7 @@ bool StreamKind::StartOne(const SourceStartRequest& r, SourceStartResult& res, s
   s.a = CopyAsset(*a);
   std::memcpy(s.path, a->streamPath, plen + 1u);
   s.loop = MakeLoop(s.a, (r.flags & kStartLoop) != 0u, s.a.loopStart, s.a.loopEnd, r.flags >> kStartLoopCountShift);
-  s.channels = r.channels == 0u || r.channels > ch ? ch : r.channels;
+  s.channels = ch;
   for (std::uint32_t c = 0; c < ch; ++c) s.ring[c] = rings_.Ring(s.rings[c]);
   s.dslot = ds;
   s.dec.codec = codec;
@@ -527,7 +600,6 @@ bool StreamKind::StartOne(const SourceStartRequest& r, SourceStartResult& res, s
   s.plannerSet = 0;
   s.planEnded = 0;
   s.headerPosted = 0;
-  s.pendingSeek = 0;
   s.pendingStop = 0;
   s.hasPendingLoop = 0;
   s.virt = (r.flags & kStartVirtual) != 0u ? 1u : 0u;
@@ -539,9 +611,18 @@ bool StreamKind::StartOne(const SourceStartRequest& r, SourceStartResult& res, s
   s.lag = 0;
   s.reseek.store(0u, std::memory_order_relaxed);
   const std::uint64_t start = WrapInto(s.loop, r.startFrame);
+  s.rloop = s.loop;
   s.ringPos = start;
   s.ringLoops = 0;
+  s.vpos = start;
+  s.vloops = 0;
   s.renderPos = start;
+  s.renderLoops = 0;
+  {  // nothing pending: every generation equal
+    const std::uint32_t g = s.reqGen.load(std::memory_order_relaxed);
+    s.execGen.store(g, std::memory_order_relaxed);
+    s.adoptGen.store(g, std::memory_order_relaxed);
+  }
   s.hasOverride = start != r.startFrame ? 1u : 0u;
   s.overridePos = start;
   // Stream row (RunEventLogic creates it, D-45: slot = row).
@@ -565,7 +646,7 @@ bool StreamKind::StartOne(const SourceStartRequest& r, SourceStartResult& res, s
   codec->Init(ds.state, s.a.h);
   s.state = 1;
   ++live_;
-  ResetForSeek(s, start);
+  ResetForSeek(s, start, 0);
   if (s.virt == 0u) {
     PostReads(s);
     if (s.preActive != 0u && inlineBudget != 0u) {  // decode the head of the preload now (6.1)
@@ -631,11 +712,31 @@ void StreamKind::Control(const SourceControlOp* ops, std::uint32_t count) noexce
         break;
       case ControlOp::SetLoop: {
         const bool loop = op.frame2 != 0u || op.frame != 0u;
-        s.pendingLoop = MakeLoop(s.a, loop, op.frame, op.frame2, s.loop.count);
-        s.hasPendingLoop = 1;  // applied with the seek, when no job reads the loop
-        ctl->loopStartFrame = s.pendingLoop.lb;
-        ctl->loopEndFrame = s.pendingLoop.le;
-        target = s.renderPos;  // re-read with the new loop from the current position
+        const LoopRange to = MakeLoop(s.a, loop, op.frame, op.frame2, s.loop.count);
+        ctl->loopStartFrame = to.lb;
+        ctl->loopEndFrame = to.le;
+        if (!JobBusy(s.jobCounter) && s.hasPendingLoop == 0u && LoopChangeFits(s, to)) {
+          // The data read and decoded so far is the same under the new loop:
+          // keep the PCM ring, change the read plan from where it is.
+          s.loop = to;
+          s.dec.loop = to;
+          s.rloop = to;  // Render reads it from the next RenderBatch on (before it in this block)
+          const std::uint64_t base = s.a.streamDataOffset;
+          std::uint64_t lb = 0, le = 0;
+          SeekPoint sp{};
+          if (to.Looping() && ResolveSeek(s.a, to.lb, &sp)) {
+            lb = base + sp.byte;
+            le = base + EndByte(s.a, to.le, s.dataBytes);
+            if (le <= lb) lb = le = 0;
+          }
+          s.planner.Reset(base, base + s.dataBytes, lb, le, chunkBytes_);
+          s.planner.Seek(s.lastReadEnd);
+          s.planEnded = 0;
+          break;
+        }
+        s.pendingLoop = to;  // otherwise: re-read from the current position with the new loop
+        s.hasPendingLoop = 1;
+        target = s.renderPos;
         break;
       }
       case ControlOp::Pause:
@@ -646,27 +747,19 @@ void StreamKind::Control(const SourceControlOp* ops, std::uint32_t count) noexce
         break;
     }
     if (target == kNone) continue;
-    target = WrapInto(s.hasPendingLoop != 0u ? s.pendingLoop : s.loop, target);
-    s.pendingSeek = 1;
-    s.seekTarget = target;
-    s.hasOverride = 1;
-    s.overridePos = target;
-    s.renderPos = target;
-    s.ringPos = target;
-    s.ringLoops = 0;
-    s.primed = 0;
-    s.stalled = 0;
-    s.lag = 0;
-    s.fadeDone = fadeFrames_;  // no fade: a seek is sample accurate (core fades devirtualised voices)
-    s.reseek.store(0u, std::memory_order_relaxed);
+    s.seekTarget = WrapInto(s.hasPendingLoop != 0u ? s.pendingLoop : s.loop, target);
+    s.seekLoops = op.op == ControlOp::SetLoop ? s.renderLoops : 0u;
+    s.reqGen.store(s.reqGen.load(std::memory_order_relaxed) + 1u, std::memory_order_release);
     ctl->state = static_cast<std::uint8_t>(StreamStateId::Priming);
   }
 }
 
 bool StreamKind::Ready(const StreamInst& s) const noexcept {
-  if (s.pendingSeek != 0u) return false;
+  const std::uint32_t want = s.reqGen.load(std::memory_order_acquire);
+  if (s.execGen.load(std::memory_order_acquire) != want) return false;  // not executed yet
   if (s.ended.load(std::memory_order_acquire) != 0u || s.error.load(std::memory_order_acquire) != 0u) return true;
-  return RingWrite(s) - RingRead(s) >= readyFrames_;
+  const std::uint64_t from = s.adoptGen.load(std::memory_order_acquire) == want ? RingRead(s) : s.execBase;
+  return RingWrite(s) - from >= readyFrames_;
 }
 
 void StreamKind::QueryReady(const SlotIndex* slots, std::uint32_t count, std::uint8_t* ready) const noexcept {
@@ -684,12 +777,37 @@ void StreamKind::RenderOne(StreamInst& s, const RenderItem& it, VoiceRenderStatu
     st.ended = 1;
     return;
   }
-  if (s.hasOverride != 0u) {
+  if (s.hasOverride != 0u) {  // start position mapped into the loop (Start, before the first render)
     it.playhead->frame = s.overridePos;
     it.playhead->fraction = 0;
     s.hasOverride = 0;
   }
-  if (s.pendingSeek != 0u || s.virt != 0u) return;  // silence while re-priming
+  if (s.virt != 0u) return;  // virtual: silence (never stale data)
+  // Adopt a re-positioned ring (seek, devirtualise, re-seek) once Publish executed it.
+  const std::uint32_t want = s.reqGen.load(std::memory_order_acquire);
+  if (want != s.adoptGen.load(std::memory_order_relaxed)) {
+    if (s.execGen.load(std::memory_order_acquire) != want) return;  // asked, not executed yet: silence
+    SetRingRead(s, s.execBase);
+    s.rloop = s.execLoop;
+    if (s.execKind == 2u) {  // time priority re-seek: the voice runs on by the clock
+      s.lag -= s.reseekAhead;
+      s.ringPos = s.execTarget;
+      s.ringLoops = s.execLoops;
+    } else {
+      s.ringPos = s.execTarget;
+      s.ringLoops = s.execLoops;
+      s.vpos = s.execTarget;
+      s.vloops = s.execLoops;
+      s.lag = 0;
+      s.primed = 0;
+      s.stalled = 0;
+      s.fadeDone = fadeFrames_;  // no fade: a seek is sample accurate (core fades devirtualised voices)
+      it.playhead->frame = s.execTarget;
+      it.playhead->fraction = 0;
+      it.playhead->loopCount = s.execLoops;
+    }
+    s.adoptGen.store(want, std::memory_order_release);
+  }
   const std::uint32_t err = s.error.load(std::memory_order_acquire);
   const std::uint32_t ended = s.ended.load(std::memory_order_acquire);
   const std::uint64_t w = RingWrite(s);
@@ -701,7 +819,12 @@ void StreamKind::RenderOne(StreamInst& s, const RenderItem& it, VoiceRenderStatu
   auto drop = [&](std::uint64_t n) noexcept {
     r += n;
     avail -= n;
-    AdvancePos(s.loop, s.ringPos, s.ringLoops, n);
+    AdvancePos(s.rloop, s.ringPos, s.ringLoops, n);
+  };
+  auto publish = [&]() noexcept {
+    SetRingRead(s, r);
+    it.playhead->frame = s.vpos;
+    it.playhead->loopCount = s.vloops;
   };
   if (s.primed == 0u) {
     if (avail < readyFrames_ && ended == 0u && err == 0u) return;  // Priming: silence, position kept
@@ -716,29 +839,28 @@ void StreamKind::RenderOne(StreamInst& s, const RenderItem& it, VoiceRenderStatu
       s.lag = 0;
       s.stalled = 0;
       s.fadeDone = 0;
+      s.vpos = s.ringPos;
+      s.vloops = s.ringLoops;
     } else {
       st.starved = 1;
       Count(sh_, kStreamStallBlocks);
       if (timePriority) {
         s.lag += static_cast<std::int64_t>(req);
+        AdvancePos(s.rloop, s.vpos, s.vloops, req);  // the playhead follows the clock
         const std::uint64_t room = rings_.frames > readyFrames_ + req ? rings_.frames - readyFrames_ - req : 0u;
         if (s.lag > 0 && static_cast<std::uint64_t>(s.lag) > room && s.reseek.load(std::memory_order_relaxed) == 0u) {
           // The gap no longer fits the ring: read again from where the voice will be.
           const std::uint64_t lead = readyFrames_ + 2u * req;
-          std::uint64_t pos = s.ringPos;
-          std::uint32_t loops = s.ringLoops;
-          AdvancePos(s.loop, pos, loops, static_cast<std::uint64_t>(s.lag) + lead);
+          std::uint64_t pos = s.vpos;
+          std::uint32_t loops = s.vloops;
+          AdvancePos(s.rloop, pos, loops, lead);
           s.reseekTarget = pos;
+          s.reseekLoops = loops;
           s.reseekAhead = s.lag + static_cast<std::int64_t>(lead);  // target - ringPos
           s.reseek.store(1u, std::memory_order_release);
         }
-        std::uint64_t pos = s.ringPos;
-        std::uint32_t loops = s.ringLoops;
-        if (s.lag > 0) AdvancePos(s.loop, pos, loops, static_cast<std::uint64_t>(s.lag));
-        it.playhead->frame = pos;
-        it.playhead->loopCount = loops;
       }
-      SetRingRead(s, r);
+      publish();
       return;
     }
   }
@@ -748,13 +870,15 @@ void StreamKind::RenderOne(StreamInst& s, const RenderItem& it, VoiceRenderStatu
     const std::uint32_t at = static_cast<std::uint32_t>((r + done) & mask);
     std::uint32_t k = rings_.frames - at;
     if (k > n - done) k = n - done;
-    for (std::uint32_t c = 0; c < it.channels; ++c) {
+    for (std::uint32_t c = 0; c < it.channels && c < s.channels; ++c) {
       std::memcpy(it.out[c] + it.frameOffset + done, s.ring[c] + at, sizeof(float) * k);
     }
     done += k;
   }
   s.fadeDone += FadeIn(it.out, it.channels, it.frameOffset, n, s.fadeDone, fadeFrames_);
   drop(n);
+  s.vpos = s.ringPos;
+  s.vloops = s.ringLoops;
   st.framesRendered = n;
   if (n < req) {
     if (err != 0u || ended != 0u) {
@@ -767,15 +891,13 @@ void StreamKind::RenderOne(StreamInst& s, const RenderItem& it, VoiceRenderStatu
       st.starved = 1;
       ++schema::WriteColumn<SystemId::Render, ColumnId::Stream_stallCount>(*sv_.tables)[s.slot];
       Count(sh_, kStreamStalls);
-      if (timePriority) s.lag = static_cast<std::int64_t>(req - n);
+      if (timePriority) {
+        s.lag = static_cast<std::int64_t>(req - n);
+        AdvancePos(s.rloop, s.vpos, s.vloops, req - n);
+      }
     }
   }
-  SetRingRead(s, r);
-  std::uint64_t pos = s.ringPos;
-  std::uint32_t loops = s.ringLoops;
-  if (s.lag > 0) AdvancePos(s.loop, pos, loops, static_cast<std::uint64_t>(s.lag));
-  it.playhead->frame = pos;
-  it.playhead->loopCount = loops;
+  publish();
 }
 
 void StreamKind::RenderBatch(const snd::source::RenderBatch& b, VoiceRenderStatus* status) noexcept {
@@ -789,6 +911,7 @@ void StreamKind::RenderBatch(const snd::source::RenderBatch& b, VoiceRenderStatu
     StreamInst& s = inst_[it.sourceSlot];
     RenderOne(s, it, status[i]);
     s.renderPos = it.playhead->frame;
+    s.renderLoops = it.playhead->loopCount;
   }
 }
 
@@ -806,7 +929,7 @@ void StreamKind::AdvanceVirtual(const AdvanceItem* items, std::uint32_t count, V
       it.playhead->fraction = 0;
       s.hasOverride = 0;
     }
-    if (AdvanceVirtualPos(s.loop, s.a.h.total_frames, *it.playhead, it.outputFrames, it.pitch)) status[i].ended = 1;
+    if (AdvanceVirtualPos(s.rloop, s.a.h.total_frames, *it.playhead, it.outputFrames, it.pitch)) status[i].ended = 1;
     s.renderPos = it.playhead->frame;
   }
 }
@@ -830,30 +953,25 @@ void StreamKind::ScheduleBackground(const BlockInfo&) noexcept {
       }
       continue;
     }
-    if (s.reseek.load(std::memory_order_acquire) != 0u && s.pendingSeek == 0u) {
-      // Time priority: the voice keeps moving; the ring restarts ahead of it.
+    const std::uint32_t want = s.reqGen.load(std::memory_order_relaxed);
+    if (s.reseek.load(std::memory_order_acquire) != 0u && s.execGen.load(std::memory_order_relaxed) == want &&
+        s.adoptGen.load(std::memory_order_acquire) == want) {
+      // Time priority: the voice keeps moving; the ring restarts ahead of it (Render adopts it).
       s.reseek.store(0u, std::memory_order_relaxed);
-      ResetForSeek(s, s.reseekTarget);
-      s.ringPos = s.reseekTarget;
-      s.ringLoops = 0;
-      s.lag -= s.reseekAhead;  // negative: the voice reaches the new ring start later
+      s.reqGen.store(want + 1u, std::memory_order_release);
+      Execute(s, want + 1u, 2u, s.reseekTarget, s.reseekLoops, inlineBudget);
     }
     if (s.pendingStop != 0u) {
       Channel(i).Cancel();
       DropCurrent(s);
-      SetRingWrite(s, RingRead(s));
       s.pendingStop = 0;
-      s.plannerSet = s.headerDone.load(std::memory_order_relaxed) != 0u ? s.plannerSet : 0u;
+      s.plannerSet = 0;  // a devirtualise seeks and plans again
       s.headerPosted = s.headerDone.load(std::memory_order_relaxed) != 0u ? 1u : 0u;
     }
     if (s.virt != 0u) continue;
-    if (s.pendingSeek != 0u) {
-      ResetForSeek(s, s.seekTarget);
-      s.pendingSeek = 0;
-      if (s.preActive != 0u && inlineBudget != 0u) {
-        --inlineBudget;
-        Decode(s);
-      }
+    {
+      const std::uint32_t g = s.reqGen.load(std::memory_order_relaxed);
+      if (g != s.execGen.load(std::memory_order_relaxed)) Execute(s, g, 1u, s.seekTarget, s.seekLoops, inlineBudget);
     }
     // Header (the audio thread is the channel's consumer while no job runs).
     if (s.headerDone.load(std::memory_order_relaxed) == 0u && s.curValid == 0u) {
@@ -865,7 +983,7 @@ void StreamKind::ScheduleBackground(const BlockInfo&) noexcept {
         }
       }
     }
-    if (s.headerDone.load(std::memory_order_acquire) != 0u && s.plannerSet == 0u) SetupPlanner(s);
+    if (s.headerDone.load(std::memory_order_acquire) != 0u && s.plannerSet == 0u && s.reqGen.load(std::memory_order_relaxed) == s.execGen.load(std::memory_order_relaxed)) SetupPlanner(s);
     if (s.error.load(std::memory_order_relaxed) != 0u) continue;
     PostReads(s);
     // Decode job when the PCM ring has room and there is input.

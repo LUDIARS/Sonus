@@ -57,6 +57,10 @@ struct RuntimeDesc {
   IAllocator* allocator = nullptr;      // required
   io::IoScheduler* io = nullptr;        // Stream kind (with streamPool)
   io::StreamPool* streamPool = nullptr; // the pool `io` was initialised with
+  // Config.maxVoiceChannels (1..8): the PCM rings guarantee that maxStreams
+  // streams and maxDecoders per-voice rings can each play this many channels
+  // at once (memory below).
+  std::uint32_t maxVoiceChannels = 8;
   bool enableSample = true;
   bool enableStream = true;
 };

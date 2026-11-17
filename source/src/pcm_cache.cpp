@@ -121,13 +121,21 @@ bool PcmCache::Evict(std::uint32_t need, Shared& sh) noexcept {
 CacheResult PcmCache::Acquire(const AssetCopy& a, ICodec* codec, Shared& sh, std::uint64_t now,
                               std::uint32_t* entry) noexcept {
   if (!Enabled() || a.h.channels == 0u || a.h.channels > kMaxChannels) return CacheResult::Full;
+  for (std::uint32_t i = 0; i < entryCap_; ++i) {  // entries of an older load of this bank slot
+    CacheEntry& e = entries_[i];
+    if (e.state != 0u && e.bankSlot == a.bankSlot && e.loadGen != a.loadGen && e.pins == 0u && !JobBusy(e.jobCounter)) {
+      if (e.state == 1u) sh.decoders.Release(e.slot);
+      Free(i);
+    }
+  }
   for (std::uint32_t i = 0; i < entryCap_; ++i) {
     CacheEntry& e = entries_[i];
     if (e.state == 0u || e.state == 3u) continue;
-    if (e.assetId == a.assetId && e.bankSlot == a.bankSlot && e.data == a.data && e.frames == a.h.total_frames &&
-        e.codecId == a.h.codec) {
+    if (e.assetId == a.assetId && e.bankSlot == a.bankSlot && e.loadGen == a.loadGen && e.data == a.data &&
+        e.frames == a.h.total_frames && e.codecId == a.h.codec) {
       ++e.pins;
       e.lastUse = now;
+      if (e.state == 1u) std::atomic_ref<std::uint32_t>(e.cancel).store(0u, std::memory_order_release);
       *entry = i;
       Count(sh, kCacheHits);
       return CacheResult::Hit;
@@ -164,6 +172,7 @@ CacheResult PcmCache::Acquire(const AssetCopy& a, ICodec* codec, Shared& sh, std
   e.state = 1;
   e.assetId = a.assetId;
   e.bankSlot = a.bankSlot;
+  e.loadGen = a.loadGen;
   e.codecId = a.h.codec;
   e.data = a.data;
   e.frames = a.h.total_frames;
@@ -193,13 +202,17 @@ CacheResult PcmCache::Acquire(const AssetCopy& a, ICodec* codec, Shared& sh, std
 }
 
 void PcmCache::Unpin(std::uint32_t i) noexcept {
-  if (i < entryCap_ && entries_[i].pins > 0u) --entries_[i].pins;
+  if (i >= entryCap_ || entries_[i].pins == 0u) return;
+  if (--entries_[i].pins == 0u && entries_[i].state == 1u) {
+    // Nobody pins the bank any more: the fill stops before its next read (bank unload, 3.3).
+    std::atomic_ref<std::uint32_t>(entries_[i].cancel).store(1u, std::memory_order_release);
+  }
 }
 
 void PcmCache::Fill(CacheEntry& e, std::uint64_t upTo) noexcept {
   ResidentInput in(e.a, e.inputOff);
   PageSink sink(e.cache->pageBase_, e.cache->pageBytes_, e, e.filled.load(std::memory_order_relaxed));
-  // Publish progress every 16 Ki frames so voices can start before the fill ends.
+  // Publish progress every 4 Ki frames so voices can start before the fill ends.
   while (!e.dec.ended && e.dec.error == 0u && sink.Room() != 0u && sink.Pos() < upTo) {
     if (std::atomic_ref<std::uint32_t>(e.cancel).load(std::memory_order_acquire) != 0u) return;
     struct Chunk final : OutputSink {
@@ -213,7 +226,7 @@ void PcmCache::Fill(CacheEntry& e, std::uint64_t upTo) noexcept {
       }
     };
     const std::uint64_t want = upTo - sink.Pos();
-    Chunk chunk(sink, want < 16384u ? static_cast<std::uint32_t>(want) : 16384u);
+    Chunk chunk(sink, want < 4096u ? static_cast<std::uint32_t>(want) : 4096u);  // the cancel flag is seen every 4 Ki frames
     const std::uint32_t before = chunk.left;
     const std::uint64_t got = e.dec.Run(in, chunk);
     e.filled.store(sink.Pos(), std::memory_order_release);

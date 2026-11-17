@@ -125,6 +125,9 @@ bool PrepareBankRecord(Impl& im, const cmd::BankRegister& reg) noexcept {
     s.virtualReturn = (fl & bf::kAssetVirtualKill) != 0u ? 2u : ((fl & bf::kAssetVirtualRestart) != 0u ? 1u : 0u);
     s.ioPriority = (fl & bf::kAssetPriorityMusic) != 0u ? 2u : ((fl & bf::kAssetPriorityVoice) != 0u ? 1u : 0u);
     s.bankSlot = static_cast<std::uint16_t>(reg.bank.slot);
+    // Load generation (low 16 bits of the bank handle's generation): sources key
+    // their caches with it so another load in the same slot never matches (source_if.hpp).
+    s.reserved = static_cast<std::uint16_t>(reg.bank.generation);
   }
   // Synth parameters (SYNP).
   r.synthCount = nS;

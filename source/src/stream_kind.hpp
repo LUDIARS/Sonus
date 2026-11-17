@@ -81,30 +81,47 @@ struct StreamInst {
   std::uint32_t plannerSet;
   std::uint32_t planEnded;      // non-looping plan reached the data end
   std::uint32_t wrapsPosted;    // wrapped reads posted since the plan was set
+  std::uint64_t lastReadEnd;    // file offset after the last read posted (linear)
   std::uint64_t ioStart;        // data byte where the IO reads start (after the preload)
   std::uint32_t headerPosted;
-  std::uint32_t pendingSeek;
-  std::uint64_t seekTarget;
+  std::uint64_t seekTarget;     // Control: target of request reqGen
+  std::uint32_t seekLoops;
   std::uint32_t pendingStop;    // virtualised: drop IO and buffered data
-  std::uint32_t hasPendingLoop; // SetLoop waiting for the seek
+  std::uint32_t hasPendingLoop; // SetLoop that needs a re-read: applied with the seek
   LoopRange pendingLoop;
   std::uint32_t virt;
   std::uint32_t seq;
   std::uint32_t errorCounted;
+
+  // --- requests audio thread -> Render (source_if.hpp: Publish never writes the
+  // render state; Render adopts a re-positioned ring at the head of RenderBatch) ---
+  std::atomic<std::uint32_t> reqGen{0};   // a seek / re-seek was asked (Control, Publish)
+  std::atomic<std::uint32_t> execGen{0};  // ... and executed by Publish (IO + decoder), published with:
+  std::uint64_t execBase;       //   ring write position where the new data starts
+  std::uint64_t execTarget;     //   material position of execBase
+  std::uint32_t execLoops;
+  std::uint32_t execKind;       //   1 seek (playhead = target), 2 time-priority re-seek (playhead runs on)
+  LoopRange execLoop;           //   loop the new data follows
+  std::atomic<std::uint32_t> adoptGen{0};  // Render: last request adopted
 
   // --- render (RT worker / audio thread) ---
   std::uint8_t primed;
   std::uint8_t stalled;
   std::uint8_t kill;
   std::uint32_t fadeDone;       // frames of the current fade in
+  LoopRange rloop;              // the loop Render follows (adopted with the data)
   std::uint64_t ringPos;        // material position of the PCM ring's read side
   std::uint32_t ringLoops;
+  std::uint64_t vpos;           // the voice's position by the clock (= ringPos unless time priority stalls)
+  std::uint32_t vloops;
   std::int64_t lag;             // time priority: frames the voice is ahead of the ring
   std::uint32_t hasOverride;
   std::uint64_t overridePos;
   std::uint64_t renderPos;      // playhead after the last render (audio thread reads it)
+  std::uint32_t renderLoops;
   std::atomic<std::uint32_t> reseek{0};  // time priority asks for a re-seek to reseekTarget
   std::uint64_t reseekTarget;
+  std::uint32_t reseekLoops;
   std::int64_t reseekAhead;
 };
 
@@ -142,7 +159,10 @@ class StreamKind final : public ISourceKind {
   void Layout(Carver& c, const SourceLimits& l) noexcept;
   bool StartOne(const SourceStartRequest& r, SourceStartResult& res, std::uint32_t& inlineBudget) noexcept;
   void Decode(StreamInst& s) noexcept;
-  void ResetForSeek(StreamInst& s, std::uint64_t target) noexcept;
+  void ResetForSeek(StreamInst& s, std::uint64_t target, std::uint32_t loops) noexcept;
+  void Execute(StreamInst& s, std::uint32_t gen, std::uint32_t kind, std::uint64_t target, std::uint32_t loops,
+               std::uint32_t& inlineBudget) noexcept;
+  bool LoopChangeFits(const StreamInst& s, const LoopRange& to) const noexcept;
   void SetupPlanner(StreamInst& s) noexcept;
   void PostReads(StreamInst& s) noexcept;
   bool TryFree(StreamInst& s) noexcept;
