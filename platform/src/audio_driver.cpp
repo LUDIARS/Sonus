@@ -79,8 +79,12 @@ void AudioDriver::Run() noexcept {
       wgResult_.store(static_cast<std::uint8_t>(r), std::memory_order_relaxed);
     }
     const bool prefill = prefillRequested_.exchange(false, std::memory_order_acq_rel);
-    SND_RT_SCOPE();
-    core_.Service(prefill);
+    {
+      SND_RT_SCOPE();
+      core_.Service(prefill);
+    }
+    // Resume() waits for this prefill (finished or cancelled) before it restarts the device.
+    if (prefill && resumeWaiting_.exchange(false, std::memory_order_acq_rel)) ready_.Post();
   }
   membership.Leave();
 }
@@ -153,8 +157,21 @@ bool AudioDriver::Resume() noexcept {
     return false;
   }
   if (device_ == nullptr) return false;
+  // 2.6: fill the render-ahead first, then restart the device; bounded by
+  // prefillTimeoutMs like Start().
+  while (ready_.TryWait()) {
+  }
+  resumeWaiting_.store(true, std::memory_order_release);
   prefillRequested_.store(true, std::memory_order_release);
   wake_.Post();
+  if (!ready_.WaitFor(static_cast<std::uint64_t>(desc_.prefillTimeoutMs) * 1000000ull)) {
+    // Time out: let the block being rendered finish, render no more, keep
+    // the device stopped. The driver stays usable (Resume may be retried).
+    core_.CancelService();
+    ready_.Wait();
+    core_.ClearCancel();
+    return false;
+  }
   return device_->Start();
 }
 

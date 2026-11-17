@@ -141,6 +141,8 @@ class DriverCore {
   // Any thread. The running (and every later) Service returns before its next
   // block; the block being rendered finishes. Cleared by Init.
   void CancelService() noexcept { cancel_.store(true, std::memory_order_release); }
+  // Any thread. Allows Service to render again after CancelService.
+  void ClearCancel() noexcept { cancel_.store(false, std::memory_order_release); }
 
   // Any thread.
   DriverStats Stats() const noexcept;

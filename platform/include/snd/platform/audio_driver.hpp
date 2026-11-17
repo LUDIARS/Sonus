@@ -81,11 +81,17 @@ class AudioDriver {
   // Owner thread. No-op if not started.
   void Stop() noexcept;
   // Owner thread. Resumes a device that stays SUSPENDED until the app asks
-  // (iOS: an interruption that ended without ShouldResume, D-63): asks the
-  // audio thread for a prefill and calls the device's Start() again. The
-  // device posts RESUMED when it plays again. The SUSPENDED event itself is
-  // forwarded to `listener` as is; api calls this from snd_resume. false if
-  // not running or the device refuses.
+  // (iOS: an interruption that ended without ShouldResume, D-63): like
+  // Start(), it waits (at most prefillTimeoutMs) until the audio thread has
+  // filled the render-ahead, then calls the device's Start() again (2.6).
+  // On time-out it waits for the block being rendered to return, renders no
+  // more, leaves the device stopped and returns false (Resume may be
+  // retried). The device posts RESUMED when it plays again. When the OS
+  // resumes by itself (RESUMED without Resume(), e.g. iOS ShouldResume) the
+  // prefill cannot be awaited: a short ring is handled as an underrun
+  // (fade-in, lostFrames). The SUSPENDED event is forwarded to `listener` as
+  // is; api calls this from snd_resume. false if not running or the device
+  // refuses.
   bool Resume() noexcept;
   bool Running() const noexcept { return device_ != nullptr; }
 
@@ -112,6 +118,7 @@ class AudioDriver {
   std::atomic<bool> running_{false};
   std::atomic<bool> prefillRequested_{false};
   std::atomic<bool> prefilled_{false};
+  std::atomic<bool> resumeWaiting_{false};
   std::atomic<std::uint64_t> wakeups_{0};
   std::atomic<std::uint64_t> events_{0};
   std::atomic<std::uint64_t> misuse_{0};
