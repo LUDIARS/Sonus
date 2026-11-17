@@ -309,7 +309,7 @@ SND_TEST(LivelinkOverride, CommandsBeforeTheHandshakeCloseTheConnection) {
   SND_CHECK(f.server->Stats().protocolErrors >= 2u);
 }
 
-// D-80: a Server destroyed with edits accepted but not applied; the next Server's tool
+// D-87: a Server destroyed with edits accepted but not applied; the next Server's tool
 // edits the same bus before any block runs. Whatever order the two producers' arenas
 // are applied in, the old session's edits are dropped (counted) and the new value wins.
 SND_TEST(LivelinkOverride, OldSessionEditsNeverOverwriteTheNewServersValues) {

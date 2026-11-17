@@ -119,7 +119,7 @@ struct LiveTap {
   void (*stall)(void* user, std::uint32_t slot, Id eventId, std::uint32_t count, BlockIndex block) noexcept = nullptr;
   // ApplyCommands, before core applies a live link command it interprets itself
   // (LiveOverride, LiveClearOverrides): false skips it (the live link drops the edits
-  // of an earlier session, D-80). Null: always applied.
+  // of an earlier session, D-87). Null: always applied.
   bool (*admit)(void* user, cmd::CommandType type) noexcept = nullptr;
   // End of every RenderBlock (suspended blocks too). The Live* queries below may be
   // called from here.

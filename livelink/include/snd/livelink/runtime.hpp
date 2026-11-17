@@ -84,7 +84,7 @@ struct RecordEnd {
 
 struct RuntimeDrops {
   std::uint32_t log = 0, timing = 0, stalls = 0, lod = 0, results = 0, records = 0;
-  std::uint32_t staleEdits = 0;  // edits of an earlier Server's session, not applied (D-80)
+  std::uint32_t staleEdits = 0;  // edits of an earlier Server's session, not applied (D-87)
 };
 
 // Snapshots published through TripleSlots (live link thread reads them).
@@ -119,7 +119,7 @@ class LiveRuntime {
   bool Recording() const noexcept { return recording_.load(std::memory_order_acquire) != 0u; }
   // A new session number for a Server (never 0, never reused while the runtime lives).
   // The newest session is the only one whose edits are applied: edits recorded by an
-  // earlier Server and applied after a newer Server started are dropped (D-80).
+  // earlier Server and applied after a newer Server started are dropped (D-87).
   std::uint32_t NewSession() noexcept {
     const std::uint32_t s = nextSession_.fetch_add(1u, std::memory_order_relaxed);
     latestSession_.store(s, std::memory_order_release);

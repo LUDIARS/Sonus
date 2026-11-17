@@ -200,7 +200,7 @@ void LiveRuntime::OnCommand(core::System& sys, cmd::CommandType type, const void
       if (known) producerSession_[currentProducer_] = static_cast<std::uint32_t>(c.value);
       return;
     }
-    if (StaleProducer()) {  // D-80: an earlier Server's edit is not applied (its result is dropped there)
+    if (StaleProducer()) {  // D-87: an earlier Server's edit is not applied (its result is dropped there)
       Bump(dropStale_);
       r.result = SND_ERR_INVALID_HANDLE;
       if (!results_.TryPush(r)) Bump(dropResults_);
@@ -218,7 +218,7 @@ void LiveRuntime::OnCommand(core::System& sys, cmd::CommandType type, const void
     for (std::uint32_t i = 0; i < chunkCount_ && !ours; ++i) ours = p == &chunks_[i];
     const std::uint32_t st = ours ? p->state.load(std::memory_order_acquire) : PendingChunk::kFree;
     if (ours && StaleProducer() && (st == PendingChunk::kQueued || st == PendingChunk::kCancelled)) {
-      Bump(dropStale_);  // D-80: not applied; the slot goes back to the pool
+      Bump(dropStale_);  // D-87: not applied; the slot goes back to the pool
       p->state.store(PendingChunk::kFree, std::memory_order_release);
       r.result = SND_ERR_INVALID_HANDLE;
     } else if (st == PendingChunk::kCancelled) {
