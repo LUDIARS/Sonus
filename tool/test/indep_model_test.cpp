@@ -798,3 +798,129 @@ SND_TEST(IndepToolProject, Defect_duplicate_names_crash_the_ui) {
   });
   SND_CHECK_MSG(k == 0 || k == indep::kNotIsolated, "duplicate override keys (child result %d)", k);
 }
+
+// --- E1 / 11.3: voice order and the recording states with a scripted game ------------------
+
+namespace {
+
+struct Linked {
+  tooltest::ToolProject tool;
+  indep::ScriptedGame g;
+  Session s;
+  ll::Client* c = nullptr;
+  Linked() {
+    SND_REQUIRE(tool.ok && g.ok);
+    s.UseProject(tool.project);
+    SND_REQUIRE_EQ(s.Connect(indep::GameConn(g, tool.project.buildHash())), SND_OK);
+    SND_REQUIRE(indep::Drive(s, g, [&] { return s.connection().state() == LinkState::Online; }));
+    c = s.connection().client();
+  }
+};
+
+}  // namespace
+
+SND_TEST(IndepToolProfiler, VoicesRealFirstThenLoudestFirst) {
+  Linked l;
+  SND_REQUIRE(l.c != nullptr);
+  std::vector<ll::VoiceInfo> v;
+  const float aud[] = {0.2f, 0.9f, 0.5f, 0.7f, 0.1f, 0.95f, NAN, 0.3f};
+  for (std::uint32_t i = 0; i < 8; ++i) {
+    ll::VoiceInfo x{};
+    x.eventId = 100 + i;
+    x.audibility = aud[i];
+    x.isVirtual = (i % 2 == 0) ? 1u : 0u;
+    v.push_back(x);
+  }
+  SND_REQUIRE(l.g.SendList(ll::MessageType::VoiceList, v));
+  SND_REQUIRE(indep::Drive(l.s, l.g, [&] { return l.c->Received(ll::MessageType::VoiceList) >= 1u; }));
+  Profiler p;
+  p.Poll(l.c, indep::NowNs());
+  const std::vector<ll::VoiceInfo>& out = p.voices();
+  SND_REQUIRE_EQ(out.size(), 8u);
+  SND_CHECK_EQ(p.realVoices(), 4u);
+  for (std::size_t i = 0; i < 4; ++i) SND_CHECK_EQ(out[i].isVirtual, 0u);
+  for (std::size_t i = 4; i < 8; ++i) SND_CHECK(out[i].isVirtual != 0u);
+  // real: 0.95, 0.9, 0.7, 0.3; virtual (finite ones in order): 0.5, 0.2, 0.1 (NaN anywhere)
+  SND_CHECK_EQ(out[0].eventId, 105u);
+  SND_CHECK_EQ(out[1].eventId, 101u);
+  SND_CHECK_EQ(out[2].eventId, 103u);
+  SND_CHECK_EQ(out[3].eventId, 107u);
+  float last = 2.0f;
+  for (std::size_t i = 4; i < 8; ++i) {
+    if (std::isnan(out[i].audibility)) continue;
+    SND_CHECK(out[i].audibility <= last);
+    last = out[i].audibility;
+  }
+}
+
+// 11.3 / README: Record -> (Ack) Recording; Stop -> (Ack) Stopping -> Ready once no data
+// arrived for 100 ms; a refused start is Failed; Save writes the game's numbers.
+SND_TEST(IndepToolProfiler, RecordingStatesFollowAcksAndSettle) {
+  Linked l;
+  SND_REQUIRE(l.c != nullptr);
+  Profiler p;  // analytic times
+  const std::uint64_t ms = 1000000ull, t0 = 5000ull * 1000ull * ms;
+  l.g.holdAcks = true;
+  SND_REQUIRE(p.StartRecording(l.c));
+  SND_CHECK(p.recordingState() == RecordingState::Starting);
+  SND_REQUIRE(indep::Drive(l.s, l.g, [&] { return l.g.heldAcks.size() == 1u; }));
+  p.Poll(l.c, t0);
+  SND_CHECK(p.recordingState() == RecordingState::Starting);  // no Ack yet
+  l.g.ReleaseAcks();
+  auto pollUntil = [&](std::uint64_t now, RecordingState st) {
+    return indep::Drive(l.s, l.g, [&] {
+      p.Poll(l.c, now);
+      return p.recordingState() == st;
+    });
+  };
+  SND_REQUIRE(pollUntil(t0 + 1 * ms, RecordingState::Recording));
+  auto data = [&](std::uint64_t offset, std::uint32_t n) {
+    std::vector<std::uint8_t> b(sizeof(ll::RecordData) + n, 0);
+    const ll::RecordData rd{offset, n};
+    std::memcpy(b.data(), &rd, sizeof rd);
+    const ll::RecordLod lod{static_cast<std::uint32_t>(ll::RecordKind::Lod), 1u, 10u + offset};
+    for (std::uint32_t o = 0; o + 16u <= n; o += 16u) std::memcpy(b.data() + sizeof rd + o, &lod, 16);
+    const std::uint64_t before = l.c->RecordingBytes();
+    l.g.Send(ll::MessageType::RecordData, b.data(), static_cast<std::uint32_t>(b.size()));
+    return indep::Drive(l.s, l.g, [&] { return l.c->RecordingBytes() == before + n; });
+  };
+  SND_REQUIRE(data(0, 32));
+  SND_REQUIRE(p.StopRecording(l.c));
+  SND_CHECK(p.recordingState() == RecordingState::Stopping);
+  SND_REQUIRE(indep::Drive(l.s, l.g, [&] { return l.g.heldAcks.size() == 1u; }));
+  l.g.ReleaseAcks();
+  SND_REQUIRE(indep::Drive(l.s, l.g, [&] {
+    p.Poll(l.c, t0 + 10 * ms);
+    return l.g.heldAcks.empty() && p.recordedBytes() == 32u;
+  }));
+  // Data still arriving after the stop's Ack keeps it Stopping; Ready 100 ms after the last.
+  SND_REQUIRE(data(32, 16));
+  p.Poll(l.c, t0 + 60 * ms);
+  SND_CHECK(p.recordingState() == RecordingState::Stopping);
+  p.Poll(l.c, t0 + 150 * ms);
+  SND_CHECK(p.recordingState() == RecordingState::Stopping);
+  p.Poll(l.c, t0 + 160 * ms);
+  SND_CHECK(p.recordingState() == RecordingState::Ready);
+  SND_CHECK_EQ(p.recordedBytes(), 48u);
+  // Save: the game's numbers in the header, the records as received.
+  ProjectDir dir("indep-rec3");
+  std::string err;
+  const std::string path = (dir.dir() / "r.snrec").string();
+  SND_REQUIRE(p.SaveRecording(l.c, l.s.CurrentRecordingInfo(), path, &err));
+  Recording r;
+  SND_REQUIRE(LoadRecording(path, &r, &err));
+  SND_CHECK_EQ(r.info.sampleRate, 48000u);
+  SND_CHECK_EQ(r.info.blockSize, 256u);
+  SND_CHECK_EQ(r.info.runtimeBuildHash, l.g.runtimeHash);
+  SND_CHECK_EQ(r.info.projectBuildHash, l.tool.project.buildHash());
+  SND_CHECK_EQ(r.records.size(), 48u);
+  SND_CHECK_EQ(Summarize(r.records.data(), r.records.size()).lods, 3u);
+  // A refused start is Failed.
+  l.g.holdAcks = false;
+  l.g.ackResult = [](const indep::GameFrame& f) {
+    return static_cast<std::int32_t>(f.Is(ll::MessageType::RecordControl) ? SND_ERR_INVALID_ARGUMENT : SND_OK);
+  };
+  SND_REQUIRE(p.StartRecording(l.c));
+  SND_REQUIRE(pollUntil(t0 + 300 * ms, RecordingState::Failed));
+  SND_CHECK_EQ(p.recordingError(), SND_ERR_INVALID_ARGUMENT);
+}

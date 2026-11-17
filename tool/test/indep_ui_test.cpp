@@ -382,3 +382,27 @@ SND_TEST(IndepToolUi, ScreensComposeAtOrdinaryDpiAndOddViewports) {
     }
   }
 }
+
+// E3: the timing graph shows the last 240 blocks; the vertical scale is
+// max(1.25 x budget, 1.1 x maximum).
+SND_TEST(IndepToolUi, TimingGraphShowsTheLast240Blocks) {
+  ui::Palette pal = ui::MakePalette(tela::Theme{});
+  ui::GraphLook g;
+  g.width = 479.0f;
+  g.height = 100.0f;
+  for (int i = 0; i < 300; ++i) {
+    g.total.push_back(static_cast<float>(i));
+    g.render.push_back(static_cast<float>(i) * 0.5f);
+  }
+  g.budget = 100.0f;
+  ui::GraphShape shape;
+  ui::DrawTimingGraph(g, pal, &shape);
+  SND_REQUIRE_EQ(shape.totalPoints.size(), 240u);
+  SND_CHECK_NEAR(shape.scale.yMax, 1.1f * 299.0f, 1e-3);
+  // oldest shown = block 60 at the left, newest = 299 at the top right
+  SND_CHECK_NEAR(shape.totalPoints.front().x, 0.0f, 1e-3);
+  SND_CHECK_NEAR(shape.totalPoints.back().x, 479.0f, 1e-3);
+  SND_CHECK_NEAR(shape.totalPoints.front().y, 100.0f - 60.0f / (1.1f * 299.0f) * 100.0f, 1e-2);
+  SND_CHECK_NEAR(shape.totalPoints.back().y, 100.0f - 299.0f / (1.1f * 299.0f) * 100.0f, 1e-2);
+  SND_CHECK_NEAR(shape.budgetY, 100.0f - 100.0f / (1.1f * 299.0f) * 100.0f, 1e-2);
+}
