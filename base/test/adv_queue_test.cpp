@@ -105,7 +105,10 @@ SND_TEST(AdvSpsc, ConcurrentCapacityTwoNoLossNoDupNoTear) {
   std::uint64_t expect = 0, sum = 0, bad = 0;
   while (expect < kN) {
     Big b;
-    if (!r.TryPop(b)) continue;
+    if (!r.TryPop(b)) {
+      std::this_thread::yield();  // let the producer run when the cores are oversubscribed
+      continue;
+    }
     if (b.seq != expect) ++bad;
     for (auto w : b.words) bad += w != b.seq * 3u + 1u ? 1u : 0u;
     sum += b.seq;
@@ -217,7 +220,8 @@ SND_TEST(AdvArenaCycle, ConcurrentOwnershipAndContentWithSlowConsumer) {
     Rng rng(count * 77u);
     while (!producerDone.load() || !held.empty() || received < kPublishes) {
       std::uint32_t idx = 0;
-      if (c.Take(idx)) {
+      const bool took = c.Take(idx);
+      if (took) {
         if (owner[idx].exchange(kConsumer) != kInFlight) violations.fetch_add(1);
         const std::uint64_t* a = mem.data() + static_cast<std::size_t>(idx) * kWords;
         const std::uint64_t s = a[0];
@@ -243,6 +247,7 @@ SND_TEST(AdvArenaCycle, ConcurrentOwnershipAndContentWithSlowConsumer) {
         }
         held.clear();
       }
+      if (!took) std::this_thread::yield();  // nothing published yet: let the producer run
     }
     producer.join();
     SND_CHECK_MSG(violations.load() == 0u, "count=%u: %llu ownership/content violations", count,
@@ -287,6 +292,7 @@ SND_TEST(AdvMpmc, TinyRingManyThreadsExactlyOncePerProducerOrder) {
       gate.ArriveAndWait();
       for (std::uint32_t i = 0; i < kPer;) {
         if (q.TryPush((static_cast<std::uint64_t>(p) << 32) | i)) ++i;
+        else std::this_thread::yield();  // full: let a consumer run
       }
     });
   }
@@ -297,7 +303,10 @@ SND_TEST(AdvMpmc, TinyRingManyThreadsExactlyOncePerProducerOrder) {
       for (auto& l : last) l = 0xFFFFFFFFu;
       while (popped.load(std::memory_order_relaxed) < static_cast<std::uint64_t>(kProducers) * kPer) {
         std::uint64_t v = 0;
-        if (!q.TryPop(v)) continue;
+        if (!q.TryPop(v)) {
+          std::this_thread::yield();  // empty: let a producer run
+          continue;
+        }
         popped.fetch_add(1, std::memory_order_relaxed);
         const std::uint32_t p = static_cast<std::uint32_t>(v >> 32), i = static_cast<std::uint32_t>(v);
         if (p >= kProducers || i >= kPer) {
