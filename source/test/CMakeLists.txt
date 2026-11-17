@@ -34,3 +34,6 @@ target_include_directories(indep_late_chunk_test PRIVATE ${PROJECT_SOURCE_DIR}/b
 snd_add_test(indep_fix_sample_test SOURCES indep_fix_sample_test.cpp LINK ${_source_test_link})
 target_include_directories(indep_fix_sample_test PRIVATE ${PROJECT_SOURCE_DIR}/buildtool/test)
 set_tests_properties(indep_fix_sample_test PROPERTIES TIMEOUT 600)
+snd_add_test(indep_fix_stream_test SOURCES indep_fix_stream_test.cpp LINK ${_source_test_link})
+target_include_directories(indep_fix_stream_test PRIVATE ${PROJECT_SOURCE_DIR}/buildtool/test)
+set_tests_properties(indep_fix_stream_test PROPERTIES TIMEOUT 600)
