@@ -133,7 +133,10 @@ class IndepKind final : public snd::source::ISourceKind {
   void Control(const snd::source::SourceControlOp* ops, std::uint32_t n) noexcept override {
     controls.fetch_add(n);
     for (std::uint32_t i = 0; i < n; ++i) {
-      if (ops[i].sourceSlot < n_ && inUseSrc_[ops[i].sourceSlot].load(std::memory_order_acquire) != 0u) controlBusy.fetch_add(1);
+      if (ops[i].sourceSlot < n_ && inUseSrc_[ops[i].sourceSlot].load(std::memory_order_acquire) != 0u) {
+        controlBusy.fetch_add(1);
+        controlBusyOps.fetch_or(1u << static_cast<std::uint32_t>(ops[i].op));
+      }
     }
   }
   void QueryReady(const SlotIndex*, std::uint32_t n, std::uint8_t* ready) const noexcept override {
@@ -149,6 +152,12 @@ class IndepKind final : public snd::source::ISourceKind {
       const auto& it = b.items[i];
       if (it.sourceSlot < n_ && inUseSrc_[it.sourceSlot].exchange(1u, std::memory_order_acq_rel) != 0u) overlap.fetch_add(1);
       if (it.realSlot < cap_ && inUseReal_[it.realSlot].exchange(1u, std::memory_order_acq_rel) != 0u) overlap.fetch_add(1);
+    }
+    const std::uint64_t callerSlow = callerSlowNs.load();
+    if (callerSlow != 0u && tAudioThread) {  // lets the workers claim chunks at all
+      const std::uint64_t until = snd::platform::MonotonicNanoseconds() + callerSlow;
+      while (snd::platform::MonotonicNanoseconds() < until) {
+      }
     }
     const std::uint64_t slow = slowNs.load();
     if (slow != 0u && !tAudioThread && (slowBlockMask.load() == 0u || (b.block.index % slowBlockMask.load()) == 0u)) {
@@ -234,6 +243,8 @@ class IndepKind final : public snd::source::ISourceKind {
   std::atomic<std::uint64_t> overlap{0}, discont{0}, doubleBlock{0}, releasedBusy{0}, deadRender{0}, liveStart{0},
       controlBusy{0};
   std::atomic<std::uint64_t> slowNs{0};
+  std::atomic<std::uint64_t> callerSlowNs{0};
+  std::atomic<std::uint32_t> controlBusyOps{0};  // bit per ControlOp seen while busy  // per batch on the audio thread
   std::atomic<std::uint64_t> slowBlockMask{0};  // 0: every block, else blocks with index % mask == 0
   std::atomic<std::uint32_t> postJobs{0};
   std::atomic<std::uint64_t> posted{0}, jobsRun{0}, startedSinceLastPost{0};

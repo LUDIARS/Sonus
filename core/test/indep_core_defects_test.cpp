@@ -153,7 +153,11 @@ SND_TEST(IndepDefect, Defect_core_epoch_ignores_untracked_jobs) {
 // its render state" (the source instance included). Pausing a playback whose
 // voice is held sends ISourceKind::Control(Pause) for that voice while the late
 // chunk may still be inside RenderBatch for the same source slot
-// (sys_event.cpp SetVoicesPaused does not skip held voices).
+// (sys_event.cpp SetVoicesPaused does not skip held voices). The same happens
+// with ControlOp::Devirtualize for a voice promoted in the block whose chunk
+// was late: RunEventLogic sends it one block after the promotion
+// (sys_event.cpp, "virtual <-> real transitions"), while the voice is held; it
+// shows up in IndepParallel.LateChunksKeepTheD43Rules (reported there).
 SND_TEST(IndepDefect, Defect_core_control_on_held_voice) {
   snd_config cfg = Config();
   cfg.max_real_voices = 8;
