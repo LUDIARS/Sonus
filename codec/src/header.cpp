@@ -10,19 +10,63 @@ const char* HeaderErrorName(HeaderError e) noexcept {
   switch (e) {
     case HeaderError::None: return "none";
     case HeaderError::UnknownCodec: return "unknown codec";
-    case HeaderError::CodecUnavailable: return "codec not available in this build (Opus: no third-party library)";
+    case HeaderError::CodecUnavailable: return "codec not available in this build (Opus: built with SND_CODEC_OPUS=OFF)";
     case HeaderError::BadChannels: return "bad channel count";
     case HeaderError::BadSampleRate: return "bad sample rate";
     case HeaderError::BadBlockAlign: return "bad block_align";
     case HeaderError::BadFramesPerPacket: return "frames_per_packet does not match block_align";
     case HeaderError::FrameCountOverflow: return "pre_skip + total_frames overflows";
+    case HeaderError::BadCodecSetup: return "Opus setup data (extra) missing or invalid";
   }
   return "?";
 }
 
+bool OpusAvailable() noexcept { return SND_CODEC_OPUS_ENABLED != 0; }
+
 bool IsBuiltinCodec(std::uint32_t fourcc) noexcept {
-  return fourcc == SND_CODEC_PCM_F32 || fourcc == SND_CODEC_PCM_S16 || fourcc == SND_CODEC_ADPCM;
+  return fourcc == SND_CODEC_PCM_F32 || fourcc == SND_CODEC_PCM_S16 || fourcc == SND_CODEC_ADPCM ||
+         (fourcc == SND_CODEC_OPUS && OpusAvailable());
 }
+
+HeaderError ParseOpusSetup(const CodecHeader& h, OpusSetup* out) noexcept {
+  if (h.channels == 0u || h.channels > SND_MAX_CHANNELS) return HeaderError::BadChannels;
+  if (h.extra == nullptr || h.extra_bytes != kOpusSetupHeaderBytes + h.channels) return HeaderError::BadCodecSetup;
+  const std::uint8_t* e = h.extra;
+  const std::uint32_t streams = e[2];
+  const std::uint32_t coupled = e[3];
+  if (e[0] != kOpusSetupVersion || e[1] != h.channels) return HeaderError::BadCodecSetup;
+  if (streams == 0u || streams > kOpusMaxStreams || coupled > streams) return HeaderError::BadCodecSetup;
+  OpusSetup s{};
+  s.streams = streams;
+  s.coupledStreams = coupled;
+  for (std::uint32_t c = 0; c < h.channels; ++c) {
+    const std::uint32_t m = e[kOpusSetupHeaderBytes + c];
+    if (m != 255u && m >= streams + coupled) return HeaderError::BadCodecSetup;
+    s.mapping[c] = static_cast<std::uint8_t>(m);
+  }
+  if (out != nullptr) *out = s;
+  return HeaderError::None;
+}
+
+std::uint32_t OpusMaxPacketBytes(const CodecHeader& h) noexcept {
+  OpusSetup s;
+  if (h.codec != SND_CODEC_OPUS || ParseOpusSetup(h, &s) != HeaderError::None) return 0;
+  return s.streams * kOpusMaxPacketBytesPerStream;
+}
+
+namespace {
+
+// Opus: 48 kHz, 20 ms packets, variable size (block_align 0), setup in extra.
+HeaderError ValidateOpusHeader(const CodecHeader& h) noexcept {
+  if (h.channels == 0u || h.channels > SND_MAX_CHANNELS) return HeaderError::BadChannels;
+  if (h.sample_rate != kOpusSampleRate) return HeaderError::BadSampleRate;
+  if (h.total_frames > UINT64_MAX - h.pre_skip) return HeaderError::FrameCountOverflow;
+  if (h.block_align != 0u) return HeaderError::BadBlockAlign;
+  if (h.frames_per_packet != 0u && h.frames_per_packet != kOpusPacketFrames) return HeaderError::BadFramesPerPacket;
+  return ParseOpusSetup(h, nullptr);
+}
+
+}  // namespace
 
 std::uint32_t AdpcmFramesPerBlock(std::uint32_t channels, std::uint32_t blockAlign) noexcept {
   if (channels == 0u || channels > SND_MAX_CHANNELS) return 0;
@@ -33,7 +77,7 @@ std::uint32_t AdpcmFramesPerBlock(std::uint32_t channels, std::uint32_t blockAli
 }
 
 HeaderError ValidateHeader(const CodecHeader& h) noexcept {
-  if (h.codec == SND_CODEC_OPUS) return HeaderError::CodecUnavailable;
+  if (h.codec == SND_CODEC_OPUS) return OpusAvailable() ? ValidateOpusHeader(h) : HeaderError::CodecUnavailable;
   if (!IsBuiltinCodec(h.codec)) return HeaderError::UnknownCodec;
   if (h.channels == 0u || h.channels > SND_MAX_CHANNELS) return HeaderError::BadChannels;
   if (h.sample_rate == 0u) return HeaderError::BadSampleRate;
@@ -54,17 +98,23 @@ HeaderError ValidateHeader(const CodecHeader& h) noexcept {
 
 std::uint32_t PacketBytes(const CodecHeader& h) noexcept {
   if (ValidateHeader(h) != HeaderError::None) return 0;
+  if (h.codec == SND_CODEC_OPUS) return 0;  // variable size
   if (h.codec == SND_CODEC_ADPCM) return h.block_align;
   return h.channels * (h.codec == SND_CODEC_PCM_F32 ? 4u : 2u);
 }
 
 std::uint32_t PacketFrames(const CodecHeader& h) noexcept {
   if (ValidateHeader(h) != HeaderError::None) return 0;
+  if (h.codec == SND_CODEC_OPUS) return kOpusPacketFrames;
   if (h.codec == SND_CODEC_ADPCM) return AdpcmFramesPerBlock(h.channels, h.block_align);
   return 1u;
 }
 
 std::uint32_t HoldCapacityBytes(const CodecHeader& h) noexcept {
+  if (h.codec == SND_CODEC_OPUS) {
+    if (ValidateHeader(h) != HeaderError::None) return 0;
+    return kHoldInputBytes + kOpusLengthPrefixBytes + OpusMaxPacketBytes(h);
+  }
   const std::uint32_t packet = PacketBytes(h);
   if (packet == 0u) return 0;
   return kHoldInputBytes + packet;

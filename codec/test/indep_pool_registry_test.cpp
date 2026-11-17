@@ -389,13 +389,16 @@ SND_TEST(IndepRegistry, UserWinsAndCallsAreForwarded) {
 SND_TEST(IndepRegistry, LimitsReasonsAndBridges) {
   CodecRegistry reg;
   LookupFailure why = LookupFailure::None;
-  SND_CHECK(reg.Find(SND_CODEC_OPUS, &why) == nullptr);
-  SND_CHECK(why == LookupFailure::OpusUnavailable);
+  // Contract 1.1 + D-56: Opus is built in unless SND_CODEC_OPUS=OFF (then the A0-3 reason).
+  snd::ICodec* const builtinOpus = snd::codec::BuiltinCodec(SND_CODEC_OPUS);
+  const LookupFailure opusWhy = snd::codec::OpusAvailable() ? LookupFailure::None : LookupFailure::OpusUnavailable;
+  SND_CHECK(reg.Find(SND_CODEC_OPUS, &why) == builtinOpus);
+  SND_CHECK(why == opusWhy);
   SND_CHECK(reg.Find(snd::Fourcc('Z', 'Z', 'Z', 'Z'), &why) == nullptr);
   SND_CHECK(why == LookupFailure::NotRegistered);
   SND_CHECK(reg.Find(0, &why) == nullptr);
   SND_CHECK(why == LookupFailure::NotRegistered);
-  SND_CHECK(reg.Find(SND_CODEC_OPUS) == nullptr);  // why == nullptr is allowed
+  SND_CHECK(reg.Find(SND_CODEC_OPUS) == builtinOpus);  // why == nullptr is allowed
   SND_CHECK(std::strlen(snd::codec::LookupFailureName(LookupFailure::OpusUnavailable)) > 0);
   Marker markers[CodecRegistry::kMaxUserCodecs];
   snd_codec tables[CodecRegistry::kMaxUserCodecs + 1];
@@ -411,7 +414,7 @@ SND_TEST(IndepRegistry, LimitsReasonsAndBridges) {
   SND_CHECK(reg.Init(tables, CodecRegistry::kMaxUserCodecs + 1) == RegistryStatus::TooManyCodecs);
   SND_CHECK_EQ(reg.UserCodecCount(), 0u);
   SND_CHECK(reg.Find(0x100u) == nullptr);
-  SND_CHECK(reg.Find(SND_CODEC_OPUS, &why) == nullptr && why == LookupFailure::OpusUnavailable);
+  SND_CHECK(reg.Find(SND_CODEC_OPUS, &why) == builtinOpus && why == opusWhy);
   // Duplicates far apart, each null function, fourcc 0.
   for (std::uint32_t i = 0; i < CodecRegistry::kMaxUserCodecs; ++i) tables[i] = snd::ToC(markers[i], 0x100u + i);
   tables[CodecRegistry::kMaxUserCodecs - 1].codec = 0x100u;

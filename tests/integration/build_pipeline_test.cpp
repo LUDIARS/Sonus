@@ -87,7 +87,7 @@ SND_TEST(BuildPipeline, EveryCodecRoundTripsThroughTheBank) {
     if (cc.fourcc == SND_CODEC_ADPCM) {
       SND_CHECK_EQ(h.block_align, bt::kAdpcmBlockBytesPerChannel * h.channels);
       SND_CHECK(h.block_align <= 1024u * h.channels);
-      SND_CHECK(snd::codec::BuiltinCodec(h.codec)->StateBytes(h) <= 32768u);  // default decoderSlotBytes
+      SND_CHECK(snd::codec::BuiltinCodec(h.codec)->StateBytes(h) <= 32768u);  // ADPCM rule: fits 32 KiB (default slot is 64 KiB, D-58)
     }
     // The bytes are the codec module's encoding (byte-identical).
     const bk::ByteSpan data = bank.view.WaveData(row);

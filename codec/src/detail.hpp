@@ -81,6 +81,14 @@ inline std::uint8_t* HoldBuffer(DecoderState* s) noexcept {
   return reinterpret_cast<std::uint8_t*>(s) + kStateHeaderBytes;
 }
 
+// Shared by every built-in decoder state (also the Opus state, opus_decoder.cpp),
+// so that a state passed to the wrong built-in codec is recognised.
+inline constexpr std::uint32_t kFailedRuntime = 1u;  // cleared by Seek / Init
+inline constexpr std::uint32_t kFailedHeader = 2u;   // cleared by Init with a valid header only
+
+// The Opus decoder object (opus_decoder.cpp); nullptr when the build has no Opus.
+ICodec* OpusCodec() noexcept;
+
 }  // namespace snd::codec::detail
 
 #endif  // SND_CODEC_SRC_DETAIL_HPP

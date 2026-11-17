@@ -43,3 +43,11 @@ snd_add_test(integration_core_end_to_end_test
   SOURCES core_end_to_end_test.cpp
   LINK sonus_core sonus_buildtool sonus_bank sonus_codec sonus_dsp sonus_io sonus_jobs sonus_platform sonus_base sonus_mocks)
 target_include_directories(integration_core_end_to_end_test PRIVATE ${PROJECT_SOURCE_DIR}/buildtool/test ${PROJECT_SOURCE_DIR}/core/test)
+
+# Opus (D-56..D-60): buildtool -> bank (ParseBank) -> codec, analytic checks; with
+# SND_CODEC_OPUS=OFF it checks that the build rejects OPUS assets.
+snd_add_test(integration_opus_pipeline_test
+  SOURCES opus_pipeline_test.cpp
+  LINK sonus_buildtool sonus_bank sonus_codec sonus_dsp sonus_io sonus_jobs sonus_platform sonus_base sonus_mocks)
+target_include_directories(integration_opus_pipeline_test PRIVATE ${PROJECT_SOURCE_DIR}/buildtool/test)
+set_tests_properties(integration_opus_pipeline_test PROPERTIES TIMEOUT 600)
