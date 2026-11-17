@@ -262,6 +262,7 @@ SND_TEST(IndepFix, HeldVoicesGetTheFinalPauseStateOnce) {
     b.Event(n, 1000.0f);
   }
   bool checked = false;
+  int noLate = 0, released = 0;
   for (int attempt = 0; attempt < 30 && !checked; ++attempt) {
     Fx fx(cfg);
     fx.Load("p", b.Build("P"));
@@ -273,11 +274,14 @@ SND_TEST(IndepFix, HeldVoicesGetTheFinalPauseStateOnce) {
     }
     fx.Steps(4);
     fx.kind.slowNs.store(40000000);  // 40 ms in the worker's chunks
-    fx.kind.callerSlowNs.store(300000);
+    fx.kind.callerSlowNs.store(1000000);  // 1 ms per batch on the audio thread: the worker wakes and takes chunks
     fx.Step();
     fx.kind.slowNs.store(0);
     fx.kind.callerSlowNs.store(0);
-    if (fx.sys->LastBlock().lateChunks == 0u) continue;
+    if (fx.sys->LastBlock().lateChunks == 0u) {
+      ++noLate;
+      continue;
+    }
     const std::uint64_t heldN = fx.sys->LastBlock().heldVoices;  // one voice per chunk
     const std::uint64_t pause0 = fx.kind.controlsByOp[static_cast<int>(snd::source::ControlOp::Pause)].load();
     const std::uint64_t resume0 = fx.kind.controlsByOp[static_cast<int>(snd::source::ControlOp::Resume)].load();
@@ -291,7 +295,10 @@ SND_TEST(IndepFix, HeldVoicesGetTheFinalPauseStateOnce) {
     std::this_thread::sleep_for(std::chrono::milliseconds(60));
     fx.Steps(8);
     fx.sys->Update();
-    if (!stillHeld) continue;
+    if (!stillHeld) {
+      ++released;
+      continue;
+    }
     for (auto& p : ps) SND_CHECK_EQ(fx.sys->GetPlaybackState(p), SND_PLAYBACK_STATE_PAUSED);
     SND_CHECK_EQ(fx.LastMean(), 0.0f);
     const std::uint64_t pauses = fx.kind.controlsByOp[static_cast<int>(snd::source::ControlOp::Pause)].load() - pause0;
@@ -313,7 +320,10 @@ SND_TEST(IndepFix, HeldVoicesGetTheFinalPauseStateOnce) {
     SND_CHECK(fx.LastMean() > 0.0f);
     checked = true;
   }
-  if (!checked) std::printf("SKIP: no hold that lasted over the pause sequence in 30 attempts\n");
+  if (!checked) {
+    std::printf("SKIP: no hold that lasted over the pause sequence in 30 attempts (%d without a late chunk, %d released early)\n",
+                noLate, released);
+  }
 }
 
 // 6. en -> ja -> en -> ja -> en with voices of each playing: every new play

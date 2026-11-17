@@ -117,6 +117,7 @@ SND_TEST(IndepParallel, LateChunksKeepTheD43Rules) {
   fx.Load("p", ManyEvents(40));
   fx.kind.slowNs.store(1500000);
   fx.kind.slowBlockMask.store(3);
+  fx.kind.callerSlowNs.store(100000);  // workers must get chunks at all (fast builds, slow wake-ups)
   std::vector<snd_playback_handle> live;
   std::uint32_t lateBlocks = 0, heldSeen = 0, setViolations = 0, parallelBlocks = 0;
   std::uint32_t lateSet = 2;  // set of the last parallel block that had late chunks, 2 = none
@@ -157,6 +158,7 @@ SND_TEST(IndepParallel, LateChunksKeepTheD43Rules) {
     }
   }
   fx.kind.slowNs.store(0);
+  fx.kind.callerSlowNs.store(0);
   fx.Steps(40);  // let every straggler finish and every hold be released
   std::printf("blocks: parallel %u, with late chunks %u, with held voices %u\n", parallelBlocks, lateBlocks, heldSeen);
   SND_CHECK_EQ(setViolations, 0u);
