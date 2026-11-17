@@ -85,3 +85,33 @@
 - B1 bpm の極値（非常に小さい / 大きい）、拍子 1/2・7/8・16 分。
 - B2 予約の目標がブロック先頭ちょうど / ブロック末尾 -1 / ブロック末尾ちょうど（= 次ブロック先頭）。
 - B3 tick 端数が累積しても拍の位置がずれない（長時間 = 数千ブロック）。
+
+---
+
+## 実装を読んだ後の対応表（追記）
+
+上の一覧は実装を読む前に書いた。以下は実装と既存テスト（`music/test`, `tests/integration/music_{segment,transition,transport,system}_test`）を読んだ後の対応。
+
+| 性質 | 既存テスト | 追加テスト（`music_indep_test.cpp` / `defect_music_*`） |
+| --- | --- | --- |
+| T2, B1, B3 | 120 BPM のみ | `BeatsStayExactAtAFractionalBeatLength`（127 BPM、200 拍、丸め誤差の累積なし） |
+| T9（ブロック境界ちょうど） | 一部 | `BeatsOnBlockEdgesAreSentOnce`（112.5 BPM: 全拍がブロック境界） |
+| T7, 適用順 | `SetTempoOnTheNextBar` 等 | `TwoTempoChangesInOneBlockLastWins`, `TransportChangesInOneBlockApplyInClockOrder` |
+| T8 + R9 | `SeekRenumbers...` | `QuantisedSeekRestartsAtTheBarLine` |
+| T6 | — | `StoppedTransportStartsAtBarZeroWhenPlayed` |
+| T13, T14 | — | `PlaybackOwnedTransportCannotBeDestroyed`, `MusicalWhenOnADestroyedTransportIsImmediate` |
+| R7 | — | `SameClockReservationsFireInSequenceOrder` |
+| T3, T4, R2, R3 | 拍の通知のみ | `QuantisationAcrossSignatureAndTempoChange` |
+| R5（遷移） | 予約のみ | `PendingTransitionFollowsATempoChange` |
+| X2, X6 | 一部 | `RequestForTheCurrentStateIsIgnoredWhenIdle`, `AfterBridgeLastQueuedRequestForTheNewStateDoesNothing` |
+| X11 | 即時のみ | `WrongEventKindThroughPrepareAndAReservation` |
+| S4（SetGain が目標で止まる） | 4096 サンプル後のみ | `StemGainHoldsItsTargetLongAfterTheRamp` |
+| D1, D2 | 判断のみ | `ParallelRenderingGivesTheSameDecisionsAndBits`（遅れたチャンクが無いときはビット一致も） |
+| D3 | 遷移と Stinger | `NoAllocationWithSeeksTempoPausesAndTransitions`（シーク・テンポ・ポーズ・遷移） |
+| G3 + T9 | 拍の位置のみ | `Defect_music_stall_beat_twice` |
+| X（ポーズ中の要求） | — | `Defect_music_state_lost_while_paused` |
+| T8 + T3 | — | `Defect_music_seek_before_signature_change` |
+| X8（拍子違い） | 同じ拍子のみ | `Defect_music_samebar_other_signature` |
+| S3（shuffle の 1 周） | 2 項目 | `Defect_music_shuffle_over_32` |
+
+未検証（公開 API や試験用ソースから起こせない、または設計書から期待が一意に決まらない）: G2 の拍時刻（ストール検出の遅れ、仕様の穴）、T11、T15（API が無い）、D5、D6、R11、VoiceEnded がリセット位置で失われる不具合の回帰（Start を拒む音源が要る）。
