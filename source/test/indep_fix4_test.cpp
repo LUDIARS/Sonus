@@ -132,7 +132,7 @@ SND_TEST(IndepFix4, ShortLoopCountsFromEveryStart) {
     for (std::uint32_t count : {2u, 3u, 7u}) {
       for (std::uint64_t start : {std::uint64_t{0}, ref.loopStart + 1u, std::uint64_t{ref.loopEnd + 5u}}) {
         if (start >= ref.h.total_frames) continue;
-        if (a.name == "q" && start != 0u) continue;  // Defect_source_FiniteLoopAtTheFileStartStallsWhenStartedInsideIt
+        if (a.name == "q" && start != 0u) continue;  // FiniteLoopAtTheFileStartPlaysWhenStartedInsideIt
         IndepDriver d(b, IndepDriver::Opt{});
         SND_REQUIRE(d.Ok());
         IndepDriver::Voice v;
@@ -257,7 +257,7 @@ SND_TEST(IndepFix4, IoErrorAfterARepeatedLoop) {
 // without a stall. Today, with a loop count of 2 (one wrap), it stalls for
 // ~66 blocks and time priority then skips ~16 700 frames; started at frame 0,
 // or with a count of 3, it plays exactly.
-SND_TEST(IndepFix4, Defect_source_FiniteLoopAtTheFileStartStallsWhenStartedInsideIt) {
+SND_TEST(IndepFix4, FiniteLoopAtTheFileStartPlaysWhenStartedInsideIt) {
   Built b = Build("f4pre", {Spec("q", 40000, "PC16", "\"loop\": {\"start\": 0, \"end\": 700}")});
   SND_REQUIRE_MSG(b.ok, "%s", b.diag.c_str());
   const Decoded ref = Reference(b, "q");
