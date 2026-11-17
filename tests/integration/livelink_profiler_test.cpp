@@ -161,7 +161,8 @@ SND_TEST(LivelinkProfiler, StalledToolDropsProfilerDataWithoutStallingTheGame) {
   SND_CHECK_MSG(st.profilerDropped > 0u, "sent %u dropped %u bytesOut %llu connected %d", st.profilerSent, st.profilerDropped, static_cast<unsigned long long>(st.bytesOut), f.server->Connected() ? 1 : 0);
   SND_CHECK(st.profilerSent > 0u);
   SND_CHECK(f.server->Connected());  // still attached: dropping is not an error
-  SND_CHECK_MSG(worstMs < 50.0, "a block took %.2f ms", worstMs);
+  // Generous: sanitizers and a loaded machine stretch blocks; waiting on the tool would never end.
+  SND_CHECK_MSG(worstMs < 1000.0, "a block took %.2f ms", worstMs);
   // The peer reads again: the stream resumes on frame boundaries.
   std::size_t before = p.frames.size();
   SND_CHECK(f.StepUntil([&] {

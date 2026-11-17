@@ -8,6 +8,7 @@
 //     handshake: the server never crashes (ASan), the game keeps rendering and
 //     the next tool works.
 #include <atomic>
+#include <cmath>
 #include <random>
 #include <thread>
 
@@ -21,6 +22,7 @@ SND_TEST(LivelinkStress, ToolFloodsEditsWhileTheGameRenders) {
   f.Load(DevBank());
   f.sys->Play(HashId("Tone"), snd_emitter_handle{0}, nullptr);
   f.Steps(4);
+  const float base = f.LastLeft();
   ll::ServerDesc sd;
   sd.meterHz = 120;
   sd.timingHz = 120;
@@ -34,7 +36,8 @@ SND_TEST(LivelinkStress, ToolFloodsEditsWhileTheGameRenders) {
   c->Start();
   SND_REQUIRE(f.StepUntil([&] { return c->State() == ll::ClientState::Ready; }));
   std::atomic<bool> done{false};
-  std::atomic<std::uint32_t> acked{0}, sent{0}, failed{0};
+  std::atomic<std::uint32_t> acked{0}, sent{0}, failed{0}, refused{0}, timedOut{0};
+  std::atomic<std::int32_t> lastBad{0};
   std::thread tool([&] {
     std::vector<std::uint32_t> seqs;
     for (int i = 0; i < 300; ++i) {
@@ -55,11 +58,30 @@ SND_TEST(LivelinkStress, ToolFloodsEditsWhileTheGameRenders) {
     for (std::uint32_t s : seqs) {
       std::int32_t r = 1;
       const auto left = std::chrono::duration_cast<std::chrono::milliseconds>(ackEnd - std::chrono::steady_clock::now());
-      if (s != 0u && left.count() > 0 && c->WaitAck(s, static_cast<std::uint32_t>(left.count()), &r) && r == SND_OK) {
-        acked.fetch_add(1);
+      if (s != 0u && left.count() > 0 && c->WaitAck(s, static_cast<std::uint32_t>(left.count()), &r) &&
+          (r == SND_OK || r == SND_ERR_COMMAND_BUFFER_FULL)) {
+        // Back-pressure: the live link producer's arenas were full (the game renders
+        // slower than the tool sends); refused synchronously, never lost silently.
+        (r == SND_OK ? acked : refused).fetch_add(1);
       } else {
         failed.fetch_add(1);
+        if (s == 0u) {
+          lastBad.store(-1000);
+        } else if (r == 1) {
+          timedOut.fetch_add(1);
+        } else {
+          lastBad.store(r);
+        }
       }
+    }
+    // Final values, retried until accepted.
+    for (int k = 0; k < 2; ++k) {
+      std::int32_t r = SND_ERR_COMMAND_BUFFER_FULL;
+      for (int attempt = 0; attempt < 100 && r == SND_ERR_COMMAND_BUFFER_FULL; ++attempt) {
+        const std::uint32_t s = c->SetValue(BusVolume(k == 0 ? "Sfx" : "Master", k == 0 ? -11.0f : -10.0f));
+        if (s == 0u || !c->WaitAck(s, 30000, &r)) r = SND_ERR_COMMAND_BUFFER_FULL;
+      }
+      if (r != SND_OK) failed.fetch_add(1);
     }
     done.store(true);
   });
@@ -69,11 +91,27 @@ SND_TEST(LivelinkStress, ToolFloodsEditsWhileTheGameRenders) {
     std::this_thread::sleep_for(std::chrono::microseconds(100));
   }
   tool.join();
-  SND_CHECK_EQ(acked.load(), 300u);
-  SND_CHECK_EQ(failed.load(), 0u);
+  SND_CHECK_EQ(acked.load() + refused.load(), 300u);
+  SND_CHECK(acked.load() > 0u);
+  SND_CHECK_MSG(failed.load() == 0u, "failed %u (timed out %u, last result %d) client connects %u disconnects %u timeouts %u errors %u; server rec %u refused %u results-dropped %u",
+                failed.load(), timedOut.load(), lastBad.load(), c->Stats().connects, c->Stats().disconnects,
+                c->Stats().timeouts, c->Stats().errorsReceived, f.server->Stats().commandsRecorded,
+                f.server->Stats().commandsRefused, f.rt->Drops().results);
   SND_CHECK(c->Received(ll::MessageType::BlockTiming) > 0u);
-  // The last edit of each bus is in effect: Sfx -(299 % 24) = -11 dB, Master -(298 % 24) = -10 dB.
-  f.Steps(8);
+  // The final values are in effect: Sfx -11 dB, Master -10 dB on the constant tone
+  // (after the last audition of "Blip", 2400 frames, has ended).
+  f.Steps(24);
+  SND_CHECK_NEAR(f.LastLeft() / base, std::pow(10.0, -21.0 / 20.0), 1e-4);
+  {
+    const ll::ServerStats st = f.server->Stats();
+    const ll::RuntimeDrops dr = f.rt->Drops();
+    snd_stats ss{};
+    f.sys->GetStats(&ss);
+    SND_CHECK_MSG(std::fabs(f.LastLeft() / base - std::pow(10.0, -21.0 / 20.0)) < 1e-4,
+                  "acked %u refused %u rec %u refusedCmds %u results-dropped %u conns %u playbacks %u real %u",
+                  acked.load(), refused.load(), st.commandsRecorded, st.commandsRefused, dr.results, st.connections,
+                  ss.playbacks, ss.real_voices);
+  }
   ll::Client::Destroy(c);
 }
 

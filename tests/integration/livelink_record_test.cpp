@@ -38,6 +38,7 @@ void RecordSession(Recorded& rec) {
   std::uint32_t s2 = c->SetValue(BusVolume("Sfx", -6.0f));
   f.StepUntil([&] { return c->TakeAck(s2, &r); });
   SND_CHECK_EQ(r, SND_OK);
+  f.Steps(4);  // the tone alone at -6 dB (checked in the replay)
   f.sys->Play(HashId("Blip"), snd_emitter_handle{0}, nullptr);
   f.Steps(3);
   f.sys->SetParamGlobal(HashId("Knob"), 0.5f);

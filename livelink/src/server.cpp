@@ -740,10 +740,11 @@ struct Server::Impl final : FrameReader::Handler {
       DrainRecords();
       DrainProfiler(platform::MonotonicNanoseconds());
       if (conn != nullptr) PumpSend();
-      if (recordedCommands && registered) {
-        sys->Flush();
-        recordedCommands = false;
-      }
+      // Every loop, not only after recording: a publish that found no free arena
+      // (the audio thread still holds them) must be retried, or the last commands
+      // would wait for the next tool message (empty arenas are not published).
+      if (registered) sys->Flush();
+      recordedCommands = false;
     }
     // shutdown: stop recording, drain what is left to the sink
     if (recMode == RecMode::Sink) {
