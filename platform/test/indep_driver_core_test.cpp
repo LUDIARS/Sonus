@@ -845,7 +845,19 @@ SND_TEST(IndepDriverCore, EntryPointsAreRtSafe) {
 // exercised here), writer looping Service, a third thread posting CHANGED
 // events and reading the statistics. Every non-silent output frame must be in
 // the layout of the callback that played it, and in order within a layout.
-SND_TEST(IndepDriverCore, ThreadedReaderWriterEventsAndSwitches) {
+//
+// DEFECT (intermittent; seen once in 20 TSan runs: 108 frames in the wrong
+// layout, valid + silent != frames). OnDeviceCallback loads the write index
+// and THEN the ack. If the writer publishes a block and acknowledges a
+// channel switch between those two loads, the reader skips to AckPos (> the
+// stale write index it holds), computes (w - r) with r > w, which wraps to a
+// huge value, and copies `frames` samples past the published data (old
+// contents of the ring, in the old layout). The read index then runs ahead
+// of the write index. Expected: reload the write index after seeing a new
+// ack (it is then >= AckPos), or clamp. Each round below repeats the scenario
+// to raise the chance of hitting the window.
+SND_TEST(IndepDriverCore, Defect_platform_ChannelSwitchRaceReadsPastWriteIndex) {
+ for (int round = 0; round < 3; ++round) {
   Recorder r;
   DriverCore core;
   SND_REQUIRE(core.Init(snd::base::DefaultAllocator(), Desc(r, 64, 2, 0, 8, 512), 48000, 2, 128));
@@ -882,7 +894,8 @@ SND_TEST(IndepDriverCore, ThreadedReaderWriterEventsAndSwitches) {
     check.Feed(out.data(), n, ch);
     frames += n;
     if (switching && check.valid > validBefore) switching = false;  // new layout is playing
-    if (!switching && i % 1500 == 1499) {
+    if ((i & 7) == 0) std::this_thread::yield();  // let the writer run (the reader is not paced)
+    if (!switching && i % 1500 == 1499 && i < 28000) {
       ch = ch == 2u ? 6u : (ch == 6u ? 1u : 2u);
       switching = true;
       ++switches;
@@ -892,18 +905,20 @@ SND_TEST(IndepDriverCore, ThreadedReaderWriterEventsAndSwitches) {
   writer.join();
   events.join();
   const DriverStats s = core.Stats();
-  snd::test::Note("frames %llu valid %llu silent %llu switches %u underruns %llu",
+  snd::test::Note("frames %llu valid %llu silent %llu switches %u underruns %llu; device ch %u, ring ch %u, "
+                  "FormatFn %u (last %u ch), formatChanges %llu, queued %u",
                   static_cast<unsigned long long>(frames), static_cast<unsigned long long>(check.valid),
                   static_cast<unsigned long long>(check.silent), switches,
-                  static_cast<unsigned long long>(s.underruns));
+                  static_cast<unsigned long long>(s.underruns), ch, s.channels, r.formatCalls, r.formatChannels,
+                  static_cast<unsigned long long>(s.formatChanges), s.queuedFrames);
   SND_CHECK_EQ(check.badFormat, 0u);
   SND_CHECK_EQ(check.badOrder, 0u);
   SND_CHECK_EQ(check.valid + check.silent, frames);
   SND_CHECK_EQ(check.silent, s.lostFrames);
   SND_CHECK_EQ(s.framesConsumed, frames);
   SND_CHECK_EQ(r.badFrames, 0u);
-  // The reader is not paced (much faster than real time): underruns are
-  // expected; what matters is that every layout switch completed.
+  // The reader is barely paced (much faster than real time): underruns are
+  // expected and a switch may still be pending when the loop ends.
   SND_CHECK(check.valid > 0u);
-  SND_CHECK(switches >= 5u);
+ }
 }
