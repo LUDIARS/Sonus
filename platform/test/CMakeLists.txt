@@ -73,3 +73,6 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64|amd64")
   set_source_files_properties(simd_indep_avx2.cpp PROPERTIES COMPILE_OPTIONS "-mavx2;-mfma")
   target_compile_definitions(platform_simd_indep_test PRIVATE SND_SIMD_TEST_HAVE_AVX2=1)
 endif()
+
+# --- Independent tests of stage 2 (output backends and the driver, D-61..D-66) -------------
+snd_add_test(platform_indep_driver_core_test SOURCES indep_driver_core_test.cpp LINK sonus_platform)
