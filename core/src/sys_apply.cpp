@@ -877,6 +877,17 @@ void ApplyCommands(Impl& im) noexcept {
   im.ev.musicInputCount = 0;
   ReleaseOwnedRows(im);
   ApplyDeferred(im);
+  auto apply = [&](const cmd::CommandHeader& ch, const std::uint8_t* payload) { ApplyOne(im, ch, payload); };
+  const LiveTap& tap = im.desc.liveTap;
+  if (tap.replay != nullptr) {  // 11.3: a replay's arenas of this block first
+    LiveArenaView rv{};
+    while (tap.replay(tap.user, im.block, &rv)) {
+      cmd::ForEachCommand(rv.normal, rv.normal + rv.normalBytes, apply);
+      cmd::ForEachCommand(rv.reserve, rv.reserve + rv.reserveBytes, apply);
+      if ((rv.flags & cmd::kArenaHasFallback) != 0u && rv.fallback != nullptr) ApplyFallback(im, *rv.fallback);
+      rv = LiveArenaView{};
+    }
+  }
   for (std::uint32_t pi = 0; pi < im.cfg.maxThreads; ++pi) {
     Producer& pr = im.producers[pi];
     std::uint32_t idx = 0;
@@ -884,7 +895,11 @@ void ApplyCommands(Impl& im) noexcept {
       ArenaView& av = pr.arenas[idx];
       cmd::ArenaHeader& h = *av.header;
       h.appliedBlock = im.block;  // D-12
-      auto apply = [&](const cmd::CommandHeader& ch, const std::uint8_t* payload) { ApplyOne(im, ch, payload); };
+      if (tap.arena != nullptr) {  // 11.3 recording
+        const bool fb = (h.flags & cmd::kArenaHasFallback) != 0u;
+        tap.arena(tap.user, LiveArenaView{pi, h.flags, im.block, av.normal, h.normalBytes, h.reserveBytes, av.reserve,
+                                          fb ? &av.fallback : nullptr});
+      }
       cmd::ForEachCommand(av.normal, av.normal + h.normalBytes, apply);
       cmd::ForEachCommand(av.reserve, av.reserve + h.reserveBytes, apply);
       if ((h.flags & cmd::kArenaHasFallback) != 0u) ApplyFallback(im, av.fallback);

@@ -25,8 +25,10 @@ snd_musical_time TicksToMusical(MusicalTicks tick, TimeSignature sig) noexcept {
 void Publish(Impl& im) noexcept {
   schema::Tables& t = im.tables;
   // 1. Lossless flags.
+  const LiveTap& tap = im.desc.liveTap;
   for (std::uint32_t i = 0; i < im.endedCount; ++i) {
     const EndedPlayback& e = im.ended[i];
+    if (tap.ended != nullptr) tap.ended(tap.user, e.slot, e.generation, e.reason, e.detail);
     base::notify::PublishEnd(im.endFlags, e.slot,
                              notify::EndRecord{e.generation, static_cast<std::uint16_t>(e.reason),
                                                static_cast<std::uint16_t>(e.detail)});
@@ -51,6 +53,7 @@ void Publish(Impl& im) noexcept {
     im.eventCount += im.music->CollectNotifications(im.events + im.eventCount, im.eventCap - im.eventCount);
   }
   for (std::uint32_t i = 0; i < im.eventCount; ++i) {
+    if (tap.event != nullptr) tap.event(tap.user, im.events[i]);
     if (!base::notify::PushEvent(*im.eventRing, im.events[i])) {
       // dropped and counted by the ring (stats.dropped_events)
     }
@@ -76,7 +79,10 @@ void Publish(Impl& im) noexcept {
         im.pub.streamStall[s] = 0u;
       }
       const std::uint32_t now = stalls[s];
-      if (now > im.pub.streamStall[s]) im.streamStalls += now - im.pub.streamStall[s];
+      if (now > im.pub.streamStall[s]) {
+        im.streamStalls += now - im.pub.streamStall[s];
+        if (tap.stall != nullptr) tap.stall(tap.user, s, now - im.pub.streamStall[s], im.block);
+      }
       im.pub.streamStall[s] = now;
     }
   }

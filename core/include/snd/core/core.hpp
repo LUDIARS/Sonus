@@ -53,8 +53,10 @@
 #include "snd/ext/codec.hpp"
 #include "snd/ext/file_system.hpp"
 #include "snd/ext/job_system.hpp"
+#include "snd/format/livelink_protocol.hpp"
 #include "snd/internal/commands.hpp"
 #include "snd/internal/music_if.hpp"
+#include "snd/internal/notify.hpp"
 #include "snd/internal/source_if.hpp"
 #include "snd/types.h"
 
@@ -84,6 +86,56 @@ struct CoreLimits {
 // does not interpret itself (LiveSetValue, LiveReplaceChunk). Principle 1 applies.
 using LiveCommandFn = void (*)(void* user, cmd::CommandType type, const void* payload) noexcept;
 
+class System;
+
+// --- Live link taps (11.2 profiler, 11.3 recording; dev builds) ----------------------
+// Called on the audio thread. Principle 1 applies: copy into preallocated memory
+// and return. Null members are skipped. The live link module installs them.
+struct LiveArenaView {
+  std::uint32_t producer = 0;      // registration index; kInvalidSlot for replayed arenas
+  std::uint32_t flags = 0;         // cmd::ArenaFlags
+  BlockIndex appliedBlock = 0;     // block whose ApplyCommands consumes the arena (D-12)
+  const std::uint8_t* normal = nullptr;
+  std::uint32_t normalBytes = 0;
+  std::uint32_t reserveBytes = 0;
+  const std::uint8_t* reserve = nullptr;
+  const cmd::OverflowFallback* fallback = nullptr;  // non-null only with kArenaHasFallback
+};
+struct LiveTap {
+  void* user = nullptr;
+  // ApplyCommands, for every producer arena, before its commands are applied.
+  void (*arena)(void* user, const LiveArenaView& arena) noexcept = nullptr;
+  // ApplyCommands, block start, before the producers: arenas of a replay (11.3). Called
+  // until it returns false; each returned arena is applied like a producer arena
+  // (normal, reserve, fallback). The memory must stay valid until the next call.
+  bool (*replay)(void* user, BlockIndex block, LiveArenaView* next) noexcept = nullptr;
+  // Every event record a system posts this block (dropped ones too).
+  void (*event)(void* user, const notify::EventRecord& record) noexcept = nullptr;
+  // Publish: a playback ended (slot, generation, snd_end_reason, snd_end_detail).
+  void (*ended)(void* user, std::uint32_t slot, std::uint32_t generation, std::uint32_t reason,
+                std::uint32_t detail) noexcept = nullptr;
+  // Publish: stream slot `slot` stalled `count` more times in this block (6.3).
+  void (*stall)(void* user, std::uint32_t slot, std::uint32_t count, BlockIndex block) noexcept = nullptr;
+  // End of every RenderBlock (suspended blocks too). The Live* queries below may be
+  // called from here.
+  void (*block)(void* user, System& sys) noexcept = nullptr;
+};
+
+// One editable cell of a registered bank's override layer (11.2).
+struct LiveCell {
+  std::uint32_t bankSlot = 0;
+  std::uint32_t row = 0;
+};
+struct LiveBankInfo {
+  HandleRef handle{};
+  Id bankId = 0;
+  std::uint32_t languageId = 0;
+  std::uint64_t projectBuildHash = 0;
+  std::uint64_t contentHash = 0;
+  std::uint32_t writable = 0;  // 1 = dev override layer present
+  std::uint32_t reserved = 0;
+};
+
 struct CoreDesc {
   const snd_config* config = nullptr;  // required, already validated by api (struct_size, version)
   IAllocator* allocator = nullptr;     // required: every byte of the runtime
@@ -100,6 +152,7 @@ struct CoreDesc {
   void* codecUser = nullptr;
   LiveCommandFn liveCommand = nullptr;
   void* liveUser = nullptr;
+  LiveTap liveTap{};  // live link profiler / recording / replay hooks (dev builds)
   double outputLatencySeconds = 0.0;   // IOutputDevice::OutputLatencySeconds (8.1 notifications, stats)
   bool rtWorkerRealtimePriority = true;  // false in tests (no SCHED_FIFO)
   std::uint32_t rtDebugClaimDelayMicroseconds = 0;  // tests only (jobs A1-14)
@@ -209,6 +262,36 @@ class System {
   std::uint32_t SampleRate() const noexcept;
   // Last block's timing (read on the audio thread or after it stopped).
   const BlockProfile& LastBlock() const noexcept;
+
+  // --- live link (audio thread: only from a LiveTap hook or CoreDesc::liveCommand) ------
+  // Profiler reads at the end of a block (after every system). Each returns the number
+  // of entries that exist and writes min(that, capacity).
+  std::uint32_t LiveVoices(livelink::VoiceInfo* out, std::uint32_t capacity) const noexcept;
+  std::uint32_t LiveMeters(livelink::MeterEntry* out, std::uint32_t capacity) const noexcept;
+  std::uint32_t LiveBanks(LiveBankInfo* out, std::uint32_t capacity) const noexcept;
+  void LiveStats(snd_stats* out) const noexcept;
+  // Override layer (11.2). Cells of the object `objectId` in table `fourcc`: tables with
+  // an id column match the row by id (index must be 0); list tables are addressed
+  // through their owner (livelink-protocol.md "値の変更の宛先", see live_link.cpp):
+  // TRAK/SEND/EFFX/SNPV/MPLE/CURV by the owner's id and the offset `index`, CLIP/ACTN by
+  // event id and (track << 16 | item), EFPV by bus id and (effect << 16 | param), CPNT
+  // by event id and (curve << 16 | point). One cell per registered bank holding it.
+  std::uint32_t LiveFindCells(Id objectId, std::uint32_t fourcc, std::uint32_t index, LiveCell* out,
+                              std::uint32_t capacity) const noexcept;
+  // Registered bank slots with this bank id (ReplaceChunk).
+  std::uint32_t LiveFindBanks(Id bankId, std::uint32_t* slots, std::uint32_t capacity) const noexcept;
+  // Rows of table `fourcc` in the override layer of a registered bank (0 if none).
+  std::uint32_t LiveTableRows(std::uint32_t bankSlot, std::uint32_t fourcc) const noexcept;
+  // Reads (*previous) and, with apply, writes one cell, then refreshes what core derived
+  // from it at registration (bus / category volume, voice limits, parameter definitions,
+  // ducking, effect parameters). apply = false only validates.
+  //   SND_ERR_UNSUPPORTED       no override layer, or the column is not live-editable
+  //                             (references and layout: rebuild and hot reload)
+  //   SND_ERR_NOT_FOUND         unknown bank slot / table / column / row
+  //   SND_ERR_INVALID_ARGUMENT  value out of the column's range (NaN, enum)
+  // Writing the value a non-editable cell already holds succeeds (no change).
+  snd_result LiveWriteCell(const LiveCell& cell, std::uint32_t fourcc, std::uint32_t column, std::uint64_t bits,
+                           std::uint64_t* previous, bool apply) noexcept;
 
   struct Impl;
   Impl* impl() noexcept { return impl_; }
