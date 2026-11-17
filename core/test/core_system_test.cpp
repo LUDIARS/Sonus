@@ -174,6 +174,7 @@ std::vector<float> RunScript(bool parallel) {
   snd_config cfg = SmallConfig();
   cfg.jobs.realtime_workers = parallel ? 2u : 0u;
   cfg.tuning.rt_spin_microseconds = 200000;  // never late: the outputs must match bit for bit
+  cfg.tuning.lod_down_blocks = 0;            // bit exactness needs the load LOD off (2.5); slow builds would trigger it
   Harness h(cfg);
   TestBank b = BasicBank();
   b.assets.push_back(TAsset{HashId("s"), 1, 44100, Sine(200000, 330.0, 44100.0, 0.3f), 0, 0});
