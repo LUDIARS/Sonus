@@ -280,3 +280,35 @@ SND_TEST(IndepFix4, Defect_source_FiniteLoopAtTheFileStartStallsWhenStartedInsid
     }
   }
 }
+
+// A playback whose stream file is missing ends with an IO error; once the file
+// is back, the next playback opens it and plays exactly (a failed binding does
+// not stick); no file stays open.
+SND_TEST(IndepFix4, MissingFileThenBack) {
+  Built b = Build("f4miss", {Spec("s", 48000, "PC16", "\"preloadMs\": 0")});
+  SND_REQUIRE_MSG(b.ok, "%s", b.diag.c_str());
+  const Decoded ref = Reference(b, "s");
+  SND_REQUIRE(ref.ok);
+  IndepDriver d(b, IndepDriver::Opt{});
+  SND_REQUIRE(d.Ok());
+  const std::string path = PathOf(b, "s");
+  d.fs.RemoveFile(path);
+  IndepDriver::Voice v;
+  v.slot = d.Start(d.Stream(), d.Asset("s"), 0, 0);
+  for (int i = 0; i < 100 && v.ended == 0u; ++i) d.Block(d.Stream(), {&v}, 256);
+  SND_CHECK(v.ended != 0u);
+  SND_CHECK(v.out.empty() || v.out[0].empty());
+  SND_CHECK(d.runtime.Stats().streamIoErrors >= 1u);
+  d.Release(d.Stream(), v.slot);
+  for (int i = 0; i < 4; ++i) d.Block(d.Stream(), {}, 256);
+  d.fs.AddFile(path, b.files[0].second);
+  IndepDriver::Voice w;
+  w.slot = d.Start(d.Stream(), d.Asset("s"), 0, 0);
+  for (int i = 0; i < 400 && w.ended == 0u; ++i) d.Block(d.Stream(), {&w}, 256);
+  SND_REQUIRE(!w.out.empty());
+  SND_CHECK_EQ(w.out[0].size(), 48000u);
+  SND_CHECK(MaxDiff(w.out[0], 0, Model(ref.ch[0], 0, 0, 0, 0, 48000)) < 1e-6);
+  d.Release(d.Stream(), w.slot);
+  for (int i = 0; i < 4; ++i) d.Block(d.Stream(), {}, 256);
+  SND_CHECK_EQ(d.fs.OpenFiles(), 0u);
+}
