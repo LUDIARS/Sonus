@@ -58,8 +58,14 @@
 // UNLOADING (same path or not), a new load is read and validated but waits
 // for the old slot's Release() before it registers (never fails for it).
 // A bank that depends on such a waiting copy waits too (its dependency is not
-// "missing" while the copy waits for the Release; that holds transitively);
-// a dependency that is really missing, or a cycle, still fails it. Side effect
+// "missing" while the copy waits for the Release; that holds transitively),
+// and so does a bank whose dependency's copy waits for an earlier copy's
+// outcome. SND_ERR_BANK_DEPENDENCY is given only once it is certain that no
+// copy of the dependency will ever be registered (a really missing bank, a
+// cycle); every such bank of a round fails together, so the outcome does not
+// depend on slot order. Dependencies are matched by bankId and buildHash only,
+// not by language (which language copy a dependency should resolve to is
+// left to stage 2, snd_set_language). Side effect
 // of the request order: a later, unrelated bank also waits to register until
 // the earlier requests finished reading and validating.
 //
