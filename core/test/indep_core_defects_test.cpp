@@ -197,9 +197,9 @@ SND_TEST(IndepDefect, Defect_core_control_on_held_voice) {
 #if defined(SND_INDEP_DEFECT_language_back)
 // 10.4: switching the language back while the previous language's bank still
 // waits to be unloaded (a voice of it plays): after SetLanguage(en) new plays
-// must resolve to English again and the English bank must stay; core keeps
-// resolving to Japanese and finally unloads the English bank although English
-// is the current language.
+// must resolve to English again. Core keeps the old English copy on its way out
+// (unload when unused), loads a second English copy that waits for that, and
+// meanwhile resolves new plays to Japanese although English is current.
 SND_TEST(IndepDefect, Defect_core_language_switch_back_while_old_bank_unloading) {
   auto voice = [](const char* lang, float f) {
     Bank b;
@@ -235,8 +235,8 @@ SND_TEST(IndepDefect, Defect_core_language_switch_back_while_old_bank_unloading)
   SND_CHECK_EQ(fx.CountEnds(b.value), 0u);
   fx.Steps(220);
   SND_CHECK(fx.Ended(b.value, SND_END_COMPLETED));
-  // English is the current language: its bank stays and new plays are English.
-  SND_CHECK_EQ(fx.sys->GetBankState(en), SND_BANK_STATE_LOADED);
+  // English is the current language: new plays are English (the English bank
+  // may be a new copy with another handle by now).
   fx.sys->Play(HashId("Line"), NoEmitter(), nullptr);
   fx.Steps(3);
   SND_CHECK_NEAR(fx.LastMean(), kCenter * 0.1f, 1e-5f);
