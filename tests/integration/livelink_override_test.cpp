@@ -382,3 +382,116 @@ SND_TEST(LivelinkOverride, OldSessionEditsNeverOverwriteTheNewServersValues) {
   ll::Client::Destroy(cb);
   ll::Server::Destroy(b);
 }
+
+namespace {
+void RecordMarker(Fixture& f, std::uint32_t field, std::uint32_t session = 0) {
+  snd::cmd::LiveSetValue m{};
+  m.field = field;
+  m.value = session;
+  SND_REQUIRE_EQ(f.sys->RecordLive(snd::cmd::CommandType::LiveSetValue, &m, sizeof(m)), SND_OK);
+}
+void RecordSfx(Fixture& f, float db) {
+  snd::cmd::LiveSetValue c{};
+  c.objectId = HashId("Sfx");
+  c.field = ll::EncodeField(bf::chunk::BUSS, bf::col::BUSS_volumeDb);
+  std::uint32_t bits = 0;
+  std::memcpy(&bits, &db, 4);
+  c.value = bits;
+  SND_REQUIRE_EQ(f.sys->RecordLive(snd::cmd::CommandType::LiveSetValue, &c, sizeof(c)), SND_OK);
+}
+}  // namespace
+
+// D-87: the session starts in Server::Start. An earlier Server's unapplied edit is not
+// applied once the next Server's Start returned, even if no tool ever connects to it.
+SND_TEST(LivelinkOverride, SessionStartsInServerStart) {
+  Fixture f;
+  f.Load(DevBank());
+  f.sys->Play(HashId("Tone"), snd_emitter_handle{0}, nullptr);
+  f.Steps(16);
+  const float base = f.LastLeft();
+  SND_REQUIRE_EQ(f.StartServer(), SND_OK);
+  ll::Client* c = nullptr;
+  SND_REQUIRE_EQ(ll::Client::Create(MemoryClient(f.link), &c), SND_OK);
+  c->Start();
+  const auto until = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+  while (!(c->State() == ll::ClientState::Ready && f.server->Connected()) && std::chrono::steady_clock::now() < until) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
+  SND_REQUIRE(f.server->Connected());
+  SND_REQUIRE(c->SetValue(BusVolume("Sfx", -20.0f), true) != 0u);
+  const auto u2 = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+  while (f.server->Stats().commandsRecorded < 2u && std::chrono::steady_clock::now() < u2) {  // marker + edit
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
+  std::this_thread::sleep_for(std::chrono::milliseconds(30));
+  ll::Client::Destroy(c);
+  f.StopServer();
+  const std::uint32_t stale0 = f.rt->Drops().staleEdits;
+  ll::ServerDesc sd;
+  sd.system = f.sys;
+  sd.runtime = f.rt;
+  sd.allocator = &snd::base::DefaultAllocator();
+  sd.acceptor = &f.link.acceptor();
+  SND_REQUIRE_EQ(ll::Server::Create(sd, &f.server), SND_OK);
+  SND_REQUIRE_EQ(f.server->Start(), SND_OK);
+  f.Steps(8);  // the old edit is applied now: dropped
+  SND_CHECK_EQ(f.rt->Drops().staleEdits - stale0, 1u);
+  SND_CHECK_NEAR(f.LastLeft() / base, 1.0, 1e-5);
+}
+
+// D-87 exception: an earlier session's disconnect revert is applied (its ClearOverrides
+// is told apart from a tool's by kFieldRevertBegin) and restores only the cells that
+// session wrote last; a tool's ClearOverrides of an earlier session is dropped.
+SND_TEST(LivelinkOverride, EarlierSessionsRevertIsAppliedButSparesNewerCells) {
+  Fixture f;
+  f.Load(DevBank());
+  f.sys->Play(HashId("Tone"), snd_emitter_handle{0}, nullptr);
+  f.Steps(16);
+  const float base = f.LastLeft();
+  const std::uint32_t s1 = f.rt->NewSession();
+  const std::uint32_t s2 = f.rt->NewSession();  // the newest
+  auto results = [&] {
+    std::vector<ll::ApplyResult> v;
+    ll::ApplyResult r{};
+    while (f.rt->results().TryPop(r)) v.push_back(r);
+    return v;
+  };
+  // The older session edits Sfx (dropped: stale) and clears overrides (dropped).
+  std::uint32_t stale = f.rt->Drops().staleEdits;
+  RecordMarker(f, ll::kFieldSession, s1);
+  RecordSfx(f, -20.0f);
+  SND_REQUIRE_EQ(f.sys->RecordLive(snd::cmd::CommandType::LiveClearOverrides, nullptr, 0), SND_OK);
+  f.Step();
+  SND_CHECK_EQ(f.rt->Drops().staleEdits - stale, 2u);
+  results();
+  // The newest session edits Sfx: applied.
+  RecordMarker(f, ll::kFieldSession, s2);
+  RecordSfx(f, -6.0f);
+  f.Steps(8);
+  SND_CHECK_NEAR(f.LastLeft() / base, std::pow(10.0, -6.0 / 20.0), 1e-4);
+  results();
+  // The older session's disconnect revert: begin marker, ClearOverrides, revert marker.
+  stale = f.rt->Drops().staleEdits;
+  RecordMarker(f, ll::kFieldSession, s1);
+  RecordMarker(f, ll::kFieldRevertBegin);
+  SND_REQUIRE_EQ(f.sys->RecordLive(snd::cmd::CommandType::LiveClearOverrides, nullptr, 0), SND_OK);
+  RecordMarker(f, ll::kFieldRevertAll);
+  f.Steps(8);
+  SND_CHECK_EQ(f.rt->Drops().staleEdits - stale, 0u);  // neither the clear nor the revert dropped
+  std::vector<ll::ApplyResult> r = results();
+  SND_REQUIRE_EQ(r.size(), 1u);
+  SND_CHECK_EQ(r[0].revert, 1u);
+  SND_CHECK_EQ(r[0].session, s1);
+  SND_CHECK_EQ(r[0].cells, 0u);  // the Sfx cell was last written by the newer session
+  SND_CHECK_NEAR(f.LastLeft() / base, std::pow(10.0, -6.0 / 20.0), 1e-4);
+  SND_CHECK_EQ(f.rt->applier().Remembered(), 1u);
+  // The newest session's own revert restores the bank value.
+  RecordMarker(f, ll::kFieldSession, s2);
+  RecordMarker(f, ll::kFieldRevertAll);
+  f.Steps(8);
+  r = results();
+  SND_REQUIRE_EQ(r.size(), 1u);
+  SND_CHECK_EQ(r[0].cells, 1u);
+  SND_CHECK_NEAR(f.LastLeft() / base, 1.0, 1e-5);
+  SND_CHECK_EQ(f.rt->applier().Remembered(), 0u);
+}

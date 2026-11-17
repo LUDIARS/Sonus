@@ -201,7 +201,7 @@ constexpr CommandRule kCommandRules[] = {
     {CT::LiveSetValue, true,
      [](const std::uint8_t* p, const L&) noexcept {
        const auto c = Load<cmd::LiveSetValue>(p);
-       if (c.field == kFieldRevertAll || c.field == kFieldSession) return c.objectId == 0u;
+       if (c.field == kFieldRevertAll || c.field == kFieldSession || c.field == kFieldRevertBegin) return c.objectId == 0u;
        std::uint32_t chunk = 0, column = 0;
        return DecodeField(c.field, &chunk, &column) && c.valueType <= static_cast<std::uint32_t>(cmd::LiveValueType::Id);
      },

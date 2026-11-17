@@ -70,9 +70,14 @@ class ValueApplier {
   void Destroy() noexcept;
 
   // --- audio thread ----------------------------------------------------------------
-  ApplyOutcome SetValue(core::System& sys, const cmd::LiveSetValue& c) noexcept;
-  ApplyOutcome ReplaceChunk(core::System& sys, const PendingChunk& chunk) noexcept;
-  ApplyOutcome RevertAll(core::System& sys) noexcept;
+  // session: the live link session of the command (D-83); 0 = none. A remembered cell
+  // carries the newest session that wrote it.
+  ApplyOutcome SetValue(core::System& sys, const cmd::LiveSetValue& c, std::uint32_t session = 0) noexcept;
+  ApplyOutcome ReplaceChunk(core::System& sys, const PendingChunk& chunk, std::uint32_t session = 0) noexcept;
+  // Restores the remembered cells whose newest writer is `session` or older (0: every
+  // cell) and forgets them; cells a newer session wrote stay (D-87: an earlier Server's
+  // disconnect revert never undoes a newer Server's edits).
+  ApplyOutcome RevertAll(core::System& sys, std::uint32_t session = 0) noexcept;
 
   // Any thread (statistics).
   std::uint32_t Remembered() const noexcept { return count_.load(std::memory_order_relaxed); }
@@ -87,11 +92,16 @@ class ValueApplier {
     std::uint32_t row;
     std::uint32_t used;
     std::uint64_t original;
+    std::uint32_t session;  // newest session that wrote the cell
+    std::uint32_t reserved;
   };
   // Entry of the cell of the bank's CURRENT registration (kInvalidSlot if none).
   std::uint32_t Find(std::uint32_t bankSlot, std::uint32_t fourcc, std::uint32_t column, std::uint32_t row) const noexcept;
+  // changed: the write changed the cell (a new record is made only then); the session of
+  // an existing record is raised either way.
   bool Remember(std::uint32_t bankSlot, std::uint32_t fourcc, std::uint32_t column, std::uint32_t row,
-                std::uint64_t original) noexcept;
+                std::uint64_t original, std::uint32_t session, bool changed) noexcept;
+  void Rebuild(bool byGeneration) noexcept;
   std::uint32_t Generation(std::uint32_t bankSlot) const noexcept;
   // Loads the registered banks; when they changed, drops the entries of registrations
   // that are gone (their banks were unloaded: nothing to restore, room freed).

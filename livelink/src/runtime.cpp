@@ -58,6 +58,7 @@ LiveRuntime::~LiveRuntime() {
     }
     alloc_->Free(chunkMemory_, MemTag::LiveLink);
     alloc_->Free(producerSession_, MemTag::LiveLink);
+    alloc_->Free(revertOpen_, MemTag::LiveLink);
   }
 }
 
@@ -73,8 +74,12 @@ bool LiveRuntime::Init(const RuntimeDesc& d) noexcept {
   IAllocator& a = *alloc_;
   producerCount_ = config_.max_registered_threads != 0u ? config_.max_registered_threads : 1u;
   producerSession_ = static_cast<std::uint32_t*>(a.Allocate(sizeof(std::uint32_t) * producerCount_, 64, MemTag::LiveLink));
-  if (producerSession_ == nullptr) return false;
-  for (std::uint32_t i = 0; i < producerCount_; ++i) producerSession_[i] = 0u;
+  revertOpen_ = static_cast<std::uint8_t*>(a.Allocate(producerCount_, 64, MemTag::LiveLink));
+  if (producerSession_ == nullptr || revertOpen_ == nullptr) return false;
+  for (std::uint32_t i = 0; i < producerCount_; ++i) {
+    producerSession_[i] = 0u;
+    revertOpen_[i] = 0u;
+  }
   chunkCount_ = d.chunkSlots;
   chunkBytes_ = (d.chunkBytes + 63u) & ~63u;
   if (chunkCount_ != 0u) {
@@ -116,12 +121,7 @@ void LiveRuntime::Install(core::CoreDesc* d) noexcept {
     Self(u)->OnStall(s, ev, n, b);
   };
   d->liveTap.block = [](void* u, core::System& sys) noexcept { Self(u)->OnBlock(sys); };
-  d->liveTap.admit = [](void* u, cmd::CommandType) noexcept {
-    LiveRuntime* rt = Self(u);
-    if (!rt->StaleProducer()) return true;
-    Bump(rt->dropStale_);
-    return false;
-  };
+  d->liveTap.admit = [](void* u, cmd::CommandType t) noexcept { return Self(u)->Admit(t); };
 }
 
 void LiveRuntime::SetProfiler(std::uint32_t mask, std::uint32_t meterHz) noexcept {
@@ -191,6 +191,15 @@ bool LiveRuntime::StaleProducer() const noexcept {
   return s != 0u && s < latestSession_.load(std::memory_order_acquire);
 }
 
+// D-87: an older session's LiveOverride / LiveClearOverrides is dropped, except the
+// LiveClearOverrides of a disconnect revert (after kFieldRevertBegin of the same producer).
+bool LiveRuntime::Admit(cmd::CommandType type) noexcept {
+  if (!StaleProducer()) return true;
+  if (type == cmd::CommandType::LiveClearOverrides && revertOpen_[currentProducer_] != 0u) return true;
+  Bump(dropStale_);
+  return false;
+}
+
 void LiveRuntime::OnCommand(core::System& sys, cmd::CommandType type, const void* payload) noexcept {
   const bool known = currentProducer_ < producerCount_;
   ApplyResult r{static_cast<std::uint32_t>(type), SND_OK, 0u, 0u, known ? producerSession_[currentProducer_] : 0u, 0u};
@@ -200,13 +209,20 @@ void LiveRuntime::OnCommand(core::System& sys, cmd::CommandType type, const void
       if (known) producerSession_[currentProducer_] = static_cast<std::uint32_t>(c.value);
       return;
     }
-    if (StaleProducer()) {  // D-87: an earlier Server's edit is not applied (its result is dropped there)
+    if (c.field == kFieldRevertBegin && c.objectId == 0u) {
+      if (known) revertOpen_[currentProducer_] = 1u;
+      return;
+    }
+    // D-87: an earlier Server's edit is not applied (its result is dropped there); its
+    // disconnect revert is (it only restores the cells that session wrote last).
+    if (c.field != kFieldRevertAll && StaleProducer()) {
       Bump(dropStale_);
       r.result = SND_ERR_INVALID_HANDLE;
       if (!results_.TryPush(r)) Bump(dropResults_);
       return;
     }
-    const ApplyOutcome o = applier_.SetValue(sys, c);
+    if (c.field == kFieldRevertAll && known) revertOpen_[currentProducer_] = 0u;
+    const ApplyOutcome o = applier_.SetValue(sys, c, r.session);
     r.result = o.result;
     r.cells = o.cells;
     r.revert = c.field == kFieldRevertAll ? 1u : 0u;
@@ -227,7 +243,7 @@ void LiveRuntime::OnCommand(core::System& sys, cmd::CommandType type, const void
     } else if (st != PendingChunk::kQueued) {
       r.result = SND_ERR_INVALID_ARGUMENT;
     } else {
-      const ApplyOutcome o = applier_.ReplaceChunk(sys, *p);
+      const ApplyOutcome o = applier_.ReplaceChunk(sys, *p, r.session);
       r.result = o.result;
       r.cells = o.cells;
       p->result = o.result;

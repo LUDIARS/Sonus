@@ -76,8 +76,13 @@ std::uint32_t ValueApplier::Find(std::uint32_t bankSlot, std::uint32_t fourcc, s
 }
 
 bool ValueApplier::Remember(std::uint32_t bankSlot, std::uint32_t fourcc, std::uint32_t column, std::uint32_t row,
-                            std::uint64_t original) noexcept {
-  if (Find(bankSlot, fourcc, column, row) != kInvalidSlot) return true;  // first write wins
+                            std::uint64_t original, std::uint32_t session, bool changed) noexcept {
+  const std::uint32_t found = Find(bankSlot, fourcc, column, row);
+  if (found != kInvalidSlot) {  // first write wins (the original); the newest writer is kept
+    if (session > edits_[found].session) edits_[found].session = session;
+    return true;
+  }
+  if (!changed) return true;
   const std::uint32_t mask = tableSize_ - 1u;
   const std::uint32_t gen = Generation(bankSlot);
   for (std::uint32_t i = Hash(bankSlot, fourcc, column, row) & mask;; i = (i + 1u) & mask) {
@@ -88,12 +93,13 @@ bool ValueApplier::Remember(std::uint32_t bankSlot, std::uint32_t fourcc, std::u
         // value is the original from now on.
         e.bankGeneration = gen;
         e.original = original;
+        e.session = session;
         return true;
       }
       continue;
     }
     if (count_.load(std::memory_order_relaxed) >= capacity_) return false;
-    e = Edit{bankSlot, gen, fourcc, column, row, 1u, original};
+    e = Edit{bankSlot, gen, fourcc, column, row, 1u, original, session, 0u};
     count_.store(count_.load(std::memory_order_relaxed) + 1u, std::memory_order_relaxed);
     return true;
   }
@@ -112,13 +118,18 @@ void ValueApplier::LoadBanks(core::System& sys) noexcept {
   }
 }
 
-void ValueApplier::Purge() noexcept {
+void ValueApplier::Purge() noexcept { Rebuild(true); }
+
+// Re-inserts the used entries (open addressing: removal by rebuilding), dropping the
+// ones of gone registrations when byGeneration.
+void ValueApplier::Rebuild(bool byGeneration) noexcept {
   std::memset(static_cast<void*>(spare_), 0, sizeof(Edit) * tableSize_);
   const std::uint32_t mask = tableSize_ - 1u;
   std::uint32_t kept = 0;
   for (std::uint32_t k = 0; k < tableSize_; ++k) {
     const Edit& e = edits_[k];
-    if (e.used == 0u || e.bankGeneration == 0u || Generation(e.bankSlot) != e.bankGeneration) continue;
+    if (e.used == 0u) continue;
+    if (byGeneration && (e.bankGeneration == 0u || Generation(e.bankSlot) != e.bankGeneration)) continue;
     for (std::uint32_t i = Hash(e.bankSlot, e.fourcc, e.column, e.row) & mask;; i = (i + 1u) & mask) {
       if (spare_[i].used == 0u) {
         spare_[i] = e;
@@ -140,9 +151,9 @@ std::uint32_t ValueApplier::Generation(std::uint32_t bankSlot) const noexcept {
   return 0;
 }
 
-ApplyOutcome ValueApplier::SetValue(core::System& sys, const cmd::LiveSetValue& c) noexcept {
-  if (c.field == kFieldRevertAll) return RevertAll(sys);
-  if (c.field == kFieldSession) return ApplyOutcome{};  // the live link's session marker (runtime)
+ApplyOutcome ValueApplier::SetValue(core::System& sys, const cmd::LiveSetValue& c, std::uint32_t session) noexcept {
+  if (c.field == kFieldRevertAll) return RevertAll(sys, session);
+  if (c.field == kFieldSession || c.field == kFieldRevertBegin) return ApplyOutcome{};  // live link markers (runtime)
   std::uint32_t fourcc = 0, column = 0;
   if (edits_ == nullptr || !DecodeField(c.field, &fourcc, &column)) return ApplyOutcome{SND_ERR_INVALID_ARGUMENT, 0};
   LoadBanks(sys);
@@ -162,15 +173,13 @@ ApplyOutcome ValueApplier::SetValue(core::System& sys, const cmd::LiveSetValue& 
   for (std::uint32_t i = 0; i < n; ++i) {
     std::uint64_t prev = 0;
     if (sys.LiveWriteCell(cells_[i], fourcc, column, bits, &prev, true) != SND_OK) continue;  // validated above
-    if (prev != bits) {
-      Remember(cells_[i].bankSlot, fourcc, column, cells_[i].row, prev);
-      ++out.cells;
-    }
+    Remember(cells_[i].bankSlot, fourcc, column, cells_[i].row, prev, session, prev != bits);
+    if (prev != bits) ++out.cells;
   }
   return out;
 }
 
-ApplyOutcome ValueApplier::ReplaceChunk(core::System& sys, const PendingChunk& chunk) noexcept {
+ApplyOutcome ValueApplier::ReplaceChunk(core::System& sys, const PendingChunk& chunk, std::uint32_t session) noexcept {
   if (edits_ == nullptr || chunk.data == nullptr) return ApplyOutcome{SND_ERR_INVALID_ARGUMENT, 0};
   LoadBanks(sys);
   std::uint32_t nb = sys.LiveFindBanks(chunk.bankId, bankSlots_, maxBanks_);
@@ -213,10 +222,9 @@ ApplyOutcome ValueApplier::ReplaceChunk(core::System& sys, const PendingChunk& c
     const std::uint32_t slot = bankSlots_[b];
     forCells([&](std::uint32_t column, std::uint32_t row, std::uint64_t bits) {
       std::uint64_t prev = 0;
-      if (sys.LiveWriteCell(core::LiveCell{slot, row}, chunk.fourcc, column, bits, &prev, true) == SND_OK &&
-          prev != bits) {
-        Remember(slot, chunk.fourcc, column, row, prev);
-        ++out.cells;
+      if (sys.LiveWriteCell(core::LiveCell{slot, row}, chunk.fourcc, column, bits, &prev, true) == SND_OK) {
+        Remember(slot, chunk.fourcc, column, row, prev, session, prev != bits);
+        if (prev != bits) ++out.cells;
       }
       return SND_OK;
     });
@@ -224,20 +232,29 @@ ApplyOutcome ValueApplier::ReplaceChunk(core::System& sys, const PendingChunk& c
   return out;
 }
 
-ApplyOutcome ValueApplier::RevertAll(core::System& sys) noexcept {
+ApplyOutcome ValueApplier::RevertAll(core::System& sys, std::uint32_t session) noexcept {
   ApplyOutcome out;
   if (edits_ == nullptr) return out;
   LoadBanks(sys);
+  bool kept = false;
   for (std::uint32_t i = 0; i < tableSize_; ++i) {
     Edit& e = edits_[i];
     if (e.used == 0u) continue;
+    if (session != 0u && e.session > session) {  // a newer session wrote it: not ours to undo
+      kept = true;
+      continue;
+    }
     if (e.bankGeneration != 0u && Generation(e.bankSlot) == e.bankGeneration &&
         sys.LiveWriteCell(core::LiveCell{e.bankSlot, e.row}, e.fourcc, e.column, e.original, nullptr, true) == SND_OK) {
       ++out.cells;
     }
     e = Edit{};
   }
-  count_.store(0, std::memory_order_relaxed);
+  if (kept) {
+    Rebuild(false);
+  } else {
+    count_.store(0, std::memory_order_relaxed);
+  }
   return out;
 }
 

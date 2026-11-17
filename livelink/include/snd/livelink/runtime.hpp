@@ -197,6 +197,8 @@ class LiveRuntime {
   std::atomic<std::uint32_t> latestSession_{0};
   std::atomic<std::uint32_t> dropStale_{0};
   bool StaleProducer() const noexcept;  // audio thread: the arena being applied is of an older session
+  bool Admit(cmd::CommandType type) noexcept;  // LiveTap::admit
+  std::uint8_t* revertOpen_ = nullptr;  // [producerCount_] audio thread: kFieldRevertBegin seen, revert not done
   std::uint32_t* producerSession_ = nullptr;  // [max_registered_threads] audio thread: last marker per producer
   std::uint32_t producerCount_ = 0;
   std::uint32_t currentProducer_ = 0xFFFFFFFFu;  // producer of the arena being applied

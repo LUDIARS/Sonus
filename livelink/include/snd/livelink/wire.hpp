@@ -99,6 +99,10 @@ inline constexpr std::uint32_t kFieldRevertAll = 0xFFFFFFFFu;
 // records it before its first tracked command, so that applied results carry the
 // session of the Server that recorded them (LiveRuntime, ApplyResult::session).
 inline constexpr std::uint32_t kFieldSession = 0xFFFFFFFEu;
+// The live link's "a disconnect revert starts" marker (objectId 0): the next
+// LiveClearOverrides of the same producer belongs to the revert (D-87: a revert is applied
+// even when its session is old; a tool's ClearOverrides of an old session is not).
+inline constexpr std::uint32_t kFieldRevertBegin = 0xFFFFFFFDu;
 std::uint32_t EncodeField(std::uint32_t chunkFourcc, std::uint32_t column) noexcept;  // kFieldRevertAll if unknown
 bool DecodeField(std::uint32_t field, std::uint32_t* chunkFourcc, std::uint32_t* column) noexcept;
 

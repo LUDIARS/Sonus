@@ -244,7 +244,7 @@ struct Server::Impl final : FrameReader::Handler {
       recStopping = true;
     }
     if (d.revertOnDisconnect) {
-      revertPending = 3u;  // bit0 LiveClearOverrides, bit1 the revert marker
+      revertPending = 7u;
       revertTries = 0;
       TryRevert();
     }
@@ -253,13 +253,19 @@ struct Server::Impl final : FrameReader::Handler {
   // Records the disconnect revert; refused parts (arena full) are retried every loop,
   // up to kRevertTries, then counted (ServerStats::revertsLost) and logged.
   static constexpr std::uint32_t kRevertTries = 2000;
+  // In order: kFieldRevertBegin (bit0), LiveClearOverrides (bit1), kFieldRevertAll (bit2).
   void TryRevert() noexcept {
     if (revertPending == 0u) return;
-    if ((revertPending & 1u) != 0u &&
-        Record(cmd::CommandType::LiveClearOverrides, nullptr, 0, 0, false, nullptr, false) == SND_OK) {
-      revertPending &= ~1u;
+    if ((revertPending & 1u) != 0u) {
+      cmd::LiveSetValue b{};
+      b.field = kFieldRevertBegin;
+      if (Record(cmd::CommandType::LiveSetValue, &b, sizeof(b), 0, false, nullptr, false) == SND_OK) revertPending &= ~1u;
     }
-    if (revertPending == 2u) {  // in order: the marker after the clear
+    if (revertPending == 6u &&
+        Record(cmd::CommandType::LiveClearOverrides, nullptr, 0, 0, false, nullptr, false) == SND_OK) {
+      revertPending &= ~2u;
+    }
+    if (revertPending == 4u) {
       cmd::LiveSetValue rv{};
       rv.field = kFieldRevertAll;
       if (Record(cmd::CommandType::LiveSetValue, &rv, sizeof(rv), 0, false, nullptr, false) == SND_OK) revertPending = 0u;
@@ -274,7 +280,13 @@ struct Server::Impl final : FrameReader::Handler {
   // result is matched later (SetValue / ReplaceChunk).
   snd_result Record(cmd::CommandType type, const void* payload, std::uint32_t bytes, std::uint32_t seq, bool wantAck,
                     PendingChunk* chunk, bool reply) noexcept {
-    const bool track = type == cmd::CommandType::LiveSetValue || type == cmd::CommandType::LiveReplaceChunk;
+    // Commands with an applied result (the markers other than the revert have none).
+    bool track = type == cmd::CommandType::LiveReplaceChunk;
+    if (type == cmd::CommandType::LiveSetValue) {
+      cmd::LiveSetValue v;
+      std::memcpy(&v, payload, sizeof(v));
+      track = v.field != kFieldRevertBegin;
+    }
     if (track && pendingCount >= pendingCap) {
       commandsRefused.Add();
       return SND_ERR_LIMIT_REACHED;
@@ -747,8 +759,7 @@ struct Server::Impl final : FrameReader::Handler {
   void Run() noexcept {
     platform::SetCurrentThreadName("snd-livelink");
     registered = sys->RegisterThread() == SND_OK;
-    session = rt->NewSession();
-    sessionAnnounced = false;
+
     if (rt->config().livelink.record_commands != 0u && d.recordSink != nullptr) {
       recMode = RecMode::Sink;
       rt->RequestRecording(true);
@@ -923,6 +934,10 @@ int Server::Start() noexcept {
     im.port.store(im.tcp.Port(), std::memory_order_relaxed);
     im.acceptor = &im.tcp;
   }
+  // D-87: the session starts here, so that once Start returns no edit an earlier Server
+  // accepted is applied any more.
+  im.session = im.rt->NewSession();
+  im.sessionAnnounced = false;
   im.stop.store(0, std::memory_order_release);
   platform::ThreadDesc td;
   td.name = "snd-livelink";
