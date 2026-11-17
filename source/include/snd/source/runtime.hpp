@@ -29,15 +29,26 @@
 //     end while the cache fills in the background; without a free decoder it
 //     waits for the cache (Priming).
 //   - Work on the audio thread is bounded everywhere: Start (8 voices per
-//     call), the voice's RenderBatch for a seek / loop change (4 per batch) and
-//     Publish (4 streams per block) decode at most the ready amount (a few
-//     blocks) each.
+//     call), RenderBatch for a seek / loop change (4 voices per block, an
+//     atomic budget shared by every chunk of the block) and Publish (4 streams
+//     per block) decode at most the ready amount (a few blocks) each.
+//   - Seek and SetLoop arriving in one block compose: the voice ends at the
+//     last Seek's target (mapped with the loop in force when that Seek came)
+//     and follows the last SetLoop. A SetLoop whose loop end is behind the
+//     playhead sends the voice to the loop start (every form).
 //   - Seek / SetLoop of data in memory (resident, cache, per-voice ring) take
-//     effect inside the next block without a gap. A loop change keeps the
+//     effect inside the next block without a gap. A per-voice ring's decode
+//     job that is posted but not started is claimed (it then does nothing);
+//     while a job is running, the voice plays on from its ring and switches in
+//     the block after the job, with a 5 ms cross-fade (D-15) from the old
+//     position to the target: the one exception to "no fade on a seek". A loop change keeps the
 //     buffered data when it agrees with the new loop (only what lies past the
 //     point where the loops differ is decoded again). A stream's SetLoop only
 //     swaps the read plan when the data read so far agrees; otherwise it
-//     re-reads from the current position.
+//     re-reads from the current position. A stream SetLoop that shortens the
+//     loop keeps the PCM already decoded up to the new loop end, drops what is
+//     past it and goes on at the loop start (from the preload when the loop
+//     start lies in it, so no gap); only data not decoded yet is read again.
 //   - Streams read through io::IoScheduler / StreamChannel directly on the
 //     audio thread (IoScheduler::Post and StreamChannel::Cancel are RT-safe and
 //     must run on the same thread for one slot; core's relayed postIo would

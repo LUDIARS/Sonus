@@ -203,7 +203,10 @@ struct IoScheduler::Impl {
   }
 
   // --- file table -------------------------------------------------------------------------
-  std::uint32_t ResolveFile(const char* path, std::uint64_t now) noexcept {
+  // fresh (FileRequest): an idle entry of the same path is closed and opened
+  // again (with a new size), so a file replaced or rewritten since is read as
+  // it is now. Stream reads keep using an open entry.
+  std::uint32_t ResolveFile(const char* path, std::uint64_t now, bool fresh = false) noexcept {
     if (path == nullptr) return kNil;
     std::size_t len = 0;
     const std::uint32_t h = HashPath(path, &len);
@@ -217,6 +220,11 @@ struct IoScheduler::Impl {
         continue;
       }
       if (e.hash == h && std::strcmp(e.path, path) == 0 && !(e.failed && e.refs == 0u)) {
+        if (fresh && e.refs == 0u && e.id != kInvalidFile) {
+          fs->Close(e.id);  // idle: no reads in flight
+          e.id = kInvalidFile;
+          e.size = UINT64_MAX;
+        }
         ++e.refs;
         e.lastUse = now;
         return i;
@@ -237,11 +245,18 @@ struct IoScheduler::Impl {
     e.failed = false;
     return pick;
   }
-  void ReleaseFile(std::uint32_t& i) noexcept {
+  // close: a FileRequest's entry is closed once nothing uses it (bank loads
+  // open the file again next time and ask for its size again).
+  void ReleaseFile(std::uint32_t& i, bool close = false) noexcept {
     if (i == kNil) return;
     FileEntry& e = files[i];
     if (e.refs > 0u) --e.refs;
-    if (e.refs == 0u && e.failed) e.used = false;  // retry the open for later requests
+    if (e.refs == 0u && close && e.id != kInvalidFile) {
+      fs->Close(e.id);
+      e = FileEntry{};
+    } else if (e.refs == 0u && e.failed) {
+      e.used = false;  // retry the open for later requests
+    }
     i = kNil;
   }
   bool EnsureOpen(std::uint32_t i) noexcept {
@@ -298,7 +313,7 @@ struct IoScheduler::Impl {
     const std::uint64_t size = n.file != kNil ? files[n.file].size : UINT64_MAX;
     FileRequest* req = n.req;
     const std::uint64_t done = n.done;
-    ReleaseFile(n.file);
+    ReleaseFile(n.file, true);
     FreeNode(i);
     FinishFile(req, state, done, size);
   }
@@ -348,11 +363,11 @@ struct IoScheduler::Impl {
         FinishFile(req, FileState::Cancelled, 0, UINT64_MAX);
         continue;
       }
-      const std::uint32_t file = ResolveFile(req->path, now);
+      const std::uint32_t file = ResolveFile(req->path, now, true);
       const std::uint32_t idx = file == kNil ? kNil : freeNodes.Pop();
       if (file == kNil || idx == base::kInvalidIndex) {
         std::uint32_t f = file;
-        ReleaseFile(f);
+        ReleaseFile(f, true);
         if (file == kNil) openFailures.Add();
         FinishFile(req, FileState::Error, 0, UINT64_MAX);
         continue;

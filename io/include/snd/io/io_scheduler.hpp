@@ -67,6 +67,14 @@
 // sequence that wraps from the loop end to the loop start, so the head of the
 // loop is read ahead as the cursor approaches the loop end.
 //
+// Open files: the IO thread keeps a table of open files shared by the
+// requests of the same path. A FileRequest (bank loading) always opens its file
+// again when no request uses it, asks for the size again, and closes it when
+// it is done, so a bank file replaced (rename, delete + create) or rewritten in
+// place (larger or smaller) is read as it is now. Stream reads keep their file
+// open while they play (and an idle stream file stays open until the table
+// needs the entry); replacing a stream file while it plays is not supported.
+//
 // Notifications the audio thread reads without waiting (all atomics on the
 // StreamChannel, slot-indexed): delivered records (ring), errors, read
 // position, and the IO-side stall flag: a request outstanding longer than
