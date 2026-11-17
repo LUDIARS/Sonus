@@ -9,6 +9,7 @@ bool Decoder::SeekTo(std::uint64_t target, std::uint64_t* byte) noexcept {
   carryHead = carryCount = 0;
   drain = false;
   awaitWrap = false;
+  wrapOk = false;
   ended = false;
   decLoops = 0;
   SeekPoint sp{};
@@ -67,6 +68,7 @@ std::uint64_t Decoder::Run(InputSource& in, OutputSink& out, std::uint32_t maxIt
     }
     // 2. Loop wrap: seek to the loop start (6.3, sample accurate).
     if (awaitWrap) {
+      if (stopAtWrap && !wrapOk) return produced;  // the caller decides (Stream loop replay)
       SeekPoint sp{};
       if (!ResolveSeek(*asset, loop.lb, &sp)) {
         ended = true;
@@ -80,6 +82,7 @@ std::uint64_t Decoder::Run(InputSource& in, OutputSink& out, std::uint32_t maxIt
       carryHead = carryCount = 0;
       drain = false;
       awaitWrap = false;
+      wrapOk = false;
       continue;
     }
     if (out.Room() == 0u) return produced;

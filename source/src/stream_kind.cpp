@@ -154,6 +154,21 @@ class StreamSink final : public OutputSink {
     }
     limit_ -= n;
   }
+  // Loop replay: copies n frames from `len` frames back (len <= ring frames).
+  void Repeat(std::uint64_t len, std::uint32_t n) noexcept {
+    while (n != 0u) {
+      const std::uint32_t at = static_cast<std::uint32_t>(w_ & mask_);
+      const std::uint32_t from = static_cast<std::uint32_t>((w_ - len) & mask_);
+      std::uint32_t k = n;
+      if (k > frames_ - at) k = frames_ - at;
+      if (k > frames_ - from) k = frames_ - from;
+      if (k > len) k = static_cast<std::uint32_t>(len);
+      for (std::uint32_t c = 0; c < s_.channels; ++c) std::memmove(s_.ring[c] + at, s_.ring[c] + from, sizeof(float) * k);
+      w_ += k;
+      n -= k;
+      limit_ -= k;
+    }
+  }
   std::uint64_t W() const noexcept { return w_; }
 
  private:
@@ -333,6 +348,7 @@ void StreamKind::Shutdown() noexcept {
       if (s.curValid != 0u) Channel(i).Release(s.cur);
       s.curValid = 0;
       Channel(i).Reclaim();  // what is still in flight comes back at IoScheduler::Shutdown
+      Channel(i).CloseFile();
       if (sh_.decodersReady) sh_.decoders.Release(s.dslot);
       rings_.Release(s.channels, s.rings);
       s.state = 0;
@@ -354,7 +370,45 @@ void StreamKind::Decode(StreamInst& s, std::uint64_t limit) noexcept {
   StreamInput in(*this, s);
   const auto& r = schema::ReadColumn<SystemId::Render, ColumnId::Stream_ringRead>(*sv_.tables)[s.slot];
   StreamSink sink(s, rings_.frames, RingWrite(s), r, limit);
-  s.dec.Run(in, sink);
+  for (std::uint32_t step = 0; step < 4u; ++step) {
+    if (s.replay != 0u) {
+      std::uint64_t n = sink.Room();
+      if (n > s.replayLeft) n = s.replayLeft;
+      sink.Repeat(s.replayLen, static_cast<std::uint32_t>(n));
+      if (s.replayLeft != UINT64_MAX) s.replayLeft -= n;
+      if (s.replayLeft != 0u || s.replayIo != 2u) break;  // ring full, or the IO not re-placed yet
+      s.replay = 0;  // finite loop: the last pass is out; the material goes on after the loop end
+      if (s.replayEnd != 0u) {
+        s.dec.ended = true;
+        break;
+      }
+      s.runPos = s.dec.decPos;
+      s.runW = sink.W();
+    }
+    const LoopRange& lp = s.dec.loop;
+    const bool fits = lp.WrapsAfter(s.dec.decLoops) && lp.le - lp.lb <= rings_.frames;
+    s.dec.stopAtWrap = fits;
+    s.dec.Run(in, sink);
+    if (!fits || !s.dec.awaitWrap || s.dec.ended || s.dec.error != 0u) break;
+    if (s.dec.decPos == lp.le && s.runPos <= lp.lb && sink.W() - s.runW == lp.le - s.runPos) {
+      // One whole pass is in the ring: repeat it from memory from now on.
+      s.replay = 1;
+      s.replayIo = 1;
+      s.replayEnd = 0;
+      s.replayLen = lp.le - lp.lb;
+      if (lp.count == 0u) {
+        s.replayLeft = UINT64_MAX;
+      } else {
+        const std::uint32_t passes = lp.count - 1u - s.dec.decLoops;  // WrapsAfter: decLoops + 1 < count
+        s.replayLeft = std::uint64_t{passes} * s.replayLen;
+        s.replayLoops = lp.count - 1u;
+      }
+      continue;
+    }
+    s.dec.wrapOk = true;  // wrap in the IO this time; the next pass starts at lb here
+    s.runPos = lp.lb;
+    s.runW = sink.W();
+  }
   SetRingWrite(s, sink.W());
   if (s.dec.error != 0u && s.error.load(std::memory_order_relaxed) == 0u) s.error.store(s.dec.error, std::memory_order_release);
   if (s.dec.ended) s.ended.store(1u, std::memory_order_release);
@@ -381,7 +435,7 @@ void StreamKind::DropCurrent(StreamInst& s) noexcept {
 void StreamKind::SetupPlanner(StreamInst& s) noexcept {
   const std::uint64_t base = s.a.streamDataOffset;
   std::uint64_t lb = 0, le = 0;
-  if (s.loop.Looping()) {
+  if (s.loop.WrapsAfter(s.dec.decLoops)) {  // no wrap read once the decoder does not wrap any more
     SeekPoint sp{};
     if (ResolveSeek(s.a, s.loop.lb, &sp)) {
       lb = base + sp.byte;
@@ -392,7 +446,7 @@ void StreamKind::SetupPlanner(StreamInst& s) noexcept {
   s.planner.Reset(base, base + s.dataBytes, lb, le, chunkBytes_);
   s.planner.Seek(base + s.ioStart);
   s.lastReadEnd = base + s.ioStart;
-  s.wrapsPosted = 0;
+  s.wrapsPosted = s.dec.decLoops;  // wraps counted like the decoder's loops
   s.plannerSet = 1;
   s.planEnded = 0;
 }
@@ -407,6 +461,10 @@ void StreamKind::ResetForSeek(StreamInst& s, std::uint64_t target, std::uint32_t
     s.hasPendingLoop = 0;
   }
   s.dec.loop = s.loop;
+  s.replay = 0;
+  s.replayIo = 0;
+  s.runPos = target;
+  s.runW = RingWrite(s);
   ch.Cancel();
   DropCurrent(s);
   s.ended.store(0u, std::memory_order_relaxed);
@@ -436,6 +494,34 @@ void StreamKind::ResetForSeek(StreamInst& s, std::uint64_t target, std::uint32_t
   if (s.ended.load(std::memory_order_relaxed) != 0u) s.planEnded = 1;
 }
 
+// Audio thread (no job of s in flight), once a replay started: the IO no
+// longer rewinds. Infinite loop: the reads stop. Finite loop count: the IO and
+// the decoder go on after the loop end (the decoder resumes there after the
+// last pass); a loop that ends at the material end ends the voice after it.
+void StreamKind::ReplayIo(StreamInst& s) noexcept {
+  const std::uint64_t left = s.replayLeft;
+  const std::uint64_t len = s.replayLen;
+  const std::uint32_t loops = s.replayLoops;
+  if (left == UINT64_MAX || s.dec.loop.le >= s.a.h.total_frames) {
+    Channel(s.slot).Cancel();
+    DropCurrent(s);
+    s.preActive = 0;
+    s.planEnded = 1;
+    s.replayEnd = left == UINT64_MAX ? 0u : 1u;
+    s.replayIo = 2;
+    return;
+  }
+  ResetForSeek(s, s.dec.loop.le, loops);  // linear reads from the loop end; clears the replay: restored below
+  const bool ended = s.ended.load(std::memory_order_relaxed) != 0u;
+  s.ended.store(0u, std::memory_order_relaxed);
+  s.replay = 1;
+  s.replayIo = 2;
+  s.replayEnd = ended ? 1u : 0u;
+  s.replayLen = len;
+  s.replayLeft = left;
+  s.replayLoops = loops;
+}
+
 void StreamKind::Execute(StreamInst& s, std::uint32_t gen, std::uint32_t kind, std::uint64_t target, std::uint32_t loops,
                          std::uint32_t& inlineBudget) noexcept {
   const std::uint64_t base = RingWrite(s);
@@ -461,7 +547,7 @@ void StreamKind::Execute(StreamInst& s, std::uint32_t gen, std::uint32_t kind, s
 // (no wrap posted that the decoder has not consumed) and the reads do not go
 // past where the old and the new loop differ.
 bool StreamKind::LoopChangeFits(const StreamInst& s, const LoopRange& to) const noexcept {
-  if (s.plannerSet == 0u || s.dec.awaitWrap || s.skipToWrap != 0u || s.wrapsPosted != s.dec.decLoops ||
+  if (s.plannerSet == 0u || s.replay != 0u || s.dec.awaitWrap || s.skipToWrap != 0u || s.wrapsPosted != s.dec.decLoops ||
       s.reqGen.load(std::memory_order_relaxed) != s.adoptGen.load(std::memory_order_acquire)) {
     return false;
   }
@@ -537,6 +623,7 @@ void StreamKind::PostReads(StreamInst& s) noexcept {
 bool StreamKind::TryFree(StreamInst& s) noexcept {
   DropCurrent(s);
   if (!Channel(s.slot).Reclaim()) return false;  // reads still in flight: next block
+  Channel(s.slot).CloseFile();  // the playback ended: its stream file is closed
   sh_.decoders.Release(s.dslot);  // generation-checked (A1-15)
   s.dslot = codec::DecoderSlot{};
   rings_.Release(s.channels, s.rings);
@@ -574,7 +661,8 @@ bool StreamKind::StartOne(const SourceStartRequest& r, SourceStartResult& res, s
     return false;
   }
   StreamInst& s = inst_[slot];
-  Channel(slot).ReopenFile();  // a new playback in this slot: the stream file may have been rebuilt
+  Channel(slot).ReopenFile();  // a new playback in this slot: opens the stream file anew (it may have been
+                               // rebuilt) and reads that open file until TryFree (CloseFile)
   if (!Channel(slot).Reclaim()) {  // cannot happen: slots are freed only once clean
     free_.Push(slot);
     res.endDetail = SND_END_DETAIL_NO_STREAM_SLOT;
@@ -679,13 +767,7 @@ bool StreamKind::StartOne(const SourceStartRequest& r, SourceStartResult& res, s
     if (s.preActive != 0u && inlineBudget != 0u) {  // decode the head of the preload now (6.1)
       --inlineBudget;
       Count(sh_, kInlinePrimes);
-      StreamInput in(*this, s);
-      const auto& rr = schema::ReadColumn<SystemId::Render, ColumnId::Stream_ringRead>(*sv_.tables)[s.slot];
-      StreamSink sink(s, rings_.frames, RingWrite(s), rr, readyFrames_);
-      s.dec.Run(in, sink);
-      SetRingWrite(s, sink.W());
-      if (s.dec.error != 0u) s.error.store(s.dec.error, std::memory_order_release);
-      if (s.dec.ended) s.ended.store(1u, std::memory_order_release);
+      Decode(s, readyFrames_);
     }
   }
   res.sourceSlot = slot;
@@ -718,7 +800,7 @@ void StreamKind::Release(const SlotIndex* slots, std::uint32_t count) noexcept {
 // the ring without a break. false when the ring is not one linear piece from
 // the playhead.
 bool StreamKind::KeepAndRedecode(StreamInst& s, const LoopRange& to) noexcept {
-  if (s.dec.awaitWrap || s.skipToWrap != 0u) return false;
+  if (s.replay != 0u || s.dec.awaitWrap || s.skipToWrap != 0u) return false;
   const std::uint64_t total = s.a.h.total_frames;
   const std::uint32_t loops = Ld(s.pubRingLoops);
   const std::uint64_t ringPos = Ld(s.pubRingPos);
@@ -1059,6 +1141,7 @@ void StreamKind::ScheduleBackground(const BlockInfo&) noexcept {
       const std::uint32_t g = s.reqGen.load(std::memory_order_relaxed);
       if (g != s.execGen.load(std::memory_order_relaxed)) Execute(s, g, 1u, s.seekTarget, s.seekLoops, inlineBudget);
     }
+    if (s.replay != 0u && s.replayIo == 1u) ReplayIo(s);
     // Header (the audio thread is the channel's consumer while no job runs).
     if (s.headerDone.load(std::memory_order_relaxed) == 0u && s.curValid == 0u) {
       if (const io::ChunkRecord* p = Channel(i).Peek(); p != nullptr && (p->tag & kTagHeader) != 0u) {
@@ -1075,7 +1158,7 @@ void StreamKind::ScheduleBackground(const BlockInfo&) noexcept {
     // Decode job when the PCM ring has room and there is input.
     const std::uint64_t used = RingWrite(s) - RingRead(s);
     if (s.ended.load(std::memory_order_relaxed) != 0u || rings_.frames - used < rings_.frames / 4u) continue;
-    const bool input = s.preActive != 0u || s.curValid != 0u || Channel(i).Ready() != 0u || s.dec.drain || s.dec.awaitWrap ||
+    const bool input = s.replay != 0u || s.preActive != 0u || s.curValid != 0u || Channel(i).Ready() != 0u || s.dec.drain || s.dec.awaitWrap ||
                        s.dec.carryHead < s.dec.carryCount || (s.eof != 0u && !s.dec.ended);
     if (!input) continue;
     if (!PostJob(sv_, sh_, &StreamKind::DecodeJob, &s, &s.jobCounter, &s.cancel, 2u) && sv_.postJob == nullptr) {

@@ -134,3 +134,102 @@ SND_TEST(IoReload, DefaultFsReplacedAndRewrittenFileIsReadAgain) {
   fs.Shutdown();
   fsys::remove_all(root, ec);
 }
+
+namespace {
+// One stream read of 4 KiB at offset 0 on channel `ch` (RunOnce driven): first
+// byte of the data, '!' on a failed read, '?' when refused or not delivered.
+char StreamRead(snd::io::IoScheduler& io, snd::io::StreamPool& pool, std::uint32_t ch, const char* path, std::uint32_t tag) {
+  snd::source::IoReadRequest rq{};
+  rq.streamSlot = ch;
+  rq.chunkIndex = tag;
+  rq.path = path;
+  rq.bytes = 4096;
+  if (!io.Post(rq)) return '?';
+  snd::io::ChunkRecord rec{};
+  for (int i = 0; i < 1000; ++i) {
+    io.RunOnce();
+    if (io.Channel(ch).Pop(rec)) {
+      const char c = rec.status == snd::io::ChunkStatus::Ok ? static_cast<char>(pool.Data(rec.chunk)[0]) : '!';
+      io.Channel(ch).Release(rec);
+      return c;
+    }
+  }
+  return '?';
+}
+}  // namespace
+
+// Playback binding (StreamChannel::ReopenFile / CloseFile): a playback opens
+// its file anew once and reads that open file to its end (Cancel / seek reads
+// included), even when the file is rebuilt and another playback opens the new
+// one; the reopen is not lost when the first request is dropped as stale or
+// refused; the files are closed when the playbacks end.
+SND_TEST(IoReload, PlaybackKeepsItsFileAndANewPlaybackOpensAnew) {
+  snd::IAllocator& alloc = snd::base::DefaultAllocator();
+  snd::mock::MemoryFileSystem fs;
+  snd::io::StreamPool pool;
+  SND_REQUIRE(pool.Init(alloc, 64u << 10, 4096, 2));
+  snd::io::IoScheduler io;
+  snd::io::IoSchedulerConfig cfg;
+  cfg.maxStreams = 2;
+  cfg.bytesPerWindow = 0;
+  cfg.requestQueueCapacity = 2;
+  SND_REQUIRE(io.Init(alloc, fs, pool, cfg));
+  fs.AddFile("s.snds", std::vector<std::uint8_t>(8192, 'A'));
+  io.Channel(0).ReopenFile();  // playback 1 in slot 0
+  SND_CHECK_EQ(StreamRead(io, pool, 0, "s.snds", 1), 'A');
+  const std::uint32_t opens = fs.OpenCalls();
+  fs.AddFile("s.snds", std::vector<std::uint8_t>(8192, 'B'));  // rebuilt while playback 1 plays
+  io.Channel(0).Cancel();                                         // a seek of playback 1
+  SND_CHECK_EQ(StreamRead(io, pool, 0, "s.snds", 2), 'A');
+  SND_CHECK_EQ(fs.OpenCalls(), opens);
+  io.Channel(1).ReopenFile();  // playback 2 in slot 1: the rebuilt file
+  SND_CHECK_EQ(StreamRead(io, pool, 1, "s.snds", 3), 'B');
+  SND_CHECK_EQ(StreamRead(io, pool, 0, "s.snds", 4), 'A');  // playback 1 still reads its file
+  SND_CHECK_EQ(fs.OpenFiles(), 2u);
+  io.Channel(0).CloseFile();  // playback 1 ends: its file is closed
+  io.RunOnce();
+  SND_CHECK_EQ(fs.OpenFiles(), 1u);
+  fs.AddFile("s.snds", std::vector<std::uint8_t>(8192, 'C'));
+  // Playback 3 in slot 0: its first request is made stale (start + seek in one
+  // block) before the IO thread sees it; the next request still opens anew.
+  io.Channel(0).ReopenFile();
+  snd::source::IoReadRequest rq{};
+  rq.streamSlot = 0;
+  rq.chunkIndex = 5;
+  rq.path = "s.snds";
+  rq.bytes = 4096;
+  SND_CHECK(io.Post(rq));
+  io.Channel(0).Cancel();
+  SND_CHECK_EQ(StreamRead(io, pool, 0, "s.snds", 6), 'C');
+  SND_CHECK_EQ(StreamRead(io, pool, 1, "s.snds", 7), 'B');  // playback 2 unchanged
+  // Playback 4 in slot 1: its first Post is refused (queue full); the retry opens anew.
+  fs.AddFile("s.snds", std::vector<std::uint8_t>(8192, 'D'));
+  io.Channel(1).CloseFile();
+  io.Channel(1).ReopenFile();
+  std::uint32_t queued = 0;
+  for (std::uint32_t i = 0; i < 4; ++i) {
+    rq.streamSlot = 0;
+    rq.chunkIndex = 10 + i;
+    if (io.Post(rq)) ++queued;
+  }
+  rq.streamSlot = 1;
+  rq.chunkIndex = 20;
+  SND_CHECK(!io.Post(rq));
+  for (int i = 0; i < 50; ++i) io.RunOnce();
+  snd::io::ChunkRecord rec{};
+  std::uint32_t popped = 0;
+  while (io.Channel(0).Pop(rec)) {
+    SND_CHECK_EQ(static_cast<char>(pool.Data(rec.chunk)[0]), 'C');
+    io.Channel(0).Release(rec);
+    ++popped;
+  }
+  SND_CHECK_EQ(popped, queued);
+  SND_CHECK_EQ(StreamRead(io, pool, 1, "s.snds", 21), 'D');
+  io.Channel(0).CloseFile();
+  io.Channel(1).CloseFile();
+  io.RunOnce();
+  SND_CHECK_EQ(fs.OpenFiles(), 0u);
+  io.Shutdown();
+  io.Destroy();
+  pool.Destroy();
+}

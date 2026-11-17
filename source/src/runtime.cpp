@@ -61,8 +61,10 @@ void Runtime::BankUnregistered(void* runtime, std::uint16_t bankSlot) noexcept {
   auto* rt = static_cast<Runtime*>(runtime);
   if (rt == nullptr || rt->impl_ == nullptr) return;
   rt->impl_->shared.BankEpoch(bankSlot).fetch_add(1u, std::memory_order_release);
-  // Its stream files may be rebuilt: close what no read uses (playing streams keep theirs).
-  if (rt->impl_->shared.io != nullptr) rt->impl_->shared.io->CloseIdleFiles();
+  // Stream files need nothing here: every playback opens its file at its start
+  // and closes it at its end (StreamChannel::ReopenFile / CloseFile), so no file
+  // of the unregistered bank stays open after its playbacks, and playbacks of
+  // other banks keep theirs (never opened again while they play).
 }
 
 RuntimeStats Runtime::Stats() const noexcept {

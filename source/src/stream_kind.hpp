@@ -21,8 +21,13 @@
 //
 // Seek / loop (D-23): the seek table (or PacketForFrame) gives the packet at or
 // before target - preRoll; the extra frames are dropped. A loop wraps at the
-// loop end frame exactly; the planner reads ahead into the loop head
-// (wrapped read), the decoder seeks there.
+// loop end frame exactly. A loop no longer than the PCM ring is read and
+// decoded once: when one whole pass lb..le is in the ring, later passes are
+// copied from the ring (any length >= 1 frame, any codec block alignment), the
+// IO stops (infinite loop) or goes on after the loop end (finite loop count:
+// the decoder resumes there after the last pass). A longer loop wraps in the
+// IO: the planner reads ahead into the loop head (wrapped read), the decoder
+// seeks there.
 //
 // Underrun (6.3): when the PCM ring runs dry the output fades out (5 ms),
 // Stream.stallCount is incremented and the voice reports `starved`. It resumes
@@ -75,6 +80,18 @@ struct StreamInst {
   std::atomic<std::uint32_t> headerDone{0};
   std::atomic<std::uint32_t> ended{0};
   std::atomic<std::uint32_t> error{0};  // snd_end_detail
+  // Loop replay (a loop no longer than the PCM ring): once one whole pass
+  // lb..le lies in the ring, later passes are copied from the ring itself (no
+  // IO rewind per pass). runPos / runW: material and ring position where the
+  // decoder's current contiguous output began (ResetForSeek, a wrap).
+  std::uint64_t runPos;
+  std::uint64_t runW;
+  std::uint32_t replay;         // 1: the ring is repeated
+  std::uint32_t replayIo;       // 1: the audio thread must stop / re-place the IO; 2: done
+  std::uint32_t replayEnd;      // the material ends after the replay (finite loop ending at the end)
+  std::uint64_t replayLen;      // le - lb
+  std::uint64_t replayLeft;     // frames still to copy (UINT64_MAX: infinite loop)
+  std::uint32_t replayLoops;    // finite: decoder loops once the replay is done
   std::uint32_t jobCounter;
   std::uint32_t cancel;
 
@@ -166,6 +183,7 @@ class StreamKind final : public ISourceKind {
   bool StartOne(const SourceStartRequest& r, SourceStartResult& res, std::uint32_t& inlineBudget) noexcept;
   void Decode(StreamInst& s, std::uint64_t limit = ~std::uint64_t{0}) noexcept;
   void ResetForSeek(StreamInst& s, std::uint64_t target, std::uint32_t loops) noexcept;
+  void ReplayIo(StreamInst& s) noexcept;
   void Execute(StreamInst& s, std::uint32_t gen, std::uint32_t kind, std::uint64_t target, std::uint32_t loops,
                std::uint32_t& inlineBudget) noexcept;
   bool LoopChangeFits(const StreamInst& s, const LoopRange& to) const noexcept;

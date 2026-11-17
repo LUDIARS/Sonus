@@ -361,6 +361,8 @@ struct Decoder {
   bool drain = false;
   bool awaitWrap = false;
   bool ended = false;
+  bool stopAtWrap = false;     // Run returns at a loop wrap (awaitWrap) until wrapOk is set
+  bool wrapOk = false;         // ... the caller let this one wrap happen (cleared by it)
   std::uint32_t error = 0;     // snd_end_detail (STREAM_IO, DECODE)
 
   // Positions the codec for material frame `target`; returns the data byte to

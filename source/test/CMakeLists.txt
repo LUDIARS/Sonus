@@ -43,3 +43,7 @@ set_tests_properties(indep_fix2_test PROPERTIES TIMEOUT 900)
 snd_add_test(indep_fix3_test SOURCES indep_fix3_test.cpp LINK ${_source_test_link})
 target_include_directories(indep_fix3_test PRIVATE ${PROJECT_SOURCE_DIR}/buildtool/test)
 set_tests_properties(indep_fix3_test PROPERTIES TIMEOUT 900)
+# Stream loops of any length (loop replay from the PCM ring vs IO wraps).
+snd_add_test(source_stream_loop_test SOURCES source_stream_loop_test.cpp LINK ${_source_test_link})
+target_include_directories(source_stream_loop_test PRIVATE ${PROJECT_SOURCE_DIR}/buildtool/test)
+set_tests_properties(source_stream_loop_test PROPERTIES TIMEOUT 900)
