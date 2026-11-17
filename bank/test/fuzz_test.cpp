@@ -64,7 +64,11 @@ std::uint64_t Walk(const BankView& v) {
     const std::uint64_t n = pt.materialCount;
     if (n > 0) {
       sum += pt.single[n * 4 - 1] + pt.pair[n * n - 1] + pt.footstep[n - 1];
-      sum += static_cast<std::uint64_t>(pt.curves[n - 1].massToPitchCents[1]);
+      // Read the float's bits: fuzzed values may be NaN, negative or huge, and
+      // converting those to an integer is undefined behaviour.
+      std::uint32_t bits = 0;
+      std::memcpy(&bits, &pt.curves[n - 1].massToPitchCents[1], sizeof(bits));
+      sum += bits;
     }
   }
   for (std::uint32_t d = 0; d < v.dependencyCount(); ++d) sum += v.dependency(d).bankId;
