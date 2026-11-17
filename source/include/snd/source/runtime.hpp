@@ -16,7 +16,7 @@
 //   ... core Create / run / Destroy ...
 //   src.Destroy();                  // after core's Destroy
 //
-// Decisions (stage 2, see source/README.md):
+// Decisions (stage 2):
 //   - Load forms (6.2): PcmResident plays PCMF / PC16 from bank memory
 //     directly in RenderBatch. CompressedResident (and PcmResident assets whose
 //     codec is not PCM) decodes on the prefetch lane into a per-voice ring

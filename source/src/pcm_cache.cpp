@@ -246,6 +246,14 @@ void PcmCache::Schedule(const SourceServices& sv, Shared& sh) noexcept {
       if (e.state == 3u) Count(sh, kDecodeErrors);
       continue;
     }
+    if (e.pins == 0u) {
+      // Unfinished and no voice plays it any more: the bank may go away (a job
+      // posted now would not be covered by core's job epoch). Drop the entry.
+      sh.decoders.Release(e.slot);
+      e.slot = codec::DecoderSlot{};
+      Free(i);
+      continue;
+    }
     if (!PostJob(sv, sh, &PcmCache::FillJob, &e, &e.jobCounter, &e.cancel, 0u) && sv.postJob == nullptr) {
       FillJob(&e);  // no job service at all: fill on this thread (tests without core services)
     }
