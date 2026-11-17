@@ -86,6 +86,9 @@ class LoopSampleKind final : public snd::source::ISourceKind {
 struct Result {
   double medianUs, p99Us, maxUs;
   std::uint32_t real;
+  std::uint32_t rendered;  // LastBlock().renderedVoices
+  float peak;              // output peak of the last block (the voices really sound)
+  std::uint32_t lod;
 };
 
 Result Measure(std::uint32_t workers, std::uint32_t voices) {
@@ -109,7 +112,7 @@ Result Measure(std::uint32_t workers, std::uint32_t voices) {
   d.bankFileSystem = &fs;
   d.rtWorkerRealtimePriority = false;
   snd::core::System* sys = nullptr;
-  if (snd::core::System::Create(d, &sys) != SND_OK) return Result{1e9, 1e9, 1e9, 0};
+  if (snd::core::System::Create(d, &sys) != SND_OK) return Result{1e9, 1e9, 1e9, 0, 0, 0.0f, 0};
   TestBank b;
   b.buses.push_back(TBus{HashId("Sfx"), 1u, 0, 0, 0.0f, {}, {}});
   b.buses.push_back(TBus{HashId("Master"), kNone, 2, bf::kBusMaster, 0.0f, {}, {}});
@@ -159,12 +162,15 @@ Result Measure(std::uint32_t workers, std::uint32_t voices) {
     sys->RenderBlock(out.data());
     us.push_back(double(sys->LastBlock().totalNs) / 1000.0);
   }
+  const std::uint32_t rendered = sys->LastBlock().renderedVoices;
+  float peak = 0.0f;
+  for (float v : out) peak = std::fabs(v) > peak ? std::fabs(v) : peak;
   sys->Update();
   snd_stats st{};
   sys->GetStats(&st);
   snd::core::System::Destroy(sys);
   std::sort(us.begin(), us.end());
-  return Result{us[us.size() / 2], us[us.size() * 99 / 100], us.back(), st.real_voices};
+  return Result{us[us.size() / 2], us[us.size() * 99 / 100], us.back(), st.real_voices, rendered, peak, st.lod_level};
 }
 
 }  // namespace
@@ -173,9 +179,14 @@ SND_TEST(IndepLoad, Real128VoicesUnder30PercentAndFourTimesTheLimit) {
   const double budgetUs = 1e6 * 256.0 / 48000.0;  // one block of real time
   for (std::uint32_t workers : {0u, 2u}) {
     const Result r = Measure(workers, 128);
-    std::printf("128 voices, %u RT workers: median %.1f us (%.1f %%), p99 %.1f us, max %.1f us, real %u\n", workers,
-                r.medianUs, 100.0 * r.medianUs / budgetUs, r.p99Us, r.maxUs, r.real);
+    std::printf("128 voices, %u RT workers: median %.1f us (%.1f %%), p99 %.1f us, max %.1f us, real %u, rendered %u, "
+                "peak %.4f, lod %u\n",
+                workers, r.medianUs, 100.0 * r.medianUs / budgetUs, r.p99Us, r.maxUs, r.real, r.rendered,
+                static_cast<double>(r.peak), r.lod);
     SND_CHECK_EQ(r.real, 128u);
+    SND_CHECK_EQ(r.rendered, 128u);
+    SND_CHECK(r.peak > 0.01f);  // 128 voices of 0.01 sines: clearly audible
+    SND_CHECK_EQ(r.lod, 0u);
 #if defined(NDEBUG) && !defined(__SANITIZE_ADDRESS__) && !defined(__SANITIZE_THREAD__)
     SND_CHECK_MSG(r.medianUs < 0.30 * budgetUs, "median block %.1f us >= 30 %% of %.1f us", r.medianUs, budgetUs);
 #endif
