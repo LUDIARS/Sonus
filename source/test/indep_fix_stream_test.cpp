@@ -63,7 +63,7 @@ constexpr const char* kLoop = "\"loop\": {\"start\": 4000, \"end\": 60001}";
 // Seek then SetLoop in one block: the stream must play from the seek target
 // under the new loop. Today SetLoop (not in place while a seek is pending)
 // re-reads "from the current position" (renderPos) and replaces the target.
-SND_TEST(IndepFixStream, Defect_source_SeekThenSetLoopInOneBlockLosesTheSeek) {
+SND_TEST(IndepFixStream, SeekThenSetLoopInOneBlockKeepsTheSeek) {
   Built b = Build("fst1", {StreamSpec("l", 96000, "PC16", kLoop)});
   SND_REQUIRE_MSG(b.ok, "%s", b.diag.c_str());
   const Decoded ref = Reference(b, "l");

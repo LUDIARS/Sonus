@@ -65,7 +65,7 @@ constexpr const char* kLoop = "\"loop\": {\"start\": 4000, \"end\": 60001}";
 // them in RunEventLogic): the voice must play from the seek target under the
 // new loop. Today the SetLoop request (req = 2) overwrites the pending seek
 // (req = 1) in the single hand-over slot: the seek is lost.
-SND_TEST(IndepFixSample, Defect_source_SeekThenSetLoopInOneBlockLosesTheSeek) {
+SND_TEST(IndepFixSample, SeekThenSetLoopInOneBlockKeepsTheSeek) {
   Built b = Build("fsl1", {Spec("ra", 96000, "compressed", "ADPC", kLoop)});
   SND_REQUIRE_MSG(b.ok, "%s", b.diag.c_str());
   const Decoded ref = Reference(b, "ra");
@@ -87,7 +87,7 @@ SND_TEST(IndepFixSample, Defect_source_SeekThenSetLoopInOneBlockLosesTheSeek) {
 // SetLoop that does not fit in place (the new loop end is behind the decoder),
 // then Seek in the same block: the seek must follow the NEW loop. Today the
 // seek request overwrites the loop request and the old loop stays.
-SND_TEST(IndepFixSample, Defect_source_SetLoopThenSeekInOneBlockLosesTheLoop) {
+SND_TEST(IndepFixSample, SetLoopThenSeekInOneBlockKeepsTheLoop) {
   Built b = Build("fsl2", {Spec("ra", 96000, "compressed", "ADPC", kLoop)});
   SND_REQUIRE_MSG(b.ok, "%s", b.diag.c_str());
   const Decoded ref = Reference(b, "ra");
@@ -294,7 +294,7 @@ SND_TEST(IndepFixSample, EightChannelRingsUpToMaxDecoders) {
 // (a busy prefetch lane): the request waits for the job (the decoder is
 // shared), and the voice renders nothing meanwhile. Decision 1 asks for no hole
 // on data in memory; with a slow job the hole lasts until the job ends.
-SND_TEST(IndepFixSample, Defect_source_SeekWhileTheRingJobIsQueuedLeavesAHole) {
+SND_TEST(IndepFixSample, SeekWhileTheRingJobIsQueuedLeavesNoHole) {
   Built b = Build("fsl8", {Spec("ra", 96000, "compressed", "ADPC")});
   SND_REQUIRE_MSG(b.ok, "%s", b.diag.c_str());
   const Decoded ref = Reference(b, "ra");

@@ -104,7 +104,7 @@ bool WaitUnloaded(Rig& r, snd_bank_handle h) {
 // the recycling allocator gives B the address A had), then B plays: it must
 // play its own audio. Today the key (asset id, slot, 16-bit generation, data
 // pointer, frames, codec) matches A's entry again and A's audio is played.
-SND_TEST(IndepSourceReload, Defect_source_LoadGenerationWrapsAfter65536Loads) {
+SND_TEST(IndepSourceReload, LoadGenerationDoesNotMatchAfter65536Loads) {
   Built b1 = Build("rl1", {CacheAsset(&Ramp)});
   Built b2 = Build("rl2", {CacheAsset(&Sine1k)});
   SND_REQUIRE_MSG(b1.ok && b2.ok, "%s %s", b1.diag.c_str(), b2.diag.c_str());
