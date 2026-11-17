@@ -113,3 +113,36 @@ SND_TEST(IndepDefect, Defect_core_timed_stop_fades_before_its_clock) {
 }
 
 #endif
+
+#if defined(SND_INDEP_DEFECT_epoch_untracked)
+// 3.3 / core.hpp "releases unloaded banks once ... source jobs posted before
+// the unregistration finished". When the job-wrap pool (2 x serviceQueueEntries)
+// is exhausted, PumpServices submits jobs untracked (services.cpp) and the
+// epoch no longer waits for them: the bank is released while such a job has
+// not run yet.
+SND_TEST(IndepDefect, Defect_core_epoch_ignores_untracked_jobs) {
+  Bank b;
+  b.Event("E", 500.0f);
+  snd::core::CoreLimits lim;
+  lim.serviceQueueEntries = 16;  // queue 16 per pump, 32 job wraps
+  Fx fx(Config(), lim);
+  SND_REQUIRE_EQ(fx.created, SND_OK);
+  const snd_bank_handle h = fx.Load("b", b.Build("B"));
+  fx.jobs.SetMode(snd::mock::JobMode::Manual);
+  for (int round = 0; round < 3; ++round) {  // 3 x 16 jobs: 32 tracked, 16 untracked
+    fx.kind.postJobs.store(16);
+    fx.Step();
+  }
+  fx.sys->Update();
+  SND_REQUIRE_EQ(fx.jobs.Pending(), 48u);
+  fx.sys->UnloadBank(h, SND_UNLOAD_STOP_AND_UNLOAD);
+  for (int i = 0; i < 32; ++i) fx.jobs.RunNext();  // the 32 tracked ones (FIFO)
+  fx.Steps(30);
+  SND_CHECK_EQ(fx.jobs.Pending(), 16u);
+  SND_CHECK_MSG(fx.sys->GetBankState(h) == SND_BANK_STATE_UNLOADING,
+                "bank released (state %u) while 16 source jobs posted before the unload have not run",
+                fx.sys->GetBankState(h));
+  fx.jobs.RunAll();
+  fx.Steps(5);
+}
+#endif
