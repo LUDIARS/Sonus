@@ -19,6 +19,8 @@ snd_add_test(indep_core_mix_test SOURCES indep_core_mix_test.cpp LINK ${_core_te
 snd_add_test(indep_core_parallel_test SOURCES indep_core_parallel_test.cpp LINK ${_core_test_link})
 set_tests_properties(indep_core_parallel_test PROPERTIES TIMEOUT 300)
 snd_add_test(indep_core_bank_test SOURCES indep_core_bank_test.cpp LINK ${_core_test_link})
+snd_add_test(indep_core_load_test SOURCES indep_core_load_test.cpp LINK ${_core_test_link})
+set_tests_properties(indep_core_load_test PROPERTIES TIMEOUT 600)
 # Defects found by the independent tester: fail on purpose, one executable
 # each (the source selects its test with SND_INDEP_DEFECT_<key>).
 function(snd_indep_core_defect name key)
