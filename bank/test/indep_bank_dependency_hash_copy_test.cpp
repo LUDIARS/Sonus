@@ -2,7 +2,7 @@
 // matched by bankId AND buildHash, the language is not used for matching";
 // outcomes must not depend on slot numbers).
 //
-// Defect_*: fails on purpose. Two registered copies of bank V (language banks
+// (Reported as a defect; fixed in 7e2155b.) Formerly failing: Two registered copies of bank V (language banks
 // ja / en, i.e. the same bankId) with different contentHash. B was built
 // against the ja copy (buildHash = ja's contentHash). Decide() takes the FIRST
 // registered slot of V in slot order (FindLoaded(bankId, 0)) and only then
@@ -20,7 +20,7 @@ using namespace snd::bank;
 using indep11::Env;
 namespace bf = snd::bank_format;
 
-SND_TEST(BankDependencyHash, Defect_MatchingCopyIsFoundWhateverTheSlotOrder) {
+SND_TEST(BankDependencyHash, MatchingCopyIsFoundWhateverTheSlotOrder) {
   for (int order = 0; order < 2; ++order) {
     Env e(8);
     SND_REQUIRE(e.m != nullptr);
