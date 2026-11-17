@@ -153,10 +153,18 @@ inline AssetCopy CopyAsset(const SourceAsset& a) noexcept {
 struct LoopRange {
   std::uint64_t lb = 0;
   std::uint64_t le = 0;
-  bool Looping() const noexcept { return le > lb; }
+  std::uint32_t count = 0;  // loops to play in total (0 = infinite); the last one runs on to the end
+  bool Looping() const noexcept { return le > lb && count != 1u; }
+  // True if the material wraps at le after `done` completed loops.
+  bool WrapsAfter(std::uint32_t done) const noexcept { return Looping() && (count == 0u || done + 1u < count); }
 };
-inline LoopRange MakeLoop(const AssetCopy& a, bool loop, std::uint64_t start, std::uint64_t end) noexcept {
+// Proposed (stage-2 report): SourceStartRequest::flags bits 16..31 = loop count
+// (CLIP.loopCount, 0 = infinite). Core does not set them yet, so 0 = infinite.
+inline constexpr std::uint32_t kStartLoopCountShift = 16;
+inline LoopRange MakeLoop(const AssetCopy& a, bool loop, std::uint64_t start, std::uint64_t end,
+                          std::uint32_t count = 0) noexcept {
   LoopRange r;
+  r.count = count;
   if (!loop) return r;
   const std::uint64_t total = a.h.total_frames;
   if (end != 0u && end <= total && start < end) {
@@ -237,11 +245,16 @@ inline void ReadPcm(const CodecHeader& h, const std::uint8_t* data, std::uint64_
 // Advances a material position by n played frames (loop wrap, loopCount).
 inline void AdvancePos(const LoopRange& l, std::uint64_t& pos, std::uint32_t& loops, std::uint64_t n) noexcept {
   pos += n;
-  if (l.Looping() && pos >= l.le) {
+  while (l.WrapsAfter(loops) && pos >= l.le) {
     const std::uint64_t len = l.le - l.lb;
-    const std::uint64_t over = pos - l.le;
-    loops += static_cast<std::uint32_t>(1u + over / len);
-    pos = l.lb + over % len;
+    if (l.count == 0u) {
+      const std::uint64_t over = pos - l.le;
+      loops += static_cast<std::uint32_t>(1u + over / len);
+      pos = l.lb + over % len;
+      break;
+    }
+    pos -= len;
+    ++loops;
   }
 }
 
@@ -254,7 +267,7 @@ inline bool AdvanceVirtualPos(const LoopRange& l, std::uint64_t total, Playhead&
   std::uint64_t pos = ph.frame;
   AdvancePos(l, pos, ph.loopCount, fixed >> 32);
   ph.frame = pos;
-  return !l.Looping() && pos >= total;
+  return !l.WrapsAfter(ph.loopCount) && pos >= total;
 }
 
 // Short fades (D-15) applied in place.
@@ -337,6 +350,7 @@ struct Decoder {
   LoopRange loop;
   std::uint32_t channels = 0;  // decoded channels (= asset channels)
   std::uint64_t decPos = 0;    // material frame of the next kept frame
+  std::uint32_t decLoops = 0;  // loops completed by the decoder
   std::uint64_t discard = 0;   // decoded frames to drop first (pre-roll, D-23)
   float* carry[kMaxChannels] = {};
   std::uint32_t carryHead = 0;

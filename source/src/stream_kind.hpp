@@ -80,6 +80,7 @@ struct StreamInst {
   io::StreamReadPlanner planner;
   std::uint32_t plannerSet;
   std::uint32_t planEnded;      // non-looping plan reached the data end
+  std::uint32_t wrapsPosted;    // wrapped reads posted since the plan was set
   std::uint64_t ioStart;        // data byte where the IO reads start (after the preload)
   std::uint32_t headerPosted;
   std::uint32_t pendingSeek;

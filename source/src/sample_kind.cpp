@@ -245,7 +245,7 @@ bool SampleKind::StartOne(const SourceStartRequest& r, SourceStartResult& res, s
   in.ctx = kNone;
   in.entry = kNone;
   in.a = CopyAsset(*r.asset);
-  in.loop = MakeLoop(in.a, (r.flags & kStartLoop) != 0u, in.a.loopStart, in.a.loopEnd);
+  in.loop = MakeLoop(in.a, (r.flags & kStartLoop) != 0u, in.a.loopStart, in.a.loopEnd, r.flags >> kStartLoopCountShift);
   in.channels = r.channels == 0u || r.channels > in.a.h.channels ? in.a.h.channels : r.channels;
   in.virt = (r.flags & kStartVirtual) != 0u ? 1u : 0u;
   const std::uint64_t start = WrapInto(in.loop, r.startFrame);
@@ -382,7 +382,7 @@ void SampleKind::Control(const SourceControlOp* ops, std::uint32_t count) noexce
         break;
       case ControlOp::SetLoop: {
         const bool loop = op.frame2 != 0u || op.frame != 0u;
-        in.loop = MakeLoop(in.a, loop, op.frame, op.frame2);
+        in.loop = MakeLoop(in.a, loop, op.frame, op.frame2, in.loop.count);
         if (in.mode == SampleMode::Ring) {
           ctx_[in.ctx].dec.loop = in.loop;  // applied by the next seek (no job may hold it now)
           target = in.renderPos;
@@ -443,9 +443,9 @@ void SampleKind::RenderDirect(SampleInst& in, const RenderItem& it, VoiceRenderS
   std::uint32_t loops = it.playhead->loopCount;
   std::uint32_t written = 0;
   while (written < it.framesRequested) {
-    const std::uint64_t end = in.loop.Looping() ? in.loop.le : total;
+    const std::uint64_t end = in.loop.WrapsAfter(loops) ? in.loop.le : total;
     if (pos >= end) {
-      if (!in.loop.Looping()) break;
+      if (!in.loop.WrapsAfter(loops)) break;
       pos = in.loop.lb;
       ++loops;
       continue;
@@ -455,14 +455,14 @@ void SampleKind::RenderDirect(SampleInst& in, const RenderItem& it, VoiceRenderS
     ReadPcm(in.a.h, in.a.data, pos, static_cast<std::uint32_t>(k), it.out, it.frameOffset + written, it.channels);
     written += static_cast<std::uint32_t>(k);
     pos += k;
-    if (in.loop.Looping() && pos >= in.loop.le) {
+    if (in.loop.WrapsAfter(loops) && pos >= in.loop.le) {
       pos = in.loop.lb;
       ++loops;
     }
   }
   // End: reported by the first call that has nothing left, so the frames the
   // resampler still holds (its look-ahead) are played out first.
-  if (written == 0u && !in.loop.Looping() && pos >= total) st.ended = 1;
+  if (written == 0u && !in.loop.WrapsAfter(loops) && pos >= total) st.ended = 1;
   it.playhead->frame = pos;
   it.playhead->loopCount = loops;
   st.framesRendered = written;
@@ -485,9 +485,9 @@ void SampleKind::RenderCache(SampleInst& in, const RenderItem& it, VoiceRenderSt
   std::uint32_t written = 0;
   bool short_ = false;
   while (written < it.framesRequested) {
-    const std::uint64_t end = in.loop.Looping() ? in.loop.le : total;
+    const std::uint64_t end = in.loop.WrapsAfter(loops) ? in.loop.le : total;
     if (pos >= end) {
-      if (!in.loop.Looping()) break;
+      if (!in.loop.WrapsAfter(loops)) break;
       pos = in.loop.lb;
       ++loops;
       continue;
@@ -505,7 +505,7 @@ void SampleKind::RenderCache(SampleInst& in, const RenderItem& it, VoiceRenderSt
   if (short_) {
     st.starved = 1;
     Count(sh_, kSampleUnderruns);
-  } else if (written == 0u && !in.loop.Looping() && pos >= total) {
+  } else if (written == 0u && !in.loop.WrapsAfter(loops) && pos >= total) {
     st.ended = 1;
   }
   it.playhead->frame = pos;

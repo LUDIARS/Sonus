@@ -7,6 +7,8 @@
 // place that sees all of them; it hands them to api/core through the
 // contract interfaces. Stage 0 only references every module so the umbrella
 // library links completely.
+#include <new>
+
 #include "snd/api/api_module.hpp"
 #include "snd/api/compose.hpp"
 #include "snd/bank/bank_module.hpp"
@@ -19,6 +21,7 @@
 #include "snd/livelink/livelink_module.hpp"
 #include "snd/music/music_module.hpp"
 #include "snd/platform/platform_module.hpp"
+#include "snd/source/runtime.hpp"
 #include "snd/source/source_module.hpp"
 
 namespace snd::compose {
@@ -32,6 +35,38 @@ const char* const* LinkedModules(unsigned* count) noexcept {
   };
   if (count != nullptr) *count = static_cast<unsigned>(sizeof(kModules) / sizeof(kModules[0]));
   return kModules;
+}
+
+bool SourceKinds::Init(IAllocator& allocator, io::IoScheduler* io, io::StreamPool* streamPool) noexcept {
+  Destroy();
+  void* mem = allocator.Allocate(sizeof(source::Runtime), 64, MemTag::Misc);
+  if (mem == nullptr) return false;
+  auto* rt = new (mem) source::Runtime();
+  source::RuntimeDesc d;
+  d.allocator = &allocator;
+  d.io = io;
+  d.streamPool = streamPool;
+  if (!rt->Init(d)) {
+    rt->~Runtime();
+    allocator.Free(mem, MemTag::Misc);
+    return false;
+  }
+  runtime_ = rt;
+  alloc_ = &allocator;
+  return true;
+}
+
+void SourceKinds::Destroy() noexcept {
+  if (runtime_ == nullptr) return;
+  auto* rt = static_cast<source::Runtime*>(runtime_);
+  rt->~Runtime();
+  alloc_->Free(rt, MemTag::Misc);
+  runtime_ = nullptr;
+  alloc_ = nullptr;
+}
+
+const source::SourceKindSet* SourceKinds::Kinds() const noexcept {
+  return runtime_ != nullptr ? &static_cast<const source::Runtime*>(runtime_)->Kinds() : nullptr;
 }
 
 }  // namespace snd::compose

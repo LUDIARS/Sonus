@@ -100,7 +100,7 @@ class StreamInput final : public InputSource {
     s_.curValid = 0;
     const std::uint64_t end = rec.offset + rec.bytes;
     if (rec.bytes < rec.requested) s_.eof = 1;  // end of file
-    if (!s_.loop.Looping() && s_.headerDone.load(std::memory_order_relaxed) != 0u &&
+    if (!s_.loop.WrapsAfter(s_.dec.decLoops) && s_.headerDone.load(std::memory_order_relaxed) != 0u &&
         end >= s_.a.streamDataOffset + s_.dataBytes) {
       s_.eof = 1;
     }
@@ -349,6 +349,7 @@ void StreamKind::SetupPlanner(StreamInst& s) noexcept {
   }
   s.planner.Reset(base, base + s.dataBytes, lb, le, chunkBytes_);
   s.planner.Seek(base + s.ioStart);
+  s.wrapsPosted = 0;
   s.plannerSet = 1;
   s.planEnded = 0;
 }
@@ -410,6 +411,13 @@ void StreamKind::PostReads(StreamInst& s) noexcept {
     if (!s.planner.Next(rd)) {
       s.planEnded = 1;
       return;
+    }
+    if (rd.wrapped) ++s.wrapsPosted;
+    if (rd.loopEnd && s.loop.count != 0u && s.wrapsPosted + 1u >= s.loop.count) {
+      // Finite loop count: after the last loop the reads run on to the data end.
+      const std::uint64_t base = s.a.streamDataOffset;
+      s.planner.Reset(base, base + s.dataBytes, 0, 0, chunkBytes_);
+      s.planner.Seek(rd.offset + rd.bytes);
     }
     source::IoReadRequest rq{};
     rq.streamSlot = s.slot;
@@ -492,7 +500,7 @@ bool StreamKind::StartOne(const SourceStartRequest& r, SourceStartResult& res, s
   // Instance.
   s.a = CopyAsset(*a);
   std::memcpy(s.path, a->streamPath, plen + 1u);
-  s.loop = MakeLoop(s.a, (r.flags & kStartLoop) != 0u, s.a.loopStart, s.a.loopEnd);
+  s.loop = MakeLoop(s.a, (r.flags & kStartLoop) != 0u, s.a.loopStart, s.a.loopEnd, r.flags >> kStartLoopCountShift);
   s.channels = r.channels == 0u || r.channels > ch ? ch : r.channels;
   for (std::uint32_t c = 0; c < ch; ++c) s.ring[c] = rings_.Ring(s.rings[c]);
   s.dslot = ds;
@@ -617,7 +625,7 @@ void StreamKind::Control(const SourceControlOp* ops, std::uint32_t count) noexce
         break;
       case ControlOp::SetLoop: {
         const bool loop = op.frame2 != 0u || op.frame != 0u;
-        s.loop = MakeLoop(s.a, loop, op.frame, op.frame2);
+        s.loop = MakeLoop(s.a, loop, op.frame, op.frame2, s.loop.count);
         ctl->loopStartFrame = s.loop.lb;
         ctl->loopEndFrame = s.loop.le;
         target = s.renderPos;  // re-read with the new loop from the current position

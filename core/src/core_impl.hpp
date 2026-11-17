@@ -305,6 +305,7 @@ enum PlaybackPrivFlags : std::uint32_t {
   kPbInstanceCounted = 1u << 5,
   kPbMusic = 1u << 6,
   kPbPausedState = 1u << 7,  // currently in Paused state (voices paused)
+  kPbSourceStarted = 1u << 8,  // a source accepted at least one voice (FlushSourceCalls)
 };
 struct PlaybackPriv {
   std::uint32_t flags;

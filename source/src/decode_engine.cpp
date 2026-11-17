@@ -10,6 +10,7 @@ bool Decoder::SeekTo(std::uint64_t target, std::uint64_t* byte) noexcept {
   drain = false;
   awaitWrap = false;
   ended = false;
+  decLoops = 0;
   SeekPoint sp{};
   if (codec == nullptr || state == nullptr || asset == nullptr || !ResolveSeek(*asset, target, &sp)) {
     ended = true;
@@ -38,9 +39,9 @@ std::uint64_t Decoder::Run(InputSource& in, OutputSink& out, std::uint32_t maxIt
         discard -= k;
         continue;
       }
-      const std::uint64_t regionEnd = loop.Looping() ? loop.le : total;
+      const std::uint64_t regionEnd = loop.WrapsAfter(decLoops) ? loop.le : total;
       if (awaitWrap || decPos >= regionEnd) {  // past the loop end / the end: dropped
-        if (loop.Looping()) awaitWrap = true;
+        if (loop.WrapsAfter(decLoops)) awaitWrap = true;
         else ended = true;
         carryHead = carryCount;
         break;
@@ -55,7 +56,7 @@ std::uint64_t Decoder::Run(InputSource& in, OutputSink& out, std::uint32_t maxIt
       decPos += k;
       produced += k;
       if (decPos >= regionEnd) {
-        if (loop.Looping()) awaitWrap = true;
+        if (loop.WrapsAfter(decLoops)) awaitWrap = true;
         else ended = true;
       }
     }
@@ -74,6 +75,7 @@ std::uint64_t Decoder::Run(InputSource& in, OutputSink& out, std::uint32_t maxIt
       if (!in.SkipToWrap(sp.byte)) return produced;
       codec->Seek(state, sp.frame);
       decPos = loop.lb;
+      ++decLoops;
       discard = loop.lb - sp.frame;
       carryHead = carryCount = 0;
       drain = false;
@@ -93,7 +95,7 @@ std::uint64_t Decoder::Run(InputSource& in, OutputSink& out, std::uint32_t maxIt
           return produced;
         }
         if (!in.Exhausted()) return produced;  // waiting for input
-        if (loop.Looping()) awaitWrap = true;  // truncated loop: wrap anyway
+        if (loop.WrapsAfter(decLoops)) awaitWrap = true;  // truncated loop: wrap anyway
         else ended = true;
         continue;
       }
@@ -108,7 +110,7 @@ std::uint64_t Decoder::Run(InputSource& in, OutputSink& out, std::uint32_t maxIt
     drain = n == kCarryFrames;
     carryHead = 0;
     carryCount = n;
-    if (n == 0u && !drain && decPos >= total && !loop.Looping()) ended = true;
+    if (n == 0u && !drain && decPos >= total && !loop.WrapsAfter(decLoops)) ended = true;
   }
   return produced;
 }

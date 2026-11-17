@@ -971,6 +971,7 @@ void FlushSourceCalls(Ctx& c) noexcept {
       }
       SND_W(Voice_sourceSlot)[d] = r.sourceSlot;
       im.ev.vs[v].flags |= kVsSourceStarted;
+      Priv(im, SND_W(Voice_playbackSlot)[d]).flags |= kPbSourceStarted;
       if (r.needsPriming != 0u) {
         const SlotIndex pb = SND_W(Voice_playbackSlot)[d];
         const std::uint32_t pd = base::rows::DenseOf(t.Playback.rows, pb);
@@ -1215,8 +1216,12 @@ void RunEventLogic(Impl& im) noexcept {
     }
     // All voices gone: the playback is complete (4.1).
     if (lg.voiceCount == 0u && st != PlaybackStateId::Pending && (pp.flags & kPbMusic) == 0u) {
-      if (!EndPlayback(c, d, (pp.flags & kPbStopping) != 0u ? pp.endReason : SND_END_COMPLETED,
-                       (pp.flags & kPbStopping) != 0u ? pp.endDetail : SND_END_DETAIL_NONE)) {
+      // A source that refused its voices (FlushSourceCalls: DECODER_POOL_FULL,
+      // NO_STREAM_SLOT, ...) left the reason in endDetail: the playback is rejected.
+      const bool stopping = (pp.flags & kPbStopping) != 0u;
+      const bool refused = !stopping && pp.endDetail != SND_END_DETAIL_NONE && (pp.flags & kPbSourceStarted) == 0u;
+      if (!EndPlayback(c, d, stopping ? pp.endReason : (refused ? SND_END_REJECTED : SND_END_COMPLETED),
+                       stopping || refused ? pp.endDetail : SND_END_DETAIL_NONE)) {
         ++d;
       }
       continue;
