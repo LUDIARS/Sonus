@@ -142,6 +142,8 @@ class ScriptDevice final : public PlatformOutputDevice {
   double OutputLatencySeconds() const override { return 0.01; }
   bool IsOpen() const { return open_; }
 
+  // Replaces the published workgroup (generation + 1), as a device change would.
+  void Publish(const Workgroup& g) { PublishWorkgroup(g); }
   // Posts from the calling thread (an "OS notification thread").
   void Emit(snd::DeviceEventKind k, std::uint32_t ch, std::uint32_t rate, std::uint32_t period) {
     PostEvent(k, ch, rate, period);
@@ -525,6 +527,30 @@ SND_TEST(IndepAudioDriver, StartFailuresLeaveNothingBehind) {
   SND_CHECK_EQ(acc.TotalUsed(), 0u);
 }
 
+// D-65: the audio thread re-joins when the device's workgroup generation
+// changes. On Linux a valid (foreign) workgroup cannot be joined: the result
+// moves from NoWorkgroup to Unsupported, which proves the re-join happened.
+SND_TEST(IndepAudioDriver, RejoinsWorkgroupWhenGenerationChanges) {
+  ScriptDevice dev;
+  dev.paced = false;
+  Renderer r;
+  AudioDriver driver;
+  AudioDriverDesc d = MakeDesc(r, 64);
+  d.workgroupSource = &dev;
+  SND_REQUIRE(driver.Start(dev, snd::DeviceDesc{48000, 2, 128, 0}, d, snd::base::DefaultAllocator()));
+  SND_REQUIRE(WaitUntil([&] { return dev.calls.load() >= 10u; }));
+  SND_CHECK_EQ(driver.Stats().workgroup, WorkgroupJoinResult::NoWorkgroup);
+  const std::uint32_t gen0 = dev.WorkgroupGeneration();
+  dev.Publish(Workgroup{WorkgroupKind::WindowsMmcss, nullptr, 5u});
+  SND_CHECK_EQ(dev.WorkgroupGeneration(), gen0 + 1u);
+#if defined(__linux__)
+  SND_CHECK(WaitUntil([&] { return driver.Stats().workgroup == WorkgroupJoinResult::Unsupported; }));
+#endif
+  dev.Publish(Workgroup{});
+  SND_CHECK(WaitUntil([&] { return driver.Stats().workgroup == WorkgroupJoinResult::NoWorkgroup; }));
+  driver.Stop();
+}
+
 // Events from a separate notification thread while the driver starts and
 // stops repeatedly (D-61: any thread, short lock; D-66: forwarded). TSan target.
 SND_TEST(IndepAudioDriver, EventsFromAnotherThreadDuringStartStop) {
@@ -559,6 +585,38 @@ SND_TEST(IndepAudioDriver, EventsFromAnotherThreadDuringStartStop) {
   SND_CHECK(ev.total.load() <= posted.load());
   SND_CHECK_EQ(r.wrongBlock.load(), 0u);
   SND_CHECK_EQ(dev.mixedLayoutFrames.load(), 0u);
+}
+
+// DEFECT candidate (data race, seen by TSan only): AudioDriver::Stats() and
+// LoadLevel() are documented "Any thread", but Start() re-initialises the
+// DriverCore (DriverCore::Init assigns desc_ and rebinds the ring with plain
+// stores) while a monitoring thread (profiler, live link) may be reading the
+// statistics. Expected: polling Stats() during Start/Stop cycles is race-free.
+SND_TEST(IndepAudioDriver, Defect_platform_StatsWhileRestartingIsRaceFree) {
+  ScriptDevice dev;
+  dev.paced = false;
+  Renderer r;
+  AudioDriver driver;
+  std::atomic<bool> stop{false};
+  std::atomic<std::uint64_t> polls{0};
+  std::thread monitor([&] {
+    while (!stop.load()) {
+      const AudioDriverStats s = driver.Stats();
+      volatile std::uint32_t t = s.core.targetFrames + driver.LoadLevel();
+      (void)t;
+      polls.fetch_add(1);
+    }
+  });
+  for (int i = 0; i < 20; ++i) {
+    SND_REQUIRE(driver.Start(dev, snd::DeviceDesc{48000, 2, 64u + static_cast<std::uint32_t>(i % 3) * 64u, 0},
+                             MakeDesc(r, 32u + static_cast<std::uint32_t>(i % 2) * 32u), snd::base::DefaultAllocator()));
+    const std::uint64_t c0 = dev.calls.load();
+    SND_REQUIRE(WaitUntil([&] { return dev.calls.load() >= c0 + 10u; }));
+    driver.Stop();
+  }
+  stop.store(true);
+  monitor.join();
+  SND_CHECK(polls.load() > 0u);
 }
 
 // The silent timer device (D-61): callback with FTZ/DAZ in SND_RT_SCOPE on a
