@@ -15,3 +15,8 @@ set_tests_properties(source_stream_test PROPERTIES TIMEOUT 600)
 snd_add_test(source_kind_test SOURCES source_kind_test.cpp LINK ${_source_test_link})
 target_include_directories(source_kind_test PRIVATE ${PROJECT_SOURCE_DIR}/buildtool/test)
 set_tests_properties(source_kind_test PROPERTIES TIMEOUT 600)
+# Real IO thread + worker pool + RT workers; load (32 streams + 128 samples).
+#   ctest --repeat until-fail:20 -R source_parallel_test   (TSan and Release)
+snd_add_test(source_parallel_test SOURCES source_parallel_test.cpp LINK ${_source_test_link})
+target_include_directories(source_parallel_test PRIVATE ${PROJECT_SOURCE_DIR}/buildtool/test)
+set_tests_properties(source_parallel_test PROPERTIES TIMEOUT 600)
