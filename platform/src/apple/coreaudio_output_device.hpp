@@ -28,7 +28,8 @@
 //   iOS interruption began -> SUSPENDED (the system stopped the unit);
 //       ended with ShouldResume -> setActive:YES, restart if started -> RESUMED;
 //       ended without it -> stays SUSPENDED until the app calls Start() again
-//       (began / ended coalesced: the last one wins);
+//       (AudioDriver::Resume); began / ended coalesced: the last one wins;
+//       an ended without a preceding began does nothing;
 //   iOS route change -> CHANGED / LOST by reason (RouteChangeEvent);
 //   iOS media services reset -> LOST, rebuild the session and the unit -> CHANGED.
 // The workgroup (D-65) is the unit's kAudioOutputUnitProperty_OSWorkgroup,

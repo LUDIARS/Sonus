@@ -147,6 +147,17 @@ void AudioDriver::Stop() noexcept {
   device_ = nullptr;
 }
 
+bool AudioDriver::Resume() noexcept {
+  if (tInDriver == this) {
+    misuse_.fetch_add(1, std::memory_order_relaxed);
+    return false;
+  }
+  if (device_ == nullptr) return false;
+  prefillRequested_.store(true, std::memory_order_release);
+  wake_.Post();
+  return device_->Start();
+}
+
 AudioDriverStats AudioDriver::Stats() const noexcept {
   AudioDriverStats s;
   s.core = core_.Stats();

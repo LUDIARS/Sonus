@@ -216,7 +216,11 @@ bool CoreAudioOutputDevice::Reconfigure(std::uint32_t channels) noexcept {
 void CoreAudioOutputDevice::ApplyChannelsAndAnnounce(std::uint32_t channels) noexcept {
   // channels == 0: the client layout is kept. Otherwise switch it; a failed
   // switch is reported as LOST (never silent output without an event).
-  const bool restart = wantRunning_ && running_.load(std::memory_order_relaxed);
+#if TARGET_OS_IPHONE
+  const bool restart = wantRunning_ && !interrupted_;
+#else
+  const bool restart = wantRunning_;
+#endif
   if (channels != 0u && channels != clientChannels_) {
     if (!Reconfigure(channels)) {
       lost_ = true;
@@ -392,14 +396,13 @@ void CoreAudioOutputDevice::ProcessEvents() noexcept {
   if (anyInterrupt) {
     const bool began = (bits & kIosInterruptEnded) == 0u ||
                        ((bits & kIosInterruptBegan) != 0u && session_.LastInterruptionBegan());
-    if (began || !interrupted_) {
-      if (!interrupted_) {
-        running_.store(false, std::memory_order_seq_cst);  // the system stopped the unit
-        interrupted_ = true;
-        PostEvent(DeviceEventKind::Suspended, 0, 0, 0);
-      }
+    if ((bits & kIosInterruptBegan) != 0u && !interrupted_) {  // a coalesced began still suspends first
+      running_.store(false, std::memory_order_seq_cst);  // the system stopped the unit
+      interrupted_ = true;
+      PostEvent(DeviceEventKind::Suspended, 0, 0, 0);
     }
-    if (!began && session_.LastInterruptionShouldResume()) {
+    // An ended without a preceding began (not interrupted) does nothing.
+    if (!began && interrupted_ && session_.LastInterruptionShouldResume()) {
       // Ended with ShouldResume: reactivate and continue. Without it the
       // device stays SUSPENDED until the app calls Start() again.
       if (!manageSession_ || session_.Reactivate()) {

@@ -35,8 +35,10 @@
 //     as lost frames) and asks the writer for the new count; the writer
 //     acknowledges with the ring position where the new format starts and
 //     calls FormatFn before rendering in it; the reader drops everything
-//     before that position (those frames are added to the next block's
-//     RenderInfo::lostFrames, counted as DriverStats::droppedFrames). The
+//     before that position (counted as DriverStats::droppedFrames, NOT as
+//     lost frames: the renderer's clock advanced when it rendered them, so
+//     right after a switch it runs up to droppedFrames ahead of the device;
+//     uses that need the exact position read the device's OutputClock). The
 //     reader asks again when the answer does not match the device any more. A sample-rate change (CHANGED event) is passed to
 //     FormatFn the same way without dropping audio. The renderer always gets
 //     the device's rate and channel count; resampling to an internal rate
@@ -97,7 +99,7 @@ struct DriverStats {
   std::uint64_t framesConsumed = 0;     // frames handed to the device (incl. silence)
   std::uint64_t underruns = 0;          // callbacks that found the ring short
   std::uint64_t lostFrames = 0;         // silence inserted (underrun + format switch), total
-  std::uint64_t droppedFrames = 0;      // old-layout frames dropped at channel switches (also in RenderInfo::lostFrames)
+  std::uint64_t droppedFrames = 0;      // old-layout frames dropped at channel switches (not in lostFrames)
   std::uint64_t blocksRendered = 0;
   std::uint64_t formatChanges = 0;      // format switches applied by the writer
   std::uint64_t intervalMinNs = 0;      // callback-to-callback interval

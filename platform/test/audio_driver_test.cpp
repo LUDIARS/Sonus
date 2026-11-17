@@ -2,6 +2,7 @@
 // device mock (pumped by the test) and the silent timer device (real time).
 #include <atomic>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <vector>
 
@@ -75,6 +76,17 @@ AudioDriverDesc MakeDesc(Renderer& r, std::uint32_t block, std::uint32_t ahead) 
   d.core.user = &r;
   d.realtimeThread = false;
   return d;
+}
+
+// True when the 1-minute load average is below the core count (Linux), or
+// when it cannot be read (other OSes). Timing checks run only then.
+bool LoadBelowCoreCount() {
+  FILE* f = std::fopen("/proc/loadavg", "r");
+  if (f == nullptr) return true;
+  double load = 0.0;
+  const int n = std::fscanf(f, "%lf", &load);
+  std::fclose(f);
+  return n != 1 || load < static_cast<double>(HardwareConcurrency());
 }
 
 // Waits (bounded) until the audio thread has refilled the ring to its target.
@@ -249,7 +261,10 @@ SND_TEST(AudioDriver, TimerDeviceRealTime) {
   AudioDriverDesc d = MakeDesc(r, 256, 2);
   d.workgroupSource = &dev;
   SND_REQUIRE(driver.Start(dev, snd::DeviceDesc{48000, 2, 480, 0}, d, snd::base::DefaultAllocator()));
-  SleepFor(300000000ull);  // 300 ms = ~30 periods
+  // At least 10 callbacks (~100 ms), bounded wait: a loaded machine may delay the timer thread.
+  const std::uint64_t deadline = MonotonicNanoseconds() + 20000000000ull;
+  while (driver.Stats().core.callbacks < 10u && MonotonicNanoseconds() < deadline) SleepFor(5000000);
+  SleepFor(200000000ull);
   driver.Stop();
   const AudioDriverStats s = driver.Stats();  // counters stay readable after Stop
   snd::test::Note("callbacks=%llu underruns=%llu blocks=%llu interval avg=%.3f ms max=%.3f ms render avg=%.1f us",
@@ -257,7 +272,13 @@ SND_TEST(AudioDriver, TimerDeviceRealTime) {
                   static_cast<unsigned long long>(s.core.blocksRendered), static_cast<double>(s.core.intervalAvgNs) / 1e6,
                   static_cast<double>(s.core.intervalMaxNs) / 1e6, static_cast<double>(s.core.renderAvgNs) / 1e3);
   SND_CHECK(s.core.callbacks >= 10u);
-  SND_CHECK(s.core.intervalAvgNs > 5000000u && s.core.intervalAvgNs < 20000000u);
+  // Timing is only checked when the machine is not overloaded (the timer
+  // thread has no realtime priority here); otherwise it is only recorded.
+  if (LoadBelowCoreCount()) {
+    SND_CHECK(s.core.intervalAvgNs > 5000000u && s.core.intervalAvgNs < 20000000u);
+  } else {
+    snd::test::Note("load average >= cores: interval average not checked");
+  }
   // Everything rendered was consumed or is still queued; lost frames were reported to the renderer.
   SND_CHECK_EQ(r.nextFrame.load(), s.core.framesConsumed - s.core.lostFrames + s.core.queuedFrames);
   SND_CHECK(r.lost.load() <= s.core.lostFrames);

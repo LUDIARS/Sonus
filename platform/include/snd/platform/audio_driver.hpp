@@ -80,6 +80,13 @@ class AudioDriver {
              IAllocator& allocator) noexcept;
   // Owner thread. No-op if not started.
   void Stop() noexcept;
+  // Owner thread. Resumes a device that stays SUSPENDED until the app asks
+  // (iOS: an interruption that ended without ShouldResume, D-63): asks the
+  // audio thread for a prefill and calls the device's Start() again. The
+  // device posts RESUMED when it plays again. The SUSPENDED event itself is
+  // forwarded to `listener` as is; api calls this from snd_resume. false if
+  // not running or the device refuses.
+  bool Resume() noexcept;
   bool Running() const noexcept { return device_ != nullptr; }
 
   // Any thread.

@@ -267,13 +267,12 @@ void DriverCore::OnDeviceCallback(float* out, std::uint32_t frames, std::uint32_
       const std::uint64_t r = ring_.ReadIndex();
       const std::uint64_t pos = r + ((AckPos(a) - r) & kPosMask);
       readerFloor_ = pos;
-      // Frames in the old layout that are dropped: reported to the renderer
-      // with the next block like silence (D-66), counted separately.
+      // Frames in the old layout that are dropped. They are NOT lost frames:
+      // the renderer's clock already advanced when it rendered them, so it
+      // runs up to droppedFrames ahead of the device after a switch (D-66;
+      // exact positions come from the device's OutputClock).
       const std::uint64_t dropped = oldChannels != 0u ? (pos - r) / oldChannels : 0u;
-      if (dropped > 0u) {
-        pendingLost_.fetch_add(dropped, std::memory_order_acq_rel);
-        Bump(droppedTotal_, dropped);
-      }
+      if (dropped > 0u) Bump(droppedTotal_, dropped);
       ring_.SkipTo(pos);
       fadeInPending_ = true;
       fadePos_ = 0;
