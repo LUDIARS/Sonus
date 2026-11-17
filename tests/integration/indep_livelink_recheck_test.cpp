@@ -467,7 +467,7 @@ SND_TEST(IndepLivelinkRecheck, ServerDestroyRacesReplaceChunk) {
 
 // A Server is destroyed while its SetValue is recorded but not applied; the next
 // Server on the same runtime must answer its own commands with their own results.
-SND_TEST(IndepLivelinkRecheck, Defect_livelink_new_server_gets_the_old_servers_results) {
+SND_TEST(IndepLivelinkRecheck, NewServerGetsOnlyItsOwnResults) {
   Fixture f;
   f.Load(IndepBank(), "a.sndb");
   f.sys->Play(HashId("Tone"), snd_emitter_handle{0}, nullptr);

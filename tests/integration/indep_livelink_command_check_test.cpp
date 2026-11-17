@@ -57,7 +57,7 @@ SND_TEST(IndepLivelinkCommandCheck, BoundariesOfEveryCheckedCommand) {
   p.emitter = snd::HandleRef{cfg.max_emitters - 1u, 3u};
   SND_CHECK(Ok(Cmd(CT::Play, p), k));
   p.emitter = snd::HandleRef{cfg.max_emitters, 3u};
-  SND_CHECK(!Ok(Cmd(CT::Play, p), k));
+  SND_CHECK(Ok(Cmd(CT::Play, p), k));  // the API accepts it (decision R2)
   p.emitter = {};
   p.flags = cmd::kPlayOneShot | cmd::kPlayHasPosition;
   SND_CHECK(Ok(Cmd(CT::Play, p), k));
@@ -76,32 +76,32 @@ SND_TEST(IndepLivelinkCommandCheck, BoundariesOfEveryCheckedCommand) {
   p.when.value = 3600ull * 1000000ull;
   SND_CHECK(Ok(Cmd(CT::Play, p), k));
   p.when.value += 1u;
-  SND_CHECK(!Ok(Cmd(CT::Play, p), k));
+  SND_CHECK(Ok(Cmd(CT::Play, p), k));  // the API accepts it (decision R2)
   p.when = snd_when{};
   p.when.kind = 9u;
   SND_CHECK(!Ok(Cmd(CT::Play, p), k));
   p.when = snd_when{};
   p.when.reserved[5] = 1u;
-  SND_CHECK(!Ok(Cmd(CT::Play, p), k));
+  SND_CHECK(Ok(Cmd(CT::Play, p), k));  // the API accepts it (decision R2)
   p.when = snd_when{};
   p.when.kind = SND_WHEN_GRID;
   p.when.count = 256u;
   SND_CHECK(Ok(Cmd(CT::Play, p), k));
   p.when.count = 257u;
-  SND_CHECK(!Ok(Cmd(CT::Play, p), k));
+  SND_CHECK(Ok(Cmd(CT::Play, p), k));  // the API accepts it (decision R2)
   p.when = snd_when{};
   p.when.kind = SND_WHEN_NEXT_BAR;
   p.when.transport.value = SND_HANDLE_MAKE(cfg.max_transports - 1u, 1u);
   SND_CHECK(Ok(Cmd(CT::Play, p), k));
   p.when.transport.value = SND_HANDLE_MAKE(cfg.max_transports, 1u);
-  SND_CHECK(!Ok(Cmd(CT::Play, p), k));
+  SND_CHECK(Ok(Cmd(CT::Play, p), k));  // the API accepts it (decision R2)
   // Stop: fade < 0 is "event default"; up to an hour; finite.
   cmd::Stop s{pb, -1.0f, 0u, snd_when{}};
   SND_CHECK(Ok(Cmd(CT::Stop, s), k));
   s.fadeSeconds = 3600.0f;
   SND_CHECK(Ok(Cmd(CT::Stop, s), k));
   s.fadeSeconds = kInf;
-  SND_CHECK(!Ok(Cmd(CT::Stop, s), k));
+  SND_CHECK(Ok(Cmd(CT::Stop, s), k));  // the API accepts it (decision R2)
   // Listener.
   cmd::SetListener l{};
   l.index = cfg.max_listeners - 1u;
@@ -111,10 +111,10 @@ SND_TEST(IndepLivelinkCommandCheck, BoundariesOfEveryCheckedCommand) {
   SND_CHECK(!Ok(Cmd(CT::SetListener, l), k));
   l.index = 0;
   l.listener.weight = -0.5f;
-  SND_CHECK(!Ok(Cmd(CT::SetListener, l), k));
+  SND_CHECK(Ok(Cmd(CT::SetListener, l), k));  // the API accepts it (decision R2)
   l.listener.weight = 0;
   l.listener.enabled = 2u;
-  SND_CHECK(!Ok(Cmd(CT::SetListener, l), k));
+  SND_CHECK(Ok(Cmd(CT::SetListener, l), k));  // the API accepts it (decision R2)
   // Parameters: scope / target agreement, finite value.
   cmd::SetParam sp{};
   sp.scope = static_cast<std::uint8_t>(snd::ParamScope::Global);
@@ -171,10 +171,10 @@ SND_TEST(IndepLivelinkCommandCheck, BoundariesOfEveryCheckedCommand) {
   sk.position.tick = static_cast<std::int32_t>(SND_TICKS_PER_BEAT) - 1;
   SND_CHECK(Ok(Cmd(CT::SeekTransport, sk), k));
   sk.position.tick = static_cast<std::int32_t>(SND_TICKS_PER_BEAT);
-  SND_CHECK(!Ok(Cmd(CT::SeekTransport, sk), k));
+  SND_CHECK(Ok(Cmd(CT::SeekTransport, sk), k));  // the API accepts it (decision R2)
   sk.position.tick = 0;
   sk.position.bar = -1;
-  SND_CHECK(!Ok(Cmd(CT::SeekTransport, sk), k));
+  SND_CHECK(Ok(Cmd(CT::SeekTransport, sk), k));  // the API accepts it (decision R2)
   // Live commands.
   cmd::LiveSetValue lv{};
   lv.field = ll::kFieldRevertAll;
@@ -194,6 +194,22 @@ SND_TEST(IndepLivelinkCommandCheck, BoundariesOfEveryCheckedCommand) {
   SND_CHECK(Ok(Cmd(CT::LiveOverride, lo), k));
   lo.kind = 3u;
   SND_CHECK(!Ok(Cmd(CT::LiveOverride, lo), k));
+  // The live link's session marker passes a replay (objectId 0 only).
+  cmd::LiveSetValue mk{};
+  mk.field = ll::kFieldSession;
+  mk.value = 7u;
+  SND_CHECK(Ok(Cmd(CT::LiveSetValue, mk), k));
+  mk.objectId = 1u;
+  SND_CHECK(!Ok(Cmd(CT::LiveSetValue, mk), k));
+  // Every type has a rule; the non-replayable ones say so.
+  for (std::uint16_t t = 1; t < static_cast<std::uint16_t>(CT::Count); ++t) {
+    const ll::CommandRule* r = ll::RuleOf(t);
+    SND_CHECK_MSG(r != nullptr && static_cast<std::uint16_t>(r->type) == t, "rule of type %u", t);
+  }
+  SND_CHECK(ll::RuleOf(0) == nullptr || !ll::RuleOf(0)->replayable);
+  SND_CHECK(ll::RuleOf(static_cast<std::uint16_t>(CT::Count)) == nullptr);
+  SND_CHECK(!ll::RuleOf(static_cast<std::uint16_t>(CT::BankRegister))->replayable);
+  SND_CHECK(!ll::RuleOf(static_cast<std::uint16_t>(CT::PlaySynth))->replayable);
   // Languages and banks.
   cmd::DeclareLanguage dl{};
   dl.nameBytes = 2;
@@ -335,7 +351,7 @@ SND_TEST(IndepLivelinkCommandCheck, OrdinaryApiCommandsAreKept) {
 
 // Values the game API accepts at the edges of its own rules: a replay must keep them
 // (decision 5: "the same rules as the API entry").
-SND_TEST(IndepLivelinkCommandCheck, Defect_livelink_command_check_refuses_what_the_api_accepts) {
+SND_TEST(IndepLivelinkCommandCheck, ReplayKeepsWhatTheApiAccepts) {
   const std::vector<std::uint8_t> rec = RecordApiCalls([](Fixture& f) {
     const snd_playback_handle a = f.sys->Play(HashId("Tone"), snd_emitter_handle{0}, nullptr);
     SND_CHECK_EQ(f.sys->ApplySnapshot(HashId("Snap"), 1.5f, 0.0f), SND_OK);         // weight > 1
