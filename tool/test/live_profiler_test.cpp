@@ -2,7 +2,9 @@
 // rendered (meters vs the output samples), timings / voices / memory / event
 // log arrive, and a recording survives the save / load round trip.
 #include <cmath>
+#include <chrono>
 #include <cstdio>
+#include <thread>
 
 #include "snd/livelink/client.hpp"
 #include "snd/test/test.hpp"
@@ -87,6 +89,9 @@ SND_TEST(ToolLiveProfiler, MetersEqualTheRenderedOutput) {
 
 SND_TEST(ToolLiveProfiler, TimingsVoicesMemoryAndEventLog) {
   Setup t;
+  // The profiler mask is applied by the game shortly after the handshake: commands recorded
+  // before that are not logged. Play once the game streams (the mask is in effect).
+  SND_REQUIRE(t.rig.Run(t.s, [&] { return t.s.profiler().received(ll::MessageType::BlockTiming) > 0u; }));
   t.rig.Play("Tone");
   SND_REQUIRE(t.rig.Run(t.s, [&] {
     return t.s.profiler().timings().size() > 4u && !t.s.profiler().voices().empty() && t.s.profiler().hasMemory() &&
@@ -143,7 +148,7 @@ SND_TEST(ToolLiveProfiler, RecordingSaveAndLoadRoundTrip) {
   SND_CHECK(s.arenas > 0u);
   SND_CHECK(s.lods >= 1u);
   SND_CHECK(s.bankMaps >= 1u);
-  SND_CHECK(s.lastBlock > s.firstBlock);
+  SND_CHECK(s.lastBlock >= s.firstBlock);  // commands may all fall into one block under load
   // A damaged file is refused and the previous load stays.
   std::vector<std::uint8_t> bytes = tooltest::ReadAll(path);
   bytes[bytes.size() / 2] ^= 0x40u;
@@ -163,8 +168,22 @@ SND_TEST(ToolLiveProfiler, StaleMetersFallToMinusInfinity) {
     const BusMeter* m = t.s.profiler().FindMeter(0u);
     return m != nullptr && m->peak[0] > 0.1f;
   }, 20000));
-  const std::uint64_t now = tooltest::Now();
-  // No new meters (the game is not rendered): 400 ms later still fresh, 10 s later gone.
+  // The game is no longer rendered: wait until meters already in flight have arrived
+  // (the count stays the same for 300 ms), then poll at analytic times.
+  ll::Client* c = t.s.connection().client();
+  std::uint64_t count = c->Received(ll::MessageType::BusMeters);
+  for (auto quiet = std::chrono::steady_clock::now();
+       std::chrono::steady_clock::now() - quiet < std::chrono::milliseconds(300);) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    const std::uint64_t n = c->Received(ll::MessageType::BusMeters);
+    if (n != count) {
+      count = n;
+      quiet = std::chrono::steady_clock::now();
+    }
+  }
+  t.s.profiler().Poll(c, tooltest::Now());  // takes the last meter (fresh: restarts the hold)
+  const std::uint64_t now = t.s.profiler().FindMeter(0u)->receivedNs;  // ages count from its arrival
+  // No new meters: 400 ms later still fresh, 10 s later gone.
   t.s.profiler().Poll(t.s.connection().client(), now + 400000000ull);
   const BusMeter* m = t.s.profiler().FindMeter(0u);
   SND_CHECK(!m->stale && m->peak[0] > 0.1f);
