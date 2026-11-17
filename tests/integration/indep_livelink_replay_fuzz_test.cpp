@@ -264,7 +264,7 @@ SND_TEST(IndepLivelinkReplayFuzz, MalformedRecordingsAreRejected) {
 // volumes ...) to core unchecked; the game API validates them on the way in, a replay
 // file does not go through it. Runs last in this executable: it may abort under UBSan.
 // SND_INDEP_EXCLUDE=26,... leaves out command types (exploration).
-SND_TEST(IndepLivelinkReplayFuzz, Defect_livelink_replay_feeds_unvalidated_commands_to_core) {
+SND_TEST(IndepLivelinkReplayFuzz, ReplayValidatesCommandContents) {
   const snd_config cfg = lltest::Config();
   Gen g(0xC0FFEEu);
   if (const char* ex = std::getenv("SND_INDEP_EXCLUDE")) {

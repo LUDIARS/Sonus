@@ -261,7 +261,7 @@ SND_TEST(IndepLivelinkOverride, RevertSkipsBanksThatWereUnloaded) {
 
 // C13 / C11 (defect candidate): after a bank is unloaded and loaded again, edits of the
 // new registration must be remembered with the new bank's original and reverted.
-SND_TEST(IndepLivelinkOverride, Defect_livelink_revert_misses_edits_after_bank_reload) {
+SND_TEST(IndepLivelinkOverride, RevertCoversEditsAfterBankReload) {
   Fixture f;
   const snd_bank_handle h = LoadAt(f, IndepBank(), "a.sndb");
   f.sys->Play(HashId("Tone"), snd_emitter_handle{0}, nullptr);
@@ -482,7 +482,7 @@ SND_TEST(IndepLivelinkAck, CommandBufferFullIsAnsweredPerSeqAndLaterEditsWork) {
 // D1 (defect candidate): a burst of acknowledged edits applied in one block (a diff
 // sync after BuildMismatch, protocol §4) must not make the server drop a tool that
 // reads normally: every Ack arrives and the connection stays.
-SND_TEST(IndepLivelinkAck, Defect_livelink_ack_burst_disconnects_the_tool) {
+SND_TEST(IndepLivelinkAck, AckBurstKeepsTheTool) {
   snd_config cfg = lltest::Config();
   cfg.commands.arena_bytes = 64u << 10;
   LiveSession s(cfg);

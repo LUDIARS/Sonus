@@ -270,7 +270,7 @@ SND_TEST(IndepLivelinkTransport, ClientApiFromManyThreads) {
 
 // Client record buffer (11.3): a recording larger than recordBufferBytes keeps the
 // first bytes and counts the rest as overflow; nothing else is reported as an error.
-SND_TEST(IndepLivelinkTransport, Defect_livelink_client_record_overflow_is_miscounted) {
+SND_TEST(IndepLivelinkTransport, ClientRecordOverflowIsCountedAsOverflow) {
   Game g;
   SND_REQUIRE_EQ(g.started, SND_OK);
   ll::ClientDesc cd = lltest::MemoryClient(g.f.link);
@@ -301,7 +301,7 @@ SND_TEST(IndepLivelinkTransport, Defect_livelink_client_record_overflow_is_misco
 
 // Lifetime: destroying the Server while one of its ReplaceChunk commands is recorded but
 // not yet applied must not let the audio thread use the Server's memory afterwards.
-SND_TEST(IndepLivelinkTransport, Defect_livelink_server_destroy_leaves_replace_chunk_dangling) {
+SND_TEST(IndepLivelinkTransport, ServerDestroyDoesNotLeaveReplaceChunkDangling) {
   Fixture f;
   f.Load(IndepBank(), "a.sndb");
   f.sys->Play(HashId("Tone"), snd_emitter_handle{0}, nullptr);
