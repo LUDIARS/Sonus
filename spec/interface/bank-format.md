@@ -668,8 +668,8 @@ Opus は使う（下の「Opus」）。codec モジュールの実装（`codec/R
 | `blockAlign` | 0（可変長）。0 以外は無効 |
 | `preSkip` | エンコーダの先読み（libopus 1.5.2 は 312）。再生フレーム 0 はデコード位置 `preSkip` |
 | `preRoll` | 3840（80 ms、RFC 7845 §4.6）。シークはシーク表で `target − preRoll` 以前の点から始める（D-23） |
-| `totalFrames` | 元素材のフレーム数（48 kHz 換算）。符号化は `ceil((totalFrames + preSkip) / 960)` パケットで、末尾は無音で埋める |
-| `extraOffset` / `extraBytes` | **必須**。下の setup（`4 + channels` バイト）。WAVE の中、64 バイト境界 |
+| `totalFrames` | 元素材のフレーム数を 48 kHz に換算したもの: 元が 48 kHz ならそのまま、それ以外は `ceil(元のフレーム数 × 48000 / 元のレート)`（例: 44.1 kHz の 44100 フレーム → 48000、1 フレーム → 2）。ビルドツールのレート変換は全コーデック共通で同じ式。符号化は `ceil((totalFrames + preSkip) / 960)` パケットで、末尾は無音で埋める |
+| `extraOffset` / `extraBytes` | **必須**。下の setup。`extraBytes` は**ちょうど** `4 + channels`（短くても長くても無効なヘッダ）。WAVE の中、64 バイト境界 |
 
 データ（`WAVE` の常駐データ・ストリームファイルのデータ）はパケットを順に並べたもの:
 
@@ -692,12 +692,28 @@ setup（`extra`）:
 | 3 | u8 | 結合（ステレオ）ストリーム数 M（0〜N） |
 | 4 | u8[channels] | 出力チャンネル i ← デコードされたストリームのチャンネル `mapping[i]`（< N + M、255 = 無音）。RFC 7845 §5.1.1 のチャンネルマッピング表と同じ意味 |
 
-- **チャンネル順**: 出力（= `mapping` の並び）は WAV の順（L R C LFE BL BR SL SR、7ch は L R C LFE BC SL SR）。
+- **デコーダの検証規則**は上の表のとおりで、ストリーム数は問わない: 1〜2ch でも N ≠ 1 の setup（例: 2ch を 2 本のモノラルストリームで）は
+  RFC 7845 として有効なので受け付ける。「1〜2ch は 1 ストリーム、3〜8ch はファミリ 1」はビルドツールの出力の説明。
+- **チャンネル順**: 出力（= `mapping` の並び）は WAV の順（RFC 7845 のファミリ 1 と、WAVE_FORMAT_EXTENSIBLE の一般的なチャンネルマスクに合わせる）。
   ビルドツールはサラウンドの符号化のために Vorbis の順（RFC 7845 §5.1.1.2）へ並べ替えて符号化し、その逆を `mapping` に書く。
-  ランタイムは `mapping` に従うだけで並べ替えない。
+  ランタイムは `mapping` に従うだけで並べ替えない。ビルドツールが入力（WAV）のチャンネルとみなす並び:
+
+  | ch | WAV の順（= 出力の順） | Vorbis の順（符号化の内部） |
+  | --- | --- | --- |
+  | 1 | M | M |
+  | 2 | L R | L R |
+  | 3 | L R C | L C R |
+  | 4 | L R BL BR | L R BL BR |
+  | 5 | L R C BL BR | L C R BL BR |
+  | 6 | L R C LFE BL BR | L C R BL BR LFE |
+  | 7 | L R C LFE BC SL SR | L C R SL SR BC LFE |
+  | 8 | L R C LFE BL BR SL SR | L C R SL SR BL BR LFE |
 - `SEEK`: `frame` は再生フレーム、`byteOffset` はデータ先頭からの、そのパケットの**長さの前置**の位置。先頭は `{0, 0}`。
   パケット k（デコード位置 960k）は `960k > preSkip` かつ `960k − preSkip < totalFrames` のとき候補になり、`frame = 960k − preSkip`。
-  よって `frame + preSkip` は 960 の倍数（ランタイムの `Seek(frame)` はそれ以外を拒む）。
+  よって `frame + preSkip` は 960 の倍数。`Seek(f > 0)` で `f + preSkip` が 960 の倍数でなければ（パケット境界でなければ）次の `Decode` が失敗する
+  （`SND_DECODE_ERROR`、`Seek` / `Init` まで継続。ADPCM の規則と同じ）。
+- 終端: `totalFrames` を出し終えた後の入力（残りのパケット、ストリームファイルの最後のセクタの 0 の埋め、その他のバイト）は解釈せずに消費して捨てる。
+- 保持の上限（D-51）の「1 パケット」は、最大のパケット = `ストリーム数 × 1277 + 2`（長さの前置込み）。未デコードの入力は `16 KiB + ストリーム数 × 1277 + 2` まで。
 - プリロード（`PREL`）はシーク点で切った先頭の部分（ADPCM 以外の可変長コーデックと同じ扱い）。
 - ビルドツールは既定で「パケット間の予測なし」（libopus `OPUS_SET_PREDICTION_DISABLED`）で符号化する。CELT のパケット
   （既定のビットレート）では、シーク点から 2 パケット後以降の出力が通しのデコードとビット単位で一致するので、`preRoll` = 80 ms で

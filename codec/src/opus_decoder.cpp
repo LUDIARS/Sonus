@@ -21,8 +21,9 @@
 //     past-the-end packet is reached with room), so a caller that stops after
 //     a full output and then seeks does not pay for packets it never uses.
 //   - Pre-skip frames after Init / Seek(0) are dropped, nothing is emitted after
-//     total_frames; packets that start at or after the end are consumed
-//     without decoding.
+//     total_frames. Once the decode position reaches the end, all further
+//     input (packets, sector padding, garbage) is consumed and dropped without
+//     being parsed (ext.h: input past the end is consumed and dropped).
 //   - Corrupt data (bad length, libopus error, a packet that is not 960 frames)
 //     returns SND_DECODE_ERROR, sticky until Init / Seek.
 #include "detail.hpp"
@@ -130,13 +131,18 @@ bool Run(OpusState* s, const std::uint8_t* buf, std::uint32_t avail, Output& out
   std::uint32_t u = 0;
   for (;;) {
     Emit(s, out);
-    if (PcmPending(s) || out.written == out.max) break;
+    if (PcmPending(s)) break;
+    if (s->pos >= s->end) {  // past the playable range: consume and drop without parsing (ext.h)
+      u = avail;
+      break;
+    }
+    if (out.written == out.max) break;
     if (avail - u < kOpusLengthPrefixBytes) break;
     const std::uint32_t len = base::LoadLE16(buf + u);
     if (len == 0u || len > s->maxPacket) return false;
     if (avail - u - kOpusLengthPrefixBytes < len) break;
     const std::uint8_t* packet = buf + u + kOpusLengthPrefixBytes;
-    if (s->pos < s->end) {
+    {  // s->pos < s->end here
       const int n = opus_multistream_decode_float(Decoder(s), packet, static_cast<opus_int32>(len), Pcm(s),
                                                   static_cast<int>(kOpusPacketFrames), 0);
       if (n != static_cast<int>(kOpusPacketFrames)) return false;  // libopus error or not a 20 ms packet
@@ -145,7 +151,6 @@ bool Run(OpusState* s, const std::uint8_t* buf, std::uint32_t avail, Output& out
       s->pcmCount = left < kOpusPacketFrames ? static_cast<std::uint32_t>(left) : kOpusPacketFrames;
       s->pcmHead = skip < s->pcmCount ? static_cast<std::uint32_t>(skip) : s->pcmCount;
     }
-    // else: past the playable range; consumed without decoding.
     s->pos += kOpusPacketFrames;
     u += kOpusLengthPrefixBytes + len;
   }
