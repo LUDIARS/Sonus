@@ -449,3 +449,34 @@ SND_TEST(IndepSample, Defect_source_CacheStartDecodesUpToTheOffsetOnTheAudioThre
     SND_CHECK_MSG(inl < 20000u, "%s: Start decoded %llu frames inline", name, static_cast<unsigned long long>(inl));
   }
 }
+
+// B5: a per-voice ring that runs dry (no decode job ran) reports `starved`,
+// renders 0 frames (silence, the playhead waits), and resumes exactly where it
+// stopped once the job ran: no garbage, no repeated or lost frame.
+SND_TEST(IndepSample, RingUnderrunIsSilentAndResumesExactly) {
+  Built b = Build("iunder", {Spec("ra", 96000, "compressed", "ADPC")});
+  SND_REQUIRE_MSG(b.ok, "%s", b.diag.c_str());
+  const Decoded ref = Reference(b, "ra");
+  SND_REQUIRE(ref.ok);
+  IndepDriver::Opt o;
+  o.manualJobs = true;
+  IndepDriver d(b, o);
+  SND_REQUIRE(d.Ok());
+  IndepDriver::Voice v;
+  v.slot = d.Start(d.Sample(), d.Asset("ra"), 0, 0);
+  SND_REQUIRE(v.slot != snd::kInvalidSlot);
+  for (int i = 0; i < 12; ++i) d.Block(d.Sample(), {&v}, 256);
+  const std::size_t got = v.out[0].size();
+  SND_CHECK(got >= 256u && got < 12u * 256u);  // the inline prime, then dry
+  SND_CHECK(v.starved >= 1u);
+  SND_CHECK_EQ(v.ph.frame, got);
+  for (int i = 0; i < 30; ++i) {
+    d.RunJobs();
+    d.Block(d.Sample(), {&v}, 256);
+  }
+  d.RunJobs();
+  SND_CHECK(v.out[0].size() > got + 4000u);
+  double e = 0;
+  for (std::size_t i = 0; i < v.out[0].size(); ++i) e = std::fmax(e, std::fabs(v.out[0][i] - ref.ch[0][i]));
+  SND_CHECK_MSG(e < 1e-6, "err %g", e);
+}
