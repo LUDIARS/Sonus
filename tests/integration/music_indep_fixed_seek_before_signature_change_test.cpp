@@ -1,4 +1,4 @@
-// Defect (independent music tests): seeking the music transport to a position
+// Fixed defect (independent music tests; was Defect_music_seek_before_signature_change, fixed in 7cfb9fe): seeking the music transport to a position
 // before a time-signature change that has already been passed lands on the
 // wrong tick.
 //
@@ -16,7 +16,7 @@
 
 using namespace mi;
 
-SND_TEST(MusicIndepDefect, SeekBackOverASignatureChange) {
+SND_TEST(MusicIndepFixed, SeekBackOverASignatureChange) {
   MusicProject p("defect-seek-sig");
   p.Asset("t", Material(kBar + 144000, 0.3f));
   p.Segment("T", "t", 2, "\"tempo\": [{\"tick\": 0, \"bpm\": 120}, {\"tick\": 3840, \"bpm\": 60, \"beatsPerBar\": 3}]");

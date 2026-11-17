@@ -59,15 +59,16 @@ snd_music_test(music_transition_test)
 snd_music_test(music_transport_test)
 snd_music_test(music_system_test)
 # Independent music tests (stage 4, written apart from the implementation; properties in
-# music_indep_properties.md). Defect_* tests fail on purpose until the defect is fixed.
+# music_indep_properties.md). Defect_music_* tests fail on purpose until the defect is fixed;
+# fixed ones lose the prefix (music_indep_fixed_*).
 snd_music_test(music_indep_test)
+snd_music_test(music_indep_recheck_test)
+foreach(n stall_beat_twice state_lost_while_paused seek_before_signature_change samebar_other_signature shuffle_over_32)
+  snd_music_test(music_indep_fixed_${n}_test)
+endforeach()
 function(snd_music_defect name)
   snd_add_test(Defect_music_${name}_test SOURCES defect_music_${name}_test.cpp LINK ${_music_test_link})
   target_include_directories(Defect_music_${name}_test PRIVATE ${PROJECT_SOURCE_DIR}/buildtool/test)
   set_tests_properties(Defect_music_${name}_test PROPERTIES TIMEOUT 600)
 endfunction()
-snd_music_defect(stall_beat_twice)
-snd_music_defect(state_lost_while_paused)
-snd_music_defect(seek_before_signature_change)
-snd_music_defect(samebar_other_signature)
-snd_music_defect(shuffle_over_32)
+snd_music_defect(long_stall_beat_early)

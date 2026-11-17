@@ -1,4 +1,4 @@
-// Defect (independent music tests): "same bar position" between states with
+// Fixed defect (independent music tests; was Defect_music_samebar_other_signature, fixed in 7cfb9fe): "same bar position" between states with
 // different time signatures keeps the beat inside the bar.
 //
 // Expected (8.5): "拍子が違うState間の「同じ小節位置」は、小節番号を遷移先Segmentの長さで
@@ -12,7 +12,7 @@
 
 using namespace mi;
 
-SND_TEST(MusicIndepDefect, SameBarIntoAnotherSignatureStartsOnTheHeadBeat) {
+SND_TEST(MusicIndepFixed, SameBarIntoAnotherSignatureStartsOnTheHeadBeat) {
   MusicProject p("defect-samebar");
   p.Asset("e", Material(2 * kBar, 0.2f));
   p.Asset("w", Material(2 * 72000, 0.6f));

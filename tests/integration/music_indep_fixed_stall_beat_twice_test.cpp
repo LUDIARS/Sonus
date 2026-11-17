@@ -1,4 +1,4 @@
-// Defect (independent music tests): with a "sound priority" sync group (8.4) a
+// Fixed defect (independent music tests; was Defect_music_stall_beat_twice, fixed in 7cfb9fe): with a "sound priority" sync group (8.4) a
 // one-block stall makes the next beat be notified twice.
 //
 // Expected (8.4, 8.1): "sound priority" holds the whole transport until the data
@@ -13,7 +13,7 @@
 
 using namespace mi;
 
-SND_TEST(MusicIndepDefect, SoundPriorityStallAnnouncesABeatOnce) {
+SND_TEST(MusicIndepFixed, SoundPriorityStallAnnouncesABeatOnce) {
   MusicProject p("defect-stall");
   p.Asset("s", Material(kBar, 0.3f), "\"stallPolicy\": \"sound\"");
   p.Segment("S1", "s", 1);

@@ -115,3 +115,26 @@
 | S3（shuffle の 1 周） | 2 項目 | `Defect_music_shuffle_over_32` |
 
 未検証（公開 API や試験用ソースから起こせない、または設計書から期待が一意に決まらない）: G2 の拍時刻（ストール検出の遅れ、仕様の穴）、T11、T15（API が無い）、D5、D6、R11、VoiceEnded がリセット位置で失われる不具合の回帰（Start を拒む音源が要る）。
+
+---
+
+## 再確認（7cfb9fe / 67795dc、決定 D-68〜D-82）
+
+直った 5 件の `Defect_music_*` は `music_indep_fixed_*` に改名した。決定から挙げた性質と `music_indep_recheck_test.cpp` のテスト:
+
+| 決定 | 性質 | テスト |
+| --- | --- | --- |
+| D-69 | 受理したブロックの中の拍でもサンプル精度で発火する | `D69_FiresInsideTheAcceptingBlock` |
+| D-70 | 拍頭・小節頭ちょうどの要求はその点で発火（BARS_AFTER 1 は次の小節線） | `D70_ARequestOnTheGridPointFiresThere` |
+| D-71 | 受理時に未計画の Segment の拍子・テンポをまたぐ BARS_AFTER（offset 付き） | `D71_BarsAfterIntoALaterLoopWithOffset` |
+| D-71, D-79 | Stopped 中の予約は小節 0 から、再生中の予約は停止（巻き戻し）後も同じ音楽位置 | `D71_D79_ReservationsAcrossStopAndRestart` |
+| D-72 | SetTempo は以後の Segment のテンポを上書き、拍子は Segment のまま | `D72_SetTempoOverridesTheSegmentTempoKeepsItsSignature` |
+| D-73 | nextMarker の timingCount = マーカー ID、0 = 最初のユーザーマーカー | `D73_NextMarkerTimingById` |
+| D-75 | シークは Segment 長の剰余で前方・後方とも置き直す | `D75_SeekWrapsByTheSegmentLengthBothWays` |
+| D-77 | 割り込みのフェード短縮はいまのゲインから直線 | `D77_InterruptShortensTheFadeLinearly` |
+| D-78 | 複数ブロックのストールでも各拍・各マーカーは 1 回、順序どおり | `D78_LongStallAnnouncesEveryBeatOnceInOrder` |
+| D-78 | 検出前の拍の誤差は最大 1 ブロック | `Defect_music_long_stall_beat_early`（失敗） |
+| D-80 | ポーズ中の要求は最後が勝ち、再開後にルールのタイミング。現在の State なら取り消し | `D80_PausedRequestsLastWinsThenRuleTiming`, `D80_PausedRequestForTheCurrentStateCancels` |
+| D-81 | 40 件の shuffle: 各パスで全件 1 回、境界で同じものが続かない、パスごとに違う並び、再現する | `D81_ShuffleOfFortyEntriesPlaysEachOncePerPass` |
+
+D-76（Stinger の予約を 1 ブロック早く発火）は、`ReservationAction::Stinger` を作る経路が公開 API に無いため外から検証できない（実装者のテストは IMusicSystem を包んで入力を注入している）。

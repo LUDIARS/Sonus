@@ -1,4 +1,4 @@
-// Defect (independent music tests): a shuffle playlist with more than 32
+// Fixed defect (independent music tests; was Defect_music_shuffle_over_32, fixed in 7cfb9fe): a shuffle playlist with more than 32
 // entries never plays the entries after the 32nd.
 //
 // Expected (8.3, project-format 2.x playlist / bank MPLE): a shuffle pass plays
@@ -12,7 +12,7 @@
 
 using namespace mi;
 
-SND_TEST(MusicIndepDefect, ShuffleWithThirtyThreeEntriesPlaysEveryEntry) {
+SND_TEST(MusicIndepFixed, ShuffleWithThirtyThreeEntriesPlaysEveryEntry) {
   MusicProject p("defect-shuffle");
   std::string entries;
   constexpr int kN = 33;

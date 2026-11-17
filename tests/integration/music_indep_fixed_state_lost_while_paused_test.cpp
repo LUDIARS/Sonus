@@ -1,4 +1,4 @@
-// Defect (independent music tests): SetMusicState while the music playback is
+// Fixed defect (independent music tests; was Defect_music_state_lost_while_paused, fixed in 7cfb9fe): SetMusicState while the music playback is
 // paused is dropped.
 //
 // Expected (8.6, D-09): SetMusicState is a must-deliver command; in Idle a new
@@ -13,7 +13,7 @@
 
 using namespace mi;
 
-SND_TEST(MusicIndepDefect, StateRequestedWhilePausedHappensAfterResume) {
+SND_TEST(MusicIndepFixed, StateRequestedWhilePausedHappensAfterResume) {
   MusicProject p("defect-paused");
   p.Asset("e", Material(2 * kBar, 0.2f));
   p.Asset("bt", Material(2 * kBar, 0.6f));
