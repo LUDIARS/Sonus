@@ -228,7 +228,6 @@ SND_TEST(IndepLivelinkRecheck, BackPressureStopAndResumeKeepsEveryAnswerInOrder)
   SND_REQUIRE(Handshake(g.f, p));
   constexpr std::uint32_t kN = 3000;
   std::vector<std::uint8_t> stream;
-  std::uint32_t answers = 0;
   for (std::uint32_t i = 0; i < kN; ++i) {
     ll::SetValue v = lltest::BusVolume("Sfx", -1.0f - static_cast<float>(i % 5));
     std::uint16_t flags = ll::kFrameWantsAck;
@@ -237,7 +236,6 @@ SND_TEST(IndepLivelinkRecheck, BackPressureStopAndResumeKeepsEveryAnswerInOrder)
       flags = 0;
     }
     if (i % 3u == 2u) flags = 0;  // no Ack wanted, succeeds -> silent
-    answers += i % 3u != 2u ? 1u : 0u;
     std::vector<std::uint8_t> b(16 + sizeof(v));
     ll::EncodeHeader(b.data(), static_cast<std::uint16_t>(ll::MessageType::SetValue), flags, sizeof(v), 100u + i);
     std::memcpy(b.data() + 16, &v, sizeof(v));
