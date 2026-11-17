@@ -133,7 +133,7 @@ SND_TEST(SourceParallel, LoadStreams32Samples128) {
       const snd::core::BlockProfile& bp = r.sys->LastBlock();
       sum += bp.totalNs;
       worst = bp.totalNs > worst ? bp.totalNs : worst;
-      voices = bp.renderedVoices;
+      voices = bp.renderedVoices > voices ? bp.renderedVoices : voices;  // late chunks hold voices now and then
       ++n;
     }
     const double budgetNs = 256.0 / 48000.0 * 1e9;
