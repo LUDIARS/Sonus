@@ -4,3 +4,6 @@ snd_add_test(livelink_test SOURCES livelink_unit_test.cpp LINK ${_ll_test_link})
 # Fuzz (design.md 14). Scale with SND_FUZZ_ITERATIONS; run under SND_SANITIZE=address,undefined.
 snd_add_test(livelink_fuzz_test SOURCES livelink_fuzz_test.cpp LINK ${_ll_test_link})
 set_tests_properties(livelink_fuzz_test PROPERTIES TIMEOUT 600)
+# Independent tests (written from the headers by a separate tester).
+snd_add_test(livelink_indep_unit_test SOURCES indep_livelink_unit_test.cpp LINK ${_ll_test_link})
+set_tests_properties(livelink_indep_unit_test PROPERTIES TIMEOUT 600)
