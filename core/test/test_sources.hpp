@@ -68,9 +68,12 @@ class TestSampleKind final : public snd::source::ISourceKind {
   }
   void RenderBatch(const snd::source::RenderBatch& b, snd::VoiceRenderStatus* st) noexcept override {
     batches.fetch_add(1, std::memory_order_relaxed);
-    // Slow on RT workers only (the thread that created the kind renders the serial part).
-    if (slowNs.load(std::memory_order_relaxed) != 0u && std::this_thread::get_id() != owner_) {
-      const std::uint64_t until = snd::platform::MonotonicNanoseconds() + slowNs.load(std::memory_order_relaxed);
+    // Slow on RT workers; the thread that created the kind (the audio thread of the
+    // tests) only a little, so that the workers get chunks even on a loaded machine.
+    if (slowNs.load(std::memory_order_relaxed) != 0u) {
+      const std::uint64_t ns = slowNs.load(std::memory_order_relaxed);
+      const std::uint64_t until =
+          snd::platform::MonotonicNanoseconds() + (std::this_thread::get_id() != owner_ ? ns : ns / 100u);
       while (snd::platform::MonotonicNanoseconds() < until) {
       }
     }
