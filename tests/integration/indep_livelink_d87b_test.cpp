@@ -100,7 +100,8 @@ SND_TEST(IndepLivelinkD87b, FirstBlockAfterStartAppliesNoLeftover) {
     f.server = nullptr;
     ll::Client::Destroy(c);
   }
-  SND_CHECK_NEAR(Level(f) / base, 1.0, 1e-4);
+  f.Steps(24);  // (not Level(): a Server is alive and is the only consumer of the results)
+  SND_CHECK_NEAR(LeftMean(f) / base, 1.0, 1e-4);
   SND_CHECK_EQ(f.rt->Drops().staleEdits - stale0, static_cast<std::uint32_t>(kRounds));
 }
 
