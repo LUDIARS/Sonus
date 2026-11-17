@@ -140,6 +140,20 @@ SND_TEST(StreamPolicy, WasapiPlan) {
   SND_CHECK_EQ(p.channels, 2u);
 }
 
+SND_TEST(StreamPolicy, SpeakerMasks) {
+  SND_CHECK_EQ(SpeakerMaskForChannels(1), 0x4u);
+  SND_CHECK_EQ(SpeakerMaskForChannels(2), 0x3u);
+  SND_CHECK_EQ(SpeakerMaskForChannels(6), 0x3Fu);
+  SND_CHECK_EQ(SpeakerMaskForChannels(8), 0x63Fu);
+  SND_CHECK_EQ(SpeakerMaskForChannels(9), 0u);
+  // Every mask has exactly `channels` bits set.
+  for (std::uint32_t c = 1; c <= 8; ++c) {
+    std::uint32_t bits = 0;
+    for (std::uint32_t m = SpeakerMaskForChannels(c); m != 0u; m &= m - 1u) ++bits;
+    SND_CHECK_EQ(bits, c);
+  }
+}
+
 SND_TEST(StreamPolicy, RouteChangeEvents) {
   SND_CHECK_EQ(RouteChangeEvent(1, false), SND_DEVICE_EVENT_CHANGED);  // NewDeviceAvailable
   SND_CHECK_EQ(RouteChangeEvent(2, false), SND_DEVICE_EVENT_CHANGED);  // OldDeviceUnavailable

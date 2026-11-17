@@ -61,6 +61,13 @@ struct WasapiPlan {
 WasapiPlan PlanWasapiStream(std::uint32_t requestedRate, std::uint32_t requestedChannels, bool exclusive,
                             bool haveClient3, std::uint32_t mixRate, std::uint32_t mixChannels) noexcept;
 
+// WAVEFORMATEXTENSIBLE::dwChannelMask for an interleaved float stream of
+// `channels` channels (ksmedia.h speaker bits, Microsoft's standard layouts:
+// mono = FC, stereo = FL FR, 3 = FL FR FC, quad = FL FR BL BR, 5.0 = FL FR FC
+// BL BR, 5.1 = FL FR FC LFE BL BR, 6.1 = 5.1 + BC, 7.1 = FL FR FC LFE BL BR
+// SL SR). 0 (= let the device decide) for other counts.
+std::uint32_t SpeakerMaskForChannels(std::uint32_t channels) noexcept;
+
 // --- route changes (iOS AVAudioSessionRouteChangeReason, D-63) --------------------
 // Returns the event to post for a route change with `reason`
 // (AVAudioSessionRouteChangeReason value), or 0 for none. NewDeviceAvailable,

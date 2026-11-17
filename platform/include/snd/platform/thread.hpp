@@ -6,9 +6,12 @@
 // ThreadDesc::realtimePriority. If the process lacks the permission
 // (EPERM: no CAP_SYS_NICE / RLIMIT_RTPRIO), the thread keeps running at
 // normal priority and the result says PriorityResult::FellBack — it is never
-// an error. Other OSes: same interface, the request is not applied and the
-// result is PriorityResult::Unsupported (stub until stage 2 picks targets;
-// OS audio workgroups, 2.3, are also stage 2).
+// an error.
+// Windows: THREAD_PRIORITY_TIME_CRITICAL (the audio thread and RT workers
+// also join the WASAPI device's MMCSS task, workgroup.hpp). Apple: the Mach
+// time-constraint policy (nominal 5.3 ms period; joining the device's
+// os_workgroup, workgroup.hpp, gives the real deadline). Other OSes: not
+// applied, the result is PriorityResult::Unsupported.
 #ifndef SND_PLATFORM_THREAD_HPP
 #define SND_PLATFORM_THREAD_HPP
 

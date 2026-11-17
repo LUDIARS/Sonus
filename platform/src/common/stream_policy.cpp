@@ -111,6 +111,20 @@ WasapiPlan PlanWasapiStream(std::uint32_t requestedRate, std::uint32_t requested
   return p;
 }
 
+std::uint32_t SpeakerMaskForChannels(std::uint32_t channels) noexcept {
+  switch (channels) {
+    case 1u: return 0x4u;    // SPEAKER_FRONT_CENTER
+    case 2u: return 0x3u;    // FRONT_LEFT | FRONT_RIGHT
+    case 3u: return 0x7u;    // + FRONT_CENTER
+    case 4u: return 0x33u;   // FL FR BACK_LEFT BACK_RIGHT
+    case 5u: return 0x37u;   // FL FR FC BL BR
+    case 6u: return 0x3Fu;   // FL FR FC LOW_FREQUENCY BL BR (KSAUDIO_SPEAKER_5POINT1)
+    case 7u: return 0x13Fu;  // 5.1 + BACK_CENTER
+    case 8u: return 0x63Fu;  // FL FR FC LFE BL BR SIDE_LEFT SIDE_RIGHT (KSAUDIO_SPEAKER_7POINT1_SURROUND)
+    default: return 0u;
+  }
+}
+
 std::uint32_t RouteChangeEvent(std::uint32_t reason, bool formatDiffers) noexcept {
   switch (reason) {
     case 1u:  // NewDeviceAvailable

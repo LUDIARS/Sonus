@@ -87,8 +87,11 @@ endif()
 if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
   # Objective-C++ with ARC (the root enables OBJCXX on iOS). The CXX-only
   # options of snd_apply_options do not reach OBJCXX sources, so repeat them.
-  set_source_files_properties(src/apple/ios_audio_session.mm PROPERTIES
-    COMPILE_OPTIONS "-fobjc-arc;-Wall;-Wextra;-Werror;-fno-exceptions;-fno-rtti")
+  set(_snd_mm_options -fobjc-arc -Wall -Wextra -fno-exceptions -fno-rtti)
+  if(SND_WERROR)
+    list(APPEND _snd_mm_options -Werror)
+  endif()
+  set_source_files_properties(src/apple/ios_audio_session.mm PROPERTIES COMPILE_OPTIONS "${_snd_mm_options}")
 endif()
 
 # SIMD abstraction (header only, snd/platform/simd.hpp): force the scalar path everywhere.

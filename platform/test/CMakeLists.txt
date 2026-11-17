@@ -36,7 +36,13 @@ endif()
 # exits with 77 (SKIP). See README "出力デバイスの確認".
 add_executable(platform_device_play_test device_play_test.cpp device_play_main.cpp)
 snd_apply_options(platform_device_play_test)
-target_link_libraries(platform_device_play_test PRIVATE sonus_testkit sonus_testkit_rthooks sonus_platform)
+target_link_libraries(platform_device_play_test PRIVATE sonus_testkit sonus_platform)
+if(NOT WIN32)
+  # The operator new hooks use std::aligned_alloc, which MinGW / MSVC lack
+  # (tests/framework/src/rt_hooks_new.cpp); the RT scope checks of the
+  # SND_RT_NOTE kind still run without them.
+  target_link_libraries(platform_device_play_test PRIVATE sonus_testkit_rthooks)
+endif()
 add_test(NAME platform_device_play_test COMMAND platform_device_play_test)
 set_tests_properties(platform_device_play_test PROPERTIES TIMEOUT 300 SKIP_RETURN_CODE 77)
 if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
