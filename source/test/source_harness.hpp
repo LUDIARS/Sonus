@@ -168,6 +168,7 @@ class Rig {
     rd.allocator = alloc_;
     rd.io = &io;
     rd.streamPool = &pool;
+    rd.maxVoiceChannels = o.maxVoiceChannels;
     ok_ = ok_ && runtime.Init(rd);
     snd_config_init(&cfg);
     cfg.max_streams = o.maxStreams;
@@ -234,10 +235,13 @@ class Rig {
     for (std::uint32_t i = 0; i < n; ++i) Step();
   }
   // Adds the bank and its stream files to the memory FS and loads the bank.
-  snd_bank_handle Load(const Built& b) {
-    fs.AddFile("Main.sndb", b.bank);
+  snd_bank_handle Load(const Built& b) { return LoadAs(b, "Main.sndb"); }
+  // Under another path: the IO scheduler keeps files open and the memory FS
+  // serves the bytes of the open time, so a new bank needs a new path.
+  snd_bank_handle LoadAs(const Built& b, const char* path) {
+    fs.AddFile(path, b.bank);
     for (const auto& f : b.files) fs.AddFile(f.first, f.second);
-    const snd_bank_handle h = sys->LoadBankAsync("Main.sndb");
+    const snd_bank_handle h = sys->LoadBankAsync(path);
     for (int i = 0; i < 2000 && sys->GetBankState(h) != SND_BANK_STATE_LOADED; ++i) {
       Step();
       if (opt_.threaded) std::this_thread::sleep_for(std::chrono::milliseconds(1));

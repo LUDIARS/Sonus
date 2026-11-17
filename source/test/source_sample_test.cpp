@@ -321,3 +321,39 @@ SND_TEST(SourceSample, DecoderPoolFullRefusesWithReason) {
   r.Steps(4);
   SND_CHECK(r.EndOf(p4) == nullptr);
 }
+
+// The PCM cache never serves a bank that was unloaded: a new bank in the same
+// slot whose asset has the same name and length but other content plays its
+// own audio (the cache key holds the bank load generation).
+SND_TEST(SourceSample, CacheDoesNotServeAnUnloadedBank) {
+  AssetSpec a1 = RampAsset("c", 30000, "decompressCache", "ADPC");
+  AssetSpec a2 = a1;
+  a2.pcm = Signal(1, 48000, 30000, &Sine1k);
+  Built b1 = Build("cgen1", {a1});
+  Built b2 = Build("cgen2", {a2});
+  SND_REQUIRE_MSG(b1.ok && b2.ok, "%s %s", b1.diag.c_str(), b2.diag.c_str());
+  const Decoded r2 = Reference(b2, "c");
+  SND_REQUIRE(r2.ok);
+  Rig r;
+  SND_REQUIRE(r.Ok());
+  const snd_bank_handle h1 = r.LoadAs(b1, "One.sndb");
+  const snd_playback_handle p1 = r.Play("c");
+  for (int i = 0; i < 300 && r.EndOf(p1) == nullptr; ++i) r.Step();
+  SND_REQUIRE(r.EndOf(p1) != nullptr);
+  SND_CHECK_EQ(r.sys->UnloadBank(h1, SND_UNLOAD_IF_UNUSED), SND_OK);
+  for (int i = 0; i < 200 && r.sys->GetBankState(h1) != SND_BANK_STATE_UNLOADED; ++i) r.Step();
+  SND_REQUIRE_EQ(r.sys->GetBankState(h1), SND_BANK_STATE_UNLOADED);
+  r.LoadAs(b2, "Two.sndb");
+  r.Play("c");
+  r.Steps(200);
+  const std::size_t f0 = FirstNonZero(r, 0, 1e-7f);
+  SND_REQUIRE(f0 != SIZE_MAX);
+  const std::vector<float> played = Resampled(r2.ch[0], r2.ch[0].size() + 64);
+  Fit best{0, 1e9};
+  for (std::size_t s = f0 >= 32 ? f0 - 32 : 0; s < f0 + 32; ++s) {
+    const Fit f = FitGain(r, 0, s, played);
+    if (f.maxErr < best.maxErr) best = f;
+  }
+  SND_CHECK_MSG(best.maxErr < 1e-5, "second bank: err %g", best.maxErr);
+  SND_CHECK_EQ(r.runtime.Stats().cacheHits, 0u);
+}

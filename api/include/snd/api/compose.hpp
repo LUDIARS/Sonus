@@ -2,6 +2,8 @@
 #ifndef SND_API_COMPOSE_HPP
 #define SND_API_COMPOSE_HPP
 
+#include <cstdint>
+
 #include "snd/ext/allocator.hpp"
 #include "snd/internal/source_if.hpp"
 
@@ -23,7 +25,9 @@ class SourceKinds {
   SourceKinds(const SourceKinds&) = delete;
   SourceKinds& operator=(const SourceKinds&) = delete;
 
-  bool Init(IAllocator& allocator, io::IoScheduler* io, io::StreamPool* streamPool) noexcept;
+  // maxVoiceChannels: Config.maxVoiceChannels (the PCM rings are sized for it, source/runtime.hpp).
+  bool Init(IAllocator& allocator, io::IoScheduler* io, io::StreamPool* streamPool,
+            std::uint32_t maxVoiceChannels = 8) noexcept;
   void Destroy() noexcept;
   // nullptr before Init.
   const source::SourceKindSet* Kinds() const noexcept;

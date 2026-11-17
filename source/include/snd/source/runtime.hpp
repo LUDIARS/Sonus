@@ -23,18 +23,53 @@
 //     (voiceRingFrames). DecompressCache decodes the whole asset once into the
 //     PCM cache (pcmCacheBytes in pages of pcmCachePageBytes, LRU, pinned while
 //     playing); a full cache falls back to the per-voice ring, and if that has
-//     no decoder either the start is refused (DECODER_POOL_FULL).
+//     no decoder either the start is refused (PCM_CACHE_FULL).
+//     A DecompressCache start inside a part the cache does not hold yet (a start
+//     offset past the head) plays that voice through a per-voice ring to its
+//     end while the cache fills in the background; without a free decoder it
+//     waits for the cache (Priming).
+//   - Work on the audio thread is bounded everywhere: Start (8 voices per
+//     call), the voice's RenderBatch for a seek / loop change (4 per batch) and
+//     Publish (4 streams per block) decode at most the ready amount (a few
+//     blocks) each.
+//   - Seek / SetLoop of data in memory (resident, cache, per-voice ring) take
+//     effect inside the next block without a gap. A loop change keeps the
+//     buffered data when it agrees with the new loop (only what lies past the
+//     point where the loops differ is decoded again). A stream's SetLoop only
+//     swaps the read plan when the data read so far agrees; otherwise it
+//     re-reads from the current position.
 //   - Streams read through io::IoScheduler / StreamChannel directly on the
 //     audio thread (IoScheduler::Post and StreamChannel::Cancel are RT-safe and
 //     must run on the same thread for one slot; core's relayed postIo would
 //     post after a Cancel with the new epoch). SourceServices::postIo is unused.
 //   - Stream underrun (6.3): short fade out, Stream.stallCount + starved;
 //     resume with a short fade in once the ring holds the ready amount again.
-//     Time priority skips the frames that elapsed; sound priority resumes where
-//     it stopped.
+//     Time priority skips the frames that elapsed (the playhead follows the
+//     clock, also while re-seeking ahead); sound priority resumes where it
+//     stopped.
+//   - Stream file header (bank-format.md 6.3): magic, version, codec, channels,
+//     sampleRate, assetId, totalFrames, dataOffset and dataBytes (the size the
+//     codec needs) are checked; a short read inside the data is an IO error.
+//   - Errors after the start (IO, decode) end the voice through `ended`: core
+//     cannot tell them from a normal end (VoiceRenderStatus has no reason; the
+//     game sees SND_END_COMPLETED). Counted in RuntimeStats::streamIoErrors /
+//     decodeErrors. Planned: an end reason in VoiceRenderStatus (contract 1.2).
 //   - Stream table columns (D-45): ringWrite / ringRead ARE the ring positions;
 //     readPos mirrors StreamChannel::ReadPos() (written by the decode job, the
 //     channel's consumer, as the IO side's value).
+//   - Late chunks (D-43, source_if.hpp): Publish (ScheduleBackground) never
+//     writes what RenderBatch reads or writes; changes reach the render side
+//     through atomic requests that the voice's next RenderBatch takes in.
+//
+// Memory of the PCM rings (from the kinds' pools, sized at Create):
+//   streams   maxStreams x maxVoiceChannels rings of
+//             NextPow2(streamTargetAheadMs x rate + 4 blocks) frames x 4 bytes
+//             (defaults 32 x 8 x 16384 x 4 = 16 MiB; stereo projects with
+//             maxVoiceChannels 2: 4 MiB)
+//   per-voice maxDecoders x maxVoiceChannels rings of NextPow2(voiceRingFrames)
+//             frames x 4 bytes (defaults 64 x 8 x 4096 x 4 = 8 MiB; 2 ch: 2 MiB)
+//   plus the PCM cache (pcmCacheBytes) and 8 KiB of decode carry per decode
+//   context (maxDecoders + maxStreams + 64 cache entries).
 //
 // Threads: Init / Destroy / Stats on the owner thread (Stats any thread,
 // approximate). Everything else goes through ISourceKind (source_if.hpp).

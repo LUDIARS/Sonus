@@ -610,6 +610,19 @@ fileBytes     終端
 ヘッダの後は `dataOffset` まで 0 で埋め、データの後もファイル長が `sectorAlign` の倍数になるまで 0 で埋める
 （`STRM.fileBytes` は埋めた後の長さ）。`SEEK.byteOffset` と `PREL` のプリロードはデータ先頭（`dataOffset`）から数える。
 
+ランタイムの検査（段階2、source）: ストリームを鳴らす前にヘッダ（64 バイト）を読み、次のどれかが成り立たなければ IO エラーとして
+そのボイスを終える（データは鳴らさない）。
+
+- 64 バイト読めること、`magic` = `'SNDS'`、`version` = 1
+- `codec`・`channels`・`sampleRate`・`totalFrames`・`assetId` がバンクの `ASST` 行と同じ
+- `dataOffset` が `STRM.dataOffset` と同じ
+- `dataBytes` がコーデックの期待する大きさ: PCM は `totalFrames × フレームの大きさ`、ADPCM は
+  `ceil((preSkip + totalFrames) / framesPerPacket) × blockAlign` に等しい。Opus は同じパケット数 P に対して
+  `3P ≤ dataBytes ≤ P × (2 + ストリーム数 × 1277)`。それ以外のコーデックは 1 以上
+
+データの途中（`dataOffset + dataBytes` より前）で読み出しが短く終わったとき（ファイルが切り詰められている）は、
+データの終端ではなく IO エラーとして扱う。
+
 ### 6.4 標準エフェクトの種別 ID（契約 1.1 で追記）
 
 `EFFX.effectType` は種別名の `snd_hash_id`（D-04）。標準エフェクトの種別は dsp が定める次の 14 種
