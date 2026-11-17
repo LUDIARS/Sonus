@@ -1,6 +1,7 @@
-// Independent tests of core that FAIL ON PURPOSE: defects found while
-// re-checking the stage-2 fixes. One executable per defect (CMake defines
-// SND_INDEP_DEFECT_<key>), so a defect never hides another.
+// Independent tests of core for the defects found while re-checking the
+// stage-2 fixes (fixed in a3dfbb6: the names lost their "Defect_" prefix, the
+// bodies are the original ones). One executable each (CMake defines
+// SND_INDEP_FIXED2_<key>). The comments describe the defect as it was found.
 #include <cmath>
 #include <cstdio>
 #include <thread>
@@ -19,7 +20,7 @@ namespace {
 }
 }  // namespace
 
-#if defined(SND_INDEP_DEFECT_reregister)
+#if defined(SND_INDEP_FIXED2_reregister)
 // sonus.h: order is kept per thread. A thread unregisters while its current
 // arena cannot be published yet (the producer retires, 38e9fc9) and registers
 // again at once: a Play recorded before, a Stop after the re-registration. The
@@ -28,7 +29,7 @@ namespace {
 // Update (recorder.cpp UnregisterThread, active = 2), while the thread's new
 // producer publishes at once (Flush / Unregister); ApplyCommands applies the
 // Stop first (no playback yet: ignored), then the Play.
-SND_TEST(IndepDefect, Defect_core_reregistered_thread_reorders_its_commands) {
+SND_TEST(IndepFixed, core_reregistered_thread_reorders_its_commands) {
   Fx fx;
   fx.Load("b", OneEvent("E", 500.0f));
   fx.Steps(2);
@@ -52,14 +53,14 @@ SND_TEST(IndepDefect, Defect_core_reregistered_thread_reorders_its_commands) {
 }
 #endif
 
-#if defined(SND_INDEP_DEFECT_paused_timed_stop)
+#if defined(SND_INDEP_FIXED2_paused_timed_stop)
 // A playback with a timed stop at X is paused before X (silent). When X comes
 // it must end STOPPED without sounding again; core makes it audible from the
 // start of the block containing X (fading in) and releases it over the short
 // fade from X (peak about half its level). Likely cause: once Stopping, the
 // playback loop takes the "resume from Paused" path (un-pauses the voices,
 // sys_event.cpp) and Render applies the per-sample release from X.
-SND_TEST(IndepDefect, Defect_core_timed_stop_of_paused_playback_sounds) {
+SND_TEST(IndepFixed, core_timed_stop_of_paused_playback_sounds) {
   Fx fx;
   fx.Load("b", OneEvent("E", 500.0f));
   const snd_playback_handle p = fx.sys->Play(HashId("E"), NoEmitter(), nullptr);

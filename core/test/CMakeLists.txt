@@ -37,10 +37,11 @@ snd_indep_core_fixed(core_epoch_ignores_untracked_jobs epoch_untracked)
 snd_indep_core_fixed(core_control_on_held_voice control_held)
 snd_indep_core_fixed(core_language_switch_back_while_old_bank_unloading language_back)
 snd_indep_core_fixed(core_scheduled_start_in_apply_block_never_starts start_in_apply_block)
-# Defects found re-checking the stage-2 fixes: fail on purpose, one executable each.
-function(snd_indep_core_defect name key)
-  snd_add_test(${name} SOURCES indep_core_defects_test.cpp LINK ${_core_test_link})
-  target_compile_definitions(${name} PRIVATE SND_INDEP_DEFECT_${key}=1)
+# Defects found re-checking the stage-2 fixes, now fixed (a3dfbb6): one
+# executable each; names are the former Defect_* names without the prefix.
+function(snd_indep_core_fixed2 name key)
+  snd_add_test(${name} SOURCES indep_core_fixed2_test.cpp LINK ${_core_test_link})
+  target_compile_definitions(${name} PRIVATE SND_INDEP_FIXED2_${key}=1)
 endfunction()
-snd_indep_core_defect(Defect_core_reregistered_thread_reorders_its_commands reregister)
-snd_indep_core_defect(Defect_core_timed_stop_of_paused_playback_sounds paused_timed_stop)
+snd_indep_core_fixed2(core_reregistered_thread_reorders_its_commands reregister)
+snd_indep_core_fixed2(core_timed_stop_of_paused_playback_sounds paused_timed_stop)

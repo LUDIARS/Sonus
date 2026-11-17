@@ -140,7 +140,7 @@ SND_TEST(IndepFix, RetiredNumberIsNotReusedUntilPublished) {
 
 // 3a. A timed stop at X, then a plain Stop before X: it stops now (no wait).
 // 3b. A later SetScheduledStop replaces the earlier one.
-// (3c, a pause before X: Defect_core_timed_stop_of_paused_playback_sounds)
+// (3c, a pause before X: core_timed_stop_of_paused_playback_sounds)
 SND_TEST(IndepFix, TimedStopMeetsPlainStopsPausesAndReplacement) {
   {
     Fx fx;
