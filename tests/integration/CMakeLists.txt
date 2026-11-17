@@ -51,3 +51,11 @@ snd_add_test(integration_opus_pipeline_test
   LINK sonus_buildtool sonus_bank sonus_codec sonus_dsp sonus_io sonus_jobs sonus_platform sonus_base sonus_mocks)
 target_include_directories(integration_opus_pipeline_test PRIVATE ${PROJECT_SOURCE_DIR}/buildtool/test)
 set_tests_properties(integration_opus_pipeline_test PROPERTIES TIMEOUT 600)
+
+# Stage 2, source: project -> buildtool -> bank + stream file -> IoScheduler -> core
+# with the Sample / Stream kinds of the composition root (compose::SourceKinds).
+snd_add_test(integration_source_end_to_end_test
+  SOURCES source_end_to_end_test.cpp
+  LINK sonus sonus_core sonus_buildtool sonus_bank sonus_codec sonus_dsp sonus_io sonus_jobs sonus_platform sonus_base sonus_mocks)
+target_include_directories(integration_source_end_to_end_test PRIVATE ${PROJECT_SOURCE_DIR}/buildtool/test)
+set_tests_properties(integration_source_end_to_end_test PROPERTIES TIMEOUT 600)
