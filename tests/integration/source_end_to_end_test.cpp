@@ -118,7 +118,10 @@ SND_TEST(SourceEndToEnd, ResidentCompressedAndStreamThroughCore) {
     sys->Update();
     sys->RenderBlock(out.data());
     all.insert(all.end(), out.begin(), out.end());
-    std::this_thread::sleep_for(std::chrono::microseconds(500));  // the IO thread and the workers run in between
+    // About real time (a block is 5.3 ms), so that the IO thread and the decode
+    // workers keep up even on a loaded machine (TSan): the analytic checks below
+    // assume no stream underrun.
+    std::this_thread::sleep_for(std::chrono::milliseconds(4));
   };
   const snd_bank_handle bank = sys->LoadBankAsync("Main.sndb");
   const auto until = std::chrono::steady_clock::now() + std::chrono::seconds(20);
