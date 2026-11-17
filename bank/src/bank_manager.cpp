@@ -50,7 +50,7 @@ struct BankManager::Impl {
     bool cancel = false;
     std::uint64_t requestSeq = 0;    // RequestLoad acceptance order (duplicates, D-50)
     bool willCome = false;           // scratch of ComputeWillCome (Pump, mutex held)
-    Id doomed = 0;                   // scratch of Pump: unreachable dependency of this round
+    std::uint32_t doomed = 0;        // scratch of Pump: unreachable dependency index + 1 of this round
     // validation job (job writes prepared/jobResult/jobError; manager reads after jobCounter == 0)
     JobCtx ctx{};
     std::uint32_t jobCounter = 0;
@@ -198,6 +198,21 @@ struct BankManager::Impl {
       }
     }
     return nullptr;
+  }
+  // Dependency resolution (D-50): a Ready / Registered copy with this bankId
+  // AND this content hash, wherever it is; several (same content): the one
+  // requested first. Language is not compared.
+  Slot* FindDependency(const bf::Dependency& dep) noexcept {
+    Slot* best = nullptr;
+    for (std::uint32_t i = 0; i < desc.maxBanks; ++i) {
+      Slot& s = slots[i];
+      if ((s.stage == Stage::Ready || s.stage == Stage::Registered) && s.prepared != nullptr &&
+          s.prepared->bankId == dep.bankId && s.prepared->view.contentHash() == dep.buildHash &&
+          (best == nullptr || s.requestSeq < best->requestSeq)) {
+        best = &s;
+      }
+    }
+    return best;
   }
   const char* LanguageName(Id id) const noexcept {
     for (std::uint32_t i = 0; i < languageCount; ++i) {
@@ -375,20 +390,27 @@ struct BankManager::Impl {
   // those waits end without failing anybody. Result in Slot::willCome.
   // Slots that do not qualify can never register: their dependency will never
   // be registered by any copy. Independent of slot order.
-  bool WillComeFlagged(Id bankId, const Slot* except) const noexcept {
+  bool WillComeFlagged(const bf::Dependency& dep, const Slot* except) const noexcept {
     for (std::uint32_t i = 0; i < desc.maxBanks; ++i) {
       const Slot& p = slots[i];
-      if (&p != except && p.willCome && p.prepared != nullptr && p.prepared->bankId == bankId) return true;
+      // Any copy of the bankId that will still register (its hash is checked when
+      // it is registered: a matching copy may be among them; if none matches the
+      // bank fails once nothing more can come).
+      if (&p != except && p.willCome && p.prepared != nullptr && p.prepared->bankId == dep.bankId) return true;
     }
     return false;
   }
-  // First dependency (bank order) that is not loaded and has no qualifying copy, 0 if none.
-  Id UnreachableDependency(const Slot& p) noexcept {
+  // First dependency (bank order) without a matching (bankId + hash) loaded or
+  // qualifying copy; *index = its position. false if none.
+  bool UnreachableDependency(const Slot& p, std::uint32_t* index) noexcept {
     for (std::uint32_t d = 0; d < p.prepared->dependencyCount; ++d) {
-      const Id dep = p.prepared->view.dependency(d).bankId;
-      if (FindLoaded(dep, 0) == nullptr && !WillComeFlagged(dep, &p)) return dep;
+      const bf::Dependency dep = p.prepared->view.dependency(d);
+      if (FindDependency(dep) == nullptr && !WillComeFlagged(dep, &p)) {
+        *index = d;
+        return true;
+      }
     }
-    return 0;
+    return false;
   }
   void ComputeWillCome() noexcept {
     for (std::uint32_t i = 0; i < desc.maxBanks; ++i) slots[i].willCome = false;
@@ -397,7 +419,8 @@ struct BankManager::Impl {
       for (std::uint32_t i = 0; i < desc.maxBanks; ++i) {
         Slot& p = slots[i];
         if (p.willCome || p.stage != Stage::Validated || p.cancel || p.prepared == nullptr) continue;
-        if (UnreachableDependency(p) == 0) {
+        std::uint32_t unused = 0;
+        if (!UnreachableDependency(p, &unused)) {
           p.willCome = true;
           changed = true;
         }
@@ -714,7 +737,9 @@ void BankManager::Pump() noexcept {
     for (std::uint32_t i = 0; i < impl_->desc.maxBanks; ++i) {
       Impl::Slot& s = impl_->slots[i];
       if (s.stage != Stage::Validated || s.cancel || s.prepared == nullptr || s.willCome) continue;
-      s.doomed = impl_->UnreachableDependency(s);
+      std::uint32_t d = 0;
+      (void)impl_->UnreachableDependency(s, &d);
+      s.doomed = d + 1u;  // dependency index + 1
       any = true;
     }
     if (!any) break;
@@ -722,8 +747,15 @@ void BankManager::Pump() noexcept {
       Impl::Slot& s = impl_->slots[i];
       if (s.stage != Stage::Validated || s.doomed == 0) continue;
       char why[160];
-      std::snprintf(why, sizeof(why), "dependency bank %08x is not loaded", s.doomed);
+      const bf::Dependency dep = s.prepared->view.dependency(s.doomed - 1u);
       s.doomed = 0;
+      if (const Impl::Slot* other = impl_->FindLoaded(dep.bankId, 0); other != nullptr) {
+        std::snprintf(why, sizeof(why), "dependency bank %08x was built as %016llx but %016llx is loaded",
+                      dep.bankId, static_cast<unsigned long long>(dep.buildHash),
+                      static_cast<unsigned long long>(other->prepared->view.contentHash()));
+      } else {
+        std::snprintf(why, sizeof(why), "dependency bank %08x is not loaded", dep.bankId);
+      }
       impl_->Fail(s, SND_ERR_BANK_DEPENDENCY, why);
     }
     while (impl_->PumpLocked()) {
@@ -810,16 +842,10 @@ bool Impl::Decide(Slot& s) noexcept {
   }
   for (std::uint32_t d = 0; d < pb.dependencyCount; ++d) {
     const bf::Dependency dep = pb.view.dependency(d);
-    Slot* target = FindLoaded(dep.bankId, 0);
-    if (target == nullptr) return false;  // maybe still loading: wait (Pump fails it when nothing is)
-    if (target->prepared->view.contentHash() != dep.buildHash) {
-      char why[160];
-      std::snprintf(why, sizeof(why), "dependency bank %08x was built as %016llx but %016llx is loaded",
-                    dep.bankId, static_cast<unsigned long long>(dep.buildHash),
-                    static_cast<unsigned long long>(target->prepared->view.contentHash()));
-      Fail(s, SND_ERR_BANK_DEPENDENCY, why);
-      return true;
-    }
+    // A copy with the bankId AND the build hash (any slot). None yet: wait; Pump
+    // fails the bank once no matching copy can come (a mismatching copy only:
+    // "built as ... but ... is loaded").
+    if (FindDependency(dep) == nullptr) return false;
   }
   if (pb.dspNeed.instanceBytes > 0 && desc.dsp.reserve != nullptr) {
     if (!desc.dsp.reserve(desc.dsp.user, pb.dspNeed)) {
@@ -829,7 +855,7 @@ bool Impl::Decide(Slot& s) noexcept {
     s.dspReserved = true;
   }
   for (std::uint32_t d = 0; d < pb.dependencyCount; ++d) {
-    Slot* target = FindLoaded(pb.view.dependency(d).bankId, 0);
+    Slot* target = FindDependency(pb.view.dependency(d));
     ++target->dependents;
     pb.dependencies[d] = HandleOf(*target);
   }
