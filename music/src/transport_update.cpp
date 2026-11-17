@@ -485,7 +485,10 @@ void MusicSystem::UpdateTransport(const MusicFrame& frame, schema::Tables& t, Fi
     }
     ResState& rs = s.res[r];
     double c = 0.0;
-    if (!FireClock(s, t, d, rs, &c) || c >= static_cast<double>(dueLimit)) {
+    // Transport changes are applied in step 3 only (one that became due through an
+    // earlier change of this block takes effect at the next block start).
+    if (IsTransportAction(SND_MR(Reservation_action)[d]) || !FireClock(s, t, d, rs, &c) ||
+        c >= static_cast<double>(dueLimit)) {
       ++d;
       continue;
     }
