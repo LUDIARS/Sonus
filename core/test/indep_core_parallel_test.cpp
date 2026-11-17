@@ -223,9 +223,14 @@ SND_TEST(IndepParallel, HeldVoiceFadesThenContinues) {
   SND_CHECK_EQ(fx.kind.discont.load(), 0u);
   SND_CHECK_EQ(fx.kind.doubleBlock.load(), 0u);
   // Both counters advance by one frame per frame again.
-  const std::size_t f = fx.Total() - 30;
-  const float d = fx.At(f + 1) - fx.At(f);
-  SND_CHECK_NEAR(d, 8.0f * g * kCenter / 4096.0f, 1e-6f);
+  // (a counter wraps every 4096 frames: allow one odd step; voices that lost a
+  // held block wrap at the same offset modulo 256)
+  std::uint32_t good = 0;
+  for (std::size_t f = fx.Total() - 40; f < fx.Total() - 20; ++f) {
+    const float d = fx.At(f + 1) - fx.At(f);
+    good += std::fabs(d - 8.0f * g * kCenter / 4096.0f) < 1e-6f ? 1u : 0u;
+  }
+  SND_CHECK_MSG(good >= 19u, "%u of 20 steps advance every voice by one frame", good);
 }
 
 // A1-14 (core): workers stall between claiming a chunk number and starting it;
