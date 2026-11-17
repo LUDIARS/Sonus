@@ -22,14 +22,14 @@ namespace {
 // time, which this test spends only in RenderBlock (no other thread is busy).
 // Wall time is not used: a loaded machine (other builds) stretches it.
 // Returns false when the clock is not available.
-inline bool ProcessCpuNs(std::uint64_t* ns) {
+[[maybe_unused]] inline bool ProcessCpuNs(std::uint64_t* ns) {
   timespec ts{};
   if (clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &ts) != 0) return false;
   *ns = static_cast<std::uint64_t>(ts.tv_sec) * 1000000000ull + static_cast<std::uint64_t>(ts.tv_nsec);
   return true;
 }
 // Without a CPU clock: compare only when the machine is not overloaded.
-inline bool MachineCalm() {
+[[maybe_unused]] inline bool MachineCalm() {
   double load[1] = {0.0};
   const long cores = sysconf(_SC_NPROCESSORS_ONLN);
   return getloadavg(load, 1) == 1 && cores > 0 && load[0] < static_cast<double>(cores);
