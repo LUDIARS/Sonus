@@ -71,6 +71,8 @@ struct ApplyResult {
   std::int32_t result;  // snd_result
   std::uint32_t cells;
   std::uint32_t revert;  // 1: it was the revert marker
+  std::uint32_t session = 0;  // session of the Server that recorded it (kFieldSession marker), 0 = unknown
+  std::uint32_t reserved = 0;
 };
 
 // Record ring messages: records of record_format.hpp, plus this end marker.
@@ -114,6 +116,8 @@ class LiveRuntime {
   // Starts / stops the recording at the next block boundary.
   void RequestRecording(bool on) noexcept { recordRequest_.store(on ? 1u : 0u, std::memory_order_release); }
   bool Recording() const noexcept { return recording_.load(std::memory_order_acquire) != 0u; }
+  // A new session number for a Server (never 0, never reused while the runtime lives).
+  std::uint32_t NewSession() noexcept { return nextSession_.fetch_add(1u, std::memory_order_relaxed); }
 
   // --- channels (consumer: the live link thread) ---------------------------------------
   base::SpscRing<LogEntry>& log() noexcept { return log_; }
@@ -182,6 +186,10 @@ class LiveRuntime {
   std::atomic<std::uint32_t> meterEvery_{1};
   std::atomic<std::uint32_t> recordRequest_{0};
   std::atomic<std::uint32_t> recording_{0};
+  std::atomic<std::uint32_t> nextSession_{1};
+  std::uint32_t* producerSession_ = nullptr;  // [max_registered_threads] audio thread: last marker per producer
+  std::uint32_t producerCount_ = 0;
+  std::uint32_t currentProducer_ = 0xFFFFFFFFu;  // producer of the arena being applied
   // drops
   std::atomic<std::uint32_t> dropLog_{0}, dropTiming_{0}, dropStalls_{0}, dropLod_{0}, dropResults_{0},
       dropRecords_{0};

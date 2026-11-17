@@ -89,6 +89,8 @@ struct Server::Impl final : FrameReader::Handler {
   // applied-result bookkeeping
   Pending* pending = nullptr;
   std::uint32_t pendingCap = 0, pendingHead = 0, pendingCount = 0;
+  std::uint32_t session = 0;       // LiveRuntime::NewSession, announced with kFieldSession
+  bool sessionAnnounced = false;
   std::uint32_t revertPending = 0;  // revert marker refused (arena full): retried every loop
   std::uint32_t revertTries = 0;
   std::uint64_t lastSendProgressNs = 0;
@@ -113,7 +115,7 @@ struct Server::Impl final : FrameReader::Handler {
   std::uint32_t bankCount = 0;
 
   // stats
-  Counter controlDropped, revertsLost;
+  Counter controlDropped, revertsLost, staleResults;
   Counter connections, handshakesRejected, timeouts, protocolErrors, framesIn, framesOut, bytesIn, bytesOut,
       commandsRecorded, commandsRefused, profilerSent, profilerDropped, recordBytes, pingsAnswered;
   std::atomic<std::uint32_t> lastRttUs{0};
@@ -276,6 +278,17 @@ struct Server::Impl final : FrameReader::Handler {
     if (track && pendingCount >= pendingCap) {
       commandsRefused.Add();
       return SND_ERR_LIMIT_REACHED;
+    }
+    if (track && !sessionAnnounced) {  // results are matched by session (a new Server on the same runtime)
+      cmd::LiveSetValue m{};
+      m.field = kFieldSession;
+      m.value = session;
+      const snd_result mr = sys->RecordLive(cmd::CommandType::LiveSetValue, &m, sizeof(m));
+      if (mr != SND_OK) {
+        commandsRefused.Add();
+        return mr;
+      }
+      sessionAnnounced = true;
     }
     const snd_result r = sys->RecordLive(type, payload, bytes);
     if (r != SND_OK) {
@@ -561,6 +574,10 @@ struct Server::Impl final : FrameReader::Handler {
     for (;;) {
       if (conn != nullptr && sender.control().Free() < kReplyRoom) return;
       if (!rt->results().TryPop(ar)) return;
+      if (ar.session != session) {  // recorded by an earlier Server on this runtime
+        staleResults.Add();
+        continue;
+      }
       if (pendingCount == 0u) continue;  // results of commands recorded by someone else (none)
       const Pending pd = pending[pendingHead];
       pendingHead = (pendingHead + 1u) % pendingCap;
@@ -730,6 +747,8 @@ struct Server::Impl final : FrameReader::Handler {
   void Run() noexcept {
     platform::SetCurrentThreadName("snd-livelink");
     registered = sys->RegisterThread() == SND_OK;
+    session = rt->NewSession();
+    sessionAnnounced = false;
     if (rt->config().livelink.record_commands != 0u && d.recordSink != nullptr) {
       recMode = RecMode::Sink;
       rt->RequestRecording(true);
@@ -954,6 +973,7 @@ ServerStats Server::Stats() const noexcept {
   s.pingsAnswered = static_cast<std::uint32_t>(im.pingsAnswered.Get());
   s.controlDropped = static_cast<std::uint32_t>(im.controlDropped.Get());
   s.revertsLost = static_cast<std::uint32_t>(im.revertsLost.Get());
+  s.staleResults = static_cast<std::uint32_t>(im.staleResults.Get());
   s.lastRoundTripUs = im.lastRttUs.load(std::memory_order_relaxed);
   return s;
 }

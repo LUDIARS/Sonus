@@ -56,6 +56,7 @@ LiveRuntime::~LiveRuntime() {
       alloc_->Free(chunks_, MemTag::LiveLink);
     }
     alloc_->Free(chunkMemory_, MemTag::LiveLink);
+    alloc_->Free(producerSession_, MemTag::LiveLink);
   }
 }
 
@@ -69,6 +70,10 @@ bool LiveRuntime::Init(const RuntimeDesc& d) noexcept {
   const std::uint32_t bs = config_.block_size != 0u ? config_.block_size : 256u;
   blocksPerSecond_ = config_.sample_rate / bs != 0u ? config_.sample_rate / bs : 1u;
   IAllocator& a = *alloc_;
+  producerCount_ = config_.max_registered_threads != 0u ? config_.max_registered_threads : 1u;
+  producerSession_ = static_cast<std::uint32_t*>(a.Allocate(sizeof(std::uint32_t) * producerCount_, 64, MemTag::LiveLink));
+  if (producerSession_ == nullptr) return false;
+  for (std::uint32_t i = 0; i < producerCount_; ++i) producerSession_[i] = 0u;
   chunkCount_ = d.chunkSlots;
   chunkBytes_ = (d.chunkBytes + 63u) & ~63u;
   if (chunkCount_ != 0u) {
@@ -176,9 +181,14 @@ void LiveRuntime::PushRecord(const void* rec, std::uint32_t bytes) noexcept {
 }
 
 void LiveRuntime::OnCommand(core::System& sys, cmd::CommandType type, const void* payload) noexcept {
-  ApplyResult r{static_cast<std::uint32_t>(type), SND_OK, 0u, 0u};
+  const bool known = currentProducer_ < producerCount_;
+  ApplyResult r{static_cast<std::uint32_t>(type), SND_OK, 0u, 0u, known ? producerSession_[currentProducer_] : 0u, 0u};
   if (type == cmd::CommandType::LiveSetValue) {
     const auto c = Load<cmd::LiveSetValue>(payload);
+    if (c.field == kFieldSession && c.objectId == 0u) {  // the commands that follow belong to this session
+      if (known) producerSession_[currentProducer_] = static_cast<std::uint32_t>(c.value);
+      return;
+    }
     const ApplyOutcome o = applier_.SetValue(sys, c);
     r.result = o.result;
     r.cells = o.cells;
@@ -214,6 +224,7 @@ void LiveRuntime::OnCommand(core::System& sys, cmd::CommandType type, const void
 
 void LiveRuntime::OnArena(const core::LiveArenaView& a) noexcept {
   block_ = a.appliedBlock;
+  currentProducer_ = a.producer;
   if (recording_.load(std::memory_order_relaxed) != 0u && !WriteArenaRecord(records_, a, caps_)) {
     Bump(dropRecords_);
     ++recordDroppedSession_;

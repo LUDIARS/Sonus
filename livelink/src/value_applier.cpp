@@ -142,6 +142,7 @@ std::uint32_t ValueApplier::Generation(std::uint32_t bankSlot) const noexcept {
 
 ApplyOutcome ValueApplier::SetValue(core::System& sys, const cmd::LiveSetValue& c) noexcept {
   if (c.field == kFieldRevertAll) return RevertAll(sys);
+  if (c.field == kFieldSession) return ApplyOutcome{};  // the live link's session marker (runtime)
   std::uint32_t fourcc = 0, column = 0;
   if (edits_ == nullptr || !DecodeField(c.field, &fourcc, &column)) return ApplyOutcome{SND_ERR_INVALID_ARGUMENT, 0};
   LoadBanks(sys);

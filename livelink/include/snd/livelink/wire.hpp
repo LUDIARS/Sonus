@@ -95,6 +95,10 @@ snd_result CheckTableChunk(std::uint32_t fourcc, const std::uint8_t* data, std::
 // bank_format::kChunks << 16) | column id. kFieldRevertAll is the live link's own
 // "put every edited cell back" marker (objectId 0), never sent by a tool.
 inline constexpr std::uint32_t kFieldRevertAll = 0xFFFFFFFFu;
+// The live link's session marker (objectId 0, value = session number): a Server
+// records it before its first tracked command, so that applied results carry the
+// session of the Server that recorded them (LiveRuntime, ApplyResult::session).
+inline constexpr std::uint32_t kFieldSession = 0xFFFFFFFEu;
 std::uint32_t EncodeField(std::uint32_t chunkFourcc, std::uint32_t column) noexcept;  // kFieldRevertAll if unknown
 bool DecodeField(std::uint32_t field, std::uint32_t* chunkFourcc, std::uint32_t* column) noexcept;
 

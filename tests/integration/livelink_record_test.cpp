@@ -112,8 +112,11 @@ SND_TEST(LivelinkRecord, RecordingIsWellFormedAndStartsWithLodAndBankMap) {
     if (it.kind == snd::livelink::RecordKind::Arena) {
       ++arenas;
       snd::cmd::ForEachCommand(it.normal, it.normal + it.sections.normalBytes,
-                               [&](const snd::cmd::CommandHeader& h, const std::uint8_t*) {
-                                 liveEdits += h.type == static_cast<std::uint16_t>(snd::cmd::CommandType::LiveSetValue);
+                               [&](const snd::cmd::CommandHeader& h, const std::uint8_t* p) {
+                                 if (h.type != static_cast<std::uint16_t>(snd::cmd::CommandType::LiveSetValue)) return;
+                                 snd::cmd::LiveSetValue v;
+                                 std::memcpy(&v, p, sizeof(v));
+                                 liveEdits += v.field != ll::kFieldSession ? 1u : 0u;  // not the session marker
                                });
     }
     ++n;

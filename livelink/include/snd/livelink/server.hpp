@@ -85,6 +85,7 @@ struct ServerStats {
   std::uint32_t pingsAnswered = 0;
   std::uint32_t lastRoundTripUs = 0;    // Ping -> Pong
   std::uint32_t controlDropped = 0;     // server pings that did not fit (the tool reads too slowly)
+  std::uint32_t staleResults = 0;       // applied results of an earlier Server's commands (dropped)
   std::uint32_t revertsLost = 0;        // disconnect reverts that could not be recorded (warning)
 };
 
