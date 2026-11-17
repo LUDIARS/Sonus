@@ -132,3 +132,26 @@ SND_TEST(IndepBank, ReleaseWaitsForSourceJobs) {
   SND_CHECK_EQ(fx.sys->GetBankState(h), SND_BANK_STATE_UNLOADED);
   SND_CHECK_EQ(fx.kind.jobsRun.load(), 3u);
 }
+
+// D-50: the same bank (bankId + language) from another path fails with
+// SND_ERR_BANK_ALREADY_LOADED; the first copy stays.
+SND_TEST(IndepBank, SameBankFromAnotherPathIsRefused) {
+  Bank b;
+  b.Event("E", 500.0f);
+  Fx fx;
+  const auto bytes = b.Build("B");
+  const snd_bank_handle h1 = fx.Load("one", bytes);
+  fx.fs.AddFile("two", bytes);
+  const snd_bank_handle h2 = fx.sys->LoadBankAsync("two");
+  fx.Steps(10);
+  SND_CHECK_EQ(fx.sys->GetBankState(h1), SND_BANK_STATE_LOADED);
+  SND_CHECK(fx.sys->GetBankState(h2) != SND_BANK_STATE_LOADED);
+  bool refused = false;
+  for (snd_result r : fx.loads) refused = refused || r == SND_ERR_BANK_ALREADY_LOADED;
+  SND_CHECK(refused);
+  // Same path again: the existing handle.
+  SND_CHECK_EQ(fx.sys->LoadBankAsync("one").value, h1.value);
+  fx.sys->Play(HashId("E"), NoEmitter(), nullptr);
+  fx.Steps(3);
+  SND_CHECK_NEAR(fx.LastMean(), kCenter * 0.5f, 1e-5f);
+}

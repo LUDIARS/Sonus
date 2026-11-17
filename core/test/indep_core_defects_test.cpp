@@ -193,3 +193,53 @@ SND_TEST(IndepDefect, Defect_core_control_on_held_voice) {
                 static_cast<unsigned long long>(fx.kind.controlBusy.load()));
 }
 #endif
+
+#if defined(SND_INDEP_DEFECT_language_back)
+// 10.4: switching the language back while the previous language's bank still
+// waits to be unloaded (a voice of it plays): after SetLanguage(en) new plays
+// must resolve to English again and the English bank must stay; core keeps
+// resolving to Japanese and finally unloads the English bank although English
+// is the current language.
+SND_TEST(IndepDefect, Defect_core_language_switch_back_while_old_bank_unloading) {
+  auto voice = [](const char* lang, float f) {
+    Bank b;
+    b.Event("Line", f);
+    return b.Build("Voice", HashId(lang));
+  };
+  Fx fx;
+  SND_CHECK_EQ(fx.sys->DeclareLanguage("en"), SND_OK);
+  SND_CHECK_EQ(fx.sys->DeclareLanguage("ja"), SND_OK);
+  SND_CHECK_EQ(fx.sys->DeclareLanguage("en"), SND_OK);  // again: no-op
+  fx.fs.AddFile("Voice.ja.sndb", voice("ja", 2000.0f + 256.0f * 200.0f));  // DC 1.0, 200 blocks
+  const snd_bank_handle en = fx.Load("Voice.en.sndb", voice("en", 100.0f));  // DC 0.1 endless
+  SND_REQUIRE_EQ(fx.sys->GetBankState(en), SND_BANK_STATE_LOADED);
+  const snd_playback_handle a = fx.sys->Play(HashId("Line"), NoEmitter(), nullptr);
+  fx.Steps(2);
+  SND_CHECK_EQ(fx.sys->SetLanguage(HashId("ja")), SND_OK);
+  fx.Steps(10);
+  SND_CHECK_NEAR(fx.LastMean(), kCenter * 0.1f, 1e-5f);  // A keeps English
+  const snd_playback_handle b = fx.sys->Play(HashId("Line"), NoEmitter(), nullptr);
+  fx.Steps(3);
+  SND_CHECK_NEAR(fx.LastMean(), kCenter * 1.1f, 1e-5f);  // B is Japanese
+  // (en may show UNLOADING here: it waits until A no longer uses it)
+  // Back to English while both play.
+  SND_CHECK_EQ(fx.sys->SetLanguage(HashId("en")), SND_OK);
+  fx.Steps(10);
+  const snd_playback_handle c = fx.sys->Play(HashId("Line"), NoEmitter(), nullptr);
+  fx.Steps(3);
+  SND_CHECK_NEAR(fx.LastMean(), kCenter * 1.2f, 1e-5f);  // C is English again
+  fx.sys->Stop(a, 0.0f, nullptr);
+  fx.sys->Stop(c, 0.0f, nullptr);
+  fx.Steps(4);
+  SND_CHECK_NEAR(fx.LastMean(), kCenter * 1.0f, 1e-5f);
+  SND_CHECK_EQ(fx.CountEnds(b.value), 0u);
+  fx.Steps(220);
+  SND_CHECK(fx.Ended(b.value, SND_END_COMPLETED));
+  // English is the current language: its bank stays and new plays are English.
+  SND_CHECK_EQ(fx.sys->GetBankState(en), SND_BANK_STATE_LOADED);
+  fx.sys->Play(HashId("Line"), NoEmitter(), nullptr);
+  fx.Steps(3);
+  SND_CHECK_NEAR(fx.LastMean(), kCenter * 0.1f, 1e-5f);
+}
+
+#endif
