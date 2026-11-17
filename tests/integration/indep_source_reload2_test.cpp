@@ -222,7 +222,7 @@ SND_TEST(IndepSourceReload2, RecordStreamFileReplacedBetweenPlays) {
 // load the rebuilt bank and play the stream: it must play the new content.
 // Today the IO scheduler still holds the idle stream file open from the first
 // play and reads the old bytes (the header still matches: same asset).
-SND_TEST(IndepSourceReload2, Defect_source_RebuiltStreamFileIsReadStaleAfterABankReload) {
+SND_TEST(IndepSourceReload2, RebuiltStreamFileIsReadFreshAfterABankReload) {
   auto spec = [](double (*f)(std::uint32_t, std::uint64_t)) {
     AssetSpec a;
     a.name = "s";

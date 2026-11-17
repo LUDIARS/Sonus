@@ -178,7 +178,7 @@ SND_TEST(IndepFix2, SeekSetLoopCompositionInEveryForm) {
 // start (1000); today the per-voice ring and the stream report another
 // playhead (the ring keeps the target 50000 and wraps it arithmetically:
 // 1000 + (50000 + n - 4001) % 3001).
-SND_TEST(IndepFix2, Defect_source_SeekThenLoopEndingBeforeTheTargetMisplacesThePlayhead) {
+SND_TEST(IndepFix2, SeekThenLoopEndingBeforeTheTargetKeepsThePlayhead) {
   std::vector<AssetSpec> as;
   as.push_back(Spec("pm", kN, "pcm", "PC16"));
   as.push_back(Spec("ra", kN, "compressed", "ADPC"));

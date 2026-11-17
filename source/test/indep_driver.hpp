@@ -49,6 +49,7 @@ class IndepDriver {
     std::uint32_t voiceRingFrames = 4096;
     std::uint32_t pcmCachePageBytes = 64u << 10;
     std::uint32_t ringChunks = 4;
+    std::uint32_t maxBanks = 64;
     snd::ICodec* (*findCodec)(void*, std::uint32_t) noexcept = nullptr;
     void* codecCtx = nullptr;
   };
@@ -96,6 +97,7 @@ class IndepDriver {
     rd.allocator = alloc_;
     rd.io = &io;
     rd.streamPool = &pool;
+    rd.maxBanks = o.maxBanks;
     ok_ = ok_ && runtime.Init(rd);
     lim_.maxVoices = o.maxVoices;
     lim_.maxRealVoices = o.maxVoices;
