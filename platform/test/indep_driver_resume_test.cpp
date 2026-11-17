@@ -8,6 +8,8 @@
 // and the device thread posts RESUMED before its next callback (D-63). At that
 // first callback it records the driver's fill against the target.
 #include <atomic>
+#include <cstdio>
+#include <cstdlib>
 #include <cstdint>
 #include <cstring>
 #include <thread>
@@ -74,6 +76,9 @@ class SuspendableDevice final : public PlatformOutputDevice {
   std::uint32_t Channels() const override { return ch_; }
   double OutputLatencySeconds() const override { return 0.01; }
   bool Suspended() const { return suspended_.load(); }
+  void Emit(snd::DeviceEventKind k, std::uint32_t ch, std::uint32_t rate, std::uint32_t period) {
+    PostEvent(k, ch, rate, period);
+  }
   void SuspendNow() {
     suspended_.store(true);
     PostEvent(snd::DeviceEventKind::Suspended, 0, 0, 0);
@@ -308,4 +313,149 @@ SND_TEST(IndepDriverResume, StatsWhileResumingIsRaceFree) {
   SND_CHECK(polls.load() > 0u);
   SND_CHECK_EQ(ev.suspended.load(), 50u);
   SND_CHECK_EQ(ev.resumed.load(), 50u);
+}
+
+namespace {
+// Fails the test run (instead of hanging ctest) if `done` is not set in time.
+class Watchdog {
+ public:
+  Watchdog(const char* what, std::uint64_t ms) : what_(what), ms_(ms), t_([this] { Loop(); }) {}
+  ~Watchdog() {
+    done.store(true);
+    t_.join();
+  }
+  std::atomic<bool> done{false};
+
+ private:
+  void Loop() {
+    const std::uint64_t deadline = MonotonicNanoseconds() + ms_ * 1000000ull;
+    while (!done.load()) {
+      if (MonotonicNanoseconds() > deadline) {
+        std::printf("WATCHDOG: %s did not return within %llu ms (hang)\n", what_, static_cast<unsigned long long>(ms_));
+        std::fflush(stdout);
+        std::_Exit(3);
+      }
+      SleepFor(5000000);
+    }
+  }
+  const char* what_;
+  std::uint64_t ms_;
+  std::thread t_;
+};
+}  // namespace
+
+// Resume times out (slow renderer), the device stays suspended and nothing
+// more is rendered; a second Resume with a fast renderer succeeds.
+SND_TEST(IndepDriverResume, RetryAfterTimeoutSucceeds) {
+  SuspendableDevice dev;
+  Renderer r;
+  Events ev;
+  AudioDriver driver;
+  dev.driver = &driver;
+  AudioDriverDesc d = Desc(r, &ev, 64, 12);  // target 1024: 16 blocks
+  d.prefillTimeoutMs = 40;
+  SND_REQUIRE(driver.Start(dev, snd::DeviceDesc{48000, 2, 256, 0}, d, snd::base::DefaultAllocator()));
+  SND_REQUIRE(WaitUntil([&] { return dev.calls.load() >= 10u; }));
+  r.sleepMs.store(30);  // 16 blocks x 30 ms >> 40 ms
+  dev.burst.store(12);
+  SND_REQUIRE(WaitUntil([&] { return dev.Suspended(); }));
+  SleepFor(400000000ull);
+  const std::uint64_t t0 = MonotonicNanoseconds();
+  SND_CHECK(!driver.Resume());
+  const std::uint64_t ms = (MonotonicNanoseconds() - t0) / 1000000u;
+  SND_CHECK(ms < 40u + 200u);  // timeout + at most the block in progress (30 ms) + slack
+  SND_CHECK(dev.Suspended());  // the device was not restarted
+  const std::uint64_t blocks = r.blocks.load();
+  SleepFor(100000000ull);
+  SND_CHECK_EQ(r.blocks.load(), blocks);  // nothing rendered after the timeout
+  r.sleepMs.store(0);
+  SND_CHECK(driver.Resume());
+  SND_REQUIRE(WaitUntil([&] { return dev.fillAtResume.load() >= 0; }));
+  SND_CHECK(dev.fillAtResume.load() >= dev.targetAtResume.load());
+  SND_CHECK(!dev.Suspended());
+  const std::uint64_t c = dev.calls.load();
+  SND_REQUIRE(WaitUntil([&] { return dev.calls.load() > c + 10u; }));
+  SND_CHECK_EQ(ev.resumed.load(), 1u);
+  driver.Stop();
+}
+
+// CHANGED and LOST from an OS notification thread while Resume waits for the
+// prefill: forwarded, no deadlock, Resume still completes.
+SND_TEST(IndepDriverResume, EventsWhileResumeWaits) {
+  SuspendableDevice dev;
+  Renderer r;
+  Events ev;
+  AudioDriver driver;
+  dev.driver = &driver;
+  AudioDriverDesc d = Desc(r, &ev, 64, 12);
+  d.prefillTimeoutMs = 5000;
+  SND_REQUIRE(driver.Start(dev, snd::DeviceDesc{48000, 2, 256, 0}, d, snd::base::DefaultAllocator()));
+  SND_REQUIRE(WaitUntil([&] { return dev.calls.load() >= 10u; }));
+  r.sleepMs.store(4);
+  dev.burst.store(12);
+  SND_REQUIRE(WaitUntil([&] { return dev.Suspended(); }));
+  SleepFor(200000000ull);
+  std::atomic<bool> stop{false};
+  std::atomic<std::uint32_t> posted{0};
+  std::thread notifier([&] {
+    std::uint32_t i = 0;
+    while (!stop.load()) {
+      if ((i & 1u) == 0u) {
+        dev.Emit(snd::DeviceEventKind::Changed, 2, (i & 2u) != 0u ? 44100u : 48000u, 256u);
+      } else {
+        dev.Emit(snd::DeviceEventKind::Lost, 0, 0, 0);
+      }
+      posted.fetch_add(1);
+      ++i;
+      SleepFor(1000000);
+    }
+  });
+  bool ok = false;
+  {
+    Watchdog wd("Resume with concurrent events", 20000);
+    ok = driver.Resume();
+    wd.done.store(true);
+  }
+  stop.store(true);
+  notifier.join();
+  SND_CHECK(ok);
+  SND_CHECK(posted.load() > 0u);
+  SND_CHECK(driver.Stats().events >= posted.load());
+  r.sleepMs.store(0);
+  const std::uint64_t c = dev.calls.load();
+  SND_CHECK(WaitUntil([&] { return dev.calls.load() > c + 10u; }));
+  driver.Stop();
+}
+
+// Outside the contract (Resume and Stop are owner-thread calls): Stop() from
+// another thread while Resume() waits for a slow prefill. It does not hang
+// (watchdog), but TSan reports data races (AudioDriver::device_ read in
+// Resume vs cleared in Stop; the device's Start after its Stop/Close), so it
+// is a specification question (which thread may call snd_resume /
+// snd_shutdown), not run by default. SND_INDEP_CONTRACT_EDGE=1 runs it.
+SND_TEST(IndepDriverResume, StopFromAnotherThreadWhileResumeWaits) {
+  if (std::getenv("SND_INDEP_CONTRACT_EDGE") == nullptr) {
+    snd::test::Note("skipped (outside the owner-thread contract); set SND_INDEP_CONTRACT_EDGE=1");
+    return;
+  }
+  for (int round = 0; round < 3; ++round) {
+    SuspendableDevice dev;
+    Renderer r;
+    AudioDriver driver;
+    AudioDriverDesc d = Desc(r, nullptr, 64, 12);
+    d.prefillTimeoutMs = 300;
+    SND_REQUIRE(driver.Start(dev, snd::DeviceDesc{48000, 2, 256, 0}, d, snd::base::DefaultAllocator()));
+    SND_REQUIRE(WaitUntil([&] { return dev.calls.load() >= 10u; }));
+    r.sleepMs.store(20);
+    dev.burst.store(12);
+    SND_REQUIRE(WaitUntil([&] { return dev.Suspended(); }));
+    SleepFor(300000000ull);
+    Watchdog wd("Resume racing Stop", 20000);
+    std::thread resumer([&] { (void)driver.Resume(); });
+    SleepFor(static_cast<std::uint64_t>(10 + round * 100) * 1000000ull);  // before / around / after the timeout
+    driver.Stop();
+    resumer.join();
+    wd.done.store(true);
+    SND_CHECK(!driver.Running());
+  }
 }
