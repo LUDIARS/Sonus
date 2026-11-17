@@ -53,7 +53,7 @@ char ReadOnce(snd::io::IoScheduler& io, snd::io::StreamPool& pool, std::uint32_t
 // its first read; the request queue is full, the Post is refused, the source
 // posts again next block. The read must use the file as it is now. Today the
 // refused Post has already taken (and lost) the reopen request.
-SND_TEST(IndepIoReopen, Defect_source_ReopenLostWhenThePostIsRefused) {
+SND_TEST(IndepIoReopen, ReopenKeptWhenThePostIsRefused) {
   snd::IAllocator& al = snd::base::DefaultAllocator();
   snd::mock::MemoryFileSystem fs;
   snd::io::StreamPool pool;

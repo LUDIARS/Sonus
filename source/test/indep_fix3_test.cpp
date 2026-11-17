@@ -102,7 +102,7 @@ SND_TEST(IndepFix3, MoreSeekSetLoopOrders) {
     SND_REQUIRE(ref.ok);
     const bool stream = a.loadForm == "stream";
     for (const Case& c : cases) {
-      // Streams with a one-frame loop are covered by Defect_source_ShortStreamLoopsRenderNothingOrWrongFrames.
+      // Streams with a one-frame loop are covered by ShortStreamLoopsPlayExactly.
       if (stream && std::string(c.what).find("one-frame") != std::string::npos) continue;
       if (stream && std::string(c.what).find("one frame ending") != std::string::npos) continue;
       IndepDriver d(b, IndepDriver::Opt{});
@@ -161,7 +161,7 @@ TwoBuilds MakeTwo(const char* tag, const char* extra = "") {
 // before the next block). Today the Seek's Cancel makes the header read posted
 // by Start stale; the IO thread drops it before resolving the file, so the
 // reopen flag it carried is lost and the next reads use the old open file.
-SND_TEST(IndepFix3, Defect_source_StartAndSeekInOneBlockReadTheOldStreamFile) {
+SND_TEST(IndepFix3, StartAndSeekInOneBlockReadTheRebuiltStreamFile) {
   TwoBuilds t = MakeTwo("f3reopen", "\"preloadMs\": 0");
   SND_REQUIRE(t.ok);
   // 0: start; 1: start + seek; 2: start + seek and Publish before the IO thread runs (it is
@@ -200,7 +200,7 @@ SND_TEST(IndepFix3, Defect_source_StartAndSeekInOneBlockReadTheOldStreamFile) {
 // content (the expectation given for decision B: "the earlier user keeps the
 // old file until it is done"). Today the earlier playback's later reads open
 // the file again and switch to the new bytes mid-play.
-SND_TEST(IndepFix3, Defect_source_EarlierPlaybackSwitchesToTheRebuiltFile) {
+SND_TEST(IndepFix3, EarlierPlaybackKeepsItsFile) {
   TwoBuilds t = MakeTwo("f3overlap", "\"preloadMs\": 0");  // no preload: the bank (not rebuilt here) holds none
   SND_REQUIRE(t.ok);
   IndepDriver d(t.b1, IndepDriver::Opt{});
@@ -322,7 +322,7 @@ SND_TEST(IndepFix3, UnregistrationCountersBeyond256Slots) {
 // decision 4, the voice goes to the loop start): every length plays, exactly.
 // Today a stream loop of up to 16 frames renders nothing (no frame, not
 // ended) and a loop of 100 frames plays wrong frames.
-SND_TEST(IndepFix3, Defect_source_ShortStreamLoopsRenderNothingOrWrongFrames) {
+SND_TEST(IndepFix3, ShortStreamLoopsPlayExactly) {
   std::vector<AssetSpec> as;
   as.push_back(Spec("sp", 96000, "stream", "PC16"));
   as.push_back(Spec("sa", 96000, "stream", "ADPC"));
