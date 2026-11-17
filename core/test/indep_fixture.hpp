@@ -21,6 +21,7 @@
 //   doubleBlock  the same source slot rendered twice for the same block
 //   releasedBusy Release of a source slot that a chunk is rendering
 //   deadRender   RenderBatch of a released (or never started) source slot
+//   controlBusy  Control (pause, virtualise, ...) of a source slot that a chunk is rendering
 // A test can slow down RenderBatch on RT workers (not on the audio thread)
 // to produce late chunks.
 #ifndef SND_CORE_TEST_INDEP_FIXTURE_HPP
@@ -128,7 +129,13 @@ class IndepKind final : public snd::source::ISourceKind {
       releases.fetch_add(1);
     }
   }
-  void Control(const snd::source::SourceControlOp*, std::uint32_t n) noexcept override { controls.fetch_add(n); }
+  // A Control (pause / virtualise ...) changes the source instance: never while a chunk renders it (D-43).
+  void Control(const snd::source::SourceControlOp* ops, std::uint32_t n) noexcept override {
+    controls.fetch_add(n);
+    for (std::uint32_t i = 0; i < n; ++i) {
+      if (ops[i].sourceSlot < n_ && inUseSrc_[ops[i].sourceSlot].load(std::memory_order_acquire) != 0u) controlBusy.fetch_add(1);
+    }
+  }
   void QueryReady(const SlotIndex*, std::uint32_t n, std::uint8_t* ready) const noexcept override {
     for (std::uint32_t i = 0; i < n; ++i) ready[i] = 1;
   }
@@ -220,11 +227,12 @@ class IndepKind final : public snd::source::ISourceKind {
   std::uint64_t FramesRendered(SlotIndex s) const { return framesRendered_[s].load(); }
   std::uint64_t ViolationSum() const {
     return overlap.load() + discont.load() + doubleBlock.load() + releasedBusy.load() + deadRender.load() +
-           liveStart.load();
+           liveStart.load() + controlBusy.load();
   }
 
   std::atomic<std::uint64_t> batches{0}, starts{0}, releases{0}, controls{0}, advances{0};
-  std::atomic<std::uint64_t> overlap{0}, discont{0}, doubleBlock{0}, releasedBusy{0}, deadRender{0}, liveStart{0};
+  std::atomic<std::uint64_t> overlap{0}, discont{0}, doubleBlock{0}, releasedBusy{0}, deadRender{0}, liveStart{0},
+      controlBusy{0};
   std::atomic<std::uint64_t> slowNs{0};
   std::atomic<std::uint64_t> slowBlockMask{0};  // 0: every block, else blocks with index % mask == 0
   std::atomic<std::uint32_t> postJobs{0};

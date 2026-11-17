@@ -3,6 +3,7 @@
 // (CMake defines SND_INDEP_DEFECT_<name>), so a defect never hides others.
 // Do not "fix" the expectations; fix core.
 #include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -144,5 +145,51 @@ SND_TEST(IndepDefect, Defect_core_epoch_ignores_untracked_jobs) {
                 fx.sys->GetBankState(h));
   fx.jobs.RunAll();
   fx.Steps(5);
+}
+#endif
+
+#if defined(SND_INDEP_DEFECT_control_held)
+// D-43 (3) / source_if.hpp: while a voice is held "no system reads or writes
+// its render state" (the source instance included). Pausing a playback whose
+// voice is held sends ISourceKind::Control(Pause) for that voice while the late
+// chunk may still be inside RenderBatch for the same source slot
+// (sys_event.cpp SetVoicesPaused does not skip held voices).
+SND_TEST(IndepDefect, Defect_core_control_on_held_voice) {
+  snd_config cfg = Config();
+  cfg.max_real_voices = 8;
+  cfg.jobs.realtime_workers = 1;
+  cfg.jobs.voices_per_chunk = 1;
+  cfg.tuning.rt_spin_microseconds = 50;
+  Bank b;
+  std::vector<snd_playback_handle> ps;
+  for (int i = 0; i < 8; ++i) {
+    char n[8];
+    std::snprintf(n, sizeof(n), "C%d", i);
+    b.Event(n, 1000.0f);
+  }
+  Fx fx(cfg);
+  fx.Load("p", b.Build("P"));
+  for (int i = 0; i < 8; ++i) {
+    char n[8];
+    std::snprintf(n, sizeof(n), "C%d", i);
+    ps.push_back(fx.sys->Play(HashId(n), NoEmitter(), nullptr));
+  }
+  fx.Steps(4);
+  std::uint32_t lateSeen = 0;
+  for (int tries = 0; tries < 20 && fx.kind.controlBusy.load() == 0u; ++tries) {
+    fx.kind.slowNs.store(30000000);  // 30 ms: the worker's chunk stays in RenderBatch
+    fx.Step();
+    fx.kind.slowNs.store(0);
+    if (fx.sys->LastBlock().lateChunks == 0u) continue;
+    ++lateSeen;
+    for (const snd_playback_handle& p : ps) fx.sys->Pause(p, 0.0f);
+    fx.Steps(3);  // unpaced: well inside the 30 ms
+    for (const snd_playback_handle& p : ps) fx.sys->ResumePlayback(p, 0.0f);
+    std::this_thread::sleep_for(std::chrono::milliseconds(40));
+    fx.Steps(4);
+  }
+  SND_REQUIRE(lateSeen > 0u);
+  SND_CHECK_MSG(fx.kind.controlBusy.load() == 0u, "Control on a source slot inside a late RenderBatch: %llu",
+                static_cast<unsigned long long>(fx.kind.controlBusy.load()));
 }
 #endif
