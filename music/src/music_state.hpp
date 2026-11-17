@@ -30,6 +30,10 @@ inline constexpr std::uint8_t kNoLate = 0xFFu;
 inline constexpr std::uint8_t kLateTransportGone = 0xFEu;
 // How far ahead of a segment end the playlist picks the next segment.
 inline constexpr double kPlanAheadSeconds = 0.5;
+// The time line holds the segment tempo points up to this far ahead and is topped up
+// every block (D-71: any number of points per segment; at most 64 on the map at once).
+inline constexpr double kTempoHorizonSeconds = 4.0;
+inline constexpr std::uint32_t kMaxHeldNotes = 128;
 
 enum class Role : std::uint8_t { Free = 0, Main = 1, Bridge = 2 };
 enum class InstPhase : std::uint8_t { Planned = 0, Issued = 1 };
@@ -56,6 +60,8 @@ struct Instance {
   std::uint64_t voiceFrame;  // material frame at voiceClock
   ClockSample markerCursor;  // markers before this clock were notified
   double ratio;              // output samples per material frame
+  double startBar;           // transport bar position of its bar 0
+  std::uint32_t pointNext;   // next MTMP point (index in the segment) still to put on the map
   MusicalTicks EndTick() const noexcept { return startTick + lenTicks; }
 };
 
@@ -128,7 +134,9 @@ struct MusicPb {
   ClockSample stingerClock[kMaxPendingStingers];  // fire clock of each (sample accurate start)
   std::uint32_t stingerCount;
   std::uint8_t seekPending;  // the owned transport was seeked (UpdateTransport -> music logic)
+  std::uint8_t stallHold;    // a sound-priority stall is in progress: beats / markers are held (D-78)
   ClockSample seekClock;
+  snd_musical_time seekTarget;
   std::uint32_t serial;
   std::uint32_t transitions;
   std::uint32_t deferrals;
@@ -166,6 +174,8 @@ struct State {
   ResState* res = nullptr;         // [maxReservations]
   std::uint32_t* due = nullptr;    // [maxReservations] scratch
   notify::EventRecord* notes = nullptr;  // [kNotifyCapacity]
+  notify::EventRecord held[kMaxHeldNotes];  // beats / markers held during stalls (D-78)
+  std::uint32_t heldCount = 0;
   std::uint32_t noteCount = 0;
   std::uint32_t dropped = 0;
   MusicTransitionRecord log[kLogCapacity];
@@ -221,6 +231,8 @@ void StartMusic(State& s, const BankTables& tb, MusicPb& pb, ClockSample clock) 
 std::int32_t PlanInstance(State& s, const BankTables& tb, MusicPb& pb, Timeline& tl, Role role, std::uint32_t seg,
                           std::uint32_t stateRow, MusicalTicks startTick, MusicalTicks anchorTick,
                           float fadeIn) noexcept;
+// Puts the segment's tempo points of `in` on the map up to `horizon` (transport tick).
+void TopUpPoints(const BankTables& tb, const State& s, Instance& in, Timeline& tl, double horizon) noexcept;
 void LogTransition(State& s, const MusicPb& pb, Id from, Id to, double tick, double clock, std::uint8_t late,
                    std::uint32_t deferrals) noexcept;
 

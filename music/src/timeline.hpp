@@ -63,6 +63,9 @@ struct Timeline {
   // Inserts a point (bar position derived from the previous point). Equal
   // tempo and signature to the point in effect: nothing is added. false when full.
   bool AddPoint(MusicalTicks tick, double bpm, std::uint16_t beatsPerBar, std::uint16_t beatUnit) noexcept;
+  // Replaces the map from `tick` on with one point whose bar position is `bar` (a seek
+  // rebuilds the current segment's map from its data, D-71).
+  void SetPointAt(MusicalTicks tick, double bar, double bpm, std::uint16_t beatsPerBar, std::uint16_t beatUnit) noexcept;
   // Removes points with tick >= `tick` (the first point always stays).
   void TruncateFrom(MusicalTicks tick) noexcept;
 

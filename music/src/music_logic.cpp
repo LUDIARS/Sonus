@@ -351,10 +351,11 @@ void UpdateStemGains(State& s, const schema::Tables& t, MusicPb& pb, SlotIndex e
 
 // 8.4 "sound priority": the transport waits for the sync group's starved data.
 void StallCheck(State& s, const schema::Tables& t, MusicPb& pb, Timeline& tl) noexcept {
-  if (pb.soundPriority == 0u) return;
+  if (pb.soundPriority == 0u && pb.stallHold == 0u) return;
   const ClockSample prevStart = s.blockStart >= s.blockFrames ? s.blockStart - s.blockFrames : 0u;
   std::uint32_t deficit = 0;
   for (const LocalVoice& lv : pb.voice) {
+    if (pb.soundPriority == 0u) break;
     if (!VoiceAlive(t, pb, lv) || lv.createdBlock >= s.block) continue;
     const std::uint32_t d = base::rows::DenseOf(t.Voice.rows, lv.slot);
     const VoiceRenderStatus st = SND_MR(Voice_renderStatus)[d];
@@ -367,17 +368,51 @@ void StallCheck(State& s, const schema::Tables& t, MusicPb& pb, Timeline& tl) no
     const std::uint32_t miss = expected > st.framesRendered ? expected - st.framesRendered : 0u;
     if (miss > deficit) deficit = miss;
   }
-  if (deficit == 0u) return;
-  tl.Delay(deficit);
-  // Every beat is announced once (8.4): beats this block's UpdateTransport already queued
-  // (not yet collected by Publish) move with the time line, and the beat cursor follows it
-  // so they are not found again. Beats published in earlier blocks keep their clock (the
-  // stall is seen one block late, D-78).
-  tl.beatCursor += deficit;
   const std::uint64_t th = HandleRef{pb.playback | SND_TRANSPORT_PLAYBACK_BIT, pb.generation}.Value();
-  for (std::uint32_t i = 0; i < s.noteCount; ++i) {
+  const std::uint64_t ph = HandleRef{pb.playback, pb.generation}.Value();
+  if (deficit == 0u) {
+    // The last block rendered completely: the stall is over, the held beats / markers
+    // now carry their final clocks.
+    if (pb.stallHold != 0u) {
+      pb.stallHold = 0;
+      std::uint32_t kept = 0;
+      for (std::uint32_t i = 0; i < s.heldCount; ++i) {
+        const notify::EventRecord& n = s.held[i];
+        if (n.object == th || n.object == ph) {
+          if (s.noteCount < kNotifyCapacity) {
+            s.notes[s.noteCount++] = n;
+          } else {
+            ++s.dropped;
+          }
+        } else {
+          s.held[kept++] = n;
+        }
+      }
+      s.heldCount = kept;
+    }
+    return;
+  }
+  tl.Delay(deficit);
+  // D-78: every beat / marker is announced once, at most one block early. While the
+  // stall lasts (it is seen one block late), the beats and markers not yet delivered are
+  // held and move with the time line after every starved block; the cursors follow, so
+  // nothing is found twice. They go out once a block rendered completely.
+  pb.stallHold = 1;
+  tl.beatCursor += deficit;
+  for (std::uint32_t i = 0; i < s.heldCount; ++i) {
+    if (s.held[i].object == th || s.held[i].object == ph) s.held[i].clock += deficit;
+  }
+  for (std::uint32_t i = 0; i < s.noteCount;) {
     notify::EventRecord& n = s.notes[i];
-    if (n.type == static_cast<std::uint16_t>(notify::EventType::Beat) && n.object == th) n.clock += deficit;
+    const bool beat = n.type == static_cast<std::uint16_t>(notify::EventType::Beat) && n.object == th;
+    const bool marker = n.type == static_cast<std::uint16_t>(notify::EventType::Marker) && n.object == ph;
+    if ((beat || marker) && s.heldCount < kMaxHeldNotes) {
+      n.clock += deficit;
+      s.held[s.heldCount++] = n;
+      s.notes[i] = s.notes[--s.noteCount];  // order inside the ring does not matter (clocks do)
+      continue;
+    }
+    ++i;
   }
   for (Instance& in : pb.inst) {
     if (in.role == Role::Free || in.phase != InstPhase::Issued) continue;
@@ -412,6 +447,18 @@ void IssueStingers(State& s, MusicPb& pb, MusicVoiceRequestList& out) noexcept {
 namespace detail {
 
 void ReleasePb(State& s, MusicPb& pb) noexcept {
+  // Held notices of this playback are delivered as they are.
+  const std::uint64_t th = HandleRef{pb.playback | SND_TRANSPORT_PLAYBACK_BIT, pb.generation}.Value();
+  const std::uint64_t ph = HandleRef{pb.playback, pb.generation}.Value();
+  std::uint32_t kept = 0;
+  for (std::uint32_t i = 0; i < s.heldCount; ++i) {
+    if ((s.held[i].object == th || s.held[i].object == ph) && s.noteCount < kNotifyCapacity) {
+      s.notes[s.noteCount++] = s.held[i];
+    } else if (s.held[i].object != th && s.held[i].object != ph) {
+      s.held[kept++] = s.held[i];
+    }
+  }
+  s.heldCount = kept;
   if (pb.playback < s.limits.maxPlaybacks) s.pbOfSlot[pb.playback] = kNoPb;
   pb.used = 0;
 }
@@ -482,6 +529,24 @@ void UpdatePlayback(State& s, const schema::Tables& t, MusicPb& pb, MusicVoiceRe
     }
   }
   ProcessInstances(s, t, pb, *tl, emitter, out);
+  if (pb.stallHold != 0u) {  // markers found this block wait for the end of the stall too
+    const std::uint64_t ph = HandleRef{pb.playback, pb.generation}.Value();
+    for (std::uint32_t i = 0; i < s.noteCount;) {
+      const notify::EventRecord& n = s.notes[i];
+      if (n.type == static_cast<std::uint16_t>(notify::EventType::Marker) && n.object == ph && s.heldCount < kMaxHeldNotes) {
+        s.held[s.heldCount++] = n;
+        s.notes[i] = s.notes[--s.noteCount];
+        continue;
+      }
+      ++i;
+    }
+  }
+  if (tl->Playing()) {  // D-71: segment tempo points come onto the map ahead of the position
+    const double horizon = tl->TickAtClock(static_cast<double>(s.BlockEnd()) + kTempoHorizonSeconds * s.rate);
+    for (Instance& in : pb.inst) {
+      if (in.role != Role::Free && in.stopPending == 0u) TopUpPoints(s.tb, s, in, *tl, horizon);
+    }
+  }
   if (pb.stopping == 0u) {
     UpdateStemGains(s, t, pb, emitter, out);
     IssueStingers(s, pb, out);

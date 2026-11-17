@@ -137,21 +137,48 @@ std::int32_t PlanInstance(State& s, const BankTables& tb, MusicPb& pb, Timeline&
   in.fadeIn = fadeIn;
   in.ratio = si.ratio;
   for (std::uint8_t& v : in.voices) v = 0xFFu;
-  // Tempo points: the segment's tempo from the anchor on (8.1: the transport follows the music).
+  // Tempo points: the segment's tempo from the anchor on (8.1: the transport follows the
+  // music); later points of the segment come lazily (TopUpPoints, D-71).
   const double local0 = static_cast<double>(in.anchorTick - startTick);
   double bpm = 120.0;
   std::uint16_t bpb = 4, unit = 4;
   SegmentTempoAt(tb, si, local0, &bpm, &bpb, &unit);
   tl.AddPoint(in.anchorTick, bpm, bpb, unit);
-  for (std::uint32_t k = 0; k < si.tempoCount; ++k) {
-    const std::uint32_t r = si.tempoFirst + k;
-    const MusicalTicks pt = tb.mtmp.I64(bf::col::MTMP_tick, r);
-    if (static_cast<double>(pt) <= local0 || pt >= si.lenTicks) continue;
-    tl.AddPoint(startTick + pt, tb.mtmp.F32(bf::col::MTMP_bpm, r),
-                static_cast<std::uint16_t>(tb.mtmp.U32(bf::col::MTMP_beatsPerBar, r)),
-                static_cast<std::uint16_t>(tb.mtmp.U32(bf::col::MTMP_beatUnit, r)));
+  in.pointNext = 0;
+  while (in.pointNext < si.tempoCount &&
+         static_cast<double>(tb.mtmp.I64(bf::col::MTMP_tick, si.tempoFirst + in.pointNext)) <= local0) {
+    ++in.pointNext;
   }
+  // Bar position of its bar 0 (from the anchor, whose position the map knows).
+  std::uint32_t lb = 0;
+  double rest = 0.0;
+  SegmentBarOf(tb, si, local0, &lb, &rest);
+  in.startBar = tl.BarPosition(static_cast<double>(in.anchorTick)) - static_cast<double>(lb) -
+                rest / (4.0 * kTicksPerQuarter / unit * bpb);
+  double horizon = static_cast<double>(in.anchorTick);
+  if (tl.Playing()) horizon = tl.TickAtClock(static_cast<double>(s.BlockEnd()) + kTempoHorizonSeconds * s.rate);
+  TopUpPoints(tb, s, in, tl, horizon);
   return i;
+}
+
+void TopUpPoints(const BankTables& tb, const State& s, Instance& in, Timeline& tl, double horizon) noexcept {
+  SegmentInfo si;
+  if (!DescribeSegment(tb, in.seg, s.rate, &si)) return;
+  while (in.pointNext < si.tempoCount) {
+    const std::uint32_t r = si.tempoFirst + in.pointNext;
+    const MusicalTicks pt = tb.mtmp.I64(bf::col::MTMP_tick, r);
+    if (pt >= si.lenTicks) {
+      in.pointNext = si.tempoCount;
+      break;
+    }
+    if (static_cast<double>(in.startTick + pt) > horizon) break;
+    if (!tl.AddPoint(in.startTick + pt, tb.mtmp.F32(bf::col::MTMP_bpm, r),
+                     static_cast<std::uint16_t>(tb.mtmp.U32(bf::col::MTMP_beatsPerBar, r)),
+                     static_cast<std::uint16_t>(tb.mtmp.U32(bf::col::MTMP_beatUnit, r)))) {
+      break;  // map full ahead of the position: next block
+    }
+    ++in.pointNext;
+  }
 }
 
 void StartMusic(State& s, const BankTables& tb, MusicPb& pb, ClockSample clock) noexcept {
@@ -391,6 +418,7 @@ void ExecuteTransition(State& s, const BankTables& tb, MusicPb& pb, Timeline& tl
 
 void Relocate(State& s, const BankTables& tb, MusicPb& pb, Timeline& tl) noexcept {
   const double now = tl.TickAtClock(static_cast<double>(pb.seekClock));
+  const snd_musical_time m = pb.seekTarget;
   // The segment that was playing (the latest main one).
   std::int32_t ref = -1;
   for (std::uint32_t i = 0; i < kMaxInstances; ++i) {
@@ -401,9 +429,19 @@ void Relocate(State& s, const BankTables& tb, MusicPb& pb, Timeline& tl) noexcep
   if (ref < 0) return;
   const std::uint32_t seg = pb.inst[ref].seg;
   const std::uint32_t stateRow = pb.inst[ref].stateRow;
-  const double len = static_cast<double>(pb.inst[ref].lenTicks);
-  double o = std::fmod(now - static_cast<double>(pb.inst[ref].startTick), len);
-  if (o < 0.0) o += len;
+  SegmentInfo si;
+  if (!DescribeSegment(tb, seg, s.rate, &si)) return;
+  // D-75 / D-71: the target is placed inside the segment from the segment's own data
+  // (its bar 0 is at bar position startBar; bars counted modulo its length), so tempo
+  // points the map has dropped do not matter.
+  const std::int64_t bars = si.bars == 0u ? 1 : static_cast<std::int64_t>(si.bars);
+  std::int64_t lb = static_cast<std::int64_t>(std::floor(static_cast<double>(m.bar) - pb.inst[ref].startBar + 1e-6));
+  lb = ((lb % bars) + bars) % bars;
+  const double barTick = SegmentBarTick(tb, si, static_cast<std::uint32_t>(lb));
+  double sbpm = 120.0;
+  std::uint16_t sbpb = 4, sunit = 4;
+  SegmentTempoAt(tb, si, barTick, &sbpm, &sbpb, &sunit);
+  const double o = barTick + static_cast<double>(m.beat) * (4.0 * kTicksPerQuarter / sunit) + static_cast<double>(m.tick);
   for (Instance& in : pb.inst) {
     if (in.role == Role::Free) continue;
     if (in.phase == InstPhase::Planned) {
@@ -419,10 +457,32 @@ void Relocate(State& s, const BankTables& tb, MusicPb& pb, Timeline& tl) noexcep
     }
   }
   const MusicalTicks nowT = static_cast<MusicalTicks>(std::llround(now));
-  tl.TruncateFrom(nowT);
-  pb.head = PlanInstance(s, tb, pb, tl, Role::Main, seg, stateRow, nowT - static_cast<MusicalTicks>(std::llround(o)), nowT,
-                         0.0f);
+  const MusicalTicks start = nowT - static_cast<MusicalTicks>(std::llround(o));
+  // Rebuild the map from the segment's bar 0: its bar position is the target bar minus
+  // the bars into the segment; later points come from the segment data.
+  double bpm0 = 120.0;
+  std::uint16_t bpb0 = 4, unit0 = 4;
+  SegmentTempoAt(tb, si, 0.0, &bpm0, &bpb0, &unit0);
+  tl.SetPointAt(start, static_cast<double>(m.bar - lb), bpm0, bpb0, unit0);
+  for (std::uint32_t k = 0; k < si.tempoCount; ++k) {  // points between bar 0 and the target
+    const std::uint32_t r = si.tempoFirst + k;
+    const MusicalTicks pt = tb.mtmp.I64(bf::col::MTMP_tick, r);
+    if (pt <= 0 || static_cast<double>(pt) > o) continue;
+    tl.AddPoint(start + pt, tb.mtmp.F32(bf::col::MTMP_bpm, r),
+                static_cast<std::uint16_t>(tb.mtmp.U32(bf::col::MTMP_beatsPerBar, r)),
+                static_cast<std::uint16_t>(tb.mtmp.U32(bf::col::MTMP_beatUnit, r)));
+  }
+  pb.head = PlanInstance(s, tb, pb, tl, Role::Main, seg, stateRow, start, nowT, 0.0f);
   if (pb.phase == Phase::Transitioning) pb.phase = Phase::Idle;
+  // Beats already queued from the seek clock on were numbered on the old map.
+  const std::uint64_t th = HandleRef{pb.playback | SND_TRANSPORT_PLAYBACK_BIT, pb.generation}.Value();
+  for (std::uint32_t i = 0; i < s.noteCount; ++i) {
+    notify::EventRecord& n = s.notes[i];
+    if (n.type != static_cast<std::uint16_t>(notify::EventType::Beat) || n.object != th || n.clock < pb.seekClock) continue;
+    const snd_musical_time b = tl.Musical(tl.TickAtClock(static_cast<double>(n.clock)));
+    n.a = static_cast<std::uint32_t>(b.bar);
+    n.b = static_cast<std::uint32_t>(b.beat);
+  }
 }
 
 }  // namespace snd::music::detail

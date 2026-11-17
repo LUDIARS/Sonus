@@ -444,3 +444,52 @@ SND_TEST(MusicSystem, StingerInputStartsOnItsFireClock) {
   SND_REQUIRE(inj->fired != 0u);
   SND_CHECK_EQ(at, inj->fired);
 }
+
+SND_TEST(MusicSystem, SeekBackAfterMoreTempoPointsThanTheMapHolds) {
+  // D-71: a 40-bar segment with a tempo point on every bar (480 / 960 BPM alternately:
+  // bars of 24000 / 12000 samples), played three times: about 90 points have passed
+  // (the map holds 64) when the transport is seeked back to bar 2 beat 1. The segment is
+  // re-placed from its own data: frame 24000 + 12000 + 6000, announced as bar 2 beat 1,
+  // and the beats go on at bar 2's tempo.
+  MusicProject p("many-points");
+  std::string tempo;
+  for (int k = 0; k < 40; ++k) {
+    tempo += (k == 0 ? "" : ", ") + std::string("{\"tick\": ") + std::to_string(3840 * k) +
+             ", \"bpm\": " + ((k % 2) == 0 ? "480" : "960") + "}";
+  }
+  p.Asset("many", Material(20 * 24000 + 20 * 12000, 0.2f));
+  p.Segment("Many", "many", 40, "\"tempo\": [" + tempo + "]");
+  p.Playlist("PL", "{\"segment\": \"Many\"}", "\"loopCount\": 3");
+  p.MusicEvent("Music", kOneState);
+  const std::vector<std::uint8_t> bank = BuildOne(p);
+  SND_REQUIRE(!bank.empty());
+  Rig r;
+  SND_REQUIRE(r.Load(bank));
+  const std::uint64_t s0 = r.Clock();
+  const snd_playback_handle m = r.sys->Play(HashId("Music"), snd_emitter_handle{0}, nullptr);
+  constexpr std::uint64_t kLoop = 20 * 24000 + 20 * 12000;
+  r.RunTo(s0 + 2 * kLoop + 50000);
+  {
+    const std::vector<StartLog> st = r.kind.Starts();
+    SND_REQUIRE_EQ(st.size(), std::size_t{3});
+    SND_CHECK_EQ(st[1].clock, s0 + kLoop);
+    SND_CHECK_EQ(st[2].clock, s0 + 2 * kLoop);
+  }
+  const std::uint64_t c = r.Clock();
+  const snd_musical_time to{2, 1, 0};
+  r.sys->SeekTransport(OwnedTransport(m), &to, nullptr);
+  r.RunTo(c + 20000);
+  r.sys->Update();
+  const std::vector<StartLog> st = r.kind.Starts();
+  SND_REQUIRE_EQ(st.size(), std::size_t{4});
+  SND_CHECK_EQ(st[3].clock, c);
+  SND_CHECK_EQ(st[3].frame, 24000u + 12000u + 6000u);
+  bool atSeek = false, next = false;
+  for (const Beat& b : r.ev.beats) {
+    if (b.transport != OwnedTransport(m).value) continue;
+    if (b.clock == c) atSeek = b.bar == 2 && b.beat == 1;
+    if (b.clock == c + 6000) next = b.bar == 2 && b.beat == 2;
+  }
+  SND_CHECK(atSeek);
+  SND_CHECK(next);
+}

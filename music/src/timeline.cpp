@@ -55,6 +55,7 @@ bool Timeline::AddPoint(MusicalTicks tick, double bpm, std::uint16_t beatsPerBar
   const double t = static_cast<double>(tick);
   const std::uint32_t p = PointAt(t);
   const TempoPoint& prev = points[p];
+  std::uint32_t changed = p;
   if (prev.tick == tick) {  // replace in place
     points[p].bpm = bpm;
     points[p].beatsPerBar = beatsPerBar;
@@ -77,6 +78,7 @@ bool Timeline::AddPoint(MusicalTicks tick, double bpm, std::uint16_t beatsPerBar
     const std::uint32_t at = t < static_cast<double>(points[0].tick) ? 0u : p + 1u;
     for (std::uint32_t j = count; j > at; --j) points[j] = points[j - 1u];
     ++count;
+    changed = at;
     TempoPoint& n = points[at];
     n = TempoPoint{tick, bpm, 0.0, beatsPerBar, beatUnit, 0u};
     if (at == 0u) {
@@ -85,11 +87,30 @@ bool Timeline::AddPoint(MusicalTicks tick, double bpm, std::uint16_t beatsPerBar
       n.bar = points[at - 1u].bar + (t - static_cast<double>(points[at - 1u].tick)) / BarTicks(at - 1u);
     }
   }
-  for (std::uint32_t j = 1; j < count; ++j) {
+  // Bar positions of the later points follow; earlier ones (and an explicit bar set by
+  // SetPointAt) stay as they are.
+  for (std::uint32_t j = changed + 1u; j < count; ++j) {
     points[j].bar = points[j - 1u].bar +
                     static_cast<double>(points[j].tick - points[j - 1u].tick) / BarTicks(j - 1u);
   }
   return true;
+}
+
+void Timeline::SetPointAt(MusicalTicks tick, double bar, double bpm, std::uint16_t beatsPerBar,
+                          std::uint16_t beatUnit) noexcept {
+  TruncateFrom(tick);
+  TempoPoint n{tick, bpm > 0.0 ? bpm : 120.0, bar, beatsPerBar == 0u ? std::uint16_t{4} : beatsPerBar,
+               beatUnit == 0u ? std::uint16_t{4} : beatUnit, 0u};
+  if (points[0].tick >= tick) {
+    points[0] = n;
+    count = 1;
+    return;
+  }
+  if (count >= kMaxTempoPoints) {  // make room: the oldest point goes
+    for (std::uint32_t j = 0; j + 1u < count; ++j) points[j] = points[j + 1u];
+    --count;
+  }
+  points[count++] = n;
 }
 
 void Timeline::TruncateFrom(MusicalTicks tick) noexcept {

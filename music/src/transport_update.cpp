@@ -364,6 +364,7 @@ void ApplyTransportAction(State& s, schema::Tables& t, std::uint32_t d, ClockSam
       if (MusicPb* pb = PbOfTransport(s, ts); pb != nullptr) {
         pb->seekPending = 1;
         pb->seekClock = at;
+        pb->seekTarget = m;
       }
       break;
     }
