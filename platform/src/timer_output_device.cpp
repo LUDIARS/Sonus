@@ -1,4 +1,4 @@
-#include "snd/platform/output_device.hpp"
+#include "snd/platform/timer_output_device.hpp"
 
 #include <cstring>
 #include <new>
@@ -8,12 +8,9 @@
 #include "snd/platform/cpu.hpp"
 #include "snd/types.h"
 
-namespace snd::platform {
+#include "common/device_callback.hpp"
 
-namespace {
-// The device whose callback the calling thread is running (Stop/Close guard).
-thread_local const TimerOutputDevice* tInCallback = nullptr;
-}  // namespace
+namespace snd::platform {
 
 
 TimerOutputDevice::TimerOutputDevice(IAllocator& allocator, const TimerDeviceConfig& config) noexcept
@@ -58,8 +55,8 @@ bool TimerOutputDevice::Start() {
 }
 
 void TimerOutputDevice::Stop() {
-  if (tInCallback == this) {  // forbidden from the callback: joining ourselves would deadlock
-    misuseFromCallback_.fetch_add(1, std::memory_order_relaxed);
+  if (detail::CalledFromCallback(this)) {  // forbidden from the callback: joining ourselves would deadlock
+    statMisuse_.fetch_add(1, std::memory_order_relaxed);
     return;
   }
   if (!started_) return;
@@ -69,8 +66,8 @@ void TimerOutputDevice::Stop() {
 }
 
 void TimerOutputDevice::Close() {
-  if (tInCallback == this) {  // forbidden from the callback (would free the buffer in use)
-    misuseFromCallback_.fetch_add(1, std::memory_order_relaxed);
+  if (detail::CalledFromCallback(this)) {  // forbidden from the callback (would free the buffer in use)
+    statMisuse_.fetch_add(1, std::memory_order_relaxed);
     return;
   }
   Stop();
@@ -87,18 +84,11 @@ double TimerOutputDevice::OutputLatencySeconds() const {
   if (config_.latencySeconds > 0.0) return config_.latencySeconds;
   return sampleRate_ != 0u ? static_cast<double>(periodFrames_) / static_cast<double>(sampleRate_) : 0.0;
 }
-void TimerOutputDevice::SetEventListener(DeviceEventFn fn, void* user) {
-  // The silent timer device never changes route; the listener is kept for
-  // API symmetry (stage-2 backends report CHANGED / SUSPENDED / ... here).
-  listener_ = fn;
-  listenerUser_ = user;
-}
-
 void TimerOutputDevice::ThreadMain(void* self) noexcept { static_cast<TimerOutputDevice*>(self)->Run(); }
 
 void TimerOutputDevice::Run() noexcept {
   ScopedFlushDenormals ftz;  // 2.4: device thread too
-  tInCallback = this;
+  detail::CallbackMarker mark(this);
   // Deadlines advance by exactly one period per callback, kept as an integer
   // part in ns plus a remainder in units of 1/sampleRate ns, so there is no
   // drift and no product that grows with the running time:
@@ -112,10 +102,12 @@ void TimerOutputDevice::Run() noexcept {
   const std::uint64_t frac = num % rate;
   std::uint64_t due = MonotonicNanoseconds();
   std::uint64_t carry = 0;  // < rate
+  std::uint64_t written = 0;
   while (running_.load(std::memory_order_acquire)) {
-    callback_(callbackUser_, buffer_, periodFrames_, channels_);
-    callbacks_.fetch_add(1, std::memory_order_relaxed);
-    frames_.fetch_add(periodFrames_, std::memory_order_relaxed);
+    detail::DeliverFrames(callback_, callbackUser_, buffer_, periodFrames_, channels_, periodFrames_, statCallbacks_,
+                          statFrames_);
+    written += periodFrames_;
+    PublishClock(written, periodFrames_, sampleRate_);
     due += whole;
     carry += frac;  // < 2 * rate <= 2^33
     if (carry >= rate) {
@@ -133,29 +125,6 @@ void TimerOutputDevice::Run() noexcept {
     }
     if (due > now) SleepUntil(due);
   }
-  tInCallback = nullptr;
-}
-
-IOutputDevice* CreateOutputDevice(OutputBackend backend, IAllocator& allocator) noexcept {
-  switch (backend) {
-    case OutputBackend::Default:
-    case OutputBackend::SilentTimer: {
-      void* p = allocator.Allocate(sizeof(TimerOutputDevice), alignof(TimerOutputDevice) > 16 ? alignof(TimerOutputDevice) : 16,
-                                   MemTag::Misc);
-      if (p == nullptr) return nullptr;
-      return ::new (p) TimerOutputDevice(allocator);
-    }
-  }
-  return nullptr;
-}
-
-void DestroyOutputDevice(IOutputDevice* device, IAllocator& allocator) noexcept {
-  if (device == nullptr) return;
-  // Every backend derives from IOutputDevice only (single inheritance), so the
-  // object starts at `device`. The virtual destructor runs the backend's.
-  void* memory = static_cast<void*>(device);
-  device->~IOutputDevice();
-  allocator.Free(memory, MemTag::Misc);
 }
 
 }  // namespace snd::platform

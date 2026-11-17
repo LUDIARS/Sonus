@@ -1,107 +1,41 @@
-// Default output devices (design.md 2.2, 2.6, CONTRACTS.md D-25).
+// Output devices (design.md 2.2, 2.6, CONTRACTS.md D-25, D-61..D-66).
 //
-// The target platforms and output APIs are still open (1.1, 15.2), so stage 1
-// ships one backend: TimerOutputDevice, a silent device driven by a timer
-// thread. It calls the DeviceCallback once per period in real time (absolute
-// deadlines on the monotonic clock, no drift) and discards the samples. Real
-// backends are added in stage 2 behind CreateOutputDevice().
+// Backends (one file set per OS under platform/src/<os>/, chosen at build time):
+//   SilentTimer  every OS   timer_output_device.hpp
+//   Alsa         Linux      snd_pcm_* on a dedicated thread (SND_OUTPUT_ALSA, default AUTO)
+//   Wasapi       Windows    shared-mode event-driven (IAudioClient3 low latency when
+//                           possible), exclusive mode by option, MMCSS, IMMNotificationClient
+//   CoreAudio    macOS/iOS  AudioUnit render callback (DefaultOutput / HALOutput / RemoteIO),
+//                           AudioObject listeners (macOS), AVAudioSession (iOS)
 //
-// Threads (IOutputDevice contract): Open/Start/Stop/Close/SetEventListener on
-// the owner thread; queries any thread after Open. The callback runs on the
-// device's own thread (priority: ThreadPriority::Realtime with fallback).
-// Stop() returns after the last callback has finished.
+// OutputBackend::Default resolves to the best compiled backend of the OS
+// (ResolveOutputBackend). It never falls back to the silent timer by itself:
+// if the OS device does not open, Open() fails and the caller decides (D-61).
 //
-// Calling Stop() or Close() from inside the device callback is FORBIDDEN (it
-// would join the calling thread / free the buffer being filled). The device
-// detects it, does nothing (no join, no free), returns, and counts it in
-// MisuseFromCallback(); the device keeps running.
-//
-// Timing: deadlines advance by exactly one period per callback in integer
-// nanoseconds plus a remainder (no drift, no overflow for any run time). If
-// the thread wakes more than one period late it resynchronises (LateWakeups)
-// instead of firing catch-up callbacks.
+// Shared behaviour of every backend: platform_output_device.hpp.
 #ifndef SND_PLATFORM_OUTPUT_DEVICE_HPP
 #define SND_PLATFORM_OUTPUT_DEVICE_HPP
 
-#include <atomic>
-#include <cstdint>
-
 #include "snd/ext/allocator.hpp"
-#include "snd/ext/output_device.hpp"
-#include "snd/platform/thread.hpp"
+#include "snd/platform/device_enum.hpp"
+#include "snd/platform/platform_output_device.hpp"
+#include "snd/platform/timer_output_device.hpp"
 
 namespace snd::platform {
 
-enum class OutputBackend : std::uint32_t {
-  Default = 0,      // best backend for this platform (stage 1: SilentTimer)
-  SilentTimer = 1,  // TimerOutputDevice
-};
+// True if `backend` is compiled into this build (Default and SilentTimer always are).
+bool OutputBackendAvailable(OutputBackend backend) noexcept;
+// Default -> the OS backend (Linux: Alsa if compiled, else SilentTimer;
+// Windows: Wasapi; Apple: CoreAudio; other OSes: SilentTimer). Others unchanged.
+OutputBackend ResolveOutputBackend(OutputBackend backend) noexcept;
 
-struct TimerDeviceConfig {
-  std::uint32_t sampleRate = 48000;  // used when the DeviceDesc asks for 0
-  std::uint32_t channels = 2;
-  std::uint32_t periodFrames = 256;
-  double latencySeconds = 0.0;     // reported latency; 0 = one period
-  bool realtimeThread = true;      // ask for SCHED_FIFO (falls back silently)
-};
-
-class TimerOutputDevice final : public IOutputDevice {
- public:
-  // `allocator` provides the period buffer (MemTag::Misc) at Open.
-  explicit TimerOutputDevice(IAllocator& allocator, const TimerDeviceConfig& config = TimerDeviceConfig{}) noexcept;
-  ~TimerOutputDevice() override;
-  TimerOutputDevice(const TimerOutputDevice&) = delete;
-  TimerOutputDevice& operator=(const TimerOutputDevice&) = delete;
-
-  // IOutputDevice. Open fails if already open, cb is null, or channels > SND_MAX_CHANNELS.
-  bool Open(const DeviceDesc& desc, DeviceCallback cb, void* user) override;
-  bool Start() override;  // false if not open or the thread could not be created
-  void Stop() override;
-  void Close() override;
-  std::uint32_t PeriodFrames() const override;
-  std::uint32_t SampleRate() const override;
-  std::uint32_t Channels() const override;
-  double OutputLatencySeconds() const override;
-  void SetEventListener(DeviceEventFn fn, void* user) override;
-
-  // --- statistics (any thread) ---
-  std::uint64_t Callbacks() const noexcept { return callbacks_.load(std::memory_order_relaxed); }
-  std::uint64_t FramesDelivered() const noexcept { return frames_.load(std::memory_order_relaxed); }
-  // Periods where the timer woke more than one period late and resynchronised.
-  std::uint64_t LateWakeups() const noexcept { return late_.load(std::memory_order_relaxed); }
-  // Stop()/Close() calls made from inside the callback and ignored.
-  std::uint64_t MisuseFromCallback() const noexcept { return misuseFromCallback_.load(std::memory_order_relaxed); }
-  PriorityResult ThreadPriorityResult() const noexcept { return thread_.Priority(); }
-  bool IsOpen() const noexcept { return open_; }
-  bool IsStarted() const noexcept { return started_; }
-
- private:
-  static void ThreadMain(void* self) noexcept;
-  void Run() noexcept;
-
-  IAllocator& allocator_;
-  TimerDeviceConfig config_;
-  DeviceCallback callback_ = nullptr;
-  void* callbackUser_ = nullptr;
-  DeviceEventFn listener_ = nullptr;
-  void* listenerUser_ = nullptr;
-  float* buffer_ = nullptr;
-  std::uint32_t sampleRate_ = 0;
-  std::uint32_t channels_ = 0;
-  std::uint32_t periodFrames_ = 0;
-  bool open_ = false;
-  bool started_ = false;
-  std::atomic<bool> running_{false};
-  std::atomic<std::uint64_t> callbacks_{0};
-  std::atomic<std::uint64_t> frames_{0};
-  std::atomic<std::uint64_t> late_{0};
-  std::atomic<std::uint64_t> misuseFromCallback_{0};
-  Thread thread_;
-};
-
-// Non-RT factory. Returns nullptr on allocation failure. The device lives in
-// `allocator` memory (MemTag::Misc) until DestroyOutputDevice.
-IOutputDevice* CreateOutputDevice(OutputBackend backend, IAllocator& allocator) noexcept;
+// Non-RT factory. Returns nullptr if the backend is not compiled in or on
+// allocation failure. `options` may be null (all defaults); the strings it
+// points to are copied. The device lives in `allocator` memory
+// (MemTag::Misc) until DestroyOutputDevice; buffers it allocates at Open
+// come from the same allocator.
+PlatformOutputDevice* CreateOutputDevice(OutputBackend backend, IAllocator& allocator,
+                                         const OutputDeviceOptions* options = nullptr) noexcept;
 void DestroyOutputDevice(IOutputDevice* device, IAllocator& allocator) noexcept;
 
 }  // namespace snd::platform

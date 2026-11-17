@@ -346,7 +346,12 @@ void SND_CALL Callback(void* user, float* interleaved, std::uint32_t frames, std
   // The device owns the buffer: writing all of it must be safe (ASan).
   for (std::uint32_t i = 0; i < frames * channels; ++i) interleaved[i] = 0.25f;
   const int ms = s->sleepMs.load();
-  if (ms > 0) SleepFor(static_cast<std::uint64_t>(ms) * kMs);
+  if (ms > 0) {
+    // Stage 2 (D-61): the callback runs inside SND_RT_SCOPE; this test sleeps
+    // on purpose to hold the callback open, so it leaves the RT checks.
+    snd::rt::SuspendScope deliberateBlocking;
+    SleepFor(static_cast<std::uint64_t>(ms) * kMs);
+  }
   s->calls.fetch_add(1);
   s->inCallback.fetch_sub(1);
 }
