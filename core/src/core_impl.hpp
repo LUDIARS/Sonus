@@ -466,6 +466,9 @@ struct RenderSet {
   std::uint32_t itemCount = 0;
   std::uint32_t chunkCount = 0;
   std::uint32_t inUseLate = 0;          // a late chunk of this set may still run
+  // Chunk context (Impl*, this set, block info). Lives with the set, never on the
+  // audio thread's stack: a late chunk reads it after Render returned (D-43).
+  alignas(16) std::uint8_t chunkCtx[64] = {};
 };
 
 struct RenderPriv {

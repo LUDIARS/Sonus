@@ -22,6 +22,7 @@
 // set the block uses alternates with the last parallel block (frame.cpp).
 #include <cmath>
 #include <cstring>
+#include <new>
 
 #include "access.hpp"
 #include "core_impl.hpp"
@@ -430,7 +431,8 @@ void Render(Impl& im) noexcept {
   std::memset(rd.outBuf, 0, sizeof(float) * kMaxChannels * frames);
 
   // d) Chunks: parallel only when the pool was quiescent at the block start (D-43).
-  RenderCtx ctx{&im, &set, source::BlockInfo{im.block, im.clock, frames, im.cfg.sampleRate}, rd.lod, 0u};
+  static_assert(sizeof(RenderCtx) <= sizeof(set.chunkCtx));
+  RenderCtx& ctx = *new (set.chunkCtx) RenderCtx{&im, &set, source::BlockInfo{im.block, im.clock, frames, im.cfg.sampleRate}, rd.lod, 0u};
   bool parallel = false;
   std::uint32_t generation = 0;
   im.profile.chunks = set.chunkCount;
