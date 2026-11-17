@@ -485,11 +485,8 @@ SND_TEST(IndepLivelinkProtocol, StructuredSessionFuzz) {
     }
   }
   SND_CHECK(frames > rounds);
-  // The fuzz may have edited values: put them back, then a normal tool works.
-  RevertDirect(g.f);
-  ll::ApplyResult ar{};
-  while (g.f.rt->results().TryPop(ar)) {
-  }
+  // The fuzz may have edited values; a normal tool still works (the results ring has
+  // one consumer, the server: this thread must not pop it).
   g.f.sys->Play(HashId("Tone"), snd_emitter_handle{0}, nullptr);  // in case an Audition / limit stopped it
   g.f.Steps(32);
   Tool t(g.f);

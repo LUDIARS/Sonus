@@ -338,9 +338,13 @@ SND_TEST(IndepLivelinkMemoryLink, TcpLikeSemanticsAndIntegrity) {
   SND_CHECK(game->Send("x", 1, &n) == ll::IoStatus::Closed);
   link.acceptor().Release(game);
 
-  // Reconnect (the pipe is recycled) and stream 4 MiB.
+  // Reconnect (the pipe is recycled) and stream 4 MiB. Accept may return early without
+  // a peer (a wake-up left over from the first connection): retry until the deadline.
   game = nullptr;
-  std::thread acc2([&] { game = link.acceptor().Accept(2000); });
+  std::thread acc2([&] {
+    const auto end = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (game == nullptr && std::chrono::steady_clock::now() < end) game = link.acceptor().Accept(100);
+  });
   tool = link.connector().Connect(2000);
   acc2.join();
   SND_REQUIRE(tool != nullptr && game != nullptr);
