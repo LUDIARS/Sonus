@@ -23,6 +23,7 @@
 #include "snd/codec/codec.hpp"
 #include "snd/codec/encode.hpp"
 #include "snd/dsp/effects.hpp"
+#include "snd/config.h"
 #include "snd/ext.h"
 
 namespace snd::buildtool {
@@ -896,6 +897,31 @@ void Builder::EmitAsset(BankTables& t, const Object& a, const std::string& langu
   if (io == 1) flags |= bf::kAssetPriorityMusic;
   if (io == 2) flags |= bf::kAssetPriorityVoice;
   t.asst.U32(col::ASST_flags, r, flags);
+  // Opus with 3+ channels: its decoder state exceeds the default decoder slot
+  // (D-58). Say so now instead of the runtime rejecting it (DECODER_POOL_FULL).
+  if (e.codec == SND_CODEC_OPUS && codec::OpusAvailable()) {
+    CodecHeader h{};
+    h.codec = e.codec;
+    h.channels = c.channels;
+    h.sample_rate = c.sampleRate;
+    h.frames_per_packet = e.framesPerPacket;
+    h.total_frames = e.totalFrames;
+    h.pre_skip = e.preSkip;
+    h.pre_roll = e.preRoll;
+    h.extra = e.extra.data();
+    h.extra_bytes = static_cast<std::uint32_t>(e.extra.size());
+    snd_config cfg;
+    snd_config_init(&cfg);
+    const std::uint32_t need = codec::BuiltinCodec(SND_CODEC_OPUS)->StateBytes(h);
+    if (need > cfg.memory.decoder_slot_bytes) {
+      p_.WarnAt(a, a.doc,
+                "asset '" + a.name + "': Opus with " + std::to_string(c.channels) + " channels needs a decoder slot of " +
+                    std::to_string(need) + " bytes; the default Config.memory.decoderSlotBytes is " +
+                    std::to_string(cfg.memory.decoder_slot_bytes) +
+                    " (set it to at least 196608, otherwise playback is rejected with DECODER_POOL_FULL)",
+                d_);
+    }
+  }
   // Seek table (stream and compressed forms).
   if (form != static_cast<std::uint32_t>(bf::LoadForm::PcmResident) && !e.seek.empty()) {
     t.asst.U32(col::ASST_seekFirst, r, t.seek.rows());

@@ -88,9 +88,11 @@ SND_EXTERN_C_BEGIN
   X(frame_arena_bytes, frameArenaBytes, uint32_t, uint32_t, (256u << 10))                         \
   /* per RT thread (RT workers + audio thread) scratch for the parallel render */                 \
   X(thread_arena_bytes, threadArenaBytes, uint32_t, uint32_t, (256u << 10))                       \
-  /* decoder pool = max_decoders slots of decoder_slot_bytes (CONTRACTS.md D-14) */               \
+  /* decoder pool = max_decoders slots of decoder_slot_bytes (CONTRACTS.md D-14). 64 KiB (D-58):   \
+     Opus is about 40 KiB at 1ch and 52 KiB at 2ch; Opus with 3ch or more needs 192 KiB or more.  \
+     PCM / ADPCM (<= 1024 B/ch blocks) fit 32 KiB. */                                             \
   X(max_decoders, maxDecoders, uint32_t, uint32_t, 64u)                                           \
-  X(decoder_slot_bytes, decoderSlotBytes, uint32_t, uint32_t, (32u << 10))                        \
+  X(decoder_slot_bytes, decoderSlotBytes, uint32_t, uint32_t, (64u << 10))                        \
   /* per-voice PCM ring for compressed-resident samples and Opus frame slack (6.2, 6.4) */        \
   X(voice_ring_frames, voiceRingFrames, uint32_t, uint32_t, 4096u)                                \
   /* DSP instance pool spare on top of what banks declare (3.3) */                                \

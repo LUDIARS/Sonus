@@ -80,4 +80,5 @@ sonus-build --project game/audio --out build/banks [--platform LNX_] [--release]
 - コーデック: codec モジュールのエンコーダ（`PCMF`, `PC16`, `ADPC`, `OPUS`）。バイト配置は bank-format.md §6.5。
 - Opus は常に 48 kHz: `sampleRate` に別の値があれば警告して無視し、素材を 48 kHz に変換してから符号化する。
   setup は `ASST.extraOffset/extraBytes`（WAVE の中、64 バイト境界）、シーク表は `codec::encode::BuildOpusSeekTable`、
-  ストリームのプリロードはシーク点で切る。
+  ストリームのプリロードはシーク点で切る。デコーダの状態が既定の `decoderSlotBytes`（64 KiB）を超える Opus のアセット
+  （3ch 以上）には、必要なバイト数を警告に出す（D-58。ランタイムでは `DECODER_POOL_FULL` で拒否される）。

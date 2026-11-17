@@ -158,8 +158,8 @@ setup（`extra`、`4 + ch` バイト）に版・チャンネル数・ストリ�
   （`PacketForFrame` は固定長用なので Opus では false）。
 - 壊れた入力: 長さ 0・上限超え、libopus のエラー、960 フレームでないパケットは `SND_DECODE_ERROR`（`Init` / `Seek` まで継続）。
 - `StateBytes`（libopus 1.5.2 の実測）: 1ch 40,192 / 2ch 52,800 / 3ch 76,160 / 4ch 88,768 / 5ch 112,192 / 6ch 135,552 /
-  7ch 148,160 / 8ch 171,584 バイト。**既定の `decoderSlotBytes` 32 KiB には入らない**。D-58 で既定を 64 KiB（1〜2ch が入る）に
-  上げると決めた（`config.h` への反映は受け入れ側）。3ch 以上は 192 KiB 以上のスロットが要る。足りなければ `DECODER_POOL_FULL`。
+  7ch 148,160 / 8ch 171,584 バイト。旧既定の `decoderSlotBytes` 32 KiB には入らないので、D-58 で既定を 64 KiB（1〜2ch が入る）に
+  上げた。3ch 以上は 192 KiB 以上のスロットが要る（buildtool が警告する）。足りなければ `DECODER_POOL_FULL`。
 - RT: `Init` / `Decode` / `Seek` は確保・ロック・IO をしない（libopus は `VAR_ARRAYS` でビルド、作業領域はスタック）。スタックは
   スレッド全体で 25〜32 KB（1〜8ch）、D-47 の 256 KiB に収まる。デコードは 1ch・20 ms あたり約 0.1 ms（Debug）。
 
@@ -198,7 +198,7 @@ ce::BuildOpusSeekTable(e.header, out.data(), e.bytes, intervalFrames, seekFrames
 
 - `max_frames`（1、256、4096、65536）では変わらない（保持を圧縮のまま持つため）。テストは `StateBytes` ちょうどの領域＋ガードで
   各 `max_frames` のデコードを行い、はみ出しが無いことを確かめている。
-- 結論: PCM と、1 チャンネルあたり 1024 バイト以下のブロックの ADPCM は 8ch まで既定の 32 KiB に収まる。**既定値の見直しは不要**。
+- 結論: PCM と、1 チャンネルあたり 1024 バイト以下のブロックの ADPCM は 8ch まで 32 KiB に収まる（段階1の結論。既定は Opus のため D-58 で 64 KiB に上げた）。
   buildtool は ADPCM のブロックを 1 チャンネルあたり 1024 バイト以下にすること（超えると `DECODER_POOL_FULL` で再生拒否になる）。
 - Opus は 32 KiB に収まらない（上の「Opus」の実測。D-58）。
 

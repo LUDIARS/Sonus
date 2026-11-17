@@ -650,7 +650,7 @@ Opus は使う（下の「Opus」）。codec モジュールの実装（`codec/R
 
 - PCM: `framesPerPacket` は 1（0 は指定なし）、`blockAlign` はフレームの大きさ（0 は指定なし）。
 - ADPCM: `blockAlign` は `4ch × (1 + k)`（k ≥ 1）。**1 チャンネルあたり 1024 バイト以下**（`blockAlign ≤ 1024 × ch`）。
-  これを超えるとデコーダの状態が既定の `decoderSlotBytes`（32 KiB）を 8ch で超え、再生が `DECODER_POOL_FULL` で拒否されうる。
+  これを超えるとデコーダの状態が 32 KiB（段階1までの既定の `decoderSlotBytes`。今の既定は 64 KiB、D-58）を 8ch で超える。
   既定は 512 バイト／ch（1017 フレーム、48 kHz で 21 ms）。`framesPerPacket` は 0 か計算値。ブロックは独立なので `preRoll` は 0。
 - `SEEK`: `frame` は再生フレーム（プリスキップ後）、`byteOffset` はデータ先頭から。先頭は `{0, 0}`。PCM はフレーム、ADPCM はブロックの境界。
 - プリスキップ（`preSkip`）の後の最初のフレームが再生フレーム 0。PCM・ADPCM のエンコーダは `preSkip = 0` を書く。

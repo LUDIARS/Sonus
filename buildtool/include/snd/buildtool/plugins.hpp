@@ -68,7 +68,7 @@ struct Encoder {
 
 // ADPCM block size the build writes: 512 bytes per channel (1017 frames).
 // bank-format.md §6.5: at most 1024 bytes per channel, so that the decoder
-// state fits the default Config.memory.decoderSlotBytes (32 KiB) up to 8 ch.
+// state fits 32 KiB (the default Config.memory.decoderSlotBytes is 64 KiB, D-58) up to 8 ch.
 inline constexpr std::uint32_t kAdpcmBlockBytesPerChannel = 512;
 inline constexpr std::uint32_t kMaxAdpcmBlockBytesPerChannel = 1024;
 

@@ -121,6 +121,13 @@ SND_TEST(OpusPipeline, ResidentAssetsDecodeFromTheBank) {
   o.encoders = &bt::CodecEncoders();  // sonus-build's default
   bt::Diagnostics d;
   SND_REQUIRE_MSG(proj.Build(o, &d), "%s", mini::Dump(d).c_str());
+  // D-58: the 6-channel asset needs more than the default 64 KiB slot (warned at
+  // build time); the 1-2 channel assets fit and are not warned about.
+  SND_CHECK_MSG(mini::HasDiag(d, bt::Severity::Warning, "asset 'six': Opus with 6 channels needs a decoder slot of 135552 bytes"),
+                "%s", mini::Dump(d).c_str());
+  for (const char* quiet : {"asset 'mono'", "asset 'stereo'", "asset 'stereoLow'"}) {
+    SND_CHECK_MSG(!mini::HasDiag(d, bt::Severity::Warning, quiet), "%s", mini::Dump(d).c_str());
+  }
   pipeline::ReadBank bank(mini::ReadBytes(proj.out() / "Main.sndb"));
   SND_REQUIRE_MSG(bank.ok, "%s", bank.error.message);
 
