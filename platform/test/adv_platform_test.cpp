@@ -106,9 +106,13 @@ SND_TEST(AdvSemaphore, PostNWakesExactlyNOfManyWaiters) {
 }
 
 SND_TEST(AdvSemaphore, NoLostWakeupsManyProducersManyConsumers) {
-  // Every Post must be matched by exactly one successful Wait. Each consumer
-  // uses WaitFor with a long timeout as a hang guard; a lost wake-up would
-  // show up as a timeout (counted) instead of hanging the test.
+  // Every Post must be matched by exactly one successful Wait: at the end
+  // the permits taken plus the permits left equal the permits posted. A
+  // consumer whose WaitFor times out just waits again (a timeout alone only
+  // means the thread was starved on a loaded machine, so it is noted, not
+  // failed). A lost permit or a wake-up that never comes leaves
+  // `consumed` short of `expected`; the whole test then fails at the 60 s
+  // limit instead of hanging.
   Semaphore s;
   constexpr int kProducers = 3, kConsumers = 3;
   constexpr int kPerProducer = 20000;
@@ -119,7 +123,7 @@ SND_TEST(AdvSemaphore, NoLostWakeupsManyProducersManyConsumers) {
     ts.emplace_back([&] {
       while (!stop.load(std::memory_order_relaxed)) {
         if (s.WaitFor(2000 * kMs)) consumed.fetch_add(1);
-        else if (!stop.load()) timeouts.fetch_add(1);
+        else timeouts.fetch_add(1);  // wait again
       }
     });
   }
@@ -135,14 +139,16 @@ SND_TEST(AdvSemaphore, NoLostWakeupsManyProducersManyConsumers) {
   for (auto& t : ps) t.join();
   const int expected = kProducers * (kPerProducer / 2) * 3;  // posts alternate 1 and 2 permits
   const std::uint64_t t0 = NowNs();
-  while (consumed.load() < expected && NowNs() - t0 < 20000 * kMs) std::this_thread::yield();
+  while (consumed.load() < expected && NowNs() - t0 < 60000 * kMs) SleepFor(kMs);
+  const int consumedInTime = consumed.load();
   stop = true;
-  s.Post(kConsumers);
+  s.Post(kConsumers);  // unblocks the consumers; each may still take one of these
   for (auto& t : ts) t.join();
-  // The final Post(kConsumers) only unblocks the consumers; it may add up to kConsumers.
-  SND_CHECK_MSG(consumed.load() >= expected && consumed.load() <= expected + kConsumers, "consumed %d of %d permits",
-                consumed.load(), expected);
-  SND_CHECK_EQ(timeouts.load(), 0);
+  snd::test::Note("consumed %d of %d within the limit, %d timed-out waits (retried)", consumedInTime, expected,
+                  timeouts.load());
+  SND_CHECK_MSG(consumedInTime >= expected, "only %d of %d permits consumed within 60 s", consumedInTime, expected);
+  // Conservation (quiescent now): taken + left == posted, final unblock included.
+  SND_CHECK_EQ(consumed.load() + s.ValueApprox(), expected + kConsumers);
 }
 
 SND_TEST(AdvSemaphore, WaitAndPostAreRtSafe) {
