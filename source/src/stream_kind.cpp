@@ -650,7 +650,7 @@ void StreamKind::Control(const SourceControlOp* ops, std::uint32_t count) noexce
     s.primed = 0;
     s.stalled = 0;
     s.lag = 0;
-    s.fadeDone = 0;  // fade in after the seek
+    s.fadeDone = fadeFrames_;  // no fade: a seek is sample accurate (core fades devirtualised voices)
     s.reseek.store(0u, std::memory_order_relaxed);
     ctl->state = static_cast<std::uint8_t>(StreamStateId::Priming);
   }
