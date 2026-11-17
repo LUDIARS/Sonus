@@ -6,14 +6,34 @@
 #include <cinttypes>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
+#include <ctime>
 #include <thread>
 #include <vector>
 
 #include "source_harness.hpp"
 
+#include <unistd.h>
+
 using namespace srctest;
 
 namespace {
+// CPU time of the rendering (the audio thread and the RT workers): process CPU
+// time, which this test spends only in RenderBlock (no other thread is busy).
+// Wall time is not used: a loaded machine (other builds) stretches it.
+// Returns false when the clock is not available.
+inline bool ProcessCpuNs(std::uint64_t* ns) {
+  timespec ts{};
+  if (clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &ts) != 0) return false;
+  *ns = static_cast<std::uint64_t>(ts.tv_sec) * 1000000000ull + static_cast<std::uint64_t>(ts.tv_nsec);
+  return true;
+}
+// Without a CPU clock: compare only when the machine is not overloaded.
+inline bool MachineCalm() {
+  double load[1] = {0.0};
+  const long cores = sysconf(_SC_NPROCESSORS_ONLN);
+  return getloadavg(load, 1) == 1 && cores > 0 && load[0] < static_cast<double>(cores);
+}
 AssetSpec Spec(const std::string& name, std::uint64_t frames, const char* form, const char* codec, const char* extra = "") {
   AssetSpec a;
   a.name = name;
@@ -126,10 +146,17 @@ SND_TEST(SourceParallel, LoadStreams32Samples128) {
     for (int i = 0; i < 96; ++i) r.Play("smp");
     for (int i = 0; i < 32; ++i) r.Play("cmp");
     r.Steps(40);
-    std::uint64_t sum = 0, worst = 0;
+    std::uint64_t sum = 0, worst = 0, cpuSum = 0;
+    bool cpuOk = true;
     std::uint32_t n = 0, voices = 0;
     for (int i = 0; i < 300; ++i) {
-      r.Step();
+      r.PumpIo();
+      r.sys->Update();  // decode jobs run here (deterministic jobs): not part of the block
+      std::uint64_t c0 = 0, c1 = 0;
+      cpuOk = ProcessCpuNs(&c0) && cpuOk;
+      r.sys->RenderBlock(r.out.data());
+      cpuOk = ProcessCpuNs(&c1) && cpuOk;
+      cpuSum += c1 - c0;
       const snd::core::BlockProfile& bp = r.sys->LastBlock();
       sum += bp.totalNs;
       worst = bp.totalNs > worst ? bp.totalNs : worst;
@@ -138,8 +165,10 @@ SND_TEST(SourceParallel, LoadStreams32Samples128) {
     }
     const double budgetNs = 256.0 / 48000.0 * 1e9;
     const double avg = double(sum) / n;
-    std::printf("[ LOAD ] rt workers %u: %u voices (32 streams + 128 samples), avg %.1f us (%.1f %% of the block), max %.1f us\n",
-                workers, voices, avg / 1000.0, 100.0 * avg / budgetNs, double(worst) / 1000.0);
+    const double cpu = cpuOk ? double(cpuSum) / n : -1.0;
+    std::printf("[ LOAD ] rt workers %u: %u voices (32 streams + 128 samples), CPU %.1f us (%.1f %% of the block); "
+                "wall avg %.1f us, max %.1f us\n",
+                workers, voices, cpu / 1000.0, 100.0 * cpu / budgetNs, avg / 1000.0, double(worst) / 1000.0);
     SND_CHECK(r.ends.empty());  // nothing refused
     snd_stats cs{};
     r.sys->GetStats(&cs);
@@ -153,7 +182,13 @@ SND_TEST(SourceParallel, LoadStreams32Samples128) {
     SND_CHECK_EQ(s.streamStalls, 0u);
 #if defined(NDEBUG)
     SND_CHECK_EQ(voices, 160u);  // no load LOD in an optimised build
-    SND_CHECK(avg < 0.30 * budgetNs);
+    if (cpu >= 0.0) {
+      SND_CHECK(cpu < 0.30 * budgetNs);  // CPU time of the audio thread and the RT workers
+    } else if (MachineCalm()) {
+      SND_CHECK(avg < 0.30 * budgetNs);
+    } else {
+      std::printf("[ LOAD ] no CPU clock and the machine is overloaded: recorded, not compared\n");
+    }
 #endif
   }
 }

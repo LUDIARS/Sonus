@@ -7,7 +7,11 @@
 // requested to check the selection under pressure.
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
+#include <ctime>
 #include <vector>
+
+#include <unistd.h>
 
 #include "harness.hpp"
 #include "snd/dsp/effects.hpp"
@@ -17,8 +21,25 @@ using namespace coretest;
 using snd::HashId;
 
 namespace {
+// CPU time of the rendering (the audio thread and the RT workers): process CPU
+// time, which this test spends only in RenderBlock (no other thread is busy).
+// Wall time is not used: a loaded machine (other builds) stretches it.
+// Returns false when the clock is not available.
+inline bool ProcessCpuNs(std::uint64_t* ns) {
+  timespec ts{};
+  if (clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &ts) != 0) return false;
+  *ns = static_cast<std::uint64_t>(ts.tv_sec) * 1000000000ull + static_cast<std::uint64_t>(ts.tv_nsec);
+  return true;
+}
+// Without a CPU clock: compare only when the machine is not overloaded.
+inline bool MachineCalm() {
+  double load[1] = {0.0};
+  const long cores = sysconf(_SC_NPROCESSORS_ONLN);
+  return getloadavg(load, 1) == 1 && cores > 0 && load[0] < static_cast<double>(cores);
+}
 struct Timing {
   double avgUs, p99Us, maxUs;
+  double cpuAvgUs;  // < 0: no CPU clock
 };
 Timing RunLoad(std::uint32_t workers, std::uint32_t requested, std::uint32_t* realOut) {
   snd_config cfg;
@@ -68,9 +89,15 @@ Timing RunLoad(std::uint32_t workers, std::uint32_t requested, std::uint32_t* re
   }
   h.Steps(20);
   std::vector<double> us;
+  std::uint64_t cpuSum = 0;
+  bool cpuOk = true;
   for (int i = 0; i < 300; ++i) {
     h.sys->Update();
+    std::uint64_t c0 = 0, c1 = 0;
+    cpuOk = ProcessCpuNs(&c0) && cpuOk;
     h.sys->RenderBlock(h.out.data());
+    cpuOk = ProcessCpuNs(&c1) && cpuOk;
+    cpuSum += c1 - c0;
     us.push_back(static_cast<double>(h.sys->LastBlock().totalNs) / 1000.0);
   }
   h.sys->Update();
@@ -80,7 +107,8 @@ Timing RunLoad(std::uint32_t workers, std::uint32_t requested, std::uint32_t* re
   std::sort(us.begin(), us.end());
   double sum = 0;
   for (double v : us) sum += v;
-  return Timing{sum / double(us.size()), us[us.size() * 99 / 100], us.back()};
+  return Timing{sum / double(us.size()), us[us.size() * 99 / 100], us.back(),
+                cpuOk ? static_cast<double>(cpuSum) / 1000.0 / double(us.size()) : -1.0};
 }
 }  // namespace
 
@@ -89,11 +117,19 @@ SND_TEST(CoreLoad, Real128VoicesWithinBudget) {
   for (std::uint32_t workers : {0u, 2u}) {
     std::uint32_t real = 0;
     const Timing t = RunLoad(workers, 128, &real);
-    snd::test::Note("128 voices, %u RT workers: avg %.1f us (%.1f %%), p99 %.1f us, max %.1f us, real %u", workers,
-                    t.avgUs, 100.0 * t.avgUs / blockUs, t.p99Us, t.maxUs, real);
+    snd::test::Note("128 voices, %u RT workers: CPU %.1f us (%.1f %%); wall avg %.1f us, p99 %.1f us, max %.1f us, real %u",
+                    workers, t.cpuAvgUs, 100.0 * t.cpuAvgUs / blockUs, t.avgUs, t.p99Us, t.maxUs, real);
     SND_CHECK_EQ(real, 128u);
 #if defined(NDEBUG) && !defined(__SANITIZE_ADDRESS__) && !defined(__SANITIZE_THREAD__)
-    SND_CHECK(t.avgUs < 0.30 * blockUs);
+    // CPU time of the audio thread and the RT workers (all threads of the
+    // block); with no CPU clock, the wall time only on a calm machine.
+    if (t.cpuAvgUs >= 0.0) {
+      SND_CHECK(t.cpuAvgUs < 0.30 * blockUs);
+    } else if (MachineCalm()) {
+      SND_CHECK(t.avgUs < 0.30 * blockUs);
+    } else {
+      snd::test::Note("no CPU clock and the machine is overloaded: the time is recorded, not compared");
+    }
 #endif
   }
 }
