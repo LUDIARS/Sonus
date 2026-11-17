@@ -109,7 +109,7 @@ struct StreamInst {
   // --- render (RT worker / audio thread) ---
   std::uint8_t primed;
   std::uint8_t stalled;
-  std::uint8_t kill;
+  std::uint32_t kill;           // Ld / St
   std::uint32_t fadeDone;       // frames of the current fade in
   LoopRange rloop;              // the loop Render follows (adopted with the data)
   std::uint64_t ringPos;        // material position of the PCM ring's read side
@@ -119,7 +119,11 @@ struct StreamInst {
   std::int64_t lag;             // time priority: frames the voice is ahead of the ring
   std::uint32_t hasOverride;
   std::uint64_t overridePos;
-  std::uint64_t renderPos;      // playhead after the last render (audio thread reads it)
+  std::uint64_t renderPos;      // playhead after the last render (audio thread reads it; Ld / St)
+  std::uint64_t pubRingPos;     // ringPos / ringLoops published by Render for Control (Ld / St)
+  std::uint32_t pubRingLoops;
+  std::uint32_t loopReq;        // Control -> Render: adopt newLoop as rloop (Xchg)
+  LoopRange newLoop;
   std::uint32_t renderLoops;
   std::atomic<std::uint32_t> reseek{0};  // time priority asks for a re-seek to reseekTarget
   std::uint64_t reseekTarget;

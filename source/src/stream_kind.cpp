@@ -462,12 +462,13 @@ bool StreamKind::LoopChangeFits(const StreamInst& s, const LoopRange& to) const 
     return false;
   }
   const std::uint64_t total = s.a.h.total_frames;
-  const std::uint32_t loops = s.ringLoops;
+  const std::uint32_t loops = Ld(s.pubRingLoops);
+  const std::uint64_t ringPos = Ld(s.pubRingPos);
   const std::uint64_t oldEnd = s.loop.WrapsAfter(loops) ? s.loop.le : total;
   const std::uint64_t newEnd = to.WrapsAfter(loops) ? to.le : total;
   const std::uint64_t agree = oldEnd < newEnd ? oldEnd : newEnd;
   const std::uint64_t held = RingWrite(s) - RingRead(s);
-  if (s.ringPos >= newEnd || s.dec.decPos < s.ringPos || s.dec.decPos - s.ringPos != held || s.dec.decPos > agree) {
+  if (ringPos >= newEnd || s.dec.decPos < ringPos || s.dec.decPos - ringPos != held || s.dec.decPos > agree) {
     return false;
   }
   if (to.WrapsAfter(loops)) {  // the reads must not pass the new loop end
@@ -636,6 +637,9 @@ bool StreamKind::StartOne(const SourceStartRequest& r, SourceStartResult& res, s
   s.vloops = 0;
   s.renderPos = start;
   s.renderLoops = 0;
+  s.pubRingPos = start;
+  s.pubRingLoops = 0;
+  s.loopReq = 0;
   {  // nothing pending: every generation equal
     const std::uint32_t g = s.reqGen.load(std::memory_order_relaxed);
     s.execGen.store(g, std::memory_order_relaxed);
@@ -665,7 +669,7 @@ bool StreamKind::StartOne(const SourceStartRequest& r, SourceStartResult& res, s
   s.state = 1;
   ++live_;
   ResetForSeek(s, start, 0);
-  if (s.virt == 0u) {
+  if (Ld(s.virt) == 0u) {
     PostReads(s);
     if (s.preActive != 0u && inlineBudget != 0u) {  // decode the head of the preload now (6.1)
       --inlineBudget;
@@ -711,17 +715,19 @@ void StreamKind::Release(const SlotIndex* slots, std::uint32_t count) noexcept {
 bool StreamKind::KeepAndRedecode(StreamInst& s, const LoopRange& to) noexcept {
   if (s.dec.awaitWrap || s.skipToWrap != 0u) return false;
   const std::uint64_t total = s.a.h.total_frames;
-  const std::uint32_t loops = s.ringLoops;
+  const std::uint32_t loops = Ld(s.pubRingLoops);
+  const std::uint64_t ringPos = Ld(s.pubRingPos);
   const std::uint64_t oldEnd = s.loop.WrapsAfter(loops) ? s.loop.le : total;
   const std::uint64_t newEnd = to.WrapsAfter(loops) ? to.le : total;
   const std::uint64_t agree = oldEnd < newEnd ? oldEnd : newEnd;
   const std::uint64_t r = RingRead(s);
   const std::uint64_t held = RingWrite(s) - r;
-  if (s.dec.decPos < s.ringPos || s.dec.decPos - s.ringPos != held || s.ringPos >= agree) return false;
+  if (s.dec.decPos < ringPos || s.dec.decPos - ringPos != held || ringPos >= agree) return false;
   const std::uint64_t keepEnd = s.dec.decPos < agree ? s.dec.decPos : agree;
   s.loop = to;
-  s.rloop = to;
-  SetRingWrite(s, r + (keepEnd - s.ringPos));
+  s.newLoop = to;  // Render follows it from its next RenderBatch
+  St(s.loopReq, 1u);
+  SetRingWrite(s, r + (keepEnd - ringPos));
   ResetForSeek(s, keepEnd, loops);  // IO and decoder from keepEnd (the ring is not touched)
   if (keepEnd == newEnd && to.WrapsAfter(loops) && s.headerDone.load(std::memory_order_relaxed) != 0u) {
     // The ring holds everything up to the new loop end: the decoder goes on at
@@ -755,15 +761,15 @@ void StreamKind::Control(const SourceControlOp* ops, std::uint32_t count) noexce
         target = op.frame;
         break;
       case ControlOp::Virtualize:
-        s.virt = 1;
+        St(s.virt, 1u);
         s.pendingStop = 1;  // IO stopped, position kept (6.3)
         ctl->state = static_cast<std::uint8_t>(StreamStateId::Paused);
         break;
       case ControlOp::Devirtualize:
-        s.virt = 0;
+        St(s.virt, 0u);
         s.pendingStop = 0;
         if (s.a.virtualReturn == 2u) {
-          s.kill = 1;
+          St(s.kill, 1u);
         } else {
           target = s.a.virtualReturn == 1u ? 0u : op.frame;
         }
@@ -778,7 +784,8 @@ void StreamKind::Control(const SourceControlOp* ops, std::uint32_t count) noexce
           // keep the PCM ring, change the read plan from where it is.
           s.loop = to;
           s.dec.loop = to;
-          s.rloop = to;  // Render reads it from the next RenderBatch on (before it in this block)
+          s.newLoop = to;  // Render takes it at the head of its next RenderBatch
+          St(s.loopReq, 1u);
           const std::uint64_t base = s.a.streamDataOffset;
           std::uint64_t lb = 0, le = 0;
           SeekPoint sp{};
@@ -802,11 +809,12 @@ void StreamKind::Control(const SourceControlOp* ops, std::uint32_t count) noexce
           }
           break;
         }
-        const bool behind = to.WrapsAfter(s.ringLoops) && s.renderPos >= to.le;
+        const std::uint64_t rpos = Ld(s.renderPos);
+        const bool behind = to.WrapsAfter(Ld(s.pubRingLoops)) && rpos >= to.le;
         if (!behind && !JobBusy(s.jobCounter) && s.hasPendingLoop == 0u && KeepAndRedecode(s, to)) break;
         s.pendingLoop = to;  // otherwise: re-read with the new loop, from the loop start when the
         s.hasPendingLoop = 1;  // loop end is behind the playhead (all forms), else from the position
-        target = behind ? to.lb : s.renderPos;
+        target = behind ? to.lb : rpos;
         break;
       }
       case ControlOp::Pause:
@@ -818,7 +826,7 @@ void StreamKind::Control(const SourceControlOp* ops, std::uint32_t count) noexce
     }
     if (target == kNone) continue;
     s.seekTarget = WrapInto(s.hasPendingLoop != 0u ? s.pendingLoop : s.loop, target);
-    s.seekLoops = op.op == ControlOp::SetLoop ? s.renderLoops : 0u;
+    s.seekLoops = op.op == ControlOp::SetLoop ? Ld(s.renderLoops) : 0u;
     s.reqGen.store(s.reqGen.load(std::memory_order_relaxed) + 1u, std::memory_order_release);
     ctl->state = static_cast<std::uint8_t>(StreamStateId::Priming);
   }
@@ -835,7 +843,7 @@ bool StreamKind::Ready(const StreamInst& s) const noexcept {
 void StreamKind::QueryReady(const SlotIndex* slots, std::uint32_t count, std::uint8_t* ready) const noexcept {
   for (std::uint32_t i = 0; i < count; ++i) {
     const SlotIndex s = slots[i];
-    ready[i] = (s >= cap_ || inst_[s].state != 1u || inst_[s].virt != 0u || Ready(inst_[s])) ? 1u : 0u;
+    ready[i] = (s >= cap_ || inst_[s].state != 1u || Ld(inst_[s].virt) != 0u || Ready(inst_[s])) ? 1u : 0u;
   }
 }
 
@@ -843,7 +851,8 @@ void StreamKind::QueryReady(const SlotIndex* slots, std::uint32_t count, std::ui
 // Render (RT worker / audio thread): copies out of the PCM ring only.
 // ---------------------------------------------------------------------------
 void StreamKind::RenderOne(StreamInst& s, const RenderItem& it, VoiceRenderStatus& st) noexcept {
-  if (s.kill != 0u) {
+  if (Ld(s.loopReq) != 0u && Xchg(s.loopReq, 0u) != 0u) s.rloop = s.newLoop;  // SetLoop in place (Control)
+  if (Ld(s.kill) != 0u) {
     st.ended = 1;
     return;
   }
@@ -852,7 +861,7 @@ void StreamKind::RenderOne(StreamInst& s, const RenderItem& it, VoiceRenderStatu
     it.playhead->fraction = 0;
     s.hasOverride = 0;
   }
-  if (s.virt != 0u) return;  // virtual: silence (never stale data)
+  if (Ld(s.virt) != 0u) return;  // virtual: silence (never stale data)
   // Adopt a re-positioned ring (seek, devirtualise, re-seek) once Publish executed it.
   const std::uint32_t want = s.reqGen.load(std::memory_order_acquire);
   if (want != s.adoptGen.load(std::memory_order_relaxed)) {
@@ -980,8 +989,10 @@ void StreamKind::RenderBatch(const snd::source::RenderBatch& b, VoiceRenderStatu
     }
     StreamInst& s = inst_[it.sourceSlot];
     RenderOne(s, it, status[i]);
-    s.renderPos = it.playhead->frame;
-    s.renderLoops = it.playhead->loopCount;
+    St(s.renderPos, it.playhead->frame);
+    St(s.renderLoops, it.playhead->loopCount);
+    St(s.pubRingPos, s.ringPos);
+    St(s.pubRingLoops, s.ringLoops);
   }
 }
 
@@ -1000,7 +1011,7 @@ void StreamKind::AdvanceVirtual(const AdvanceItem* items, std::uint32_t count, V
       s.hasOverride = 0;
     }
     if (AdvanceVirtualPos(s.rloop, s.a.h.total_frames, *it.playhead, it.outputFrames, it.pitch)) status[i].ended = 1;
-    s.renderPos = it.playhead->frame;
+    St(s.renderPos, it.playhead->frame);
   }
 }
 
@@ -1038,7 +1049,7 @@ void StreamKind::ScheduleBackground(const BlockInfo&) noexcept {
       s.plannerSet = 0;  // a devirtualise seeks and plans again
       s.headerPosted = s.headerDone.load(std::memory_order_relaxed) != 0u ? 1u : 0u;
     }
-    if (s.virt != 0u) continue;
+    if (Ld(s.virt) != 0u) continue;
     {
       const std::uint32_t g = s.reqGen.load(std::memory_order_relaxed);
       if (g != s.execGen.load(std::memory_order_relaxed)) Execute(s, g, 1u, s.seekTarget, s.seekLoops, inlineBudget);

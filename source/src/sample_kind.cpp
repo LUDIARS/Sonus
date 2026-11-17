@@ -400,12 +400,12 @@ void SampleKind::Control(const SourceControlOp* ops, std::uint32_t count) noexce
         target = op.frame;
         break;
       case ControlOp::Virtualize:
-        in.virt = 1;
+        St(in.virt, 1u);
         break;
       case ControlOp::Devirtualize:
-        in.virt = 0;
+        St(in.virt, 0u);
         if (in.a.virtualReturn == 2u) {
-          in.kill = 1;
+          St(in.kill, 1u);
         } else if (c != nullptr) {
           target = in.a.virtualReturn == 1u ? 0u : op.frame;
         } else if (in.a.virtualReturn == 1u) {
@@ -416,14 +416,16 @@ void SampleKind::Control(const SourceControlOp* ops, std::uint32_t count) noexce
         const bool loop = op.frame2 != 0u || op.frame != 0u;
         const LoopRange to = MakeLoop(in.a, loop, op.frame, op.frame2, in.loop.count);
         if (c == nullptr) {  // data in memory, read in place: the next render follows the new loop
-          in.loop = to;
+          in.newLoop = to;
+          St(in.loopReq, 1u);
           break;
         }
         std::uint64_t agree = 0;
         if (c->req.load(std::memory_order_acquire) == 0u && !JobBusy(c->jobCounter) &&
-            LoopChangeFits(*c, in, in.renderPos, in.renderLoops, to, &agree)) {
-          in.loop = to;  // the ring and the decoder agree with the new loop: nothing to redo
-          c->dec.loop = to;
+            LoopChangeFits(*c, in, Ld(in.renderPos), Ld(in.renderLoops), to, &agree)) {
+          c->dec.loop = to;  // the ring and the decoder agree with the new loop: nothing to redo
+          in.newLoop = to;   // Render takes it at the head of its next batch
+          St(in.loopReq, 1u);
           break;
         }
         c->reqLoop = to;  // Render keeps the agreeing part of the ring and decodes on (no gap)
@@ -437,14 +439,14 @@ void SampleKind::Control(const SourceControlOp* ops, std::uint32_t count) noexce
     if (target == kNone) continue;
     // A seek follows the loop in force when it comes (a pending SetLoop included).
     const bool loopPending = c != nullptr && (c->req.load(std::memory_order_relaxed) & kReqLoop) != 0u;
-    target = WrapInto(loopPending ? c->reqLoop : in.loop, target);
-    in.renderPos = target;
+    const bool newLoopPending = Ld(in.loopReq) != 0u;
+    target = WrapInto(loopPending ? c->reqLoop : (newLoopPending ? in.newLoop : in.loop), target);
     if (c != nullptr) {
       c->reqTarget = target;
       c->req.fetch_or(kReqSeek, std::memory_order_release);
     } else {
-      in.overridePos = target;
-      in.hasOverride = 1;
+      St(in.overridePos, target);
+      St(in.hasOverride, 1u);
     }
   }
 }
@@ -462,7 +464,7 @@ bool SampleKind::Ready(const SampleInst& in) const noexcept {
     case SampleMode::Cache: {
       if (cache_.Error(in.entry) != 0u || cache_.Finished(in.entry)) return true;
       const std::uint64_t filled = cache_.Filled(in.entry);
-      const std::uint64_t need = in.renderPos + readyFrames_;
+      const std::uint64_t need = Ld(in.renderPos) + readyFrames_;
       return filled >= (need < cache_.Frames(in.entry) ? need : cache_.Frames(in.entry));
     }
   }
@@ -472,7 +474,7 @@ bool SampleKind::Ready(const SampleInst& in) const noexcept {
 void SampleKind::QueryReady(const SlotIndex* slots, std::uint32_t count, std::uint8_t* ready) const noexcept {
   for (std::uint32_t i = 0; i < count; ++i) {
     const SlotIndex s = slots[i];
-    ready[i] = (s >= instCap_ || inst_[s].state != 1u || inst_[s].virt != 0u || Ready(inst_[s])) ? 1u : 0u;
+    ready[i] = (s >= instCap_ || inst_[s].state != 1u || Ld(inst_[s].virt) != 0u || Ready(inst_[s])) ? 1u : 0u;
   }
 }
 
@@ -619,7 +621,7 @@ void SampleKind::ExecuteRequest(RingCtx& c, SampleInst& in, const RenderItem& it
 
 void SampleKind::RenderRing(SampleInst& in, const RenderItem& it, VoiceRenderStatus& st, std::uint32_t& inlineBudget) noexcept {
   RingCtx& c = ctx_[in.ctx];
-  if (in.virt != 0u) return;  // virtual (or not devirtualised yet): silence, never the stale ring
+  if (Ld(in.virt) != 0u) return;  // virtual (or not devirtualised yet): silence, never the stale ring
   // Old frames for the cross-fade of a request that waited for a running job.
   float old[kMaxChannels][256];
   std::uint32_t oldFrames = 0;
@@ -704,14 +706,14 @@ void SampleKind::RenderBatch(const snd::source::RenderBatch& b, VoiceRenderStatu
       continue;
     }
     SampleInst& in = inst_[it.sourceSlot];
-    if (in.kill != 0u) {
+    if (Ld(in.loopReq) != 0u && Xchg(in.loopReq, 0u) != 0u) in.loop = in.newLoop;  // SetLoop (Control)
+    if (Ld(in.kill) != 0u) {
       st.ended = 1;
       continue;
     }
-    if (in.hasOverride != 0u) {
-      it.playhead->frame = in.overridePos;
+    if (Ld(in.hasOverride) != 0u && Xchg(in.hasOverride, 0u) != 0u) {
+      it.playhead->frame = Ld(in.overridePos);
       it.playhead->fraction = 0;
-      in.hasOverride = 0;
     }
     switch (in.mode) {
       case SampleMode::Direct:
@@ -724,8 +726,8 @@ void SampleKind::RenderBatch(const snd::source::RenderBatch& b, VoiceRenderStatu
         RenderCache(in, it, st);
         break;
     }
-    in.renderPos = it.playhead->frame;
-    in.renderLoops = it.playhead->loopCount;
+    St(in.renderPos, it.playhead->frame);
+    St(in.renderLoops, it.playhead->loopCount);
   }
 }
 
@@ -738,13 +740,12 @@ void SampleKind::AdvanceVirtual(const AdvanceItem* items, std::uint32_t count, V
       continue;
     }
     SampleInst& in = inst_[it.sourceSlot];
-    if (in.hasOverride != 0u) {
-      it.playhead->frame = in.overridePos;
+    if (Ld(in.hasOverride) != 0u && Xchg(in.hasOverride, 0u) != 0u) {
+      it.playhead->frame = Ld(in.overridePos);
       it.playhead->fraction = 0;
-      in.hasOverride = 0;
     }
     if (AdvanceVirtualPos(in.loop, in.a.h.total_frames, *it.playhead, it.outputFrames, it.pitch)) status[i].ended = 1;
-    in.renderPos = it.playhead->frame;
+    St(in.renderPos, it.playhead->frame);
   }
 }
 
@@ -768,7 +769,7 @@ void SampleKind::ScheduleBackground(const BlockInfo& block) noexcept {
     }
     ++k;
     if (c.req.load(std::memory_order_acquire) != 0u) continue;  // Render executes it first (no job meanwhile)
-    if (in.virt != 0u || c.ended.load(std::memory_order_relaxed) != 0u || c.error.load(std::memory_order_relaxed) != 0u) {
+    if (Ld(in.virt) != 0u || c.ended.load(std::memory_order_relaxed) != 0u || c.error.load(std::memory_order_relaxed) != 0u) {
       continue;
     }
     const std::uint64_t used = c.w.load(std::memory_order_relaxed) - c.r.load(std::memory_order_acquire);

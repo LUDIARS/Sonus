@@ -58,9 +58,9 @@ struct RingCtx {
 struct SampleInst {
   std::uint32_t state;  // 0 free, 1 live, 2 closing (waits for its job)
   SampleMode mode;
-  std::uint8_t virt;
+  std::uint32_t virt;   // Ld / St
   std::uint8_t primed;  // render: ring / cache had the ready amount
-  std::uint8_t kill;    // end at the next render (virtual return "never")
+  std::uint32_t kill;   // end at the next render (virtual return "never"); Ld / St
   AssetCopy a;
   LoopRange loop;
   std::uint32_t channels;
@@ -68,7 +68,9 @@ struct SampleInst {
   std::uint32_t entry;  // CacheEntry (Cache)
   std::uint32_t hasOverride;  // render sets the playhead to `overridePos` first
   std::uint64_t overridePos;
-  std::uint64_t renderPos;    // render's last position (for Control on the audio thread)
+  std::uint64_t renderPos;    // render's last position (for Control on the audio thread; Ld / St)
+  std::uint32_t loopReq;      // Control -> Render: adopt newLoop (Xchg)
+  LoopRange newLoop;
   std::uint32_t renderLoops;
 };
 

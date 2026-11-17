@@ -405,6 +405,22 @@ inline ICodec* FindCodec(const SourceServices& sv, std::uint32_t fourcc) noexcep
   return c != nullptr ? c : codec::BuiltinCodec(fourcc);
 }
 
+// Fields shared by Control (RunEventLogic) and RenderBatch: a late chunk of the
+// previous block may still render the voice while Control runs (D-43), so they
+// are accessed atomically.
+template <class T>
+inline T Ld(const T& v) noexcept {
+  return std::atomic_ref<T>(const_cast<T&>(v)).load(std::memory_order_acquire);
+}
+template <class T>
+inline void St(T& v, T x) noexcept {
+  std::atomic_ref<T>(v).store(x, std::memory_order_release);
+}
+template <class T>
+inline T Xchg(T& v, T x) noexcept {
+  return std::atomic_ref<T>(v).exchange(x, std::memory_order_acq_rel);
+}
+
 // Job helpers: done counter doubles as the "job in flight" flag.
 inline bool JobBusy(const std::uint32_t& counter) noexcept {
   return std::atomic_ref<std::uint32_t>(const_cast<std::uint32_t&>(counter)).load(std::memory_order_acquire) != 0u;
