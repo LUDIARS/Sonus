@@ -363,3 +363,58 @@ SND_TEST(IndepLivelinkRecord, SkippedCommandsAreCountedExactly) {
   SND_CHECK_EQ(rp->Info().commands, total - skip);
   ll::Replayer::Destroy(rp);
 }
+
+// E3 / E8: BlockTiming arrives at timingHz and describes the blocks; the event log
+// shows the Play command (0x8000 | Play, event id, playback slot) and the end of that
+// playback (kLogPlaybackEnded, slot, reason COMPLETED).
+SND_TEST(IndepLivelinkProfiler, TimingRateAndEventLogOfAPlayback) {
+  Fixture f;
+  f.Load(IndepBank(), "a.sndb");
+  ll::ServerDesc sd;
+  sd.timingHz = 30;
+  sd.eventLogHz = 50;
+  SND_REQUIRE_EQ(f.StartServer(sd), SND_OK);
+  Tool t(f);
+  SND_REQUIRE(t.Ready());
+  t.c->SetProfilerMask(ll::kProfTiming | ll::kProfEventLog, 30);
+  auto runFor = [&](double seconds) {
+    const auto end = std::chrono::steady_clock::now() + std::chrono::duration<double>(seconds);
+    while (std::chrono::steady_clock::now() < end) {
+      f.Step();
+      std::this_thread::sleep_for(std::chrono::microseconds(3000));
+    }
+  };
+  runFor(0.5);
+  const std::uint64_t r0 = t.c->Received(ll::MessageType::BlockTiming);
+  const auto t0 = std::chrono::steady_clock::now();
+  const snd_playback_handle blip = f.sys->Play(HashId("Blip"), snd_emitter_handle{0}, nullptr);
+  runFor(1.5);
+  const double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+  const double rate = static_cast<double>(t.c->Received(ll::MessageType::BlockTiming) - r0) / secs;
+  SND_CHECK_MSG(rate > 20.0 && rate < 40.0, "BlockTiming at %.1f Hz (30 expected)", rate);
+  ll::TimingSample ts[256];
+  const std::uint32_t nt = t.c->CopyTimings(ts, 256);
+  SND_REQUIRE(nt > 2u);
+  for (std::uint32_t i = 1; i < nt; ++i) {
+    SND_CHECK(ts[i].timing.blockIndex > ts[i - 1].timing.blockIndex);
+    SND_CHECK(ts[i].timing.budgetMicroseconds > 0.0f && ts[i].timing.budgetMicroseconds <= 5334.0f);
+    SND_CHECK(ts[i].timing.renderMicroseconds >= 0.0f);
+  }
+  ll::LogSample ls[512];
+  const std::uint32_t nl = t.c->CopyEventLog(ls, 512);
+  const std::uint32_t slot = static_cast<std::uint32_t>(blip.value & 0xFFFFFFFFu);
+  bool play = false, ended = false;
+  for (std::uint32_t i = 0; i < nl; ++i) {
+    const ll::LogEntry& e = ls[i].entry;
+    if (e.kind == (ll::kLogCommandBit | static_cast<std::uint32_t>(snd::cmd::CommandType::Play)) &&
+        e.id == HashId("Blip") && e.handleSlot == slot) {
+      play = true;
+    }
+    if (e.kind == ll::kLogPlaybackEnded && e.handleSlot == slot) {
+      ended = play;  // after the Play entry
+      SND_CHECK_EQ(e.detail >> 16, SND_END_COMPLETED);
+    }
+  }
+  SND_CHECK(play);
+  SND_CHECK(ended);
+}
