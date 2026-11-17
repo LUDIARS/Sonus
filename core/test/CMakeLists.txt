@@ -21,6 +21,8 @@ set_tests_properties(indep_core_parallel_test PROPERTIES TIMEOUT 300)
 snd_add_test(indep_core_bank_test SOURCES indep_core_bank_test.cpp LINK ${_core_test_link})
 snd_add_test(indep_core_fixcheck_test SOURCES indep_core_fixcheck_test.cpp LINK ${_core_test_link})
 set_tests_properties(indep_core_fixcheck_test PROPERTIES TIMEOUT 300)
+snd_add_test(indep_core_fix2check_test SOURCES indep_core_fix2check_test.cpp LINK ${_core_test_link})
+set_tests_properties(indep_core_fix2check_test PROPERTIES TIMEOUT 600)
 snd_add_test(indep_core_load_test SOURCES indep_core_load_test.cpp LINK ${_core_test_link})
 set_tests_properties(indep_core_load_test PROPERTIES TIMEOUT 600)
 # Defects the independent tester found in stage 2, now fixed: one executable
