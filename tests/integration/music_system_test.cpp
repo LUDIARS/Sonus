@@ -270,9 +270,13 @@ bool SameBeats(const std::vector<Beat>& a, const std::vector<Beat>& b) {
 SND_TEST(MusicSystem, SameCommandsGiveBitIdenticalOutput) {
   const std::vector<std::uint8_t> bank = BusyBank();
   SND_REQUIRE(!bank.empty());
+  // 2.5: bit identity holds with the load LOD disabled (a slow run, e.g. under TSan,
+  // would otherwise switch new voices to the light resampler at different blocks).
+  snd_config cfg = Config();
+  cfg.tuning.lod_down_blocks = 0;
   Script a, b;
   {
-    Rig r;
+    Rig r(cfg);
     SND_REQUIRE(r.Load(bank));
     RunScript(r, &a);
     snd::music::MusicTransitionRecord log[16];
@@ -281,9 +285,12 @@ SND_TEST(MusicSystem, SameCommandsGiveBitIdenticalOutput) {
     SND_CHECK_EQ(n, 2u);
   }
   {
-    Rig r;
+    Rig r(cfg);
     SND_REQUIRE(r.Load(bank));
     RunScript(r, &b);
+    snd_stats st{};
+    r.sys->GetStats(&st);
+    SND_CHECK_EQ(st.lod_level, 0u);
   }
   SND_CHECK(a.starts.size() > 8u);
   SND_CHECK(SameStarts(a.starts, b.starts));
