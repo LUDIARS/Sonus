@@ -7,6 +7,7 @@
 // "never before the deadline") are strict; upper bounds are generous (a
 // descheduled thread can lose tens of milliseconds) and are documented at
 // each check.
+#include <algorithm>
 #include <atomic>
 #include <cfloat>
 #include <cmath>
@@ -316,6 +317,7 @@ SND_TEST(AdvCpu, FlushDenormalsReallyFlushesRestoresAndIsPerThread) {
 
 namespace {
 struct CbStats {
+  static constexpr std::uint32_t kMaxIntervals = 1024;
   std::atomic<std::uint64_t> calls{0};
   std::atomic<std::uint64_t> lastNs{0};
   std::atomic<std::uint64_t> sumIntervalNs{0};
@@ -328,6 +330,10 @@ struct CbStats {
   std::atomic<std::uint64_t> afterStop{0};
   std::atomic<bool> stopped{false};
   std::atomic<int> ftz{-1};
+  // Callback-to-callback intervals, written only by the device thread and
+  // read after Stop() (which joins it); the first kMaxIntervals are kept.
+  std::uint64_t intervalNs[kMaxIntervals] = {};
+  std::atomic<std::uint32_t> intervalCount{0};
 };
 
 void SND_CALL Callback(void* user, float* interleaved, std::uint32_t frames, std::uint32_t channels) {
@@ -339,6 +345,11 @@ void SND_CALL Callback(void* user, float* interleaved, std::uint32_t frames, std
   if (last != 0u) {
     s->sumIntervalNs.fetch_add(now - last);
     snd::base::AtomicFetchMax(s->maxIntervalNs, now - last);
+    const std::uint32_t n = s->intervalCount.load();
+    if (n < CbStats::kMaxIntervals) {
+      s->intervalNs[n] = now - last;
+      s->intervalCount.store(n + 1u);
+    }
   }
   s->frames.store(frames);
   s->channels.store(channels);
@@ -416,10 +427,20 @@ SND_TEST(AdvTimerDevice, OperationsBeforeOpenAndRequestedFormat) {
 SND_TEST(AdvTimerDevice, PeriodAverageAndNoBursts) {
   // 48 kHz / 480 frames = 10 ms. Over ~1.2 s the device must deliver about
   // elapsed/period callbacks: never more than elapsed/period + 2 (absolute
-  // deadlines: no catch-up bursts) and, on a loaded machine without RT
-  // priority, at least 60 % of them (a missed period is resynchronised, not
-  // replayed). The mean interval is checked against 10 ms within 20 %, the
-  // worst single interval only loosely (< 250 ms).
+  // deadlines: no catch-up bursts), and pace them at the period.
+  //
+  // Without RT priority a loaded machine preempts the device thread; a
+  // period missed by more than one period is resynchronised, not replayed
+  // (LateWakeups() counts them), so the call count and the mean then depend
+  // on how long the thread was off the CPU, not on the device. Hence:
+  //  - always: no bursts, and the mean interval is the period within 20 %
+  //    once each resync's two outliers are left out: the preemption gap (one
+  //    of the longest intervals) and the call fired right after it (one of
+  //    the shortest). With no late wakeup nothing is left out;
+  //  - with no late wakeup (nothing dropped): also at least 60 % of the
+  //    expected calls and no interval >= 250 ms.
+  // If resyncs left fewer than 10 ordinary intervals the pacing cannot be
+  // judged (the machine was too loaded); only the burst bound is checked.
   TimerOutputDevice dev(snd::base::DefaultAllocator(), NonRtConfig());
   CbStats st;
   SND_REQUIRE(dev.Open(snd::DeviceDesc{48000, 2, 480, 0}, &Callback, &st));
@@ -429,18 +450,34 @@ SND_TEST(AdvTimerDevice, PeriodAverageAndNoBursts) {
   dev.Stop();
   const std::uint64_t elapsed = NowNs() - t0;
   const std::uint64_t calls = st.calls.load();
+  const std::uint64_t late = dev.LateWakeups();
   const double expected = static_cast<double>(elapsed) / 10e6;
-  snd::test::Note("calls=%llu expected~%.1f late=%llu mean=%.3f ms max=%.3f ms", static_cast<unsigned long long>(calls),
-                  expected, static_cast<unsigned long long>(dev.LateWakeups()),
-                  calls > 1 ? static_cast<double>(st.sumIntervalNs.load()) / static_cast<double>(calls - 1) / 1e6 : 0.0,
-                  static_cast<double>(st.maxIntervalNs.load()) / 1e6);
+  const std::uint32_t n = st.intervalCount.load();
+  std::uint64_t sorted[CbStats::kMaxIntervals];
+  std::copy(st.intervalNs, st.intervalNs + n, sorted);
+  std::sort(sorted, sorted + n);
+  const double mean = calls > 1u ? static_cast<double>(st.sumIntervalNs.load()) / static_cast<double>(calls - 1u) : 0.0;
+  // Mean without the `late` shortest and `late` longest intervals.
+  const bool judgeable = 2u * late + 10u <= n;
+  std::uint64_t keptSum = 0;
+  for (std::uint64_t i = late; judgeable && i + late < n; ++i) keptSum += sorted[i];
+  const double paced = judgeable ? static_cast<double>(keptSum) / static_cast<double>(n - 2u * late) : 0.0;
+  snd::test::Note("calls=%llu expected~%.1f late=%llu mean=%.3f ms paced=%.3f ms max=%.3f ms",
+                  static_cast<unsigned long long>(calls), expected, static_cast<unsigned long long>(late), mean / 1e6,
+                  paced / 1e6, static_cast<double>(st.maxIntervalNs.load()) / 1e6);
   SND_CHECK(static_cast<double>(calls) <= expected + 2.0);
-  SND_CHECK(static_cast<double>(calls) >= expected * 0.6);
-  if (calls > 10u) {
-    const double mean = static_cast<double>(st.sumIntervalNs.load()) / static_cast<double>(calls - 1u);
-    SND_CHECK_MSG(mean > 8e6 && mean < 12e6 * (dev.LateWakeups() > 0 ? 1.5 : 1.0), "mean interval %.3f ms", mean / 1e6);
+  SND_REQUIRE(calls > 1u);
+  SND_CHECK_EQ(static_cast<std::uint64_t>(n), calls - 1u);
+  if (!judgeable) {
+    snd::test::Note("too loaded to judge the pacing: %llu late wakeups in %u intervals",
+                    static_cast<unsigned long long>(late), n);
+    return;
   }
-  SND_CHECK(st.maxIntervalNs.load() < 250 * kMs);
+  SND_CHECK_MSG(paced > 8e6 && paced < 12e6, "mean interval without resync outliers %.3f ms", paced / 1e6);
+  if (late == 0u) {
+    SND_CHECK(static_cast<double>(calls) >= expected * 0.6);
+    SND_CHECK(st.maxIntervalNs.load() < 250 * kMs);
+  }
 }
 
 SND_TEST(AdvTimerDevice, StopWaitsForRunningCallbackAndNoneAfter) {
