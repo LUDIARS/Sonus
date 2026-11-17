@@ -1,5 +1,5 @@
 # Authoring tool (design.md 11; stage 2: mixer and profiler). Built only with
-# -DSND_BUILD_TOOL=ON. The UI uses LUDIARS Tela (CONTRACTS.md D-56), found with
+# -DSND_BUILD_TOOL=ON. The UI uses LUDIARS Tela (CONTRACTS.md D-67), found with
 # find_package (Tela_DIR or CMAKE_PREFIX_PATH); it is never bundled or fetched.
 find_package(Tela CONFIG REQUIRED)
 

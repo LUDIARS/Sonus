@@ -2,7 +2,7 @@
 
 設計書 11 章のスタンドアロンのツール `sonus-tool`。実行中のゲームにライブリンク（`spec/interface/livelink-protocol.md`）で
 接続し、バスの音量・ミュート・ソロ・エフェクトのパラメータを変え（11.2 上書き層）、ゲームが送るボイス・処理時間・メモリ・
-メータ・イベントログを表示し、記録（11.3）を保存・読み込みする。UI は LUDIARS **Tela**（CONTRACTS.md D-56）。
+メータ・イベントログを表示し、記録（11.3）を保存・読み込みする。UI は LUDIARS **Tela**（CONTRACTS.md D-67）。
 
 - 依存（凍結、ルート `CMakeLists.txt` の `SND_MODULE_DEPS_tool`）: buildtool, dsp, core, livelink。加えて Tela（`find_package`）。
 - `-DSND_BUILD_TOOL=ON` のときだけビルドする。既定（OFF）では Tela は要らない。
@@ -153,7 +153,7 @@ tool/
   OS から観測して渡す（Windows はウィンドウのサブクラス、macOS は NSEvent のローカルモニタ）。
 - 例外: Tela は検証に失敗すると例外を投げる。Sonus 側は投げない呼び方だけをする（図形は `SafeDrawing` が座標・数・作業量を
   先に検査、viewport・テーマも検査してから渡す）。ホストの 3 ファイルだけを `-fexceptions` でコンパイルし、Tela の
-  コンストラクタと `synchronize()` の例外を境界で捕まえる（D-56）。
+  コンストラクタと `synchronize()` の例外を境界で捕まえる（D-67）。
 - テーマ: Tela の `Theme`（panel / text / button / pressed）から色を作る（`palette.hpp`）。区分の色（メータ、ミュート、ソロ、
   クリップ）だけ固定の色相をテーマのパネル色に寄せて使う。
 
