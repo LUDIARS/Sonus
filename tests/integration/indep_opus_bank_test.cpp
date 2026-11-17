@@ -565,8 +565,8 @@ SND_TEST(IndepOpusBank, CacheKeys) {
                            "{\"bitrate\": 48000, \"complexity\": 9, \"vbr\": \"constrained\"}",
                            "{\"bitrate\": 48000, \"complexity\": 9, \"vbr\": \"constrained\", \"signal\": \"voice\"}",
                            "{\"bitrate\": 48000, \"complexity\": 9, \"vbr\": \"constrained\", \"signal\": \"music\"}",
-                           "{\"bitrate\": 48000, \"complexity\": 9, \"vbr\": \"constrained\", \"signal\": \"music\", "
-                           "\"independentFrames\": false}"};
+                           ("{\"bitrate\": 48000, \"complexity\": 9, \"vbr\": \"constrained\", \"signal\": \"music\", "
+                            "\"independentFrames\": false}")};
   for (const char* c : changes) {
     project(c);
     bt::BuildResult r;
