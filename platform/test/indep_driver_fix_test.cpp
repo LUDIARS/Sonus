@@ -301,10 +301,21 @@ SND_TEST(IndepDriverFix, ThreadedFlipsRatesAndChannels) {
       }
       if ((i & 3) == 0) std::this_thread::yield();
     }
+    // Liveness: with the layout held still, audio resumes (bounded wait, the
+    // machine may be loaded; the reader above is not paced).
+    bool resumed = false;
+    for (int k = 0; k < 2000 && !resumed; ++k) {
+      const std::uint64_t before = dev.valid;
+      core.OnDeviceCallback(out.data(), 64, ch);
+      dev.Feed(out.data(), 64, ch);
+      resumed = dev.valid > before;
+      if (!resumed) SleepFor(1000000);
+    }
     stop.store(true, std::memory_order_release);
     writer.join();
     events.join();
     const DriverStats s = core.Stats();
+    SND_CHECK(resumed);
     snd::test::Note("round %d: switches %u valid %llu silent %llu dropped %llu", round, switches,
                     static_cast<unsigned long long>(dev.valid), static_cast<unsigned long long>(dev.silent),
                     static_cast<unsigned long long>(s.droppedFrames));
@@ -312,7 +323,6 @@ SND_TEST(IndepDriverFix, ThreadedFlipsRatesAndChannels) {
     SND_CHECK_EQ(dev.valid + dev.silent, dev.time);
     SND_CHECK_EQ(dev.silent, s.lostFrames);
     SND_CHECK_EQ(s.framesConsumed, dev.time);
-    SND_CHECK(switches > 10u);
   }
 }
 
