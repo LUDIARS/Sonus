@@ -71,6 +71,7 @@ SND_TEST(IndepLivelinkSession, ServersInARowAnswerOnlyTheirOwnCommands) {
   f.Steps(8);
   SND_REQUIRE(f.link.Init(snd::base::DefaultAllocator(), 1u << 20));
   SND_REQUIRE(f.cfg_.max_registered_threads < 8u);
+  std::uint32_t stale = 0;
   for (int round = 0; round < 8; ++round) {
     f.server = NewServer(f);
     SND_REQUIRE(f.server != nullptr);
@@ -87,14 +88,20 @@ SND_TEST(IndepLivelinkSession, ServersInARowAnswerOnlyTheirOwnCommands) {
     const bool gotGood = f.StepUntil([&] { return c->TakeAck(good, &rg); });
     SND_CHECK_MSG(gotBad && rb == SND_ERR_NOT_FOUND, "round %d: Ack of the bad edit %d", round, rb);
     SND_CHECK_MSG(gotGood && rg == SND_OK, "round %d: Ack of the good edit %d", round, rg);
-    if (round > 0) SND_CHECK_EQ(f.server->Stats().staleResults, 3u);
+    // The previous Server's 3 results are dropped here, or (when its last arena was still
+    // held at its Destroy and published later) during a later Server: counted in total.
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
     // Leave 3 edits unapplied for the next Server.
     for (int i = 0; i < 3; ++i) c->SetValue(lltest::BusVolume("Master", -0.5f), true);
     WaitRecorded(f.server, 5u);
+    stale += f.server->Stats().staleResults;
     ll::Server::Destroy(f.server);
     f.server = nullptr;
     ll::Client::Destroy(c);
   }
+  // 7 Servers each left 3 edits for a successor (the last one's are never applied while a
+  // Server exists); the ones applied while the 8 Servers lived were all dropped.
+  SND_CHECK_MSG(stale >= 18u && stale <= 21u, "%u stale results dropped (18..21 expected)", stale);
 }
 
 // The marker in an arena of its own, edits in later arenas, then a new marker: each
