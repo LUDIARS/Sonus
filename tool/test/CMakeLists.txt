@@ -20,3 +20,12 @@ add_test(NAME tool_app_headless
                  --snapshot ${CMAKE_CURRENT_BINARY_DIR}/headless-mixer.ppm)
 add_test(NAME tool_app_bad_option COMMAND sonus-tool --size 10x10)
 set_tests_properties(tool_app_bad_option PROPERTIES WILL_FAIL TRUE)
+
+# Independent tests (tool/test/indep_properties.md, written from the specs before reading
+# the code). Tests named Defect_* fail on purpose: each documents an implementation defect.
+foreach(_t indep_model_test indep_sync_test indep_ui_test indep_concurrency_test)
+  snd_add_test(tool_${_t} SOURCES ${_t}.cpp LINK ${_tool_test_link})
+  target_include_directories(tool_${_t} PRIVATE ${PROJECT_SOURCE_DIR}/core/test ${PROJECT_SOURCE_DIR}/tests/integration
+                             ${CMAKE_CURRENT_SOURCE_DIR})
+  set_tests_properties(tool_${_t} PROPERTIES TIMEOUT 600)
+endforeach()
