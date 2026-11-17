@@ -32,10 +32,14 @@ struct LiveBankInfo;
 
 namespace snd::livelink {
 
-// What LiveReplaceChunk::prepared points to: a validated table chunk owned by the
-// live link thread until `state` says the audio thread is done with it.
+// What LiveReplaceChunk::prepared points to: a validated table chunk. The slots and
+// their data live in LiveRuntime (which outlives core), so the audio thread always
+// writes into live memory, even when the Server was destroyed meanwhile.
+//   Free -(live link thread)-> Queued -(audio thread)-> Done -(live link thread)-> Free
+//   Queued -(Server::Destroy)-> Cancelled -(audio thread: not applied)-> Free
+//   Done   -(Server::Destroy)-> Free
 struct PendingChunk {
-  enum State : std::uint32_t { kFree = 0, kQueued = 1, kDone = 2 };
+  enum State : std::uint32_t { kFree = 0, kQueued = 1, kDone = 2, kCancelled = 3 };
   std::atomic<std::uint32_t> state{kFree};
   std::int32_t result = 0;        // snd_result, written before state = kDone
   std::uint32_t cells = 0;        // cells changed
@@ -44,7 +48,7 @@ struct PendingChunk {
   std::uint32_t fourcc = 0;
   std::uint32_t rows = 0;
   std::uint32_t reserved = 0;
-  const std::uint8_t* data = nullptr;  // TableChunkHeader + ColumnEntry[] + columns
+  std::uint8_t* data = nullptr;  // TableChunkHeader + ColumnEntry[] + columns (capacity: RuntimeDesc::chunkBytes)
   std::uint64_t bytes = 0;
 };
 
@@ -84,14 +88,20 @@ class ValueApplier {
     std::uint32_t used;
     std::uint64_t original;
   };
+  // Entry of the cell of the bank's CURRENT registration (kInvalidSlot if none).
   std::uint32_t Find(std::uint32_t bankSlot, std::uint32_t fourcc, std::uint32_t column, std::uint32_t row) const noexcept;
   bool Remember(std::uint32_t bankSlot, std::uint32_t fourcc, std::uint32_t column, std::uint32_t row,
                 std::uint64_t original) noexcept;
   std::uint32_t Generation(std::uint32_t bankSlot) const noexcept;
+  // Loads the registered banks; when they changed, drops the entries of registrations
+  // that are gone (their banks were unloaded: nothing to restore, room freed).
   void LoadBanks(core::System& sys) noexcept;
+  void Purge() noexcept;
 
   IAllocator* alloc_ = nullptr;
   Edit* edits_ = nullptr;          // open addressing, tableSize_ entries
+  Edit* spare_ = nullptr;          // rebuild target of Purge (same size)
+  std::uint64_t bankKey_ = 0;      // hash of the registered (slot, generation) set at the last purge
   std::uint32_t tableSize_ = 0;    // power of two >= 2 * capacity_
   std::uint32_t capacity_ = 0;
   std::atomic<std::uint32_t> count_{0};

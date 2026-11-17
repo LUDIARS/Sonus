@@ -127,6 +127,9 @@ void MemoryLink::ReleaseEnd(MemoryEnd* end) noexcept {
 ITransport* MemoryLink::Acceptor::Accept(std::uint32_t timeoutMs) noexcept {
   MemoryLink& l = *link;
   if (!l.ready_ || l.activeGame_.load(std::memory_order_acquire) != 0u) return nullptr;
+  // Signals left from earlier connections must not end the wait early.
+  while (pending.TryWait()) {
+  }
   for (int attempt = 0; attempt < 2; ++attempt) {
     for (Pipe& p : l.pipes_) {
       std::uint32_t expected = Pipe::kPending;

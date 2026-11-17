@@ -81,7 +81,9 @@ void Publish(Impl& im) noexcept {
       const std::uint32_t now = stalls[s];
       if (now > im.pub.streamStall[s]) {
         im.streamStalls += now - im.pub.streamStall[s];
-        if (tap.stall != nullptr) tap.stall(tap.user, s, now - im.pub.streamStall[s], im.block);
+        if (tap.stall != nullptr) {
+          tap.stall(tap.user, s, LiveStreamEventOf(im, s), now - im.pub.streamStall[s], im.block);
+        }
       }
       im.pub.streamStall[s] = now;
     }

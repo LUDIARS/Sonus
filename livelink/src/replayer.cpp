@@ -5,6 +5,7 @@
 #include <new>
 
 #include "snd/core/core.hpp"
+#include "snd/livelink/command_check.hpp"
 #include "snd/livelink/record_format.hpp"
 #include "snd/livelink/wire.hpp"
 
@@ -74,6 +75,7 @@ Replayer::~Replayer() {
 int Replayer::Init(const ReplayDesc& d) noexcept {
   config_ = *d.config;
   const FallbackCaps caps = CapsOf(config_);
+  const CommandLimits limits = LimitsOf(config_);
   if (!applier_.Init(*alloc_, d.maxEdits, config_.max_banks)) return SND_ERR_OUT_OF_BUDGET;
   // Pass 1: validate, count.
   std::uint64_t cmdBytes = 0, fbBytes = 0;
@@ -163,6 +165,11 @@ int Replayer::Init(const ReplayDesc& d) noexcept {
           ++info_.skippedCommands;
           return;
         }
+        if (!CheckCommand(h, payload, limits)) {
+          ++info_.invalidCommands;
+          if (h.type < static_cast<std::uint16_t>(cmd::CommandType::Count)) ++info_.invalidByType[h.type];
+          return;
+        }
         std::memcpy(commands_ + at, payload - sizeof(cmd::CommandHeader), h.sizeBytes);
         at += h.sizeBytes;
         ++info_.commands;
@@ -192,8 +199,18 @@ int Replayer::Init(const ReplayDesc& d) noexcept {
       fb.unloadBank = bits(caps.banks);
       std::memset(fb.unloadBank, 0, BitWordsOf(caps.banks) * 8u);  // bank slots differ in the replay
       fb.params = reinterpret_cast<cmd::OverflowParam*>(m);
-      std::memcpy(fb.params, src, std::size_t{fh.paramCount} * sizeof(cmd::OverflowParam));
-      fb.paramCapacity = fh.paramCount;
+      std::uint32_t kept = 0;
+      for (std::uint32_t i = 0; i < fh.paramCount; ++i) {
+        cmd::OverflowParam op;
+        std::memcpy(&op, src + std::size_t{i} * sizeof(op), sizeof(op));
+        if (op.used == 0u) continue;
+        if (!CheckOverflowParam(op, limits)) {
+          ++info_.invalidFallbackParams;
+          continue;
+        }
+        fb.params[kept++] = op;
+      }
+      fb.paramCapacity = kept;
       fb.lostParams = fh.lostParams;
       fbAt += FallbackMemoryBytes(caps, fh.paramCount);
       a.fallback = fi++;

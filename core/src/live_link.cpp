@@ -263,6 +263,23 @@ std::uint32_t System::LiveVoices(livelink::VoiceInfo* out, std::uint32_t capacit
   return vr.count;
 }
 
+Id LiveStreamEventOf(const Impl& im, std::uint32_t slot) noexcept {
+  const schema::Tables& t = im.tables;
+  const schema::TableRows& vr = t.Voice.rows;
+  const SourceKind* vkind = DiagRead<schema::ColumnId::Voice_sourceKind>(t);
+  const SlotIndex* vsrc = DiagRead<schema::ColumnId::Voice_sourceSlot>(t);
+  const SlotIndex* vpb = DiagRead<schema::ColumnId::Voice_playbackSlot>(t);
+  const Id* pev = DiagRead<schema::ColumnId::Playback_eventId>(t);
+  for (std::uint32_t d = 0; d < vr.count; ++d) {
+    if (vkind[d] != SourceKind::Stream || vsrc[d] != slot) continue;
+    const std::uint32_t pd = vpb[d] == kNoSlot ? kNoSlot : base::rows::DenseOf(t.Playback.rows, vpb[d]);
+    return pd != kNoSlot ? pev[pd] : 0u;
+  }
+  return 0u;
+}
+
+Id System::LiveStreamEvent(std::uint32_t slot) const noexcept { return LiveStreamEventOf(*impl_, slot); }
+
 std::uint32_t System::LiveMeters(livelink::MeterEntry* out, std::uint32_t capacity) const noexcept {
   const Impl& im = *impl_;
   const schema::TableRows& br = im.tables.Bus.rows;
@@ -289,7 +306,9 @@ std::uint32_t System::LiveMeters(livelink::MeterEntry* out, std::uint32_t capaci
   };
   const SlotIndex master =
       im.rd.masterSlot != kNoSlot && base::rows::IsLive(br, im.rd.masterSlot) ? im.rd.masterSlot : kNoSlot;
-  put(master, 0u, master != kNoSlot ? im.busDefs[master].channels : im.cfg.outChannels);
+  // The master's own id (0 only when the output has no master bus).
+  put(master, master != kNoSlot ? bid[base::rows::DenseOf(br, master)] : 0u,
+      master != kNoSlot ? im.busDefs[master].channels : im.cfg.outChannels);
   for (std::uint32_t d = 0; d < br.count; ++d) {
     const SlotIndex s = base::rows::SlotAt(br, d);
     if (s == master) continue;

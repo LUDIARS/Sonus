@@ -50,7 +50,6 @@ struct ServerDesc {
   std::uint32_t sendBufferBytes = 0;      // bulk queue; 0: Config.livelink.send_buffer_bytes
   std::uint32_t controlBufferBytes = 16u << 10;
   std::uint32_t maxReceivePayloadBytes = 1u << 20;  // larger frames are skipped with Error
-  std::uint32_t chunkSlots = 1;                     // ReplaceChunk in flight
   std::uint32_t profilerBytesPerSecond = 1u << 20;  // bandwidth cap of the profiler messages
   std::uint32_t meterHz = 0;                        // 0: Config.livelink.meter_hz (tool can change)
   std::uint32_t timingHz = 30;                      // BlockTiming (worst block of each interval)
@@ -85,6 +84,8 @@ struct ServerStats {
   std::uint32_t recordsDropped = 0;
   std::uint32_t pingsAnswered = 0;
   std::uint32_t lastRoundTripUs = 0;    // Ping -> Pong
+  std::uint32_t controlDropped = 0;     // server pings that did not fit (the tool reads too slowly)
+  std::uint32_t revertsLost = 0;        // disconnect reverts that could not be recorded (warning)
 };
 
 class Server {

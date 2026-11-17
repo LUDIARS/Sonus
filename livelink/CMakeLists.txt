@@ -14,7 +14,8 @@ snd_add_module(livelink
     src/runtime.cpp
     src/server.cpp
     src/client.cpp
-    src/replayer.cpp)
+    src/replayer.cpp
+    src/command_check.cpp)
 # platform (threads, clock, semaphore) is a foundation module (D-02: visible to every
 # module); core does not re-export it because it reaches platform only through jobs / dsp.
 target_link_libraries(sonus_livelink PUBLIC sonus_platform)

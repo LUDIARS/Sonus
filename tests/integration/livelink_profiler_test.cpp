@@ -49,7 +49,7 @@ SND_TEST(LivelinkProfiler, StreamsVoicesMetersTimingMemoryAndTheEventLog) {
   SND_CHECK_EQ(nm, 2u);  // master + Sfx
   bool sawMaster = false;
   for (std::uint32_t i = 0; i < nm; ++i) {
-    if (m[i].busId == 0u) {  // master (SND_ID_NONE): the output level
+    if (m[i].busId == HashId("Master")) {  // the master bus, by its own id
       sawMaster = true;
       SND_CHECK_NEAR(m[i].peak[0], level, 1e-5);
     }
@@ -59,7 +59,7 @@ SND_TEST(LivelinkProfiler, StreamsVoicesMetersTimingMemoryAndTheEventLog) {
   SND_CHECK(f.StepUntil([&] {
     const std::uint32_t k = c->CopyMeters(m, 8);
     for (std::uint32_t i = 0; i < k; ++i) {
-      if (m[i].busId == 0u && std::fabs(m[i].rms[0] - level) < level * 1e-3f) return true;
+      if (m[i].busId == HashId("Master") && std::fabs(m[i].rms[0] - level) < level * 1e-3f) return true;
     }
     return false;
   }));

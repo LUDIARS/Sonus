@@ -51,6 +51,11 @@ LiveRuntime::~LiveRuntime() {
   if (alloc_ != nullptr) {
     alloc_->Free(knownBanks_, MemTag::LiveLink);
     alloc_->Free(scratchBanks_, MemTag::LiveLink);
+    if (chunks_ != nullptr) {
+      for (std::uint32_t i = 0; i < chunkCount_; ++i) chunks_[i].~PendingChunk();
+      alloc_->Free(chunks_, MemTag::LiveLink);
+    }
+    alloc_->Free(chunkMemory_, MemTag::LiveLink);
   }
 }
 
@@ -64,6 +69,17 @@ bool LiveRuntime::Init(const RuntimeDesc& d) noexcept {
   const std::uint32_t bs = config_.block_size != 0u ? config_.block_size : 256u;
   blocksPerSecond_ = config_.sample_rate / bs != 0u ? config_.sample_rate / bs : 1u;
   IAllocator& a = *alloc_;
+  chunkCount_ = d.chunkSlots;
+  chunkBytes_ = (d.chunkBytes + 63u) & ~63u;
+  if (chunkCount_ != 0u) {
+    chunks_ = static_cast<PendingChunk*>(a.Allocate(sizeof(PendingChunk) * chunkCount_, 64, MemTag::LiveLink));
+    chunkMemory_ = static_cast<std::uint8_t*>(a.Allocate(std::size_t{chunkBytes_} * chunkCount_, 64, MemTag::LiveLink));
+    if (chunks_ == nullptr || chunkMemory_ == nullptr) return false;
+    for (std::uint32_t i = 0; i < chunkCount_; ++i) {
+      new (&chunks_[i]) PendingChunk();
+      chunks_[i].data = chunkMemory_ + std::size_t{chunkBytes_} * i;
+    }
+  }
   knownBanks_ = static_cast<core::LiveBankInfo*>(a.Allocate(sizeof(core::LiveBankInfo) * maxBanks_, 64, MemTag::LiveLink));
   scratchBanks_ =
       static_cast<core::LiveBankInfo*>(a.Allocate(sizeof(core::LiveBankInfo) * maxBanks_, 64, MemTag::LiveLink));
@@ -90,7 +106,9 @@ void LiveRuntime::Install(core::CoreDesc* d) noexcept {
   d->liveTap.ended = [](void* u, std::uint32_t s, std::uint32_t g, std::uint32_t r, std::uint32_t det) noexcept {
     Self(u)->OnEnded(s, g, r, det);
   };
-  d->liveTap.stall = [](void* u, std::uint32_t s, std::uint32_t n, BlockIndex b) noexcept { Self(u)->OnStall(s, n, b); };
+  d->liveTap.stall = [](void* u, std::uint32_t s, Id ev, std::uint32_t n, BlockIndex b) noexcept {
+    Self(u)->OnStall(s, ev, n, b);
+  };
   d->liveTap.block = [](void* u, core::System& sys) noexcept { Self(u)->OnBlock(sys); };
 }
 
@@ -99,6 +117,33 @@ void LiveRuntime::SetProfiler(std::uint32_t mask, std::uint32_t meterHz) noexcep
   std::uint32_t every = (blocksPerSecond_ + meterHz / 2u) / meterHz;
   meterEvery_.store(every < 1u ? 1u : every, std::memory_order_relaxed);
   mask_.store(mask, std::memory_order_release);
+}
+
+PendingChunk* LiveRuntime::AcquireChunk() noexcept {
+  for (std::uint32_t i = 0; i < chunkCount_; ++i) {
+    std::uint32_t expected = PendingChunk::kFree;
+    // Free -> Queued happens later (after the data is copied): reserve with Done here.
+    if (chunks_[i].state.compare_exchange_strong(expected, PendingChunk::kDone, std::memory_order_acq_rel)) {
+      return &chunks_[i];
+    }
+  }
+  return nullptr;
+}
+
+void LiveRuntime::FinishChunk(PendingChunk* c) noexcept {
+  if (c == nullptr) return;
+  std::uint32_t expected = PendingChunk::kDone;
+  c->state.compare_exchange_strong(expected, PendingChunk::kFree, std::memory_order_acq_rel);
+}
+
+void LiveRuntime::CancelAllChunks() noexcept {
+  for (std::uint32_t i = 0; i < chunkCount_; ++i) {
+    std::uint32_t q = PendingChunk::kQueued;
+    if (!chunks_[i].state.compare_exchange_strong(q, PendingChunk::kCancelled, std::memory_order_acq_rel)) {
+      std::uint32_t d = PendingChunk::kDone;
+      chunks_[i].state.compare_exchange_strong(d, PendingChunk::kFree, std::memory_order_acq_rel);
+    }
+  }
 }
 
 RuntimeDrops LiveRuntime::Drops() const noexcept {
@@ -141,7 +186,14 @@ void LiveRuntime::OnCommand(core::System& sys, cmd::CommandType type, const void
   } else if (type == cmd::CommandType::LiveReplaceChunk) {
     const auto c = Load<cmd::LiveReplaceChunk>(payload);
     PendingChunk* p = static_cast<PendingChunk*>(const_cast<void*>(c.prepared));
-    if (p == nullptr || p->state.load(std::memory_order_acquire) != PendingChunk::kQueued) {
+    // Only slots of this runtime's pool are ever dereferenced.
+    bool ours = false;
+    for (std::uint32_t i = 0; i < chunkCount_ && !ours; ++i) ours = p == &chunks_[i];
+    const std::uint32_t st = ours ? p->state.load(std::memory_order_acquire) : PendingChunk::kFree;
+    if (st == PendingChunk::kCancelled) {
+      p->state.store(PendingChunk::kFree, std::memory_order_release);  // its Server is gone
+      r.result = SND_ERR_INVALID_HANDLE;
+    } else if (st != PendingChunk::kQueued) {
       r.result = SND_ERR_INVALID_ARGUMENT;
     } else {
       const ApplyOutcome o = applier_.ReplaceChunk(sys, *p);
@@ -149,7 +201,10 @@ void LiveRuntime::OnCommand(core::System& sys, cmd::CommandType type, const void
       r.cells = o.cells;
       p->result = o.result;
       p->cells = o.cells;
-      p->state.store(PendingChunk::kDone, std::memory_order_release);
+      std::uint32_t q = PendingChunk::kQueued;
+      if (!p->state.compare_exchange_strong(q, PendingChunk::kDone, std::memory_order_acq_rel)) {
+        p->state.store(PendingChunk::kFree, std::memory_order_release);  // cancelled while applying
+      }
     }
   } else {
     return;
@@ -210,9 +265,9 @@ void LiveRuntime::OnEnded(std::uint32_t slot, std::uint32_t, std::uint32_t reaso
   PushLog(kLogPlaybackEnded, 0u, slot, (reason << 16) | (detail & 0xFFFFu));
 }
 
-void LiveRuntime::OnStall(std::uint32_t slot, std::uint32_t count, BlockIndex block) noexcept {
+void LiveRuntime::OnStall(std::uint32_t slot, Id eventId, std::uint32_t count, BlockIndex block) noexcept {
   if ((mask_.load(std::memory_order_relaxed) & kProfStreams) != 0u &&
-      !stalls_.TryPush(StreamStall{0u, slot, clock_})) {
+      !stalls_.TryPush(StreamStall{eventId, slot, clock_})) {
     Bump(dropStalls_);
   }
   if (recording_.load(std::memory_order_relaxed) != 0u) {

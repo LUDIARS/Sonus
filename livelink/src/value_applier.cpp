@@ -32,11 +32,12 @@ bool ValueApplier::Init(IAllocator& allocator, std::uint32_t maxEdits, std::uint
   while (tableSize_ < 2u * capacity_) tableSize_ <<= 1;
   maxBanks_ = maxBanks < 1u ? 1u : maxBanks;
   edits_ = static_cast<Edit*>(allocator.Allocate(sizeof(Edit) * tableSize_, 64, MemTag::LiveLink));
+  spare_ = static_cast<Edit*>(allocator.Allocate(sizeof(Edit) * tableSize_, 64, MemTag::LiveLink));
   cells_ = static_cast<core::LiveCell*>(allocator.Allocate(sizeof(core::LiveCell) * maxBanks_, 64, MemTag::LiveLink));
   banks_ = static_cast<core::LiveBankInfo*>(
       allocator.Allocate(sizeof(core::LiveBankInfo) * maxBanks_, 64, MemTag::LiveLink));
   bankSlots_ = static_cast<std::uint32_t*>(allocator.Allocate(sizeof(std::uint32_t) * maxBanks_, 64, MemTag::LiveLink));
-  if (edits_ == nullptr || cells_ == nullptr || banks_ == nullptr || bankSlots_ == nullptr) {
+  if (edits_ == nullptr || spare_ == nullptr || cells_ == nullptr || banks_ == nullptr || bankSlots_ == nullptr) {
     Destroy();
     return false;
   }
@@ -48,11 +49,13 @@ bool ValueApplier::Init(IAllocator& allocator, std::uint32_t maxEdits, std::uint
 void ValueApplier::Destroy() noexcept {
   if (alloc_ != nullptr) {
     alloc_->Free(edits_, MemTag::LiveLink);
+    alloc_->Free(spare_, MemTag::LiveLink);
     alloc_->Free(cells_, MemTag::LiveLink);
     alloc_->Free(banks_, MemTag::LiveLink);
     alloc_->Free(bankSlots_, MemTag::LiveLink);
   }
   edits_ = nullptr;
+  spare_ = nullptr;
   cells_ = nullptr;
   banks_ = nullptr;
   bankSlots_ = nullptr;
@@ -65,7 +68,9 @@ std::uint32_t ValueApplier::Find(std::uint32_t bankSlot, std::uint32_t fourcc, s
   for (std::uint32_t i = Hash(bankSlot, fourcc, column, row) & mask, n = 0; n < tableSize_; i = (i + 1u) & mask, ++n) {
     const Edit& e = edits_[i];
     if (e.used == 0u) return kInvalidSlot;
-    if (e.bankSlot == bankSlot && e.fourcc == fourcc && e.column == column && e.row == row) return i;
+    if (e.bankSlot == bankSlot && e.fourcc == fourcc && e.column == column && e.row == row) {
+      return e.bankGeneration == Generation(bankSlot) ? i : kInvalidSlot;
+    }
   }
   return kInvalidSlot;
 }
@@ -73,12 +78,22 @@ std::uint32_t ValueApplier::Find(std::uint32_t bankSlot, std::uint32_t fourcc, s
 bool ValueApplier::Remember(std::uint32_t bankSlot, std::uint32_t fourcc, std::uint32_t column, std::uint32_t row,
                             std::uint64_t original) noexcept {
   if (Find(bankSlot, fourcc, column, row) != kInvalidSlot) return true;  // first write wins
-  if (count_.load(std::memory_order_relaxed) >= capacity_) return false;
   const std::uint32_t mask = tableSize_ - 1u;
+  const std::uint32_t gen = Generation(bankSlot);
   for (std::uint32_t i = Hash(bankSlot, fourcc, column, row) & mask;; i = (i + 1u) & mask) {
     Edit& e = edits_[i];
-    if (e.used != 0u) continue;
-    e = Edit{bankSlot, Generation(bankSlot), fourcc, column, row, 1u, original};
+    if (e.used != 0u) {
+      if (e.bankSlot == bankSlot && e.fourcc == fourcc && e.column == column && e.row == row) {
+        // A record of an earlier registration of this bank slot: the new registration's
+        // value is the original from now on.
+        e.bankGeneration = gen;
+        e.original = original;
+        return true;
+      }
+      continue;
+    }
+    if (count_.load(std::memory_order_relaxed) >= capacity_) return false;
+    e = Edit{bankSlot, gen, fourcc, column, row, 1u, original};
     count_.store(count_.load(std::memory_order_relaxed) + 1u, std::memory_order_relaxed);
     return true;
   }
@@ -87,6 +102,35 @@ bool ValueApplier::Remember(std::uint32_t bankSlot, std::uint32_t fourcc, std::u
 void ValueApplier::LoadBanks(core::System& sys) noexcept {
   const std::uint32_t n = sys.LiveBanks(banks_, maxBanks_);
   bankCount_ = n < maxBanks_ ? n : maxBanks_;
+  std::uint64_t key = 0xCBF29CE484222325ull;
+  for (std::uint32_t i = 0; i < bankCount_; ++i) {
+    key = (key ^ banks_[i].handle.Value()) * 0x100000001B3ull;
+  }
+  if (key != bankKey_) {
+    bankKey_ = key;
+    Purge();
+  }
+}
+
+void ValueApplier::Purge() noexcept {
+  std::memset(static_cast<void*>(spare_), 0, sizeof(Edit) * tableSize_);
+  const std::uint32_t mask = tableSize_ - 1u;
+  std::uint32_t kept = 0;
+  for (std::uint32_t k = 0; k < tableSize_; ++k) {
+    const Edit& e = edits_[k];
+    if (e.used == 0u || e.bankGeneration == 0u || Generation(e.bankSlot) != e.bankGeneration) continue;
+    for (std::uint32_t i = Hash(e.bankSlot, e.fourcc, e.column, e.row) & mask;; i = (i + 1u) & mask) {
+      if (spare_[i].used == 0u) {
+        spare_[i] = e;
+        break;
+      }
+    }
+    ++kept;
+  }
+  Edit* t = edits_;
+  edits_ = spare_;
+  spare_ = t;
+  count_.store(kept, std::memory_order_relaxed);
 }
 
 std::uint32_t ValueApplier::Generation(std::uint32_t bankSlot) const noexcept {

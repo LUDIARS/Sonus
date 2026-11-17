@@ -696,6 +696,9 @@ inline void PostError(Impl& im, snd_result code, std::uint32_t detail, std::uint
             static_cast<std::uint16_t>(detail));
 }
 
+// Live link (live_link.cpp): event of the playback whose voice reads stream slot `slot`.
+Id LiveStreamEventOf(const Impl& im, std::uint32_t slot) noexcept;
+
 // Bank lookups (audio thread).
 const BankRecord* RegisteredBank(const Impl& im, std::uint16_t bankSlot) noexcept;
 EventRef ResolveEvent(const Impl& im, Id event) noexcept;

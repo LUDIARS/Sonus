@@ -52,6 +52,8 @@ struct RuntimeDesc {
   std::uint32_t resultEntries = 1024;  // applied SetValue / ReplaceChunk results
   std::uint32_t maxVoices = 0;         // 0: max_virtual_voices
   std::uint32_t maxMeters = 0;         // 0: 256 buses
+  std::uint32_t chunkSlots = 1;        // ReplaceChunk in flight (PendingChunk pool)
+  std::uint32_t chunkBytes = 1u << 20; // largest ReplaceChunk table (data bytes)
 };
 
 // LogEntry.kind values the runtime produces (protocol §6, LogEntry):
@@ -127,6 +129,17 @@ class LiveRuntime {
   RuntimeDrops Drops() const noexcept;
   ValueApplier& applier() noexcept { return applier_; }
 
+  // --- ReplaceChunk slots (live link thread) -------------------------------------------
+  // The pool outlives any Server: the audio thread writes results into it even if the
+  // Server that queued a chunk is gone. Acquire: a Free slot (nullptr if none), its
+  // `data` holds ChunkBytes(). Finish: Done -> Free after the result was read.
+  // CancelAll (Server::Destroy): Queued -> Cancelled (the audio thread frees it without
+  // applying), Done -> Free.
+  PendingChunk* AcquireChunk() noexcept;
+  void FinishChunk(PendingChunk* c) noexcept;
+  void CancelAllChunks() noexcept;
+  std::uint32_t ChunkBytes() const noexcept { return chunkBytes_; }
+
   const snd_config& config() const noexcept { return config_; }
   std::uint32_t MaxVoices() const noexcept { return maxVoices_; }
   std::uint32_t MaxMeters() const noexcept { return maxMeters_; }
@@ -136,7 +149,7 @@ class LiveRuntime {
   void OnArena(const core::LiveArenaView& arena) noexcept;
   void OnEvent(const notify::EventRecord& record) noexcept;
   void OnEnded(std::uint32_t slot, std::uint32_t generation, std::uint32_t reason, std::uint32_t detail) noexcept;
-  void OnStall(std::uint32_t slot, std::uint32_t count, BlockIndex block) noexcept;
+  void OnStall(std::uint32_t slot, Id eventId, std::uint32_t count, BlockIndex block) noexcept;
   void OnBlock(core::System& sys) noexcept;
 
   // The System bound to the hooks (set by Bind, after System::Create).
@@ -178,6 +191,9 @@ class LiveRuntime {
   BlockIndex block_ = 0;      // block being processed (ApplyCommands .. end)
   ClockSample clock_ = 0;     // clock at the start of block_
   std::uint32_t blocksSinceMeters_ = 0, blocksSinceStats_ = 0, blocksPerSecond_ = 1;
+  PendingChunk* chunks_ = nullptr;  // [chunkCount_]
+  std::uint8_t* chunkMemory_ = nullptr;
+  std::uint32_t chunkCount_ = 0, chunkBytes_ = 0;
   core::LiveBankInfo* knownBanks_ = nullptr;  // [maxBanks] registered at the last block
   core::LiveBankInfo* scratchBanks_ = nullptr;
   std::uint32_t knownBankCount_ = 0;

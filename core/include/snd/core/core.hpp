@@ -114,8 +114,9 @@ struct LiveTap {
   // Publish: a playback ended (slot, generation, snd_end_reason, snd_end_detail).
   void (*ended)(void* user, std::uint32_t slot, std::uint32_t generation, std::uint32_t reason,
                 std::uint32_t detail) noexcept = nullptr;
-  // Publish: stream slot `slot` stalled `count` more times in this block (6.3).
-  void (*stall)(void* user, std::uint32_t slot, std::uint32_t count, BlockIndex block) noexcept = nullptr;
+  // Publish: stream slot `slot` stalled `count` more times in this block (6.3). eventId: the
+  // event of the playback whose voice reads the stream (0 if no voice reads it any more).
+  void (*stall)(void* user, std::uint32_t slot, Id eventId, std::uint32_t count, BlockIndex block) noexcept = nullptr;
   // End of every RenderBlock (suspended blocks too). The Live* queries below may be
   // called from here.
   void (*block)(void* user, System& sys) noexcept = nullptr;
@@ -270,6 +271,8 @@ class System {
   std::uint32_t LiveMeters(livelink::MeterEntry* out, std::uint32_t capacity) const noexcept;
   std::uint32_t LiveBanks(LiveBankInfo* out, std::uint32_t capacity) const noexcept;
   void LiveStats(snd_stats* out) const noexcept;
+  // Event id of the playback whose voice reads stream slot `slot` (0 if none).
+  Id LiveStreamEvent(std::uint32_t slot) const noexcept;
   // Override layer (11.2). Cells of the object `objectId` in table `fourcc`: tables with
   // an id column match the row by id (index must be 0); list tables are addressed
   // through their owner (livelink-protocol.md "値の変更の宛先", see live_link.cpp):

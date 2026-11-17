@@ -19,6 +19,16 @@
 // DestroyUserBuffer (callbacks, device input and game memory: 2.5 does not
 // cover them).
 //
+// Every other command passes the game API's entry rules (command_check.hpp: enums,
+// ranges, NaN / Inf, handle shapes, time signatures); a command that fails them is
+// left out and counted per type (Info().invalidCommands / invalidByType), like the
+// overflow-fallback parameters (invalidFallbackParams).
+//
+// Starting state: a recording holds no snapshot of the state at its start. A replay
+// renders what the recorded run rendered only when it starts from the same state as
+// the recording did (banks loaded, sounds playing, overrides, parameter values);
+// writing the starting state into the recording is a candidate for contract 1.2.
+//
 // Create parses and validates the whole recording (malformed input is
 // rejected, never crashes). The audio-thread hook only walks prepared arrays.
 #ifndef SND_LIVELINK_REPLAYER_HPP
@@ -51,7 +61,10 @@ struct ReplayDesc {
 struct ReplayInfo {
   std::uint32_t arenas = 0;           // arena records
   std::uint32_t commands = 0;         // commands kept
-  std::uint32_t skippedCommands = 0;  // left out (see above)
+  std::uint32_t skippedCommands = 0;  // left out: not replayable (see above)
+  std::uint32_t invalidCommands = 0;  // left out: failed the API entry rules (command_check.hpp)
+  std::uint32_t invalidByType[static_cast<std::size_t>(cmd::CommandType::Count)] = {};  // per CommandType
+  std::uint32_t invalidFallbackParams = 0;
   std::uint32_t lodRecords = 0;
   std::uint32_t stallRecords = 0;
   std::uint32_t bankMaps = 0;

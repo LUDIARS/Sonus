@@ -90,7 +90,8 @@ struct Client::Impl final : FrameReader::Handler {
   bool haveMemory = false;
   std::uint64_t received[8] = {};
   std::uint8_t* record = nullptr;
-  std::uint64_t recordBytes = 0;
+  std::uint64_t recordBytes = 0;     // kept in `record`
+  std::uint64_t recordReceived = 0;  // offset of the stream (kept + overflow)
   ClientStats stats{};
 
   ~Impl() override { Free(); }
@@ -273,14 +274,16 @@ struct Client::Impl final : FrameReader::Handler {
           ++stats.protocolErrors;
           return;
         }
-        if (rd.offset != recordBytes) {  // a gap: keep what is contiguous
+        if (rd.offset != recordReceived) {  // a real gap in the stream
           ++stats.protocolErrors;
           return;
         }
+        // Once the buffer is full, everything that follows is overflow (not an error).
         const std::uint64_t room = d.recordBufferBytes - recordBytes;
         const std::uint64_t take = rd.bytes < room ? rd.bytes : room;
-        std::memcpy(record + recordBytes, data, static_cast<std::size_t>(take));
+        if (take != 0u) std::memcpy(record + recordBytes, data, static_cast<std::size_t>(take));
         recordBytes += take;
+        recordReceived += rd.bytes;
         stats.recordOverflow += static_cast<std::uint32_t>(rd.bytes - take);
         return;
       }
@@ -535,6 +538,8 @@ std::uint32_t Client::StartRecording(bool wantAck) noexcept {
   {
     base::LockGuard g(impl_->mutex);
     impl_->recordBytes = 0;
+    impl_->recordReceived = 0;
+    impl_->stats.recordOverflow = 0;
   }
   const RecordControl m{1u, 0u};
   return impl_->Command(MessageType::RecordControl, wantAck, &m, sizeof(m));
@@ -701,8 +706,9 @@ std::uint64_t Client::RecordingBytes() const noexcept {
   return impl_->recordBytes;
 }
 
-std::uint64_t Client::CopyRecording(std::uint8_t* out, std::uint64_t capacity) const noexcept {
+std::uint64_t Client::CopyRecording(std::uint8_t* out, std::uint64_t capacity, bool* truncated) const noexcept {
   base::LockGuard g(impl_->mutex);
+  if (truncated != nullptr) *truncated = impl_->recordReceived > impl_->recordBytes;
   const std::uint64_t n = impl_->recordBytes < capacity ? impl_->recordBytes : capacity;
   if (n != 0u) std::memcpy(out, impl_->record, static_cast<std::size_t>(n));
   return n;

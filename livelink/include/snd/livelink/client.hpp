@@ -94,7 +94,7 @@ struct ClientStats {
   std::uint32_t lastRoundTripUs = 0;
   std::uint64_t lastGameClock = 0;   // Pong.gameClockSample
   std::uint32_t errorsReceived = 0;
-  std::uint32_t recordOverflow = 0;  // recording bytes that did not fit
+  std::uint32_t recordOverflow = 0;  // recording bytes received after the buffer was full (not errors)
 };
 
 class Client {
@@ -156,7 +156,9 @@ class Client {
 
   // --- recording (11.3) ------------------------------------------------------------------
   std::uint64_t RecordingBytes() const noexcept;
-  std::uint64_t CopyRecording(std::uint8_t* out, std::uint64_t capacity) const noexcept;
+  // *truncated (optional): the recording did not fit in recordBufferBytes; the copy is
+  // its beginning only (ClientStats::recordOverflow says how many bytes are missing).
+  std::uint64_t CopyRecording(std::uint8_t* out, std::uint64_t capacity, bool* truncated = nullptr) const noexcept;
 
   struct Impl;
 

@@ -98,6 +98,8 @@ class FrameSender {
   void Clear() noexcept;
   FrameQueue& control() noexcept { return control_; }
   FrameQueue& bulk() noexcept { return bulk_; }
+  const FrameQueue& control() const noexcept { return control_; }
+  const FrameQueue& bulk() const noexcept { return bulk_; }
   bool Idle() const noexcept { return inFlight_ == 0u && control_.Empty() && bulk_.Empty(); }
   // Sends as much as the transport takes. Ok / WouldBlock, or Closed / Error.
   IoStatus Pump(ITransport& t, std::uint64_t* sentBytes) noexcept;

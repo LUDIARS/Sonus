@@ -56,7 +56,7 @@ struct Server::Impl final : FrameReader::Handler {
     std::uint32_t conn;    // connection generation (replies only to the same one)
     std::uint16_t wantAck;
     std::uint16_t kind;    // cmd::CommandType
-    std::int32_t chunk;    // PendingChunk slot or -1
+    PendingChunk* chunk;   // ReplaceChunk slot (LiveRuntime pool) or null
   };
 
   ServerDesc d{};
@@ -89,8 +89,9 @@ struct Server::Impl final : FrameReader::Handler {
   // applied-result bookkeeping
   Pending* pending = nullptr;
   std::uint32_t pendingCap = 0, pendingHead = 0, pendingCount = 0;
-  PendingChunk* chunks = nullptr;
-  std::uint8_t** chunkData = nullptr;
+  std::uint32_t revertPending = 0;  // revert marker refused (arena full): retried every loop
+  std::uint32_t revertTries = 0;
+  std::uint64_t lastSendProgressNs = 0;
 
   // profiler
   std::uint32_t meterHz = 30;
@@ -112,6 +113,7 @@ struct Server::Impl final : FrameReader::Handler {
   std::uint32_t bankCount = 0;
 
   // stats
+  Counter controlDropped, revertsLost;
   Counter connections, handshakesRejected, timeouts, protocolErrors, framesIn, framesOut, bytesIn, bytesOut,
       commandsRecorded, commandsRefused, profilerSent, profilerDropped, recordBytes, pingsAnswered;
   std::atomic<std::uint32_t> lastRttUs{0};
@@ -135,7 +137,6 @@ struct Server::Impl final : FrameReader::Handler {
     if (voiceList > scratchBytes) scratchBytes = voiceList;
     if (meterList > scratchBytes) scratchBytes = meterList;
     pendingCap = rt->results().Capacity();
-    const std::uint32_t nChunks = desc.chunkSlots;
     recvBuf = static_cast<std::uint8_t*>(alloc->Allocate(kRecvChunk, 64, MemTag::LiveLink));
     scratch = static_cast<std::uint8_t*>(alloc->Allocate(scratchBytes, 64, MemTag::LiveLink));
     logBuf = static_cast<std::uint8_t*>(alloc->Allocate(sizeof(ListHeader) + sizeof(LogEntry) * kLogBatch, 64, MemTag::LiveLink));
@@ -143,16 +144,6 @@ struct Server::Impl final : FrameReader::Handler {
     banks = static_cast<core::LiveBankInfo*>(
         alloc->Allocate(sizeof(core::LiveBankInfo) * (cfg.max_banks != 0u ? cfg.max_banks : 1u), 64, MemTag::LiveLink));
     if (recvBuf == nullptr || scratch == nullptr || logBuf == nullptr || pending == nullptr || banks == nullptr) return false;
-    if (nChunks != 0u) {
-      chunks = static_cast<PendingChunk*>(alloc->Allocate(sizeof(PendingChunk) * nChunks, 64, MemTag::LiveLink));
-      chunkData = static_cast<std::uint8_t**>(alloc->Allocate(sizeof(std::uint8_t*) * nChunks, 64, MemTag::LiveLink));
-      if (chunks == nullptr || chunkData == nullptr) return false;
-      for (std::uint32_t i = 0; i < nChunks; ++i) {
-        new (&chunks[i]) PendingChunk();
-        chunkData[i] = static_cast<std::uint8_t*>(alloc->Allocate(desc.maxReceivePayloadBytes, 64, MemTag::LiveLink));
-        if (chunkData[i] == nullptr) return false;
-      }
-    }
     return reader.Init(*alloc, desc.maxReceivePayloadBytes) && sender.Init(*alloc, desc.controlBufferBytes, bulk);
   }
 
@@ -166,27 +157,19 @@ struct Server::Impl final : FrameReader::Handler {
     logBuf = nullptr;
     alloc->Free(pending, MemTag::LiveLink);
     alloc->Free(banks, MemTag::LiveLink);
-    if (chunks != nullptr) {
-      for (std::uint32_t i = 0; i < d.chunkSlots; ++i) {
-        if (chunkData != nullptr) alloc->Free(chunkData[i], MemTag::LiveLink);
-        chunks[i].~PendingChunk();
-      }
-      alloc->Free(chunks, MemTag::LiveLink);
-      alloc->Free(chunkData, MemTag::LiveLink);
-    }
     recvBuf = scratch = nullptr;
     pending = nullptr;
     banks = nullptr;
-    chunks = nullptr;
-    chunkData = nullptr;
   }
 
   // --- sending -------------------------------------------------------------------------
   bool Control(MessageType type, std::uint32_t seq, const void* p, std::uint32_t n) noexcept {
     if (conn == nullptr) return false;
     if (!sender.control().Push(static_cast<std::uint16_t>(type), 0, seq, p, n)) {
-      protocolErrors.Add();
-      BeginClose();  // the tool does not read: give up on it
+      // Cannot happen for replies (reading and the result drain stop while the control
+      // queue is short of room); a ping that does not fit is dropped. A tool that does
+      // not read at all is dropped by the send-progress timeout (Service).
+      controlDropped.Add();
       return false;
     }
     framesOut.Add();
@@ -231,7 +214,7 @@ struct Server::Impl final : FrameReader::Handler {
     reader.Reset();
     sender.Clear();
     phase = Phase::AwaitHello;
-    phaseNs = lastRecvNs = lastPingNs = now;
+    phaseNs = lastRecvNs = lastPingNs = lastSendProgressNs = now;
     closingNs = 0;
     tokens = static_cast<double>(d.profilerBytesPerSecond);
     tokenNs = now;
@@ -259,17 +242,36 @@ struct Server::Impl final : FrameReader::Handler {
       recStopping = true;
     }
     if (d.revertOnDisconnect) {
-      Record(cmd::CommandType::LiveClearOverrides, nullptr, 0, 0, false, -1, false);
+      revertPending = 3u;  // bit0 LiveClearOverrides, bit1 the revert marker
+      revertTries = 0;
+      TryRevert();
+    }
+  }
+
+  // Records the disconnect revert; refused parts (arena full) are retried every loop,
+  // up to kRevertTries, then counted (ServerStats::revertsLost) and logged.
+  static constexpr std::uint32_t kRevertTries = 2000;
+  void TryRevert() noexcept {
+    if (revertPending == 0u) return;
+    if ((revertPending & 1u) != 0u &&
+        Record(cmd::CommandType::LiveClearOverrides, nullptr, 0, 0, false, nullptr, false) == SND_OK) {
+      revertPending &= ~1u;
+    }
+    if (revertPending == 2u) {  // in order: the marker after the clear
       cmd::LiveSetValue rv{};
       rv.field = kFieldRevertAll;
-      Record(cmd::CommandType::LiveSetValue, &rv, sizeof(rv), 0, false, -1, false);
+      if (Record(cmd::CommandType::LiveSetValue, &rv, sizeof(rv), 0, false, nullptr, false) == SND_OK) revertPending = 0u;
+    }
+    if (revertPending != 0u && ++revertTries >= kRevertTries) {
+      revertsLost.Add();  // the warning: ServerStats::revertsLost (no tool is attached to tell)
+      revertPending = 0u;
     }
   }
 
   // Records a live command from this (registered) thread. With track, the applied
   // result is matched later (SetValue / ReplaceChunk).
   snd_result Record(cmd::CommandType type, const void* payload, std::uint32_t bytes, std::uint32_t seq, bool wantAck,
-                    std::int32_t chunk, bool reply) noexcept {
+                    PendingChunk* chunk, bool reply) noexcept {
     const bool track = type == cmd::CommandType::LiveSetValue || type == cmd::CommandType::LiveReplaceChunk;
     if (track && pendingCount >= pendingCap) {
       commandsRefused.Add();
@@ -355,7 +357,7 @@ struct Server::Impl final : FrameReader::Handler {
           c.id = m.paramId;
           std::memcpy(&c.value, &m.value, 4);
           c.enable = m.enable;
-          r = Record(cmd::CommandType::LiveOverride, &c, sizeof(c), h.seq, wantAck, -1, true);
+          r = Record(cmd::CommandType::LiveOverride, &c, sizeof(c), h.seq, wantAck, nullptr, true);
         }
         return Reply(h.seq, wantAck, r, "OverrideParam");
       }
@@ -368,12 +370,12 @@ struct Server::Impl final : FrameReader::Handler {
           c.id = m.musicEventId;
           c.value = m.stateId;
           c.enable = m.enable;
-          r = Record(cmd::CommandType::LiveOverride, &c, sizeof(c), h.seq, wantAck, -1, true);
+          r = Record(cmd::CommandType::LiveOverride, &c, sizeof(c), h.seq, wantAck, nullptr, true);
         }
         return Reply(h.seq, wantAck, r, "OverrideState");
       }
       case MessageType::ClearOverrides:
-        return Reply(h.seq, wantAck, Record(cmd::CommandType::LiveClearOverrides, nullptr, 0, h.seq, wantAck, -1, true),
+        return Reply(h.seq, wantAck, Record(cmd::CommandType::LiveClearOverrides, nullptr, 0, h.seq, wantAck, nullptr, true),
                      "ClearOverrides");
       case MessageType::SetProfilerMask: {
         const SetProfilerMask m = ReadFixed<SetProfilerMask>(p, n);
@@ -474,7 +476,7 @@ struct Server::Impl final : FrameReader::Handler {
       c.valueType = m.valueType;
       c.index = m.index;
       c.value = m.value;
-      r = Record(cmd::CommandType::LiveSetValue, &c, sizeof(c), h.seq, wantAck, -1, true);
+      r = Record(cmd::CommandType::LiveSetValue, &c, sizeof(c), h.seq, wantAck, nullptr, true);
     }
     if (r != SND_OK) Reply(h.seq, wantAck, r, "SetValue");  // success: answered when applied
   }
@@ -486,17 +488,15 @@ struct Server::Impl final : FrameReader::Handler {
     snd_result r = TrailingData(p, h.payloadBytes, sizeof(ReplaceChunk), m.bytes, &data) ? SND_OK : SND_ERR_INVALID_ARGUMENT;
     if (r == SND_OK) r = CheckTableChunk(m.fourcc, data, m.bytes, &rows);
     if (r == SND_ERR_UNSUPPORTED) return Reply(h.seq, wantAck, r, "blob chunk: rebuild and hot reload");
-    std::int32_t slot = -1;
+    PendingChunk* slot = nullptr;
+    if (r == SND_OK && m.bytes > rt->ChunkBytes()) r = SND_ERR_OUT_OF_BUDGET;
     if (r == SND_OK) {
-      for (std::uint32_t i = 0; i < d.chunkSlots && slot < 0; ++i) {
-        if (chunks[i].state.load(std::memory_order_acquire) == PendingChunk::kFree) slot = static_cast<std::int32_t>(i);
-      }
-      if (slot < 0) r = SND_ERR_LIMIT_REACHED;
+      slot = rt->AcquireChunk();
+      if (slot == nullptr) r = SND_ERR_LIMIT_REACHED;
     }
     if (r == SND_OK) {
-      PendingChunk& c = chunks[slot];
-      std::memcpy(chunkData[slot], data, static_cast<std::size_t>(m.bytes));
-      c.data = chunkData[slot];
+      PendingChunk& c = *slot;
+      std::memcpy(c.data, data, static_cast<std::size_t>(m.bytes));
       c.bytes = m.bytes;
       c.bankId = m.bankId;
       c.fourcc = m.fourcc;
@@ -523,7 +523,7 @@ struct Server::Impl final : FrameReader::Handler {
         c.flags = cmd::kPlayHasPosition;
         c.position = Vec3{m.position[0], m.position[1], m.position[2]};
       }
-      r = Record(cmd::CommandType::LiveAudition, &c, sizeof(c), h.seq, wantAck, -1, true);
+      r = Record(cmd::CommandType::LiveAudition, &c, sizeof(c), h.seq, wantAck, nullptr, true);
     }
     Reply(h.seq, wantAck, r, "Audition");
   }
@@ -552,14 +552,20 @@ struct Server::Impl final : FrameReader::Handler {
   }
 
   // --- runtime channels ----------------------------------------------------------------
+  // Back-pressure (acceptance decision D2): a result is taken from the ring only when its
+  // answer fits in the control queue; the rest waits in the ring for the next loop, so
+  // no Ack is lost and the order is kept.
+  static constexpr std::uint64_t kReplyRoom = kFrameHeaderBytes + sizeof(Error);
   void DrainResults() noexcept {
     ApplyResult ar{};
-    while (rt->results().TryPop(ar)) {
+    for (;;) {
+      if (conn != nullptr && sender.control().Free() < kReplyRoom) return;
+      if (!rt->results().TryPop(ar)) return;
       if (pendingCount == 0u) continue;  // results of commands recorded by someone else (none)
       const Pending pd = pending[pendingHead];
       pendingHead = (pendingHead + 1u) % pendingCap;
       --pendingCount;
-      if (pd.chunk >= 0) chunks[pd.chunk].state.store(PendingChunk::kFree, std::memory_order_release);
+      if (pd.chunk != nullptr) rt->FinishChunk(pd.chunk);
       if (pd.conn == 0u || pd.conn != connGen || conn == nullptr) continue;
       Reply(pd.seq, pd.wantAck != 0u, ar.result,
             pd.kind == static_cast<std::uint16_t>(cmd::CommandType::LiveReplaceChunk) ? "ReplaceChunk not applied"
@@ -736,6 +742,7 @@ struct Server::Impl final : FrameReader::Handler {
       } else {
         Service(now);
       }
+      TryRevert();
       DrainResults();
       DrainRecords();
       DrainProfiler(platform::MonotonicNanoseconds());
@@ -763,15 +770,34 @@ struct Server::Impl final : FrameReader::Handler {
     std::uint64_t sent = 0;
     const IoStatus st = sender.Pump(*conn, &sent);
     bytesOut.Add(sent);
+    if (sent != 0u || sender.Idle()) lastSendProgressNs = platform::MonotonicNanoseconds();
     if (st == IoStatus::Closed || st == IoStatus::Error) Disconnect();
   }
 
+  // Bytes that may be read now (acceptance decision D2): every tracked command (>= 32
+  // bytes on the wire) needs a slot of the result FIFO, every frame (>= 16 bytes) may
+  // need a reply (<= kReplyRoom bytes) in the control queue. 0: stop reading; the
+  // tool's frames wait in the transport (TCP flow control).
+  std::size_t ReadBudget() const noexcept {
+    std::uint64_t b = kRecvChunk;
+    const std::uint64_t byResults = std::uint64_t{pendingCap - pendingCount} * 32u;
+    if (byResults < b) b = byResults;
+    const std::uint64_t cf = sender.control().Free();
+    const std::uint64_t byControl = cf > 2u * kReplyRoom ? (cf - 2u * kReplyRoom) * kFrameHeaderBytes / kReplyRoom : 0u;
+    if (byControl < b) b = byControl;
+    return static_cast<std::size_t>(b);
+  }
+
   void Service(std::uint64_t now) noexcept {
-    conn->Wait(true, !sender.Idle(), d.pollMs);
+    const bool canRead = ReadBudget() != 0u;
+    conn->Wait(canRead, !sender.Idle(), d.pollMs);
+    if (!canRead || phase == Phase::Closing) lastRecvNs = platform::MonotonicNanoseconds();  // not listening
     // receive
     for (int round = 0; round < 64 && conn != nullptr; ++round) {
+      const std::size_t budget = ReadBudget();
+      if (budget == 0u) break;
       std::size_t got = 0;
-      const IoStatus st = conn->Recv(recvBuf, kRecvChunk, &got);
+      const IoStatus st = conn->Recv(recvBuf, budget, &got);
       if (st == IoStatus::Ok) {
         bytesIn.Add(got);
         lastRecvNs = platform::MonotonicNanoseconds();
@@ -805,6 +831,12 @@ struct Server::Impl final : FrameReader::Handler {
       return;
     }
     if (now - lastRecvNs > d.timeoutMs * kMs) {
+      timeouts.Add();
+      Disconnect();
+      return;
+    }
+    // A tool that reads nothing for timeoutMs (the only reason to drop a tool for its pace).
+    if (!sender.Idle() && now - lastSendProgressNs > d.timeoutMs * kMs) {
       timeouts.Add();
       Disconnect();
       return;
@@ -889,6 +921,9 @@ void Server::Stop() noexcept {
   if (!im.started) return;
   im.stop.store(1, std::memory_order_release);
   im.thread.Join();
+  // Chunks still queued are cancelled: the audio thread frees them without applying
+  // (their memory belongs to the LiveRuntime, which outlives this Server).
+  im.rt->CancelAllChunks();
   im.tcp.Close();
   im.started = false;
 }
@@ -917,6 +952,8 @@ ServerStats Server::Stats() const noexcept {
   s.runtimeDropped = dr.log + dr.timing + dr.stalls + dr.lod + dr.results;
   s.recordsDropped = dr.records;
   s.pingsAnswered = static_cast<std::uint32_t>(im.pingsAnswered.Get());
+  s.controlDropped = static_cast<std::uint32_t>(im.controlDropped.Get());
+  s.revertsLost = static_cast<std::uint32_t>(im.revertsLost.Get());
   s.lastRoundTripUs = im.lastRttUs.load(std::memory_order_relaxed);
   return s;
 }

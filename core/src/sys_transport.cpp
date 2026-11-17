@@ -169,7 +169,8 @@ void UpdateTransport(Impl& im) noexcept {
           snd_musical_time mt{};
           std::memcpy(&mt, payload.bytes, sizeof(mt));
           const TimeSignature sig = SND_W(Transport_signature)[td];
-          const std::int64_t beatTicks = static_cast<std::int64_t>(kTicksPerBeat) * 4 / (sig.beatUnit == 0u ? 4 : sig.beatUnit);
+          std::int64_t beatTicks = static_cast<std::int64_t>(kTicksPerBeat) * 4 / (sig.beatUnit == 0u ? 4 : sig.beatUnit);
+    if (beatTicks < 1) beatTicks = 1;  // defensive: a beat unit above 4 * kTicksPerBeat (bad input)
           TransportPosition& pos = SND_W(Transport_position)[td];
           pos.tick = (static_cast<std::int64_t>(mt.bar) * sig.beatsPerBar + mt.beat) * beatTicks + mt.tick;
           pos.tickFraction = 0.0;
@@ -215,7 +216,8 @@ void UpdateTransport(Impl& im) noexcept {
     pos.tickFraction = f - whole;
     // Beat notifications of the minimal transport.
     const TimeSignature sig = SND_W(Transport_signature)[d];
-    const std::int64_t beatTicks = static_cast<std::int64_t>(kTicksPerBeat) * 4 / (sig.beatUnit == 0u ? 4 : sig.beatUnit);
+    std::int64_t beatTicks = static_cast<std::int64_t>(kTicksPerBeat) * 4 / (sig.beatUnit == 0u ? 4 : sig.beatUnit);
+    if (beatTicks < 1) beatTicks = 1;  // defensive: a beat unit above 4 * kTicksPerBeat (bad input)
     const std::int64_t before = pos.tick - static_cast<MusicalTicks>(whole);
     const std::int64_t firstBeat = (before + beatTicks - 1) / beatTicks;
     const std::int64_t lastBeat = pos.tick / beatTicks;
