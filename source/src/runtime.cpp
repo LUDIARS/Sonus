@@ -44,6 +44,12 @@ void Runtime::Destroy() noexcept {
   kinds_ = SourceKindSet{};
 }
 
+void Runtime::BankUnregistered(void* runtime, std::uint16_t bankSlot) noexcept {
+  auto* rt = static_cast<Runtime*>(runtime);
+  if (rt == nullptr || rt->impl_ == nullptr) return;
+  rt->impl_->shared.bankEpoch[bankSlot % detail::kBankEpochs].fetch_add(1u, std::memory_order_release);
+}
+
 RuntimeStats Runtime::Stats() const noexcept {
   RuntimeStats s;
   if (impl_ == nullptr) return s;

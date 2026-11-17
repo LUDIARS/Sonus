@@ -67,6 +67,10 @@ void SourceKinds::Destroy() noexcept {
   alloc_ = nullptr;
 }
 
+void SourceKinds::BankUnregistered(void* user, std::uint16_t bankSlot) noexcept {
+  source::Runtime::BankUnregistered(user, bankSlot);
+}
+
 const source::SourceKindSet* SourceKinds::Kinds() const noexcept {
   return runtime_ != nullptr ? &static_cast<const source::Runtime*>(runtime_)->Kinds() : nullptr;
 }

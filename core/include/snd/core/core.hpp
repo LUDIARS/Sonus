@@ -90,6 +90,12 @@ struct CoreDesc {
   // Codec lookup for sources (custom codecs first). Null: no codecs.
   ICodec* (*findCodec)(void* user, std::uint32_t fourcc) noexcept = nullptr;
   void* codecUser = nullptr;
+  // Called on the audio thread (ApplyCommands, RT: principle 1) when a bank is
+  // unregistered (its playbacks are gone; its memory goes back after the epoch).
+  // The composition root passes source::Runtime::BankUnregistered so the PCM
+  // cache drops the entries of that bank. Null: not called.
+  void (*bankUnregistered)(void* user, std::uint16_t bankSlot) noexcept = nullptr;
+  void* bankUser = nullptr;
   LiveCommandFn liveCommand = nullptr;
   void* liveUser = nullptr;
   double outputLatencySeconds = 0.0;   // IOutputDevice::OutputLatencySeconds (8.1 notifications, stats)

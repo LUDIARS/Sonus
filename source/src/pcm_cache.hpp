@@ -13,8 +13,11 @@
 // codec). The load generation (SourceAsset::reserved, the low 16 bits of the
 // bank handle's generation, set by core; source_if.hpp) differs for every load
 // of a bank, so an entry never serves another load, even one at the same slot
-// and address. Entries of an older load of a slot are freed once unpinned (the
-// first start from the new load). A fill whose last voice went away is
+// and address. When core unregisters a bank (CoreDesc::bankUnregistered ->
+// Runtime::BankUnregistered) the entries of that slot become stale: never
+// served again and freed in Publish once unpinned. Entries of an older load
+// are also freed at the first start from a new load (16-bit generations wrap;
+// the unregistration covers that). A fill whose last voice went away is
 // cancelled at once (the job stops before its next read of bank memory) and
 // the entry is dropped: no fill job outlives the voices that pin the bank.
 //
@@ -34,6 +37,7 @@ struct CacheEntry {
   Id assetId;
   std::uint16_t bankSlot;
   std::uint16_t loadGen;
+  std::uint32_t bankEpoch;            // Shared::bankEpoch of the slot when the entry was made
   std::uint32_t codecId;
   const std::uint8_t* data;
   std::uint64_t frames;
@@ -94,6 +98,9 @@ class PcmCache {
  private:
   std::uint32_t FramesPerPage(std::uint32_t channels) const noexcept { return pageBytes_ / (4u * channels); }
   void Free(std::uint32_t e) noexcept;
+  static bool Stale(const CacheEntry& e, const Shared& sh) noexcept {
+    return sh.bankEpoch[e.bankSlot % kBankEpochs].load(std::memory_order_acquire) != e.bankEpoch;
+  }
   bool Evict(std::uint32_t pagesNeeded, Shared& sh) noexcept;
 
   std::uint8_t* pageBase_ = nullptr;

@@ -110,6 +110,8 @@ SND_TEST(SourceEndToEnd, ResidentCompressedAndStreamThroughCore) {
   d.sources = kinds.Kinds();
   d.jobs = &workers;
   d.bankScheduler = &io;
+  d.bankUnregistered = &snd::compose::SourceKinds::BankUnregistered;
+  d.bankUser = kinds.BankUser();
   d.rtWorkerRealtimePriority = false;
   snd::core::System* sys = nullptr;
   SND_REQUIRE_EQ(snd::core::System::Create(d, &sys), SND_OK);

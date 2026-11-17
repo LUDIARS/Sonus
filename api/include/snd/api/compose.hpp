@@ -31,6 +31,9 @@ class SourceKinds {
   void Destroy() noexcept;
   // nullptr before Init.
   const source::SourceKindSet* Kinds() const noexcept;
+  // For core::CoreDesc::bankUnregistered / bankUser (the PCM cache drops an unregistered bank).
+  static void BankUnregistered(void* user, std::uint16_t bankSlot) noexcept;
+  void* BankUser() const noexcept { return runtime_; }
 
  private:
   void* runtime_ = nullptr;  // snd::source::Runtime

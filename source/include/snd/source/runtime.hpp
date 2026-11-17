@@ -141,6 +141,9 @@ class Runtime {
   void Destroy() noexcept;
 
   const SourceKindSet& Kinds() const noexcept { return kinds_; }
+  // core::CoreDesc::bankUnregistered (user = this Runtime). Any thread, RT-safe
+  // (one atomic increment): the PCM cache frees the bank's entries once unpinned.
+  static void BankUnregistered(void* runtime, std::uint16_t bankSlot) noexcept;
   RuntimeStats Stats() const noexcept;
 
   struct Impl;  // source/src

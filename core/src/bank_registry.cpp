@@ -520,6 +520,8 @@ void UnregisterBank(Impl& im, std::uint32_t bankSlot) noexcept {
   const bk::BankView& v = *r.view;
   ba.state = BankAudioState::AwaitEpoch;  // excluded from the definition search below
   ba.unregisterBlock = im.block;
+  // Sources drop what they cached of this bank (PCM cache) once it is unused (stage 2).
+  if (im.desc.bankUnregistered != nullptr) im.desc.bankUnregistered(im.desc.bankUser, static_cast<std::uint16_t>(bankSlot));
   // Buses.
   for (std::uint32_t b = 0; b < r.busCount; ++b) {
     const std::uint32_t slot = r.busSlot[b];

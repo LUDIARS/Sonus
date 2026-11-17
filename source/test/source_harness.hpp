@@ -187,6 +187,8 @@ class Rig {
     d.sources = &runtime.Kinds();
     d.jobs = o.threaded ? static_cast<snd::IJobSystem*>(&workers_) : static_cast<snd::IJobSystem*>(&jobs);
     d.bankScheduler = &io;
+    d.bankUnregistered = &snd::source::Runtime::BankUnregistered;
+    d.bankUser = &runtime;
     d.rtWorkerRealtimePriority = false;
     created = ok_ ? snd::core::System::Create(d, &sys) : SND_ERR_OUT_OF_BUDGET;
     if (sys != nullptr) {

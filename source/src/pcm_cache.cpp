@@ -123,7 +123,8 @@ CacheResult PcmCache::Acquire(const AssetCopy& a, ICodec* codec, Shared& sh, std
   if (!Enabled() || a.h.channels == 0u || a.h.channels > kMaxChannels) return CacheResult::Full;
   for (std::uint32_t i = 0; i < entryCap_; ++i) {  // entries of an older load of this bank slot
     CacheEntry& e = entries_[i];
-    if (e.state != 0u && e.bankSlot == a.bankSlot && e.loadGen != a.loadGen && e.pins == 0u && !JobBusy(e.jobCounter)) {
+    const bool stale = e.state != 0u && (Stale(e, sh) || (e.bankSlot == a.bankSlot && e.loadGen != a.loadGen));
+    if (stale && e.pins == 0u && !JobBusy(e.jobCounter)) {
       if (e.state == 1u) sh.decoders.Release(e.slot);
       Free(i);
     }
@@ -131,6 +132,7 @@ CacheResult PcmCache::Acquire(const AssetCopy& a, ICodec* codec, Shared& sh, std
   for (std::uint32_t i = 0; i < entryCap_; ++i) {
     CacheEntry& e = entries_[i];
     if (e.state == 0u || e.state == 3u) continue;
+    if (Stale(e, sh)) continue;  // its bank was unregistered (freed once unpinned)
     if (e.assetId == a.assetId && e.bankSlot == a.bankSlot && e.loadGen == a.loadGen && e.data == a.data &&
         e.frames == a.h.total_frames && e.codecId == a.h.codec) {
       ++e.pins;
@@ -173,6 +175,7 @@ CacheResult PcmCache::Acquire(const AssetCopy& a, ICodec* codec, Shared& sh, std
   e.assetId = a.assetId;
   e.bankSlot = a.bankSlot;
   e.loadGen = a.loadGen;
+  e.bankEpoch = sh.bankEpoch[a.bankSlot % kBankEpochs].load(std::memory_order_acquire);
   e.codecId = a.h.codec;
   e.data = a.data;
   e.frames = a.h.total_frames;
@@ -271,9 +274,10 @@ void PcmCache::Schedule(const SourceServices& sv, Shared& sh) noexcept {
       FillJob(&e);  // no job service at all: fill on this thread (tests without core services)
     }
   }
-  for (std::uint32_t i = 0; i < entryCap_; ++i) {  // failed and unused: give the pages back
+  for (std::uint32_t i = 0; i < entryCap_; ++i) {  // failed, or of an unregistered bank, and unused: free
     CacheEntry& e = entries_[i];
-    if (e.state == 3u && e.pins == 0u && !JobBusy(e.jobCounter)) Free(i);
+    if (e.state == 0u || e.pins != 0u || JobBusy(e.jobCounter)) continue;
+    if (e.state == 3u || (e.state == 2u && Stale(e, sh))) Free(i);
   }
 }
 

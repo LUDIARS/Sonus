@@ -19,7 +19,8 @@ namespace snd::source::detail {
 inline constexpr std::uint32_t kNone = 0xFFFFFFFFu;
 inline constexpr std::uint32_t kCarryFrames = 256;   // decode granularity (frames per Decode call)
 inline constexpr std::uint32_t kMaxInput = codec::kHoldInputBytes;  // bytes per Decode call (D-51)
-inline constexpr std::uint32_t kFadeMs = 5;         // short fade (D-15, Config.tuning.shortFadeMs default)
+inline constexpr std::uint32_t kFadeMs = 5;
+inline constexpr std::uint32_t kBankEpochs = 256;  // bank slots (modulo): unregistration counters         // short fade (D-15, Config.tuning.shortFadeMs default)
 
 inline std::uint64_t AlignUp(std::uint64_t v, std::uint64_t a) noexcept { return (v + a - 1u) & ~(a - 1u); }
 inline std::uint32_t NextPow2(std::uint32_t v) noexcept {
@@ -381,6 +382,7 @@ struct Shared {
   io::IoScheduler* io = nullptr;
   io::StreamPool* streamPool = nullptr;
   std::uint32_t maxVoiceChannels = kMaxChannels;  // RuntimeDesc (Config.maxVoiceChannels)
+  std::atomic<std::uint32_t> bankEpoch[kBankEpochs] = {};  // bumped when a bank slot is unregistered
   codec::DecoderPool decoders;
   std::uint32_t decoderUsers = 0;  // kinds that called EnsureDecoders
   bool decodersReady = false;
