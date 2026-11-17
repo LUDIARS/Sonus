@@ -248,9 +248,9 @@ struct Server::Impl final : FrameReader::Handler {
 
   void Disconnect() noexcept {
     if (conn == nullptr) return;
+    connected.store(0, std::memory_order_release);  // before the peer can see the close
     acceptor->Release(conn);
     conn = nullptr;
-    connected.store(0, std::memory_order_release);
     reader.Reset();
     sender.Clear();
     rt->SetProfiler(0u, 0u);
