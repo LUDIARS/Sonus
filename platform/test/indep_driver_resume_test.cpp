@@ -249,7 +249,7 @@ SND_TEST(IndepDriverResume, ResumesASuspendedDevice) {
 // target BEFORE the device plays again, as Start() does. Resume() posts the
 // prefill and calls device->Start() at once, so with a slow renderer the
 // device restarts on a partly filled ring.
-SND_TEST(IndepDriverResume, Defect_platform_ResumeRestartsDeviceBeforePrefill) {
+SND_TEST(IndepDriverResume, ResumeRestartsDeviceAfterPrefill) {
   SuspendableDevice dev;
   Renderer r;
   Events ev;
