@@ -181,7 +181,6 @@ class LiveRuntime {
   core::LiveBankInfo* knownBanks_ = nullptr;  // [maxBanks] registered at the last block
   core::LiveBankInfo* scratchBanks_ = nullptr;
   std::uint32_t knownBankCount_ = 0;
-  std::uint32_t lastUnderruns_ = 0, lastLate_ = 0;
 };
 
 }  // namespace snd::livelink

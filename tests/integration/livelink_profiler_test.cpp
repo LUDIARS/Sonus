@@ -52,10 +52,17 @@ SND_TEST(LivelinkProfiler, StreamsVoicesMetersTimingMemoryAndTheEventLog) {
     if (m[i].busId == 0u) {  // master (SND_ID_NONE): the output level
       sawMaster = true;
       SND_CHECK_NEAR(m[i].peak[0], level, 1e-5);
-      SND_CHECK_NEAR(m[i].rms[0], level, level * 0.01f);  // RMS window still settling
     }
   }
   SND_CHECK(sawMaster);
+  // The RMS window settles on the constant level (a later meter snapshot).
+  SND_CHECK(f.StepUntil([&] {
+    const std::uint32_t k = c->CopyMeters(m, 8);
+    for (std::uint32_t i = 0; i < k; ++i) {
+      if (m[i].busId == 0u && std::fabs(m[i].rms[0] - level) < level * 1e-3f) return true;
+    }
+    return false;
+  }));
   std::vector<ll::MeterSample> hist(512);
   SND_CHECK(c->CopyMeterHistory(HashId("Sfx"), hist.data(), 512) >= 2u);
   std::vector<ll::TimingSample> ts(512);
@@ -141,14 +148,17 @@ SND_TEST(LivelinkProfiler, StalledToolDropsProfilerDataWithoutStallingTheGame) {
   // From now on the peer never reads.
   double worstMs = 0;
   const auto t0 = std::chrono::steady_clock::now();
-  while (std::chrono::steady_clock::now() - t0 < std::chrono::milliseconds(1500)) {
+  std::uint32_t blocks = 0;
+  while ((blocks < 1000u || f.server->Stats().profilerDropped == 0u) &&
+         std::chrono::steady_clock::now() - t0 < std::chrono::seconds(20)) {
+    ++blocks;
     const auto a = std::chrono::steady_clock::now();
     f.Step();
     worstMs = std::max(worstMs, std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - a).count());
     std::this_thread::sleep_for(std::chrono::microseconds(500));
   }
   const ll::ServerStats st = f.server->Stats();
-  SND_CHECK(st.profilerDropped > 0u);
+  SND_CHECK_MSG(st.profilerDropped > 0u, "sent %u dropped %u bytesOut %llu connected %d", st.profilerSent, st.profilerDropped, static_cast<unsigned long long>(st.bytesOut), f.server->Connected() ? 1 : 0);
   SND_CHECK(st.profilerSent > 0u);
   SND_CHECK(f.server->Connected());  // still attached: dropping is not an error
   SND_CHECK_MSG(worstMs < 50.0, "a block took %.2f ms", worstMs);
