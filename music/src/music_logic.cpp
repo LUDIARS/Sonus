@@ -303,10 +303,11 @@ void ProcessInstances(State& s, const schema::Tables& t, MusicPb& pb, Timeline& 
           const std::uint32_t r = si.markerFirst + k;
           const std::uint64_t f = s.tb.mmrk.U64(bf::col::MMRK_frame, r);
           if (f < in.voiceFrame) continue;
-          const double c = static_cast<double>(in.voiceClock) + static_cast<double>(f - in.voiceFrame) * in.ratio;
-          if (c < static_cast<double>(in.markerCursor) || c >= static_cast<double>(s.BlockEnd())) continue;
-          if (in.stopPending != 0u && c >= static_cast<double>(in.stopClock)) continue;
-          PushNote(s, notify::EventType::Marker, s.tb.mmrk.U32(bf::col::MMRK_id, r), handle, RoundClock(c));
+          const ClockSample c =
+              RoundClock(static_cast<double>(in.voiceClock) + static_cast<double>(f - in.voiceFrame) * in.ratio);
+          if (c < in.markerCursor || c >= s.BlockEnd()) continue;
+          if (in.stopPending != 0u && c >= in.stopClock) continue;
+          PushNote(s, notify::EventType::Marker, s.tb.mmrk.U32(bf::col::MMRK_id, r), handle, c);
         }
       }
       in.markerCursor = s.BlockEnd();

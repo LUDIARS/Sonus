@@ -96,10 +96,12 @@ void EmitBeats(State& s, Timeline& tl, std::uint64_t handle, ClockSample to) noe
   double b = tl.NextBeat(tl.TickAtClock(static_cast<double>(from)));
   for (std::uint32_t guard = 0; guard < 256u; ++guard) {
     double c = 0.0;
-    if (!tl.ClockAtTick(b, &c) || c >= static_cast<double>(to)) break;
-    if (b >= -1e-6 && c >= static_cast<double>(from) - 0.5) {
+    if (!tl.ClockAtTick(b, &c)) break;
+    const ClockSample at = RoundClock(c);  // rounded on both bounds: a beat on a block edge is sent once
+    if (at >= to) break;
+    if (b >= -1e-6 && at >= from) {
       const snd_musical_time m = tl.Musical(b);
-      PushNote(s, notify::EventType::Beat, static_cast<std::uint32_t>(m.bar), handle, RoundClock(c),
+      PushNote(s, notify::EventType::Beat, static_cast<std::uint32_t>(m.bar), handle, at,
                static_cast<std::uint32_t>(m.beat));
     }
     b = tl.NextBeat(b + 0.5);
