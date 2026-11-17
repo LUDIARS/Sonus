@@ -53,3 +53,10 @@ foreach(_ll livelink_override_test livelink_profiler_test livelink_record_test l
   target_include_directories(integration_${_ll} PRIVATE ${PROJECT_SOURCE_DIR}/core/test)
   set_tests_properties(integration_${_ll} PROPERTIES TIMEOUT 600)
 endforeach()
+
+# Independent live link tests (stage 2 livelink, written from the spec by a separate tester).
+foreach(_ll indep_livelink_override_test indep_livelink_protocol_test)
+  snd_add_test(integration_${_ll} SOURCES ${_ll}.cpp LINK ${_ll_link})
+  target_include_directories(integration_${_ll} PRIVATE ${PROJECT_SOURCE_DIR}/core/test)
+  set_tests_properties(integration_${_ll} PROPERTIES TIMEOUT 600)
+endforeach()
