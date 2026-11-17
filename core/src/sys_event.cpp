@@ -297,14 +297,17 @@ void StopVoice(Ctx& c, SlotIndex v, float fadeSeconds, ClockSample at = 0, bool 
   if (lc.state == static_cast<std::uint8_t>(VoiceStateId::Releasing)) {
     // Already releasing: only a shorter end (the unload discard) changes it, and the
     // envelope continues from its current level down to 0 within fadeSeconds.
+    // The envelope continues from its level now and reaches 0 at max(at, now) + fadeSeconds
+    // (music: an interrupting transition ends an outgoing fade sooner).
     const float sr = static_cast<float>(im.cfg.sampleRate);
-    const ClockSample newStop = c.clock + static_cast<ClockSample>(fadeSeconds * sr + 0.5f);
+    const ClockSample from = at > c.clock ? at : c.clock;
+    const ClockSample newStop = from + static_cast<ClockSample>(fadeSeconds * sr + 0.5f);
     if (!shorten || !(fadeSeconds > 0.0f) || newStop >= lc.stopClock) return;
     const float relFrames = lc.releaseSeconds * sr;
     float level = relFrames > 0.0f ? static_cast<float>(lc.stopClock - c.clock) / relFrames : 0.0f;
     level = level > 1.0f ? 1.0f : level;
     if (level <= 0.0f) return;
-    lc.releaseSeconds = fadeSeconds / level;
+    lc.releaseSeconds = static_cast<float>(newStop - c.clock) / sr / level;
     lc.stopClock = newStop;
     return;
   }
@@ -951,7 +954,9 @@ void RunMusic(Ctx& c) noexcept {
       }
       case music::MusicVoiceOp::StopVoice:
         if (rq.voiceSlot < im.cfg.maxVirtual) {
-          StopVoice(c, rq.voiceSlot, rq.fadeSeconds, rq.startClock);  // release from startClock (0 = now)
+          // Release from startClock (0 = now); a voice already releasing ends sooner if asked.
+          StopVoice(c, rq.voiceSlot, rq.fadeSeconds > 0.0f ? rq.fadeSeconds : im.cfg.shortFadeSeconds, rq.startClock,
+                    true);
           res.voiceSlot = rq.voiceSlot;
         }
         break;

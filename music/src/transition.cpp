@@ -282,8 +282,13 @@ void ExecuteTransition(State& s, const BankTables& tb, MusicPb& pb, Timeline& tl
       in.role = Role::Free;  // never started: dropped
       continue;
     }
-    if (in.stopPending != 0u && in.stopClock <= stopAt) continue;
-    if (x >= static_cast<double>(in.EndTick()) - 0.5) continue;  // musically over: the tail rings
+    if (x >= static_cast<double>(in.EndTick()) - 0.5 && in.stopPending == 0u) continue;  // musically over: the tail rings
+    if (in.stopPending != 0u) {
+      // Already fading (an interrupted transition): only an earlier end replaces it.
+      const double oldEnd = static_cast<double>(in.stopClock) + static_cast<double>(in.stopFade) * s.rate;
+      const double newEnd = static_cast<double>(stopAt) + (fadeOut > 0.0 ? fadeOut : 0.005) * s.rate;
+      if (newEnd >= oldEnd) continue;
+    }
     in.stopPending = 1;
     if (static_cast<double>(in.startTick) >= x - 0.5 && in.voiceClock >= stopAt) {
       in.stopClock = in.voiceClock;  // issued ahead (prime) but not audible yet
