@@ -26,8 +26,8 @@ struct Decoded {
   std::uint64_t loopStart = 0, loopEnd = 0;
 };
 
-// Decodes asset row `row` of the built bank.
-inline Decoded Reference(const Built& b, std::uint32_t row) {
+// Decodes the asset named `name` of the built bank (rows are sorted by name).
+inline Decoded Reference(const Built& b, const std::string& name) {
   namespace bk = snd::bank;
   namespace bf = snd::bank_format;
   Decoded d;
@@ -39,7 +39,12 @@ inline Decoded Reference(const Built& b, std::uint32_t row) {
   bk::ParseOptions po;
   po.platform = bf::kPlatformAny;
   bk::ParseError err;
-  if (bk::ParseBank(img.get(), n, po, &v, &err) != SND_OK || row >= v.Rows(bf::chunk::ASST)) return d;
+  if (bk::ParseBank(img.get(), n, po, &v, &err) != SND_OK) return d;
+  std::uint32_t row = 0xFFFFFFFFu;
+  for (std::uint32_t i = 0; i < v.Rows(bf::chunk::ASST); ++i) {
+    if (v.Column<bk::col::ASST_id>()[i] == snd::HashId(name.c_str())) row = i;
+  }
+  if (row == 0xFFFFFFFFu) return d;
   snd::CodecHeader& h = d.h;
   h.codec = v.Column<bk::col::ASST_codec>()[row];
   h.channels = v.Column<bk::col::ASST_channels>()[row];

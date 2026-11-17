@@ -9,3 +9,6 @@ set(_source_test_link sonus_source sonus_core sonus_buildtool sonus_bank sonus_d
 snd_add_test(source_sample_test SOURCES source_sample_test.cpp LINK ${_source_test_link})
 target_include_directories(source_sample_test PRIVATE ${PROJECT_SOURCE_DIR}/buildtool/test)
 set_tests_properties(source_sample_test PROPERTIES TIMEOUT 600)
+snd_add_test(source_stream_test SOURCES source_stream_test.cpp LINK ${_source_test_link})
+target_include_directories(source_stream_test PRIVATE ${PROJECT_SOURCE_DIR}/buildtool/test)
+set_tests_properties(source_stream_test PROPERTIES TIMEOUT 600)

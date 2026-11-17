@@ -127,7 +127,7 @@ SND_TEST(SourceSample, CompressedAdpcmAndOpusMatchTheCodec) {
   Built b = Build("comp", as);
   SND_REQUIRE_MSG(b.ok, "%s", b.diag.c_str());
   for (std::uint32_t row = 0; row < as.size(); ++row) {
-    const Decoded ref = Reference(b, row);
+    const Decoded ref = Reference(b, as[row].name);
     SND_REQUIRE(ref.ok);
     Rig r;
     SND_REQUIRE(r.Ok());
@@ -172,7 +172,7 @@ SND_TEST(SourceSample, CompressedLoopIsSampleExact) {
   Built b = Build("comploop", as);
   SND_REQUIRE_MSG(b.ok, "%s", b.diag.c_str());
   for (std::uint32_t row = 0; row < as.size(); ++row) {
-    const Decoded ref = Reference(b, row);
+    const Decoded ref = Reference(b, as[row].name);
     SND_REQUIRE(ref.ok);
     SND_REQUIRE_EQ(ref.loopEnd, 9000u);
     Rig r;
@@ -205,7 +205,7 @@ SND_TEST(SourceSample, DecompressCacheFillsOnceAndIsShared) {
   a.pcm = Signal(1, 48000, 30000, &Sine1k);
   Built b = Build("cache", {a});
   SND_REQUIRE_MSG(b.ok, "%s", b.diag.c_str());
-  const Decoded ref = Reference(b, 0);
+  const Decoded ref = Reference(b, a.name);
   SND_REQUIRE(ref.ok);
   Rig r;
   SND_REQUIRE(r.Ok());
