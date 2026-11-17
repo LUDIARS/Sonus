@@ -149,6 +149,28 @@ minor（追加のみ）として扱ってよいもの: 新しい関数、列挙�
 | D-54 | DSP インスタンスプールの予約量はランタイムが決める: `BankManager` は読み込み時（検証ジョブ、通常ワーカー）に、実際の Config（`sampleRate`、`blockSize`、バスのチャンネル数）でバンクの EFFX / EFPV / EFBL からエフェクト記述を作り、`dsp::ComputeDspPoolNeed` を計算し直して予約する（bank は dsp に依存できないので、計算は `BankManagerDesc::dsp.compute` で構成ルートが渡す）。バスのチャンネル数は自分 → 親の順に 0 でない値、根まで 0 なら「出力（マスター）のチャンネル数」（`BankManagerDesc::outputChannels`、既定 2）。バンクの `DSPN` は照合用の目安で、ランタイムの値と違っても失敗にしない（`PreparedBank::builtDspNeed` に残す）。バンク形式は変えない | ビルド時の値はランタイムの Config を知らない。プラグインの状態サイズもランタイムでしか分からない |
 | D-55 | `snd::WhenKind::ClockSample` を `AtClockSample` に改名した（内部ヘッダの `snd::ClockSample` 型と同じ名前で、公開ヘッダと内部ヘッダを同じ翻訳単位で読むと `-Wshadow` で失敗した）。公開と内部を同時に読む翻訳単位がコンパイルできることを `contract_test` が確かめる | 段階2の api は両方を読む |
 
+### 段階4（music）での決定
+
+契約の版は変えない（ヘッダの変更なし）。設計書 8 章の解釈と、core ⇄ music の取り決め。
+
+| # | 決定 | 理由 |
+| --- | --- | --- |
+| D-68 | tick は 4 分音符 = 960（PPQ）。拍は拍子の分母の音符（6/8 なら 480 tick）。BPM は 4 分音符を数える（`snd_transport_desc.bpm` も同じ）。設計書 8.1 を直した。`types.h` の `SND_TICKS_PER_BEAT` の注記は契約 1.2 で直す候補 | 8.1 の「1 拍 = 960 tick」と拍子の分母が食い違っていた |
+| D-69 | 最小先読み（8.2）の「1 ブロック」は受理したブロック自身。リード時間はそのブロックの先頭からのプライム時間 | 受理したブロックの中でサンプル精度で発火できる |
+| D-70 | NEXT_BEAT / NEXT_BAR / GRID などは、現在位置がちょうど拍頭・小節頭ならその点で発火する（≥） | core の最小トランスポートと同じ |
+| D-71 | グリッド系の予約は音楽位置（小節線＋小節内 tick＋offset_ticks）で持ち、毎ブロック、その時点のテンポマップで tick とサンプル時刻を求め直す（後から計画された Segment の拍子・テンポ、SetTempo、シークに追従）。テンポマップは通過済みの点も持つ（64 点。満杯なら通過済みの最も古い点を捨てる）。音楽位置 → tick はマップ全体から求める | 8.2「テンポ変更やシークが途中で起きても予約は新しい時間軸に従う」 |
+| D-72 | SetTempo はその時刻から次の SetTempo まで、以後の Segment のテンポ点を上書きする。マップに戻す手段は契約 1.2 の候補 | 8.1「テンポマップへの上書き」 |
+| D-73 | MTRN の nextMarker は `timingCount` をマーカー ID として使う（0 = 任意のユーザーマーカー）。`snd_when` の NEXT_MARKER の `value` 0 も同じ。入口・出口・ピックアップのマーカーは数えない | 列が無い |
+| D-74 | sameBar の小節番号は遷移元 Segment の中の小節。遷移先はその番号を自分の小節数で割った余りの小節。拍子が違えばその頭拍、同じなら小節内の位置も保つ | 8.5 |
+| D-75 | 音楽 Playback のトランスポートのシークは、いまの Segment を新しい位置に置き直す（Segment 内の位置は Segment 長での剰余）。Playlist はそこから続く | 8.1 のシークと Segment の関係が未定義 |
+| D-76 | 置き換え（overlap = replace）で外れた Stinger の予約は REJECTED / RESERVATION_MISSED で終わる。Stinger の予約は 1 ブロック早く発火し、music の PlayEvent の子 Playback は次のブロックの ApplyCommands で CLOCK_SAMPLE 付きに作られる（発火時刻のサンプルから鳴る） | 子 Playback は ApplyCommands でしか作れない |
+| D-77 | 割り込み遷移で出ていく音のフェードを短くするときは、いまのゲインから新しい終了時刻まで直線（core の StopVoice: リリース中なら max(at, now) + fade に終わる） | 包絡線は 1 本の直線しか持たない |
+| D-78 | 「音優先」のストールは次のブロックで検出し、トランスポートを足りなかったフレーム数だけ遅らせる。そのブロックでまだ配送していない拍と拍のカーソルも一緒にずらし、各拍・各マーカーは 1 回だけ通知する。検出前に配送済みの拍は遅延前の時刻（最大 1 ブロック、2.5 の「保証しない」） | 8.4 |
+| D-79 | Stopped のトランスポートへの予約（NEXT_BAR など）は再生開始位置（小節 0）に解決し、再生開始の瞬間に発火する | 未定義 |
+| D-80 | SetMusicState は必達（D-09）。トランスポートが進んでいない間（Paused など）の要求も保持し（最後の要求が勝つ、現在の State なら取り消し）、再生再開後にルールのタイミングで評価する | 8.6 に一時停止中の例外は無い |
+| D-81 | Playlist の件数に上限は無い。shuffle の並びは保存せず、パスごとの鍵による [0, n) の全単射で求める（直前のパスの最後と同じものを先頭にしない） | 無言の打ち切りを避ける |
+| D-82 | core ⇄ music の取り決め（`core.hpp`）: `ClipRef.trackIndex == kClipRefAssetTrack` なら clipIndex は ASST 行。StartClip の `fadeSeconds` はフェードイン。StopVoice の `startClock` はリリース開始（0 = 今）。`FireEntry.lateRuleApplied == kFireTransportGone` はトランスポート消滅。SetGain は目標値で止まるブロック単位のランプ。契約 1.2 で `music_if.hpp` に移す候補 | music_if.hpp に書いていない |
+
 ### `Config` の項目（13.2 と本文の上限・「仮」の値）
 
 | 項目 | 既定 | 出典 |

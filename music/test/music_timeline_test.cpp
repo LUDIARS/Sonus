@@ -94,7 +94,7 @@ SND_TEST(MusicTimeline, OverridePauseSeekDelay) {
 }
 
 SND_TEST(MusicTimeline, AdvanceKeepsPassedPoints) {
-  // D-68: musical positions are resolved on the whole map, also behind the position.
+  // D-71: musical positions are resolved on the whole map, also behind the position.
   Timeline t;
   t.Reset(48000.0, 120.0, 4, 4);
   t.StartAt(0, 0.0);

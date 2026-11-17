@@ -220,13 +220,16 @@ struct Events {
 
 class Rig {
  public:
-  explicit Rig(const snd_config& cfg = Config(), snd::IAllocator* allocator = nullptr) : cfg_(cfg) {
+  // `musicOverride`: an IMusicSystem given to core instead of `music` (e.g. a wrapper around it).
+  explicit Rig(const snd_config& cfg = Config(), snd::IAllocator* allocator = nullptr,
+               snd::music::IMusicSystem* musicOverride = nullptr)
+      : cfg_(cfg) {
     kinds_.kinds[static_cast<int>(snd::SourceKind::Sample)] = &kind;
     snd::core::CoreDesc d;
     d.config = &cfg_;
     d.allocator = allocator != nullptr ? allocator : &snd::base::DefaultAllocator();
     d.sources = &kinds_;
-    d.music = &music;
+    d.music = musicOverride != nullptr ? musicOverride : &music;
     d.jobs = &jobs;
     d.bankFileSystem = &fs;
     d.rtWorkerRealtimePriority = false;

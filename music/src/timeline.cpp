@@ -209,7 +209,7 @@ void Timeline::AdvanceTo(ClockSample clock) noexcept {
     if (beatCursor < clock) beatCursor = clock;
   }
   // Passed points stay: musical positions (seek, TickOfMusical) are resolved on the
-  // whole map from tick 0 (D-68). The oldest ones go only when the table is full.
+  // whole map from tick 0 (D-71). The oldest ones go only when the table is full.
 }
 
 double Timeline::BarPosition(double tick) const noexcept {

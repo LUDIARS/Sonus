@@ -7,6 +7,7 @@
 #include <atomic>
 #include <cmath>
 #include <cstring>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -352,4 +353,94 @@ SND_TEST(MusicSystem, ParallelRenderingKeepsTheMusicDecisions) {
   }
   SND_CHECK(SameStarts(serial.starts, parallel.starts));
   SND_CHECK(SameBeats(serial.beats, parallel.beats));
+}
+
+namespace {
+// Forwards to MusicSystem and, once armed, adds a fired stinger input (the input core
+// produces for ReservationAction::Stinger, which only the api stage will create).
+class StingerInjector final : public snd::music::IMusicSystem {
+ public:
+  explicit StingerInjector(snd::music::MusicSystem& m) : m_(m) {}
+  std::size_t PoolBytes(const snd::music::MusicLimits& l) const noexcept override { return m_.PoolBytes(l); }
+  bool Init(void* p, std::size_t b, const snd::music::MusicLimits& l, const snd::music::MusicServices& s) noexcept override {
+    return m_.Init(p, b, l, s);
+  }
+  void Shutdown() noexcept override { m_.Shutdown(); }
+  void UpdateTransport(const snd::music::MusicFrame& f, snd::schema::Tables& t, snd::music::FireList& fire) noexcept override {
+    m_.UpdateTransport(f, t, fire);
+  }
+  void RunMusicLogic(const snd::music::MusicFrame& f, const snd::schema::Tables& t, const snd::music::MusicInput* in,
+                     std::uint32_t n, snd::music::MusicVoiceRequestList& out) noexcept override {
+    std::uint32_t k = 0;
+    for (; k < n && k + 1u < kCap; ++k) buf_[k] = in[k];
+    if (armed.load() != 0u) {
+      armed.store(0u);
+      snd::music::MusicInput& x = buf_[k++];
+      x = snd::music::MusicInput{};
+      x.kind = snd::music::MusicInputKind::Stinger;
+      x.playbackSlot = slot;
+      x.stateId = stinger;
+      x.voiceSlot = snd::kInvalidSlot;
+      x.clock = f.block.clock + f.block.frames + 100;  // inside the next block (fired one block early)
+      fired = x.clock;
+    }
+    m_.RunMusicLogic(f, t, buf_, k, out);
+  }
+  void OnVoiceResults(const snd::music::MusicVoiceResult* r, std::uint32_t n) noexcept override { m_.OnVoiceResults(r, n); }
+  std::uint32_t CollectNotifications(snd::notify::EventRecord* o, std::uint32_t c) noexcept override {
+    return m_.CollectNotifications(o, c);
+  }
+  bool TicksToClock(snd::SlotIndex t, snd::MusicalTicks k, snd::ClockSample* o) const noexcept override {
+    return m_.TicksToClock(t, k, o);
+  }
+  bool ClockToTicks(snd::SlotIndex t, snd::ClockSample c, snd::MusicalTicks* o) const noexcept override {
+    return m_.ClockToTicks(t, c, o);
+  }
+  std::atomic<std::uint32_t> armed{0};
+  snd::SlotIndex slot = 0;
+  snd::Id stinger = 0;
+  std::uint64_t fired = 0;
+
+ private:
+  static constexpr std::uint32_t kCap = 512;
+  snd::music::MusicSystem& m_;
+  snd::music::MusicInput buf_[kCap] = {};
+};
+}  // namespace
+
+SND_TEST(MusicSystem, StingerInputStartsOnItsFireClock) {
+  MusicProject p("stinger-input");
+  p.Asset("m", Material(4 * kBar, 0.1f));
+  p.Asset("st", Material(4800, 0.05f));
+  p.Event("St", "\"stinger\": true, \"tracks\": [{\"clips\": [{\"asset\": \"st\"}]}]");
+  p.Segment("M", "m", 4);
+  p.Playlist("PL", "{\"segment\": \"M\"}");
+  p.MusicEvent("Music", std::string(kOneState) +
+                            ", \"stingers\": [{\"name\": \"Hit\", \"event\": \"St\", \"timing\": \"nextBeat\"}]");
+  const std::vector<std::uint8_t> bank = BuildOne(p);
+  SND_REQUIRE(!bank.empty());
+  std::unique_ptr<StingerInjector> inj;
+  Rig* rp = nullptr;
+  // The injector wraps the rig's own MusicSystem.
+  struct Holder {
+    snd::music::MusicSystem inner;
+  };
+  Holder h;
+  inj = std::make_unique<StingerInjector>(h.inner);
+  Rig r(Config(), nullptr, inj.get());
+  rp = &r;
+  SND_REQUIRE(rp->Load(bank));
+  const std::uint64_t s0 = r.Clock();
+  const snd_playback_handle m = r.sys->Play(HashId("Music"), snd_emitter_handle{0}, nullptr);
+  r.RunTo(s0 + 20000);
+  inj->slot = SlotOf(m);
+  inj->stinger = HashId("Hit");
+  inj->armed.store(1u);
+  r.Steps(8);
+  std::uint64_t at = UINT64_MAX;
+  for (const StartLog& s : r.kind.Starts()) {
+    if (s.asset == HashId("st")) at = s.clock;
+  }
+  SND_REQUIRE(inj->fired != 0u);
+  SND_CHECK_EQ(at, inj->fired);
 }

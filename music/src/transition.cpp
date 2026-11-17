@@ -353,7 +353,7 @@ void ExecuteTransition(State& s, const BankTables& tb, MusicPb& pb, Timeline& tl
         const std::uint32_t destBar = bar % (dsi.bars == 0u ? 1u : dsi.bars);
         const double destBarTick = SegmentBarTick(tb, dsi, destBar);
         // 8.5: between different time signatures, the head beat of that bar; with the
-        // same signature the position inside the bar (the beat) is kept as well (D-68).
+        // same signature the position inside the bar (the beat) is kept as well (D-74).
         double sb = 0.0, db = 0.0;
         std::uint16_t sbpb = 4, sunit = 4, dbpb = 4, dunit = 4;
         SegmentTempoAt(tb, ssi, static_cast<double>(curOffset), &sb, &sbpb, &sunit);

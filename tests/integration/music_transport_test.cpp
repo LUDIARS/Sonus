@@ -27,6 +27,13 @@ std::vector<std::uint8_t> TransportBank() {
   p.Segment("SUp", "up", 1, "\"entryFrame\": 6000");
   p.Playlist("PL", "{\"segment\": \"SUp\"}");
   p.MusicEvent("Music", "\"initialState\": \"S\", \"states\": [{\"name\": \"S\", \"playlist\": \"PL\"}]");
+  // "Meter": A (1 bar 4/4) then B (2 bars 3/4, 120 BPM: 72000 samples a bar).
+  p.Asset("ma", Material(kBar, 0.1f));
+  p.Asset("mb", Material(2 * 72000, 0.2f));
+  p.Segment("MA", "ma", 1);
+  p.Segment("MB", "mb", 2, "\"tempo\": [{\"tick\": 0, \"bpm\": 120, \"beatsPerBar\": 3}]");
+  p.Playlist("PM", "{\"segment\": \"MA\"}, {\"segment\": \"MB\"}", "\"loopCount\": 1");
+  p.MusicEvent("Meter", "\"initialState\": \"M\", \"states\": [{\"name\": \"M\", \"playlist\": \"PM\"}]");
   std::string diag;
   std::vector<std::uint8_t> bank = p.Build(&diag);
   if (bank.empty()) std::fprintf(stderr, "%s\n", diag.c_str());
@@ -298,4 +305,39 @@ SND_TEST(MusicTransport, MusicApiOnANormalPlaybackWarns) {
   bool warned = false;
   for (const ErrorRec& e : x.r.ev.errors) warned = warned || (e.object == p.value && e.detail == SND_END_DETAIL_WRONG_EVENT_KIND);
   SND_CHECK(warned);
+}
+
+SND_TEST(MusicTransport, ReservationsFollowSegmentsPlannedLater) {
+  // D-71: BARS_AFTER 2 is accepted while only A (4/4) is planned; B (3/4) is planned
+  // half a second before A's end. The target is "bar 2", resolved on the map in effect
+  // when it fires: 1 bar of 4/4 + 1 bar of 3/4.
+  T x;
+  SND_REQUIRE(x.ok());
+  const std::uint64_t m0 = x.r.Clock();
+  const snd_playback_handle m = x.r.sys->Play(HashId("Meter"), snd_emitter_handle{0}, nullptr);
+  x.r.RunTo(m0 + 10000);
+  x.Play("H0", Kind(OwnedTransport(m), SND_WHEN_BARS_AFTER, 2));
+  x.Play("H1", Kind(OwnedTransport(m), SND_WHEN_BARS_AFTER, 3));
+  x.r.RunTo(m0 + 4 * kBar);
+  SND_CHECK_EQ(x.StartOf("mb"), m0 + kBar);
+  SND_CHECK_EQ(x.StartOf("h0"), m0 + kBar + 72000);
+  SND_CHECK_EQ(x.StartOf("h1"), m0 + kBar + 2 * 72000);
+}
+
+SND_TEST(MusicTransport, ReservationOnAStoppedTransportFiresWhenItStarts) {
+  // D-79: NEXT_BAR on a Stopped transport resolves to its start position (bar 0) and
+  // fires the moment it starts playing.
+  T x;
+  SND_REQUIRE(x.ok());
+  snd_transport_desc d{120.0f, 4, 4, 0, 0};
+  const snd_transport_handle t2 = x.r.sys->CreateTransport(&d);
+  x.r.Step();
+  snd_when w = Kind(t2, SND_WHEN_NEXT_BAR);
+  x.r.sys->Play(HashId("H2"), snd_emitter_handle{0}, &w);
+  x.r.Steps(50);
+  SND_CHECK_EQ(x.StartOf("h2"), UINT64_MAX);
+  const std::uint64_t c = x.r.Clock();
+  x.r.sys->SetTransportState(t2, SND_TRANSPORT_PLAYING, nullptr);
+  x.r.Steps(4);
+  SND_CHECK_EQ(x.StartOf("h2"), c);
 }

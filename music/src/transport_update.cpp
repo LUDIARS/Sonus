@@ -507,7 +507,7 @@ void MusicSystem::UpdateTransport(const MusicFrame& frame, schema::Tables& t, Fi
     // Transport changes are applied in step 3 only (one that became due through an
     // earlier change of this block takes effect at the next block start).
     // Stingers fire one block early: core creates their playback in the next block's
-    // ApplyCommands with the exact start clock (sample accurate, D-68).
+    // ApplyCommands with the exact start clock (sample accurate, D-76).
     const ClockSample limit =
         SND_MR(Reservation_action)[d] == ReservationAction::Stinger ? dueLimit + s.blockFrames : dueLimit;
     if (IsTransportAction(SND_MR(Reservation_action)[d]) || !FireClock(s, t, d, rs, &c) ||

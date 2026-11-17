@@ -372,7 +372,7 @@ void StallCheck(State& s, const schema::Tables& t, MusicPb& pb, Timeline& tl) no
   // Every beat is announced once (8.4): beats this block's UpdateTransport already queued
   // (not yet collected by Publish) move with the time line, and the beat cursor follows it
   // so they are not found again. Beats published in earlier blocks keep their clock (the
-  // stall is seen one block late, D-68).
+  // stall is seen one block late, D-78).
   tl.beatCursor += deficit;
   const std::uint64_t th = HandleRef{pb.playback | SND_TRANSPORT_PLAYBACK_BIT, pb.generation}.Value();
   for (std::uint32_t i = 0; i < s.noteCount; ++i) {

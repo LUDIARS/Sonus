@@ -137,6 +137,8 @@ event の `music`:
   前の行に覆われて一致しえない行は警告。`*` はワイルドカード（列の値 0）。
 - `timing`: `immediate` / `nextBeat` / `nextBar` / `barsAfter` / `grid` / `nextMarker` / `segmentEnd`（`snd_when_kind`）。
   `start`: `head` / `sameBar` / `marker` / `lastPosition`。`interrupt`: `allowed` / `afterBridge`。`late`: `nextGrid` / `startLate` / `cancel`。
+- `timing` が `nextMarker` のとき、`timingCount` はマーカー ID（マーカー名の `snd_hash_id`、0 = 任意のユーザーマーカー。入口・出口・ピックアップのマーカーは数えない）。
+- Playlist の `entries` の件数に上限は無い（`shuffle` も全件を 1 パスに 1 回ずつ鳴らす）。
 - スティンガーの Event は同じバンクにあること。`stingers[].timingCount`（`MSTG.timingCount`、`barsAfter` の N や `grid` の分割数）も書ける。
 - `MSTA.flags` はバンク形式でビットの意味が未定義のため、プロジェクト形式には項目を設けず常に 0 を書く（意味が決まった時点で項目を足す）。
 
