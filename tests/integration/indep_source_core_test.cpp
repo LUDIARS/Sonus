@@ -116,12 +116,15 @@ SND_TEST(IndepSourceCore, EndKeepsTheLastFrameInEveryForm) {
   }
 }
 
-// B4: the PCM cache key is (asset id, bank slot, data pointer, frames, codec).
-// Unload a bank, load another one of the same size (same slot; a recycling
-// allocator returns the same address) whose asset of the same name and length
-// has other content: the new bank must play its own audio. Today the cache
-// entry of the unloaded bank matches and its PCM is played.
-SND_TEST(IndepSourceCore, Defect_source_CacheServesTheAudioOfAnUnloadedBank) {
+// B4: the PCM cache key is (asset id, bank slot, load generation, data
+// pointer, frames, codec). Unload a bank, load another one of the same size
+// (same slot; a recycling allocator returns the same address) whose asset of
+// the same name and length has other content: the new bank plays its own
+// audio. The second bank is read under ANOTHER path: the IO scheduler keeps
+// files open by path and the memory FS serves the bytes of the open time, so a
+// new bank under the same path would be read with the old content (recorded
+// separately, indep_source_reload_test.cpp).
+SND_TEST(IndepSourceCore, CacheDoesNotServeTheAudioOfAnUnloadedBank) {
   AssetSpec a1;
   a1.name = "c";
   a1.pcm = Signal(1, 48000, 30000, &Ramp);
@@ -149,7 +152,7 @@ SND_TEST(IndepSourceCore, Defect_source_CacheServesTheAudioOfAnUnloadedBank) {
     SND_CHECK_EQ(r.sys->UnloadBank(h1, SND_UNLOAD_IF_UNUSED), SND_OK);
     for (int i = 0; i < 200 && r.sys->GetBankState(h1) != SND_BANK_STATE_UNLOADED; ++i) r.Step();
     SND_REQUIRE_EQ(r.sys->GetBankState(h1), SND_BANK_STATE_UNLOADED);
-    r.Load(b2);
+    r.LoadAs(b2, "Second.sndb");
     const snd_playback_handle p2 = r.Play("c");
     for (int i = 0; i < 300 && r.EndOf(p2) == nullptr; ++i) r.Step();
     const std::size_t f0 = FirstNonZero(r, 0, 1e-4f);

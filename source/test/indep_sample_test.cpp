@@ -164,7 +164,7 @@ SND_TEST(IndepSample, LoopSeamsExactInEveryForm) {
 // plays) must not leave a block without frames. Today the block that follows
 // the Control renders 0 frames (pendingSeek) and the position stands still for
 // a block: a 256-frame hole in the middle of the sound.
-SND_TEST(IndepSample, Defect_source_SeekOfCompressedResidentLeavesAnEmptyBlock) {
+SND_TEST(IndepSample, SeekOfCompressedResidentLeavesNoEmptyBlock) {
   std::vector<AssetSpec> as;
   as.push_back(Spec("ra", 96000, "compressed", "ADPC"));
   if (snd::codec::OpusAvailable()) as.push_back(Spec("ro", 96000, "compressed", "OPUS"));
@@ -197,7 +197,7 @@ SND_TEST(IndepSample, Defect_source_SeekOfCompressedResidentLeavesAnEmptyBlock) 
 // off to let a loop ring out): the output must go on without a hole. Today
 // SetLoop re-seeks the per-voice ring to the current position: one block of 0
 // frames, the playhead stands still.
-SND_TEST(IndepSample, Defect_source_SetLoopOnCompressedResidentLeavesAnEmptyBlock) {
+SND_TEST(IndepSample, SetLoopOnCompressedResidentLeavesNoEmptyBlock) {
   Built b = Build("isetloopgap", {Spec("ra", 48000, "compressed", "ADPC", "\"loop\": {\"start\": 4000, \"end\": 30001}")});
   SND_REQUIRE_MSG(b.ok, "%s", b.diag.c_str());
   const Decoded ref = Reference(b, "ra");
@@ -225,7 +225,7 @@ SND_TEST(IndepSample, Defect_source_SetLoopOnCompressedResidentLeavesAnEmptyBloc
 // still has it virtual. It must render either nothing or the material at its
 // playhead. Today RenderRing ignores `virt` and plays the stale ring (the
 // material from where it was virtualised).
-SND_TEST(IndepSample, Defect_source_RingRendersStaleDataBeforeDevirtualize) {
+SND_TEST(IndepSample, RingRendersNoStaleDataBeforeDevirtualize) {
   Built b = Build("istale", {Spec("ra", 96000, "compressed", "ADPC")});
   SND_REQUIRE_MSG(b.ok, "%s", b.diag.c_str());
   const Decoded ref = Reference(b, "ra");
@@ -420,7 +420,7 @@ SND_TEST(IndepSample, CacheLruPinningFallbackAndRefusal) {
 // start offset deep into a DecompressCache asset must not make Start decode the
 // whole asset up to the offset on the audio thread. Today FillHead decodes
 // [0, start + ready) inline (here ~450 000 frames for ADPCM; ~9 s of Opus).
-SND_TEST(IndepSample, Defect_source_CacheStartDecodesUpToTheOffsetOnTheAudioThread) {
+SND_TEST(IndepSample, CacheStartDoesNotDecodeUpToTheOffsetOnTheAudioThread) {
   std::vector<AssetSpec> as;
   as.push_back(Spec("cad", 480000, "decompressCache", "ADPC"));
   as.push_back(Spec("rad", 480000, "compressed", "ADPC"));

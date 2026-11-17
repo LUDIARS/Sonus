@@ -49,7 +49,7 @@ void LateChunkAgainstPublish(src::ISourceKind& k, IndepDriver::Voice& v) {
 
 }  // namespace
 
-SND_TEST(IndepLateChunk, Defect_source_RingSeekInPublishRacesALateChunk) {
+SND_TEST(IndepLateChunk, RingSeekInPublishAgainstALateChunk) {
   AssetSpec a;
   a.name = "ra";
   a.pcm = Signal(1, 48000, 96000, &Sine1k);
@@ -72,7 +72,7 @@ SND_TEST(IndepLateChunk, Defect_source_RingSeekInPublishRacesALateChunk) {
   SND_CHECK(v.out[0].size() > before + 2000u);
 }
 
-SND_TEST(IndepLateChunk, Defect_source_StreamSeekInPublishRacesALateChunk) {
+SND_TEST(IndepLateChunk, StreamSeekInPublishAgainstALateChunk) {
   AssetSpec a;
   a.name = "sa";
   a.pcm = Signal(1, 48000, 96000, &Sine1k);

@@ -101,7 +101,7 @@ SND_TEST(IndepStream, HeaderMismatchesAreRejected) {
 // (sampleRate, assetId) and for a dataBytes / file length that cannot hold
 // totalFrames of PC16: the stream silently plays something else (or less) and
 // ends as if complete, no IO error.
-SND_TEST(IndepStream, Defect_source_HeaderSampleRateAssetIdAndSizeNotChecked) {
+SND_TEST(IndepStream, HeaderSampleRateAssetIdAndSizeChecked) {
   const std::uint64_t n = 96000;
   Built good = Build("ihdr2", {StreamSpec("h", n, "PC16")});
   SND_REQUIRE_MSG(good.ok, "%s", good.diag.c_str());
@@ -225,7 +225,7 @@ SND_TEST(IndepStream, TimePriorityStallStaysOnTheClock) {
 // back at Devirtualize) must not run ahead of the clock. After a time-priority
 // re-seek the kind reports the re-seek target (time + ready + 2 blocks) while
 // the voice waits for it: up to ~2560 frames ahead for several blocks.
-SND_TEST(IndepStream, Defect_source_TimePriorityPlayheadRunsAheadWhileReseeking) {
+SND_TEST(IndepStream, TimePriorityPlayheadStaysOnTheClockWhileReseeking) {
   const std::uint64_t n = 150000;
   Built b = Build("itim2", {StreamSpec("t", n, "PC16")});
   SND_REQUIRE_MSG(b.ok, "%s", b.diag.c_str());
@@ -238,7 +238,7 @@ SND_TEST(IndepStream, Defect_source_TimePriorityPlayheadRunsAheadWhileReseeking)
 // SetLoop while streaming (loop off to ring out, a common "loop release"):
 // playback must not be interrupted. Today SetLoop re-seeks the stream to the
 // current position: the PCM ring is dropped and the voice re-primes from IO.
-SND_TEST(IndepStream, Defect_source_SetLoopInterruptsAStream) {
+SND_TEST(IndepStream, SetLoopDoesNotInterruptAStream) {
   Built b = Build("isetl", {StreamSpec("l", 96000, "PC16", "\"loop\": {\"start\": 10000, \"end\": 60001}")});
   SND_REQUIRE_MSG(b.ok, "%s", b.diag.c_str());
   const Decoded ref = Reference(b, "l");
@@ -382,7 +382,7 @@ SND_TEST(IndepStream, PrimingAndPrimeFrames) {
 // Today the PCM rings are sized for 2 channels per stream on average
 // (max(8, 2 * maxStreams) rings): with maxStreams = 2, two 6-channel streams do
 // not fit and the second is refused with NO_STREAM_SLOT while a slot is free.
-SND_TEST(IndepStream, Defect_source_MultichannelStreamsRefusedBelowMaxStreams) {
+SND_TEST(IndepStream, MultichannelStreamsUpToMaxStreams) {
   Built b = Build("i6ch", {StreamSpec("six", 48000, "PC16", "", 6)});
   SND_REQUIRE_MSG(b.ok, "%s", b.diag.c_str());
   IndepDriver::Opt o;
