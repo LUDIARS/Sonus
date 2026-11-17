@@ -25,7 +25,9 @@ void DeclareHeader(tela::Document& doc, ViewContext& ctx, float width) {
   Button(doc, "tab.profiler", mixer ? "Profiler" : "[Profiler]", [a] { a->OnScreen(Screen::Profiler); }, 108, 6, 96,
          28);
   const Project& p = ctx.session.project();
-  Text(doc, "hdr.project", "project " + (p.name().empty() ? p.directory() : p.name()), 214, 8, 220, 24);
+  std::string project = "project " + (p.name().empty() ? p.directory() : p.name());
+  if (p.errorCount() != 0u) project += "  (" + std::to_string(p.errorCount()) + " errors)";  // build errors too
+  Text(doc, "hdr.project", project, 214, 8, 260, 24);
   // Connection: state light, text, connect / disconnect.
   const LinkState st = conn.state();
   tela::Color on = ctx.palette.failed;
