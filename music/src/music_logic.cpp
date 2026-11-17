@@ -369,6 +369,16 @@ void StallCheck(State& s, const schema::Tables& t, MusicPb& pb, Timeline& tl) no
   }
   if (deficit == 0u) return;
   tl.Delay(deficit);
+  // Every beat is announced once (8.4): beats this block's UpdateTransport already queued
+  // (not yet collected by Publish) move with the time line, and the beat cursor follows it
+  // so they are not found again. Beats published in earlier blocks keep their clock (the
+  // stall is seen one block late, D-68).
+  tl.beatCursor += deficit;
+  const std::uint64_t th = HandleRef{pb.playback | SND_TRANSPORT_PLAYBACK_BIT, pb.generation}.Value();
+  for (std::uint32_t i = 0; i < s.noteCount; ++i) {
+    notify::EventRecord& n = s.notes[i];
+    if (n.type == static_cast<std::uint16_t>(notify::EventType::Beat) && n.object == th) n.clock += deficit;
+  }
   for (Instance& in : pb.inst) {
     if (in.role == Role::Free || in.phase != InstPhase::Issued) continue;
     in.voiceClock += deficit;  // the material is that much later now
@@ -385,13 +395,14 @@ void IssueStingers(State& s, MusicPb& pb, MusicVoiceRequestList& out) noexcept {
     if (row == bf::kNone) continue;
     MusicVoiceRequest* rq = NewRequest(out);
     if (rq == nullptr) {
+      pb.stingerClock[kept] = pb.stingerClock[i];
       pb.stingers[kept++] = pb.stingers[i];
       continue;
     }
     rq->op = MusicVoiceOp::PlayEvent;
     rq->playbackSlot = pb.playback;
     rq->event = EventRef{pb.bank, 0u, s.tb.mstg.U32(bf::col::MSTG_event, row)};
-    rq->startClock = s.blockStart;
+    rq->startClock = pb.stingerClock[i] > s.blockStart ? pb.stingerClock[i] : s.blockStart;
   }
   pb.stingerCount = kept;
 }
@@ -429,6 +440,10 @@ void UpdatePlayback(State& s, const schema::Tables& t, MusicPb& pb, MusicVoiceRe
     if (pb.stopping == 0u) Relocate(s, s.tb, pb, *tl);
   }
   StallCheck(s, t, pb, *tl);
+  if (pb.stopping == 0u && pb.hasDeferred != 0u && tl->Playing()) {
+    pb.hasDeferred = 0;
+    HandleSetState(s, s.tb, pb, pb.deferredTarget, s.blockStart, false);
+  }
   if (pb.stopping == 0u) {
     // Transition state machine (8.6).
     if (pb.phase == Phase::Transitioning && s.blockStart >= pb.transEnd) {
@@ -517,6 +532,7 @@ void MusicSystem::RunMusicLogic(const MusicFrame& frame, const schema::Tables& t
         break;
       case MusicInputKind::Stinger:
         if (MusicPb* pb = PbOf(s, in.playbackSlot); pb != nullptr && pb->stingerCount < kMaxPendingStingers) {
+          pb->stingerClock[pb->stingerCount] = in.clock;
           pb->stingers[pb->stingerCount++] = in.stateId;
         }
         break;

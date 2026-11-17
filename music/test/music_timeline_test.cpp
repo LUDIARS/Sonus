@@ -93,17 +93,23 @@ SND_TEST(MusicTimeline, OverridePauseSeekDelay) {
   SND_CHECK_NEAR(t.TickAtClock(400000.0), 0.0, 1e-9);
 }
 
-SND_TEST(MusicTimeline, AdvanceDropsPassedPoints) {
+SND_TEST(MusicTimeline, AdvanceKeepsPassedPoints) {
+  // D-68: musical positions are resolved on the whole map, also behind the position.
   Timeline t;
   t.Reset(48000.0, 120.0, 4, 4);
   t.StartAt(0, 0.0);
-  t.AddPoint(3840, 90.0, 4, 4);
-  t.AddPoint(7680, 60.0, 4, 4);
-  t.AdvanceTo(100000);  // past the first change
+  t.AddPoint(3840, 60.0, 3, 4);
+  t.AdvanceTo(200000);  // well inside bar 1 (3/4)
   SND_CHECK_EQ(t.count, 2u);
-  SND_CHECK_EQ(t.points[0].tick, 3840);
-  SND_CHECK_NEAR(t.BpmAt(t.anchorTick), 90.0, 1e-9);
-  SND_CHECK_NEAR(t.BarPosition(7680.0), 2.0, 1e-9);
+  SND_CHECK_EQ(t.TickOfMusical(snd_musical_time{0, 2, 0}), 1920.0);
+  SND_CHECK_EQ(t.Musical(1920.0).beat, 2);
+  SND_CHECK_NEAR(ClockOf(t, 1920.0), 48000.0, 1e-6);
+  // A full table forgets its oldest passed point.
+  for (std::uint32_t k = 2; k < snd::music::detail::kMaxTempoPoints + 4; ++k) {
+    t.AdvanceTo(static_cast<snd::ClockSample>(200000 + k * 300000));
+    t.AddPoint(static_cast<snd::MusicalTicks>(3840 + k * 2880), (k % 2) != 0u ? 60.0 : 90.0, 3, 4);
+  }
+  SND_CHECK_EQ(t.count, snd::music::detail::kMaxTempoPoints);
 }
 
 SND_TEST(MusicSystemUnit, InitRejectsBadPoolsAndConvertsOnlyLiveTransports) {

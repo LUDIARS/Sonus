@@ -63,7 +63,16 @@ bool Timeline::AddPoint(MusicalTicks tick, double bpm, std::uint16_t beatsPerBar
              prev.beatUnit == beatUnit) {
     return true;  // nothing changes
   } else {
-    if (count >= kMaxTempoPoints) return false;
+    if (count >= kMaxTempoPoints) {
+      // Full: forget the oldest point if it is already behind the position (its bar
+      // number lives on in the next point), otherwise refuse.
+      if (static_cast<double>(points[1].tick) > anchorTick + kEps || t <= static_cast<double>(points[1].tick)) {
+        return false;
+      }
+      for (std::uint32_t j = 0; j + 1u < count; ++j) points[j] = points[j + 1u];
+      --count;
+      return AddPoint(tick, bpm, beatsPerBar, beatUnit);
+    }
     // Insertion position: after p, or before the first point.
     const std::uint32_t at = t < static_cast<double>(points[0].tick) ? 0u : p + 1u;
     for (std::uint32_t j = count; j > at; --j) points[j] = points[j - 1u];
@@ -199,10 +208,8 @@ void Timeline::AdvanceTo(ClockSample clock) noexcept {
     anchorClock = clock;
     if (beatCursor < clock) beatCursor = clock;
   }
-  while (count >= 2u && static_cast<double>(points[1].tick) <= anchorTick + kEps) {
-    for (std::uint32_t j = 0; j + 1u < count; ++j) points[j] = points[j + 1u];
-    --count;
-  }
+  // Passed points stay: musical positions (seek, TickOfMusical) are resolved on the
+  // whole map from tick 0 (D-68). The oldest ones go only when the table is full.
 }
 
 double Timeline::BarPosition(double tick) const noexcept {
@@ -241,6 +248,8 @@ double TickOfBar(const Timeline& tl, double bar) noexcept {
   return static_cast<double>(tl.points[i].tick) + (bar - tl.points[i].bar) * tl.BarTicks(i);
 }
 }  // namespace
+
+double Timeline::TickAtBar(double bar) const noexcept { return TickOfBar(*this, bar); }
 
 double Timeline::NextBar(double from) const noexcept {
   const double pos = BarPosition(from);

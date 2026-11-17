@@ -11,6 +11,41 @@ std::uint32_t NextRandom(std::uint32_t& state) noexcept {
   return x;
 }
 
+namespace {
+std::uint32_t Mix(std::uint32_t x) noexcept {
+  x ^= x >> 16;
+  x *= 0x7FEB352Du;
+  x ^= x >> 15;
+  x *= 0x846CA68Bu;
+  x ^= x >> 16;
+  return x;
+}
+}  // namespace
+
+std::uint32_t ShuffleAt(std::uint32_t k, std::uint32_t n, std::uint32_t key) noexcept {
+  if (n <= 1u) return 0;
+  std::uint32_t bits = 1;
+  while ((1u << bits) < n) ++bits;
+  const std::uint32_t mask = (1u << bits) - 1u;
+  const std::uint32_t shift = bits / 2u + 1u;
+  std::uint32_t mul[3], add[3];
+  for (std::uint32_t r = 0; r < 3; ++r) {
+    mul[r] = Mix(key + 0x9E3779B9u * (2u * r + 1u)) | 1u;  // odd: a bijection mod 2^bits
+    add[r] = Mix(key ^ (0x85EBCA6Bu * (2u * r + 2u)));
+  }
+  auto h = [&](std::uint32_t x) {
+    for (std::uint32_t r = 0; r < 3; ++r) {
+      x = (x * mul[r]) & mask;
+      x ^= x >> shift;  // bijective (shift >= 1)
+      x = (x + add[r]) & mask;
+    }
+    return x;
+  };
+  std::uint32_t y = h(k);
+  for (std::uint32_t guard = 0; y >= n && guard <= mask; ++guard) y = h(y);  // cycle walking
+  return y < n ? y : k;
+}
+
 void CursorReset(Cursor& c, std::uint32_t playlist) noexcept {
   c = Cursor{};
   c.playlist = playlist;
@@ -36,7 +71,6 @@ std::uint32_t CursorNext(Cursor& c, const BankTables& tb, std::uint32_t& rng, st
   std::uint32_t first = 0, n = 0;
   if (c.finished != 0u || !Entries(tb, c.playlist, &first, &n)) return bf::kNone;
   const PlaylistMode mode = static_cast<PlaylistMode>(tb.mpls.U32(bf::col::MPLS_mode, c.playlist));
-  if (mode == PlaylistMode::Shuffle && n > kMaxShuffle) n = kMaxShuffle;
   if (c.current != bf::kNone && c.current < n && c.repeatLeft > 0u) {
     --c.repeatLeft;
     if (entryOut != nullptr) *entryOut = c.current;
@@ -78,21 +112,13 @@ std::uint32_t CursorNext(Cursor& c, const BankTables& tb, std::uint32_t& rng, st
       break;
     }
     case PlaylistMode::Shuffle: {
-      if (c.picks == 0u) {
-        for (std::uint32_t k = 0; k < n; ++k) c.order[k] = static_cast<std::uint8_t>(k);
-        for (std::uint32_t k = n; k > 1u; --k) {
-          const std::uint32_t j = NextRandom(rng) % k;
-          const std::uint8_t tmp = c.order[k - 1u];
-          c.order[k - 1u] = c.order[j];
-          c.order[j] = tmp;
-        }
-        if (n > 1u && c.current != bf::kNone && c.order[0] == c.current) {
-          const std::uint8_t tmp = c.order[0];
-          c.order[0] = c.order[1];
-          c.order[1] = tmp;
-        }
+      if (c.picks == 0u) {  // a new pass: new permutation, no repeat across the boundary
+        c.passKey = NextRandom(rng);
+        c.swapFirst = (n > 1u && c.current != bf::kNone && ShuffleAt(0, n, c.passKey) == c.current) ? 1u : 0u;
       }
-      idx = c.order[c.picks];
+      std::uint32_t k = c.picks;
+      if (c.swapFirst != 0u && k < 2u) k = 1u - k;
+      idx = ShuffleAt(k, n, c.passKey);
       break;
     }
     case PlaylistMode::Sequential:

@@ -114,6 +114,10 @@ bool MusicSystem::GetPlaybackInfo(SlotIndex playback, MusicPlaybackInfo* out) co
   i.state = pb->stateId;
   i.phase = static_cast<std::uint32_t>(pb->phase);
   i.pendingState = pb->phase == detail::Phase::Pending ? pb->pendTarget : 0u;
+  if (pb->hasDeferred != 0u) {  // requested while not playing: pending until it plays
+    i.phase = 1u;
+    i.pendingState = pb->deferredTarget;
+  }
   i.pendingTick = static_cast<MusicalTicks>(std::llround(pb->pendTick));
   i.queuedState = pb->hasQueued != 0u ? pb->queuedTarget : 0u;
   i.transitions = pb->transitions;

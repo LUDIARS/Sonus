@@ -27,7 +27,7 @@
 namespace snd::music::detail {
 
 inline constexpr double kTicksPerQuarter = SND_TICKS_PER_BEAT;
-inline constexpr std::uint32_t kMaxTempoPoints = 32;
+inline constexpr std::uint32_t kMaxTempoPoints = 64;
 
 struct TempoPoint {
   MusicalTicks tick;
@@ -81,13 +81,14 @@ struct Timeline {
   void SetTempoAt(ClockSample clock, double bpm) noexcept;
   // Sound-priority stall (8.4): everything after now happens `samples` later.
   void Delay(ClockSample samples) noexcept { anchorClock += samples; }
-  // Block start: re-anchor and drop the points before the one in effect.
+  // Block start: re-anchor (the points are kept, see AddPoint for a full table).
   void AdvanceTo(ClockSample clock) noexcept;
 
   // --- musical positions ---
   double BarPosition(double tick) const noexcept;  // fractional bar index
   snd_musical_time Musical(double tick) const noexcept;
   double TickOfMusical(const snd_musical_time& m) const noexcept;
+  double TickAtBar(double bar) const noexcept;  // tick of the bar line `bar` on the whole map
   // Grid points at or after `from` (ties count: from itself when it lies on the grid).
   double NextBeat(double from) const noexcept;
   double NextBar(double from) const noexcept;

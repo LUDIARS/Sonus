@@ -118,11 +118,14 @@ struct MusicPb {
   ClockSample transEnd;
   Interrupt transInterrupt;
   Id queuedTarget;
+  std::uint8_t hasDeferred;  // SetMusicState while the transport does not play (paused)
+  Id deferredTarget;         // evaluated (rule timing) once it plays again; last wins
   Id desired;   // SetMusicState before the playback started
   Id prepared;  // PrepareMusicState (no priming interface yet, see proposals)
   LastPosition last[kMaxLastPositions];
   std::uint32_t lastNext;
   Id stingers[kMaxPendingStingers];
+  ClockSample stingerClock[kMaxPendingStingers];  // fire clock of each (sample accurate start)
   std::uint32_t stingerCount;
   std::uint8_t seekPending;  // the owned transport was seeked (UpdateTransport -> music logic)
   ClockSample seekClock;
@@ -143,6 +146,13 @@ struct ResState {
   std::uint8_t lateRule;
   std::uint8_t late;       // late rule applied (kNoLate none)
   std::uint8_t cancel;     // fire as "cancel"
+  // Grid kinds are kept as a musical position (bar line + ticks into the bar + offset) and
+  // turned into a tick on the map in effect every block (D-68): a segment planned later,
+  // a SetTempo or a seek moves the sample time, not the musical target.
+  std::uint8_t barBased;
+  double bar;
+  double inBar;
+  double offset;
 };
 
 struct State {

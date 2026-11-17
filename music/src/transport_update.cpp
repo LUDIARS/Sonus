@@ -151,6 +151,18 @@ std::uint32_t LeadFrames(State& s, const schema::Tables& t, ReservationAction ac
   }
 }
 
+// Keeps a grid target as a musical position (bar line + ticks into the bar).
+void Pin(const Timeline& tl, ResState& rs) noexcept {
+  if (rs.barBased == 0u) return;
+  const double base = rs.tick - rs.offset;
+  rs.bar = std::floor(tl.BarPosition(base) + 1e-7);
+  rs.inBar = base - tl.TickAtBar(rs.bar);
+}
+// The target tick on the map in effect now.
+void Refresh(const Timeline& tl, ResState& rs) noexcept {
+  if (rs.barBased != 0u) rs.tick = tl.TickAtBar(rs.bar) + rs.inBar + rs.offset;
+}
+
 // Applies the late rule until the target clears `earliest` (8.2 / 8.5). Musical kinds only.
 void ApplyLateRule(State& s, Timeline& tl, ResState& rs, std::uint32_t kind, std::uint32_t count, Id marker,
                    const MusicPb* owner, double earliest) noexcept {
@@ -264,7 +276,12 @@ void Resolve(State& s, schema::Tables& t, std::uint32_t d, SlotIndex r) noexcept
     }
     default: break;
   }
-  rs.tick = tick + static_cast<double>(w.offsetTicks);
+  rs.offset = static_cast<double>(w.offsetTicks);
+  rs.tick = tick + rs.offset;
+  rs.barBased = (w.kind == SND_WHEN_NEXT_BEAT || w.kind == SND_WHEN_NEXT_BAR || w.kind == SND_WHEN_BARS_AFTER ||
+                 w.kind == SND_WHEN_GRID)
+                    ? 1u
+                    : 0u;
   if (tl->Playing()) {
     const double earliest =
         static_cast<double>(s.blockStart) + static_cast<double>(LeadFrames(s, t, action, target, payload));
@@ -274,6 +291,7 @@ void Resolve(State& s, schema::Tables& t, std::uint32_t d, SlotIndex r) noexcept
     }
     if (owner != nullptr && rs.deferrals != 0u) owner->deferrals += rs.deferrals;
   }
+  Pin(*tl, rs);
   SND_MW(Reservation_resolved)[d] =
       ResolvedTime{static_cast<MusicalTicks>(std::llround(rs.tick)), rs.deferrals, 1u};
 }
@@ -309,7 +327,7 @@ void ReplaceStingers(State& s, schema::Tables& t, std::uint32_t dNew) noexcept {
 }
 
 // Fire clock of a resolved reservation; false while its transport does not play.
-bool FireClock(State& s, const schema::Tables& t, std::uint32_t d, const ResState& rs, double* out) noexcept {
+bool FireClock(State& s, const schema::Tables& t, std::uint32_t d, ResState& rs, double* out) noexcept {
   if (rs.isClock != 0u || rs.cancel != 0u) {
     *out = rs.cancel != 0u ? static_cast<double>(s.blockStart) : static_cast<double>(rs.clock);
     return true;
@@ -319,6 +337,7 @@ bool FireClock(State& s, const schema::Tables& t, std::uint32_t d, const ResStat
     *out = static_cast<double>(s.blockStart);
     return true;
   }
+  Refresh(*tl, rs);
   double c = 0.0;
   if (!tl->ClockAtTick(rs.tick, &c)) return false;
   *out = c - static_cast<double>(rs.pickup);
@@ -487,8 +506,12 @@ void MusicSystem::UpdateTransport(const MusicFrame& frame, schema::Tables& t, Fi
     double c = 0.0;
     // Transport changes are applied in step 3 only (one that became due through an
     // earlier change of this block takes effect at the next block start).
+    // Stingers fire one block early: core creates their playback in the next block's
+    // ApplyCommands with the exact start clock (sample accurate, D-68).
+    const ClockSample limit =
+        SND_MR(Reservation_action)[d] == ReservationAction::Stinger ? dueLimit + s.blockFrames : dueLimit;
     if (IsTransportAction(SND_MR(Reservation_action)[d]) || !FireClock(s, t, d, rs, &c) ||
-        c >= static_cast<double>(dueLimit)) {
+        c >= static_cast<double>(limit)) {
       ++d;
       continue;
     }
@@ -502,8 +525,10 @@ void MusicSystem::UpdateTransport(const MusicFrame& frame, schema::Tables& t, Fi
         const ReservationWhen w = SND_MR(Reservation_when)[d];
         MusicPb* owner = tl != nullptr ? PbOfTransport(s, SND_MR(Reservation_transportSlot)[d]) : nullptr;
         if (owner != nullptr) s.tb.Bind(s.services, owner->bank);
-        if (tl != nullptr) ApplyLateRule(s, *tl, rs, w.kind, w.count, static_cast<Id>(w.value), owner,
-                                         static_cast<double>(s.blockStart));
+        if (tl != nullptr) {
+          ApplyLateRule(s, *tl, rs, w.kind, w.count, static_cast<Id>(w.value), owner, static_cast<double>(s.blockStart));
+          Pin(*tl, rs);
+        }
         if (rs.late == static_cast<std::uint8_t>(ReservationLateRule::NextGrid)) {
           PushNote(s, notify::EventType::ReservationLate, rs.late, target.Value(), s.blockStart, rs.deferrals);
           SND_MW(Reservation_resolved)[d] =

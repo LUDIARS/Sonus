@@ -194,11 +194,15 @@ void HandleSetState(State& s, const BankTables& tb, MusicPb& pb, Id target, Cloc
   }
   switch (pb.phase) {
     case Phase::Idle:
-      if (target == pb.stateId) return;
+      if (target == pb.stateId) {
+        pb.hasDeferred = 0;
+        return;
+      }
       break;
     case Phase::Pending:
       if (target == pb.stateId) {
         pb.phase = Phase::Idle;  // back to where we are: nothing to do
+        pb.hasDeferred = 0;
         return;
       }
       break;
@@ -211,8 +215,15 @@ void HandleSetState(State& s, const BankTables& tb, MusicPb& pb, Id target, Cloc
       if (target == pb.stateId) return;
       break;
   }
+  if (!tl->Playing()) {
+    // Must-deliver (D-09): kept, last request wins, and evaluated with the rule timing
+    // when the transport plays again (UpdatePlayback).
+    pb.hasDeferred = 1;
+    pb.deferredTarget = target;
+    return;
+  }
+  pb.hasDeferred = 0;
   const Rule rule = FindRule(tb, pb.eventRow, pb.stateId, target);
-  if (!tl->Playing()) return;
   double x = tl->TickAtClock(static_cast<double>(clock));
   std::uint8_t late = kNoLate;
   std::uint32_t deferrals = 0;
@@ -340,7 +351,15 @@ void ExecuteTransition(State& s, const BankTables& tb, MusicPb& pb, Timeline& tl
         double rest = 0.0;
         SegmentBarOf(tb, ssi, static_cast<double>(curOffset), &bar, &rest);
         const std::uint32_t destBar = bar % (dsi.bars == 0u ? 1u : dsi.bars);
-        startTick = destStart - static_cast<MusicalTicks>(std::llround(SegmentBarTick(tb, dsi, destBar) + rest));
+        const double destBarTick = SegmentBarTick(tb, dsi, destBar);
+        // 8.5: between different time signatures, the head beat of that bar; with the
+        // same signature the position inside the bar (the beat) is kept as well (D-68).
+        double sb = 0.0, db = 0.0;
+        std::uint16_t sbpb = 4, sunit = 4, dbpb = 4, dunit = 4;
+        SegmentTempoAt(tb, ssi, static_cast<double>(curOffset), &sb, &sbpb, &sunit);
+        SegmentTempoAt(tb, dsi, destBarTick, &db, &dbpb, &dunit);
+        if (sbpb != dbpb || sunit != dunit) rest = 0.0;
+        startTick = destStart - static_cast<MusicalTicks>(std::llround(destBarTick + rest));
       }
     } else if (rule.start == StartPosition::Marker) {
       const std::uint32_t m = FindSegmentMarker(tb, dsi, rule.startMarker);

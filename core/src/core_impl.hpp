@@ -392,6 +392,7 @@ struct Deferred {
   std::uint32_t emitterGen;
   float value;
   std::uint32_t reserved;
+  ClockSample startClock;  // Play: start at this sample (CLOCK_SAMPLE) when still ahead; 0 = now
 };
 inline constexpr std::uint32_t kVoicePausedFlag = 1u << 4;  // core-internal VoiceLifecycle.flags bit (paused)
 

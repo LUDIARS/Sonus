@@ -986,6 +986,7 @@ void RunMusic(Ctx& c) noexcept {
         df.kind = DeferredKind::Play;
         df.handle = h;
         df.ref = rq.event;
+        df.startClock = rq.startClock;  // the child playback is created next block; it starts here
         df.emitter = pd != kNoSlot ? SND_R(Playback_emitterSlot)[pd] : kNoSlot;
         df.emitterGen = df.emitter != kNoSlot ? t.Emitter.rows.generation[df.emitter] : 0u;
         Defer(im, df);
