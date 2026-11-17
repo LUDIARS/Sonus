@@ -76,3 +76,4 @@ endif()
 
 # --- Independent tests of stage 2 (output backends and the driver, D-61..D-66) -------------
 snd_add_test(platform_indep_driver_core_test SOURCES indep_driver_core_test.cpp LINK sonus_platform)
+snd_add_test(platform_indep_audio_driver_test SOURCES indep_audio_driver_test.cpp LINK sonus_platform)
