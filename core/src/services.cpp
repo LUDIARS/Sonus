@@ -8,9 +8,25 @@
 
 namespace snd::core {
 
+// Accepts a job (audio thread / RT workers, lock-free): it gets a tracking record
+// and its ticket now, so the bank epoch waits for it whichever thread pumps it later.
 bool PostJob(void* ctx, const JobDesc& job, JobLane lane) noexcept {
   Impl& im = *static_cast<Impl*>(ctx);
-  if (!im.jobQueue.TryPush(PostedJob{job, lane, 0u})) {
+  const std::uint32_t idx = im.jobWrapFree.Pop();
+  if (idx == base::kInvalidIndex) {
+    im.droppedJobs.fetch_add(1u, std::memory_order_relaxed);
+    return false;  // bounded: the source retries in a later block (D-08)
+  }
+  JobWrap& w = im.jobWraps[idx];
+  w.original = job;
+  w.owner = &im;
+  w.index = idx;
+  std::uint32_t ticket = im.jobEpoch.fetch_add(1u, std::memory_order_acq_rel) + 1u;
+  if (ticket == 0u) ticket = 1u;
+  std::atomic_ref<std::uint32_t>(w.epochBucket).store(ticket, std::memory_order_release);
+  if (!im.jobQueue.TryPush(PostedJob{idx, lane})) {
+    std::atomic_ref<std::uint32_t>(w.epochBucket).store(0u, std::memory_order_release);
+    im.jobWrapFree.Push(idx);
     im.droppedJobs.fetch_add(1u, std::memory_order_relaxed);
     return false;
   }
@@ -85,23 +101,12 @@ void System::PumpServices() noexcept {
   base::LockGuard lock(im.serviceMutex);
   PostedJob pj;
   while (im.jobQueue.TryPop(pj)) {
-    if (im.desc.jobs == nullptr) {
-      RunJob(pj.job);  // no job system: run inline on this (non-RT) thread
+    JobWrap& w = im.jobWraps[pj.wrap];
+    if (im.desc.jobs == nullptr) {  // no job system: run inline on this (non-RT) thread
+      JobTrampoline(&w);
       continue;
     }
-    const std::uint32_t idx = im.jobWrapFree.Pop();
-    if (idx == base::kInvalidIndex) {
-      im.desc.jobs->Submit(&pj.job, 1u, pj.lane);  // untracked (wrap pool exhausted)
-      continue;
-    }
-    JobWrap& w = im.jobWraps[idx];
-    w.original = pj.job;
-    w.owner = &im;
-    w.index = idx;
-    // Ticket (never 0) = position in submission order; checked by the bank epoch.
-    const std::uint32_t ticket = im.jobEpoch.fetch_add(1u, std::memory_order_relaxed) + 1u;
-    std::atomic_ref<std::uint32_t>(w.epochBucket).store(ticket == 0u ? 1u : ticket, std::memory_order_release);
-    JobDesc d = pj.job;
+    JobDesc d = w.original;
     d.fn = &JobTrampoline;
     d.data = &w;
     d.done_counter = nullptr;
@@ -116,7 +121,7 @@ void System::PumpServices() noexcept {
   }
 }
 
-// True when no wrapped job with a ticket <= `ticket` is still running.
+// True when no accepted job with a ticket <= `ticket` is queued or running.
 bool JobsDoneUpTo(const Impl& im, std::uint32_t ticket) noexcept {
   const std::uint32_t n = im.jobWrapFree.Capacity();
   for (std::uint32_t i = 0; i < n; ++i) {

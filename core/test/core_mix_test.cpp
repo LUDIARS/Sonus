@@ -289,8 +289,10 @@ SND_TEST(CoreMix, ScheduledStopCutsAtTheClock) {
   h.sys->SetScheduledStop(p, &w, 0.0f);
   h.Clear();
   h.Steps(8);
-  SND_CHECK_NEAR(h.At(500, 0), kCenter, 1e-4f);
-  SND_CHECK_NEAR(Mean(h, 2 * 256 + 256, 8 * 256, 0), 0.0f, 1e-6f);
+  // Full level up to the clock (sample accurate), then the short fade (240 frames).
+  SND_CHECK_NEAR(h.At(599, 0), kCenter, 1e-5f);
+  SND_CHECK_NEAR(h.At(600 + 120, 0), kCenter * 0.5f, 1e-2f);
+  SND_CHECK_NEAR(Mean(h, 600 + 240, 8 * 256, 0), 0.0f, 1e-6f);
   h.sys->Update();
   SND_CHECK(h.ends.Has(p, SND_END_STOPPED));
 }

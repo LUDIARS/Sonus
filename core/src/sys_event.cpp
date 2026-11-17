@@ -154,7 +154,12 @@ void SetVoicesPaused(Ctx& c, SlotIndex pb, bool paused) noexcept {
       lc.flags = paused ? static_cast<std::uint8_t>(lc.flags | kVoicePausedFlag)
                         : static_cast<std::uint8_t>(lc.flags & ~kVoicePausedFlag);
       const SlotIndex src = SND_W(Voice_sourceSlot)[d];
-      if (src != kNoSlot && im.ev.controlCount < im.cfg.maxVirtual) {
+      VoiceStatic& vs = im.ev.vs[v];
+      vs.flags = paused ? (vs.flags | kVsWantPaused) : (vs.flags & ~kVsWantPaused);
+      if (SND_R(Voice_renderHold)[d].held != 0u) {
+        vs.flags |= kVsCtlPending;  // D-43: no Control while held; sent once the hold is gone
+      } else if (src != kNoSlot && im.ev.controlCount < im.cfg.maxVirtual) {
+        vs.flags &= ~kVsCtlPending;
         source::SourceControlOp& op = im.ev.controls[im.ev.controlCount];
         op = source::SourceControlOp{};
         op.sourceSlot = src;
@@ -279,7 +284,10 @@ SlotIndex StealVictim(Ctx& c, std::uint32_t group, std::uint32_t newPriority) no
   return best;
 }
 
-void StopVoice(Ctx& c, SlotIndex v, float fadeSeconds) noexcept {
+// Releases a voice: its level fades linearly from `at` (0 = this block's start) over
+// fadeSeconds (short fade when 0) and is silent from lifecycle.stopClock on. Render
+// applies the release per sample (sample-accurate timed stops, C12).
+void StopVoice(Ctx& c, SlotIndex v, float fadeSeconds, ClockSample at = 0) noexcept {
   Impl& im = c.im;
   schema::Tables& t = c.t;
   const std::uint32_t d = base::rows::DenseOf(t.Voice.rows, v);
@@ -291,7 +299,8 @@ void StopVoice(Ctx& c, SlotIndex v, float fadeSeconds) noexcept {
   }
   lc.state = static_cast<std::uint8_t>(VoiceStateId::Releasing);
   lc.releaseSeconds = fadeSeconds > 0.0f ? fadeSeconds : im.cfg.shortFadeSeconds;
-  lc.stopClock = c.clock + static_cast<ClockSample>(lc.releaseSeconds * static_cast<float>(im.cfg.sampleRate));
+  const ClockSample from = at > c.clock ? at : c.clock;
+  lc.stopClock = from + static_cast<ClockSample>(lc.releaseSeconds * static_cast<float>(im.cfg.sampleRate) + 0.5f);
   im.ev.vs[v].flags |= kVsStopped;
 }
 
@@ -700,7 +709,10 @@ bool StartPlayback(Ctx& c, std::uint32_t d, ClockSample startClock) noexcept {
   return true;
 }
 
-void BeginStop(Ctx& c, std::uint32_t d, float fadeSeconds, bool discard) noexcept {
+// Stops a playback. at == 0: the playback fade (per block). at != 0 (Stop / SetScheduledStop
+// with a When): every voice fades from the sample `at` (sample accurate), and the playback
+// ends once its voices are gone.
+void BeginStop(Ctx& c, std::uint32_t d, float fadeSeconds, bool discard, ClockSample at = 0) noexcept {
   Impl& im = c.im;
   schema::Tables& t = c.t;
   const SlotIndex s = base::rows::SlotAt(t.Playback.rows, d);
@@ -713,6 +725,16 @@ void BeginStop(Ctx& c, std::uint32_t d, float fadeSeconds, bool discard) noexcep
   }
   if (discard) fadeSeconds = im.cfg.shortFadeSeconds;
   pp.flags |= kPbStopping;
+  if (at != 0u && !discard) {
+    pp.flags |= kPbTimedStop;
+    for (SlotIndex v = pp.voiceListHead, guard = 0; v != kNoSlot && guard < im.cfg.maxVirtual; ++guard) {
+      const SlotIndex next = im.ev.vs[v].nextInPlayback;
+      StopVoice(c, v, fadeSeconds, at);
+      v = next;
+    }
+  } else {
+    pp.flags &= ~kPbTimedStop;
+  }
   pp.fadeTarget = 0.0f;
   pp.fadeRate = FadeStepFor(im, fadeSeconds);
   pp.endReason = discard ? SND_END_DISCARDED : SND_END_STOPPED;
@@ -818,9 +840,9 @@ void ApplyFireEntry(Ctx& c, const music::FireEntry& f) noexcept {
         EndPlayback(c, d, SND_END_STOPPED, SND_END_DETAIL_NONE);
         break;
       }
-      pp.stopClock = f.fireClock;
+      pp.stopClock = f.fireClock < c.clock ? c.clock : f.fireClock;
       pp.stopFadeSeconds = fade;
-      if (f.fireClock <= c.clock) BeginStop(c, d, fade, false);
+      if (pp.stopClock < c.clock + im.cfg.blockFrames) BeginStop(c, d, fade, false, pp.stopClock);
       break;
     }
     case ReservationAction::SetMusicState:
@@ -971,6 +993,8 @@ void FlushSourceCalls(Ctx& c) noexcept {
       }
       SND_W(Voice_sourceSlot)[d] = r.sourceSlot;
       im.ev.vs[v].flags |= kVsSourceStarted;
+      im.ev.vs[v].sourceSlot = r.sourceSlot;
+      im.ev.vs[v].sourceKind = static_cast<std::uint32_t>(k);
       if (r.needsPriming != 0u) {
         const SlotIndex pb = SND_W(Voice_playbackSlot)[d];
         const std::uint32_t pd = base::rows::DenseOf(t.Playback.rows, pb);
@@ -1030,10 +1054,35 @@ void RunEventLogic(Impl& im) noexcept {
   im.ev.controlCount = 0;
   const ClockSample blockEnd = im.clock + im.cfg.blockFrames;
 
+  // 0. New playback rows (ApplyCommands created them this block): initialise, so a
+  //    reservation that fires in the same block (CLOCK_SAMPLE inside or before this
+  //    block, a DELAY_US shorter than a block) finds its playback PENDING.
+  {
+    schema::TableRows& prows = SND_ROWS(Playback);
+    for (std::uint32_t d = 0; d < prows.count; ++d) {
+      const SlotIndex s = base::rows::SlotAt(prows, d);
+      PlaybackPriv& pp = Priv(im, s);
+      if (pp.generation == prows.generation[s]) continue;
+      pp = PlaybackPriv{};
+      pp.generation = prows.generation[s];
+      pp.rng = SND_R(Playback_seed)[d];
+      pp.voiceListHead = kNoSlot;
+      pp.categorySlot = im.globalCategory;
+      SND_W(Playback_logic)[d] = PlaybackLogic{0u, 0u, 0u, 0u, 0u, 1.0f, 0.0f};
+      SND_W(Playback_schedule)[d] = PlaybackSchedule{0, 0};
+      SND_W(Playback_endInfo)[d] = PlaybackEnd{0, 0};
+      const PlaybackRequest& rq = SND_R(Playback_request)[d];
+      SND_W(Playback_state)[d] = (rq.startReservation != kNoSlot && (rq.flags & kRequestRejectReservationFull) == 0u)
+                                     ? PlaybackStateId::Pending
+                                     : PlaybackStateId::None;
+    }
+  }
+
   // 1. Fired reservations (in fire order, 2.5).
   for (std::uint32_t i = 0; i < im.fire.count; ++i) ApplyFireEntry(c, im.fire.entries[i]);
 
-  // 2. Voices: source end, virtual <-> real transitions, music gain ramps.
+  // 2. Voices: source end, deferred controls of held voices, music gain ramps.
+  //    (Virtualize / Devirtualize are sent by SelectVoices when it moves a voice.)
   {
     const schema::TableRows& vrows = t.Voice.rows;
     for (std::uint32_t d = 0; d < vrows.count; ++d) {
@@ -1049,18 +1098,16 @@ void RunEventLogic(Impl& im) noexcept {
         vs.musicGain += vs.musicGainStep;
         if (vs.musicGain < 0.0f) vs.musicGain = 0.0f;
       }
-      const bool real = SND_R(Voice_realSlot)[d] != kNoSlot && (vs.flags & kVsSourceStarted) != 0u &&
-                        lc.state != static_cast<std::uint8_t>(VoiceStateId::Starting);
-      const bool wasReal = (vs.flags & kVsWasReal) != 0u;
-      if (real != wasReal && (vs.flags & kVsSourceStarted) != 0u) {
-        vs.flags = real ? (vs.flags | kVsWasReal) : (vs.flags & ~kVsWasReal);
+      // Pause / resume asked while the voice was held (D-43: no Control then): send the
+      // final state once, now that the hold is gone.
+      if ((vs.flags & kVsCtlPending) != 0u && SND_R(Voice_renderHold)[d].held == 0u) {
+        vs.flags &= ~kVsCtlPending;
         const SlotIndex src = SND_W(Voice_sourceSlot)[d];
-        if (src != kNoSlot && im.ev.controlCount < im.cfg.maxVirtual && SND_W(Voice_createdBlock)[d] + 1u < im.block) {
+        if (src != kNoSlot && im.ev.controlCount < im.cfg.maxVirtual) {
           source::SourceControlOp& op = im.ev.controls[im.ev.controlCount];
           op = source::SourceControlOp{};
           op.sourceSlot = src;
-          op.op = real ? source::ControlOp::Devirtualize : source::ControlOp::Virtualize;
-          op.frame = SND_R(Voice_playhead)[d].frame;
+          op.op = (vs.flags & kVsWantPaused) != 0u ? source::ControlOp::Pause : source::ControlOp::Resume;
           im.ev.controlKind[im.ev.controlCount++] = static_cast<std::uint32_t>(SND_W(Voice_sourceKind)[d]);
         }
       }
@@ -1158,7 +1205,7 @@ void RunEventLogic(Impl& im) noexcept {
     }
     // Scheduled stop that fires later inside the lookahead.
     if (pp.stopClock != 0u && pp.stopClock < blockEnd && (pp.flags & kPbStopping) == 0u) {
-      BeginStop(c, d, pp.stopFadeSeconds, false);
+      BeginStop(c, d, pp.stopFadeSeconds, false, pp.stopClock);
       state = SND_W(Playback_state)[d];
     }
     // Category / global pause (4.6, D-30), unless the category or event ignores pause.
@@ -1176,7 +1223,8 @@ void RunEventLogic(Impl& im) noexcept {
     }
     const bool wantPause = (pp.flags & (kPbPausedUser | kPbPausedCategory)) != 0u && (pp.flags & kPbStopping) == 0u;
     // Fade (stop / pause / resume): logic.fadeGain = value at the end of this block.
-    const float target = (pp.flags & kPbStopping) != 0u ? 0.0f : (wantPause ? 0.0f : 1.0f);
+    const bool fadeStop = (pp.flags & kPbStopping) != 0u && (pp.flags & kPbTimedStop) == 0u;
+    const float target = fadeStop ? 0.0f : (wantPause ? 0.0f : 1.0f);
     const float g0 = lg.fadeGain;
     float g1 = g0;
     if ((pp.flags & kPbPausedState) != 0u && !wantPause) {  // resume from Paused
@@ -1199,7 +1247,7 @@ void RunEventLogic(Impl& im) noexcept {
       lg.fadeStep = 0.0f;
     }
     // Stop fade finished (the last block rendered the ramp to 0): end.
-    if ((pp.flags & kPbStopping) != 0u && g0 <= 0.0f) {
+    if (fadeStop && g0 <= 0.0f) {
       if (!EndPlayback(c, d, pp.endReason, pp.endDetail)) ++d;
       continue;
     }
@@ -1214,7 +1262,8 @@ void RunEventLogic(Impl& im) noexcept {
       if (add != 0u && ref.bankSlot != kNoBank) RunActions(c, d, from, lg.playedFrames);
     }
     // All voices gone: the playback is complete (4.1).
-    if (lg.voiceCount == 0u && st != PlaybackStateId::Pending && (pp.flags & kPbMusic) == 0u) {
+    if (lg.voiceCount == 0u && st != PlaybackStateId::Pending &&
+        ((pp.flags & kPbMusic) == 0u || (pp.flags & kPbTimedStop) != 0u)) {
       if (!EndPlayback(c, d, (pp.flags & kPbStopping) != 0u ? pp.endReason : SND_END_COMPLETED,
                        (pp.flags & kPbStopping) != 0u ? pp.endDetail : SND_END_DETAIL_NONE)) {
         ++d;

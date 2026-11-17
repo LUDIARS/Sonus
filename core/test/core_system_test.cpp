@@ -120,7 +120,7 @@ SND_TEST(CoreCommands, RejectedPlayEndsWithCommandOverflowAndStopsStillArrive) {
   snd_stats st{};
   h.sys->GetStats(&st);
   SND_CHECK(st.rejected_commands >= rejected);
-  SND_CHECK(st.reserve_overflows > 0u);
+  SND_CHECK_EQ(st.reserve_overflows, 0u);  // coalesced stops are delivered, nothing was lost (D-11)
 }
 
 SND_TEST(CoreCommands, OneShotsHaveNoEndCallbackAndOtherThreadsRecord) {

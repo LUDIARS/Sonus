@@ -363,6 +363,18 @@ void AddMusicInput(Impl& im, music::MusicInputKind kind, HandleRef playback, Id 
 void SetBankUnloading(Impl& im, HandleRef bank, std::uint32_t mode) noexcept {
   if (bank.slot >= im.cfg.maxBanks) return;
   BankAudio& b = im.ap.banks[bank.slot];
+  if (mode == kCancelUnloadWhenUnused) {  // the language came back before the bank was unused
+    if (b.state == BankAudioState::Unloading && b.unloadMode == kUnloadWhenUnused && b.generation == bank.generation) {
+      b.state = BankAudioState::Registered;
+    }
+    if (b.pendingUnload != 0u && b.pendingGeneration == bank.generation) b.pendingUnload = 0u;
+    return;
+  }
+  if (b.state == BankAudioState::Unloading && b.unloadMode == kUnloadWhenUnused && b.generation == bank.generation) {
+    b.unloadMode = mode;  // an explicit unload replaces the language drain
+    b.discardSent = 0;
+    return;
+  }
   if (b.state == BankAudioState::Registered && b.generation == bank.generation) {
     b.state = BankAudioState::Unloading;
     b.unloadMode = mode;
@@ -736,7 +748,6 @@ void ApplyFallback(Impl& im, const cmd::OverflowFallback& fb) noexcept {
     SetParamValue(im, static_cast<ParamScope>(op.scope), op.target, op.id,
                   op.isSwitch != 0u ? ParamKind::Switch : ParamKind::Continuous, std::bit_cast<float>(op.value));
   }
-  im.stats.reserve_overflows += fb.lostParams;
 }
 
 // Unloading banks (10.3): wait for the referencing playbacks, unregister, then the epoch.
@@ -771,6 +782,10 @@ void ProcessBanks(Impl& im) noexcept {
           b.discardSent = 1u;
         }
         continue;
+      }
+      if (b.unloadMode == kUnloadWhenUnused) {
+        // Tell the game side first (bank manager: UNLOADING); retry next block if the ring is full.
+        if (!im.bankEvents.TryPush(BankEvent{BankEventKind::Unregistered, s, b.generation, 0u})) continue;
       }
       UnregisterBank(im, s);
     } else if (b.state == BankAudioState::AwaitEpoch) {

@@ -45,7 +45,11 @@ inline constexpr std::uint32_t kNoSlot = kInvalidSlot;
 inline constexpr std::uint16_t kNoBank = kUnresolvedBank;
 inline constexpr std::uint32_t kMaxBusEffects = 16;       // effects processed per bus
 inline constexpr std::uint32_t kMaxNestedDepth = 4;       // nested events (4.2)
-inline constexpr std::uint32_t kUnloadWhenUnused = 0x100u;  // core-internal BankUnload mode (language switch, 10.4)
+// Core-internal BankUnload modes (language switch, 10.4). The bank stays LOADED for
+// the game while its last voices play; the bank manager learns about the unload only
+// when core unregisters it (then UNLOADING, then released after the epoch).
+inline constexpr std::uint32_t kUnloadWhenUnused = 0x100u;
+inline constexpr std::uint32_t kCancelUnloadWhenUnused = 0x101u;  // switched back before it was unused
 inline constexpr std::uint32_t kMaxLanguageSwitches = 64;
 
 // ---------------------------------------------------------------------------
@@ -79,7 +83,9 @@ struct ArenaView {
 };
 
 struct Producer {
-  std::atomic<std::uint32_t> active{0};  // 1 while a thread owns it
+  // 0 free, 1 owned by a registered thread, 2 retiring: unregistered with an arena
+  // that could not be published yet; Update publishes it, then frees the producer.
+  std::atomic<std::uint32_t> active{0};
   base::ArenaCycle cycle;
   ArenaView* arenas = nullptr;  // [arenasPerThread]
   std::uint32_t seq = 0;        // producer private
@@ -94,10 +100,9 @@ struct RejectedPlay {
 };
 
 // Source services (D-08): requests posted by RT code, drained by PumpServices.
-struct PostedJob {
-  JobDesc job;
+struct PostedJob {  // the job itself is in its JobWrap (taken when postJob accepts it)
+  std::uint32_t wrap;
   JobLane lane;
-  std::uint32_t reserved;
 };
 struct JobWrap {  // trampoline record: counts the job for the bank epoch (3.3)
   JobDesc original;
@@ -109,7 +114,7 @@ struct JobWrap {  // trampoline record: counts the job for the bank epoch (3.3)
 };
 
 // Audio -> game bank events.
-enum class BankEventKind : std::uint32_t { Release = 0, UnloadRefused = 1, RegisterFailed = 2 };
+enum class BankEventKind : std::uint32_t { Release = 0, UnloadRefused = 1, RegisterFailed = 2, Unregistered = 3 };
 struct BankEvent {
   BankEventKind kind;
   std::uint32_t slot;
@@ -305,6 +310,7 @@ enum PlaybackPrivFlags : std::uint32_t {
   kPbInstanceCounted = 1u << 5,
   kPbMusic = 1u << 6,
   kPbPausedState = 1u << 7,  // currently in Paused state (voices paused)
+  kPbTimedStop = 1u << 8,    // stopping by voice releases from a clock (sample accurate)
 };
 struct PlaybackPriv {
   std::uint32_t flags;
@@ -331,6 +337,9 @@ enum VoiceStaticFlags : std::uint32_t {
   kVsPaused = 1u << 7,
   kVsMusic = 1u << 8,
   kVsStopped = 1u << 9,      // stop requested (fade then end)
+  kVsCtlPending = 1u << 10,  // a pause / resume waits for the end of the hold (D-43)
+  kVsWantPaused = 1u << 11,  // the state to send then
+  kVsVirtualized = 1u << 12, // SelectVoices sent Virtualize; Devirtualize on the next promotion
 };
 // Static per-voice values set by RunEventLogic at creation; read by
 // EvaluateDspParams, SelectVoices, BuildRenderList and Render (proposed schema
@@ -355,6 +364,8 @@ struct VoiceStatic {
   std::uint32_t musicTag;
   ClockSample firstClock;    // creation clock (oldest steal)
   std::uint64_t startFrame;  // first source frame (Render initialises Voice.playhead with it)
+  SlotIndex sourceSlot;      // copy of Voice.sourceSlot for SelectVoices (not a declared read)
+  std::uint32_t sourceKind;
 };
 
 struct StartBatch {  // RunEventLogic: Start() requests per kind, issued once per block
@@ -436,6 +447,9 @@ struct ItemInput {
   float gain0, gain1;        // total gain ramp across [frameOffset, blockFrames)
   FilterTarget filter;
   std::uint32_t filterActive;
+  std::uint32_t releaseActive;  // the voice releases: per-sample envelope below
+  std::int64_t releaseStop;     // lifecycle.stopClock - block clock (frames, may be past the block)
+  float releaseFrames;          // release length in frames
   std::uint32_t reserved;
   PanMatrix pan;             // target matrix (unscaled) at block end
   // Outputs (chunk writes):
@@ -481,6 +495,7 @@ struct RenderPriv {
   std::uint32_t* tailChannels = nullptr;
   std::uint32_t* busGen = nullptr;        // [busCap] generation of the bus row seen (new rows: reset state)
   std::uint32_t* voiceGen = nullptr;      // [maxVirtual] generation of the voice row initialised
+  std::uint64_t* holdBlock = nullptr;     // [maxVirtual] block whose chunk was late (hold start)
   RenderSet sets[2];
   std::uint32_t lastParallelSet = 1;
   std::uint32_t currentSet = 0;
@@ -562,6 +577,8 @@ struct System::Impl {
   };
   PendingSwitch* switches = nullptr;  // [kMaxLanguageSwitches]
   std::uint32_t switchCount = 0;
+  HandleRef* draining = nullptr;      // [kMaxLanguageSwitches] old language banks unloaded when unused
+  std::uint32_t drainingCount = 0;
   cmd::BankRegister* pendingRegs = nullptr;  // [maxBanks] registrations not recorded yet (arena full)
   std::uint32_t pendingRegCount = 0;
   BankRecord** records = nullptr;  // [maxBanks] written by the owner thread, read by ApplyCommands

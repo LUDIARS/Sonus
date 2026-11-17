@@ -258,6 +258,8 @@ snd_result CreateImpl(Impl& im) noexcept {
   im.userBuffers = Arr<source::UserBufferControl>(im, g.maxUserBuffers, MemTag::Tables);
   im.languagePlan = Arr<bk::LanguageSwitch>(im, kMaxLanguageSwitches, MemTag::Misc);
   im.switches = Arr<Impl::PendingSwitch>(im, kMaxLanguageSwitches, MemTag::Misc);
+  im.draining = Arr<HandleRef>(im, kMaxLanguageSwitches, MemTag::Misc);
+  if (im.draining == nullptr) return SND_ERR_OUT_OF_BUDGET;
   im.pendingRegs = Arr<cmd::BankRegister>(im, g.maxBanks, MemTag::Misc);
   im.records = Arr<BankRecord*>(im, g.maxBanks, MemTag::Misc);
   im.releaseCandidates = Arr<Impl::ReleaseCandidate>(im, g.maxBanks, MemTag::Misc);
@@ -282,9 +284,11 @@ snd_result CreateImpl(Impl& im) noexcept {
   }
   // Services.
   const std::uint32_t q = lim.serviceQueueEntries < 16u ? 16u : lim.serviceQueueEntries;
-  im.jobWraps = Arr<JobWrap>(im, q * 2u, MemTag::Misc);
+  // Every accepted job is tracked from postJob on (bank epoch): 4 queues' worth of
+  // jobs may be queued or in the job system at once; beyond that postJob refuses.
+  im.jobWraps = Arr<JobWrap>(im, q * 4u, MemTag::Misc);
   if (im.jobWraps == nullptr || !im.jobQueue.Init(a, q, MemTag::Misc) || !im.ioQueue.Init(a, q, MemTag::Misc) ||
-      !im.jobWrapFree.Init(a, q * 2u, MemTag::Misc)) {
+      !im.jobWrapFree.Init(a, q * 4u, MemTag::Misc)) {
     return SND_ERR_OUT_OF_BUDGET;
   }
   im.jobsInFlight[0].store(0, std::memory_order_relaxed);
@@ -432,6 +436,8 @@ snd_result CreateImpl(Impl& im) noexcept {
   im.pub.transportGen = Arr<std::uint32_t>(im, g.maxTransports, MemTag::Tables);
   im.pub.playbackGen = Arr<std::uint32_t>(im, std::size_t{g.maxPlaybacks} * 3u, MemTag::Tables);
   rd.voiceGen = Arr<std::uint32_t>(im, g.maxVirtual, MemTag::Tables);
+  rd.holdBlock = Arr<std::uint64_t>(im, g.maxVirtual, MemTag::Tables);
+  if (rd.holdBlock == nullptr) return SND_ERR_OUT_OF_BUDGET;
   if (rd.voiceGen == nullptr) return SND_ERR_OUT_OF_BUDGET;
   im.fifo = Arr<float>(im, std::size_t{g.blockFrames} * g.outChannels, MemTag::Tables);
   if (rd.resamplerPool == nullptr || rd.lastAssign == nullptr || rd.stateChannels == nullptr || rd.fade == nullptr ||

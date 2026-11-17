@@ -147,6 +147,10 @@ void UpdateTransport(Impl& im) noexcept {
       continue;
     }
     const ClockSample at = fireAt < im.clock ? im.clock : fireAt;
+    if (fireAt < im.clock) {  // a time already gone (e.g. PlayScheduled in the past): now, with a warning
+      PostEvent(im, notify::EventType::ReservationLate, static_cast<std::uint32_t>(ReservationLateRule::StartLate),
+                SND_R(Reservation_target)[d].Value(), 0, static_cast<std::uint32_t>(im.clock - fireAt));
+    }
     const ReservationAction action = SND_R(Reservation_action)[d];
     const ReservationPayload payload = SND_R(Reservation_payload)[d];
     const SlotIndex ts = SND_R(Reservation_transportSlot)[d];

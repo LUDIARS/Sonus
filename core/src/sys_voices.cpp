@@ -41,6 +41,26 @@ void SelectVoices(Impl& im) noexcept {
   RealVoiceAssign* assign = SND_W(RealVoice_assign);
   const VoiceRenderHold* hold = SND_R(Voice_renderHold);
   const VoiceLifecycle* lc = SND_R(Voice_lifecycle);
+  const Playhead* playhead = SND_R(Voice_playhead);
+  // Virtualize / Devirtualize go to the source in the block the voice moves, before its
+  // first render (re-seek / prime first). Never for held voices (D-43).
+  const std::uint32_t opCap = im.cfg.realTotal * 2u;
+  source::SourceControlOp* ops = im.frameArena.AllocateArray<source::SourceControlOp>(opCap);
+  std::uint32_t* opKind = im.frameArena.AllocateArray<std::uint32_t>(opCap);
+  std::uint32_t nOps = 0;
+  auto control = [&](SlotIndex v, source::ControlOp op, std::uint64_t frame) {
+    VoiceStatic& vs = im.ev.vs[v];
+    if ((vs.flags & kVsSourceStarted) == 0u || vs.sourceSlot == kNoSlot || ops == nullptr || opKind == nullptr ||
+        nOps >= opCap) {
+      return;
+    }
+    ops[nOps] = source::SourceControlOp{};
+    ops[nOps].sourceSlot = vs.sourceSlot;
+    ops[nOps].op = op;
+    ops[nOps].frame = frame;
+    opKind[nOps++] = vs.sourceKind;
+    vs.flags = op == source::ControlOp::Virtualize ? (vs.flags | kVsVirtualized) : (vs.flags & ~kVsVirtualized);
+  };
   // 0. Validate every voice's realSlot (new rows carry stale values) and free
   //    real rows whose voice is gone or whose steal fade finished.
   for (std::uint32_t d = 0; d < vr.count; ++d) {
@@ -67,7 +87,10 @@ void SelectVoices(Impl& im) noexcept {
     if (!free && (lc[vd].flags & kVoicePausedFlag) != 0u) free = true;  // paused: silent, no fade needed
     if (free) {
       if (assign[r].fadingOut != 0u && sp.fadingCount > 0u) --sp.fadingCount;
-      if (voiceLive) realSlot[vd] = kNoSlot;
+      if (voiceLive) {
+        realSlot[vd] = kNoSlot;
+        control(v, source::ControlOp::Virtualize, playhead[vd].frame);
+      }
       base::rows::Remove(rr, r);
       sp.realFree.Push(r);
     }
@@ -129,6 +152,19 @@ void SelectVoices(Impl& im) noexcept {
     sp.voiceGen[r] = vr.generation[c.voice];
     realSlot[c.dense] = r;
     ++activeReal;
+    if ((im.ev.vs[c.voice].flags & kVsVirtualized) != 0u) {
+      control(c.voice, source::ControlOp::Devirtualize, playhead[c.dense].frame);
+    }
+  }
+  for (std::size_t k = 0; k < static_cast<std::size_t>(SourceKind::Count) && nOps != 0u; ++k) {
+    if (im.kinds[k] == nullptr) continue;
+    source::SourceControlOp* batch = im.frameArena.AllocateArray<source::SourceControlOp>(nOps);
+    if (batch == nullptr) break;
+    std::uint32_t nb = 0;
+    for (std::uint32_t i = 0; i < nOps; ++i) {
+      if (opKind[i] == k) batch[nb++] = ops[i];
+    }
+    if (nb != 0u) im.kinds[k]->Control(batch, nb);
   }
 }
 

@@ -185,11 +185,7 @@ void EvaluateDspParams(Impl& im) noexcept {
       const float el = static_cast<float>(endClock - vlc[d].startClock) / rate;
       env = el >= vs.fadeInSeconds ? 1.0f : el / vs.fadeInSeconds;
     }
-    if (vlc[d].state == static_cast<std::uint8_t>(VoiceStateId::Releasing) && vlc[d].releaseSeconds > 0.0f) {
-      const float left = vlc[d].stopClock > endClock ? static_cast<float>(vlc[d].stopClock - endClock) / rate : 0.0f;
-      const float r = left / vlc[d].releaseSeconds;
-      env *= r > 1.0f ? 1.0f : r;
-    }
+    // Voice releases (stops, steals) are applied per sample by Render (sample accurate).
     const float gEnd = DbToGain(gainDb) * linear * cat * fadeEnd * env;
     const float pEnd = std::exp2(cents / 1200.0f);
     const bool fresh = vlc[d].state == static_cast<std::uint8_t>(VoiceStateId::Starting);

@@ -81,6 +81,17 @@ void ProcessBanks(Impl& im) noexcept {
           im.callbacks.on_error(im.callbacks.user, SND_ERR_BANK_IN_USE, 0u, h.Value());
         }
         break;
+      case BankEventKind::Unregistered: {  // a language drain ended: now really unloading
+        base::LockGuard lock(im.gameMutex);
+        for (std::uint32_t i = 0; i < im.drainingCount; ++i) {
+          if (im.draining[i].slot == h.slot && im.draining[i].generation == h.generation) {
+            im.draining[i] = im.draining[--im.drainingCount];
+            break;
+          }
+        }
+        im.banks->BeginUnload(h, SND_UNLOAD_STOP_AND_UNLOAD, false);
+        break;
+      }
       case BankEventKind::RegisterFailed:
         FreeBankRecord(im, e.slot);
         im.banks->BeginUnload(h, SND_UNLOAD_STOP_AND_UNLOAD, false);
@@ -107,9 +118,10 @@ void ProcessBanks(Impl& im) noexcept {
       const Impl::PendingSwitch s = im.switches[i];
       const snd_bank_state ns = im.banks->State(s.newBank);
       if (ns == SND_BANK_STATE_LOADED) {
-        if (im.banks->BeginUnload(s.oldBank, SND_UNLOAD_IF_UNUSED, false) == SND_OK &&
-            im.banks->State(s.oldBank) == SND_BANK_STATE_UNLOADING) {
-          RecordBankUnload(im, cmd::BankUnload{s.oldBank, kUnloadWhenUnused, 0u});
+        // Unloaded when its last voice ended (10.4); LOADED for the game until then.
+        if (im.banks->State(s.oldBank) == SND_BANK_STATE_LOADED && im.drainingCount < kMaxLanguageSwitches &&
+            RecordBankUnload(im, cmd::BankUnload{s.oldBank, kUnloadWhenUnused, 0u})) {
+          im.draining[im.drainingCount++] = s.oldBank;
         }
       } else if (ns == SND_BANK_STATE_LOADING) {
         im.switches[keep++] = s;
@@ -142,6 +154,12 @@ snd_result System::Update() noexcept {
   PumpServices();
   ProcessBanks(im);
   PublishProducer(im, im.producers[0]);
+  // Retiring producers (UnregisterThread with an unpublished arena).
+  for (std::uint32_t p = 1; p < im.cfg.maxThreads; ++p) {
+    Producer& pr = im.producers[p];
+    if (pr.active.load(std::memory_order_acquire) != 2u) continue;
+    if (PublishProducer(im, pr)) pr.active.store(0u, std::memory_order_release);
+  }
 
   // Ends (lossless, D-16) and slot returns (D-46).
   base::notify::ConsumeEnds(im.endFlags, [&](SlotIndex slot, const notify::EndRecord& rec) {

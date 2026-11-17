@@ -94,6 +94,15 @@ void PostProcessItem(Impl& im, RenderSet& set, const source::RenderItem& it, Ite
                      float* const* voiceOut, schema::Tables& t) noexcept {
   const std::uint32_t frames = im.cfg.blockFrames;
   const SlotIndex r = it.realSlot;
+  // Release envelope (sample accurate): 1 before the release starts, linear to 0 at stopClock.
+  if (in.releaseActive != 0u) {
+    for (std::uint32_t f = 0; f < frames; ++f) {
+      float e = (static_cast<float>(in.releaseStop) - static_cast<float>(f)) / in.releaseFrames;
+      if (e >= 1.0f) continue;
+      e = e < 0.0f ? 0.0f : e;
+      for (std::uint32_t c = 0; c < in.channels; ++c) voiceOut[c][f] *= e;
+    }
+  }
   // Sample-accurate stop: silence after frameEnd.
   if (in.frameEnd < frames) {
     for (std::uint32_t c = 0; c < in.channels; ++c) std::memset(voiceOut[c] + in.frameEnd, 0, sizeof(float) * (frames - in.frameEnd));
@@ -276,6 +285,10 @@ void InitRenderState(Impl& im, SlotIndex r, SlotIndex v, std::uint32_t vd, const
     dsp::ResamplerInit(ResamplerState(im, r), q, vs.channels, im.cfg.maxPitchRatio);
   }
   im.rd.stateChannels[r] = vs.channels;
+  // The previous owner's last output must not be faded into a bus by this voice.
+  for (std::uint32_t o = 0; o < kMaxChannels; ++o) im.rd.tail[std::size_t{r} * kMaxChannels + o] = 0.0f;
+  im.rd.tailBus[r] = kNoSlot;
+  im.rd.tailChannels[r] = 0u;
   // Fresh starts begin at full level (sample-accurate start); devirtualised voices fade in (D-15).
   const bool fresh = ph.frame == vs.startFrame && ph.loopCount == 0u && ph.fraction == 0u;
   im.rd.fade[r] = fresh ? 1.0f : 0.0f;
@@ -312,9 +325,26 @@ void Render(Impl& im) noexcept {
       if (im.blockQuiescent) {
         const SlotIndex r = vReal[d];
         if (r != kNoSlot && r < im.cfg.realTotal) {
+          // D-43: the state is what the late chunk wrote; the voice also missed the
+          // blocks it was held (and this one): advance it like a virtual voice to
+          // catch up with the clock, then fade in from the next block.
+          const std::uint64_t missed = im.block > rd.holdBlock[v] ? im.block - rd.holdBlock[v] : 0u;
+          source::ISourceKind* src = im.kinds[static_cast<std::size_t>(SND_R(Voice_sourceKind)[d])];
+          const SlotIndex srcSlot = SND_R(Voice_sourceSlot)[d];
+          if (missed != 0u && src != nullptr && srcSlot != kNoSlot) {
+            float ratio = SND_R(Voice_pitch)[d].end *
+                          ((vs.flags & kVsSourceRate) != 0u ? vs.sourceRate / static_cast<float>(im.cfg.sampleRate) : 1.0f);
+            ratio = ratio > im.cfg.maxPitchRatio ? im.cfg.maxPitchRatio : ratio;
+            const source::AdvanceItem item{v, srcSlot, static_cast<std::uint32_t>(missed * frames), ratio,
+                                           &t.RealVoice.col.playhead[r]};
+            VoiceRenderStatus st{};
+            src->AdvanceVirtual(&item, 1u, &st);
+            t.RealVoice.col.renderStatus[r] = st;
+          }
           vPlayhead[d] = t.RealVoice.col.playhead[r];
           vStatus[d] = t.RealVoice.col.renderStatus[r];
           vStatus[d].late = 0u;
+          rd.fade[r] = 0.0f;
         }
         vHold[d] = VoiceRenderHold{};
       } else {
@@ -361,8 +391,17 @@ void Render(Impl& im) noexcept {
     const VoiceLifecycle& lc = SND_R(Voice_lifecycle)[d];
     in.frameOffset = lc.startClock > im.clock ? static_cast<std::uint32_t>(lc.startClock - im.clock) : 0u;
     in.frameEnd = frames;
-    if (lc.state == static_cast<std::uint8_t>(VoiceStateId::Releasing) && lc.stopClock < blockEnd) {
-      in.frameEnd = lc.stopClock > im.clock ? static_cast<std::uint32_t>(lc.stopClock - im.clock) : 0u;
+    if (lc.state == static_cast<std::uint8_t>(VoiceStateId::Releasing)) {
+      if (lc.stopClock < blockEnd) {
+        in.frameEnd = lc.stopClock > im.clock ? static_cast<std::uint32_t>(lc.stopClock - im.clock) : 0u;
+      }
+      const float relFrames = lc.releaseSeconds * rate;
+      const std::int64_t stop = static_cast<std::int64_t>(lc.stopClock) - static_cast<std::int64_t>(im.clock);
+      if (relFrames >= 1.0f && static_cast<float>(stop) - relFrames < static_cast<float>(frames)) {
+        in.releaseActive = 1u;
+        in.releaseStop = stop;
+        in.releaseFrames = relFrames;
+      }
     }
     // Rate.
     const Ramp pitch = SND_R(Voice_pitch)[d];
@@ -477,10 +516,12 @@ void Render(Impl& im) noexcept {
         continue;
       }
       vHold[d] = VoiceRenderHold{1u, {0, 0, 0}, generation};
+      rd.holdBlock[set.items[i].voiceSlot] = im.block;
       ++im.profile.heldVoices;
       vStatus[d].late = 1u;
       // D-15: fade the voice's last output to silence instead of cutting it.
-      const SlotIndex bus = rd.tailBus[r];
+      SlotIndex bus = rd.tailBus[r];
+      if (bus != kNoSlot && !base::rows::IsLive(t.Bus.rows, bus)) bus = kNoSlot;  // freed meanwhile
       float* dst = bus == kNoSlot ? rd.outBuf : rd.busBuf + std::size_t{bus} * kMaxChannels * frames;
       const std::uint32_t fadeFrames = im.cfg.shortFadeFrames == 0u ? 1u : (im.cfg.shortFadeFrames < frames ? im.cfg.shortFadeFrames : frames);
       for (std::uint32_t o = 0; o < rd.tailChannels[r] && o < kMaxChannels; ++o) {

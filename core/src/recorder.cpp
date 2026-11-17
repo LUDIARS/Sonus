@@ -56,7 +56,7 @@ Rec Coalesce<cmd::BankUnload>(Impl& im, ArenaView& av, const cmd::BankUnload& c)
   MarkFallback(av);
   return Rec::Coalesced;
 }
-Rec CoalesceParam(ArenaView& av, std::uint8_t scope, std::uint8_t isSwitch, Id id, HandleRef target,
+Rec CoalesceParam(Impl& im, ArenaView& av, std::uint8_t scope, std::uint8_t isSwitch, Id id, HandleRef target,
                   std::uint32_t value) noexcept {
   cmd::OverflowFallback& fb = av.fallback;
   for (std::uint32_t i = 0; i < fb.paramCapacity; ++i) {
@@ -74,15 +74,16 @@ Rec CoalesceParam(ArenaView& av, std::uint8_t scope, std::uint8_t isSwitch, Id i
     }
   }
   ++fb.lostParams;
+  im.reserveOverflows.fetch_add(1u, std::memory_order_relaxed);  // a value lost (stats.reserve_overflows)
   return Rec::Lost;
 }
 template <>
-Rec Coalesce<cmd::SetParam>(Impl&, ArenaView& av, const cmd::SetParam& c) noexcept {
-  return CoalesceParam(av, c.scope, 0u, c.param, c.target, std::bit_cast<std::uint32_t>(c.value));
+Rec Coalesce<cmd::SetParam>(Impl& im, ArenaView& av, const cmd::SetParam& c) noexcept {
+  return CoalesceParam(im, av, c.scope, 0u, c.param, c.target, std::bit_cast<std::uint32_t>(c.value));
 }
 template <>
-Rec Coalesce<cmd::SetSwitch>(Impl&, ArenaView& av, const cmd::SetSwitch& c) noexcept {
-  return CoalesceParam(av, c.scope, 1u, c.group, c.target, c.value);
+Rec Coalesce<cmd::SetSwitch>(Impl& im, ArenaView& av, const cmd::SetSwitch& c) noexcept {
+  return CoalesceParam(im, av, c.scope, 1u, c.group, c.target, c.value);
 }
 
 void WriteCommand(std::uint8_t* at, cmd::CommandType type, std::uint32_t size, std::uint32_t seq, const void* payload,
@@ -94,18 +95,22 @@ void WriteCommand(std::uint8_t* at, cmd::CommandType type, std::uint32_t size, s
 }
 
 // Appends to the producer's current arena following the delivery class.
+// The application order (normal, reserve, fallback) must equal the recording
+// order (commands.hpp): once a command went to the reserve, every later
+// command of this arena goes to the reserve too (or is coalesced / rejected),
+// and once the fallback section is in use the reserve takes nothing more.
 Rec RecordRaw(Impl& im, Producer& pr, cmd::CommandType type, std::uint32_t size, const void* payload,
               std::size_t payloadBytes, cmd::Delivery delivery) noexcept {
   ArenaView& av = pr.arenas[pr.cycle.Current()];
   cmd::ArenaHeader& h = *av.header;
-  if (h.normalBytes + size <= im.cfg.arenaBytes) {
+  if (h.reserveBytes == 0u && (h.flags & cmd::kArenaHasFallback) == 0u && h.normalBytes + size <= im.cfg.arenaBytes) {
     WriteCommand(av.normal + h.normalBytes, type, size, pr.seq++, payload, payloadBytes);
     h.normalBytes += size;
     ++h.commandCount;
     return Rec::Ok;
   }
   if ((delivery == cmd::Delivery::MustDeliver || delivery == cmd::Delivery::PlayCritical) &&
-      h.reserveBytes + size <= im.cfg.reserveBytes) {
+      (h.flags & cmd::kArenaHasFallback) == 0u && h.reserveBytes + size <= im.cfg.reserveBytes) {
     WriteCommand(av.reserve + h.reserveBytes, type, size, pr.seq++, payload, payloadBytes);
     h.reserveBytes += size;
     ++h.commandCount;
@@ -122,10 +127,10 @@ Rec Record(Impl& im, Producer& pr, const P& payload, cmd::Delivery delivery = cm
   if (r == Rec::Ok) return r;
   ArenaView& av = pr.arenas[pr.cycle.Current()];
   if (delivery == cmd::Delivery::MustDeliver) {
-    const Rec c = Coalesce<P>(im, av, payload);
-    if (c == Rec::Lost) im.reserveOverflows.fetch_add(1u, std::memory_order_relaxed);
-    if (c == Rec::Coalesced) im.reserveOverflows.fetch_add(1u, std::memory_order_relaxed);
-    return c;
+    // D-11: coalesced commands are delivered (not counted); a command the fallback cannot
+    // represent is refused synchronously (SND_ERR_COMMAND_BUFFER_FULL, the caller knows);
+    // only parameter values beyond the table are lost (counted in CoalesceParam).
+    return Coalesce<P>(im, av, payload);
   }
   ++av.header->droppedCount;
   av.header->flags |= cmd::kArenaDroppedCommands;
@@ -226,9 +231,10 @@ bool PublishProducer(Impl& im, Producer& pr) noexcept {
 bool RecordBankRegister(Impl& im, const cmd::BankRegister& c) noexcept {
   return Record(im, im.producers[0], c) == Rec::Ok;
 }
+// Core-internal unload modes have no fallback form (the bit would mean StopAndUnload).
 bool RecordBankUnload(Impl& im, const cmd::BankUnload& c) noexcept {
-  Rec r = Record(im, im.producers[0], c);
-  return r == Rec::Ok || r == Rec::Coalesced;
+  return RecordRaw(im, im.producers[0], cmd::CommandType::BankUnload, cmd::CommandTraits<cmd::BankUnload>::kSize, &c,
+                   sizeof(c), cmd::Delivery::MustDeliver) == Rec::Ok;
 }
 
 // ---------------------------------------------------------------------------
@@ -255,9 +261,12 @@ snd_result System::UnregisterThread() noexcept {
   const std::uint32_t p = CurrentProducer(im);
   if (p == kNoSlot) return SND_ERR_THREAD_NOT_REGISTERED;
   if (p == 0u) return SND_ERR_WRONG_THREAD;
-  PublishProducer(im, im.producers[p]);
+  const bool published = PublishProducer(im, im.producers[p]);
   TlsUnregister(im);
-  im.producers[p].active.store(0u, std::memory_order_release);
+  // Not published (every other arena is still with the audio thread): the producer
+  // retires; the owner's Update publishes the arena once one came back, then frees
+  // the producer. Its number is not reused before that.
+  im.producers[p].active.store(published ? 0u : 2u, std::memory_order_release);
   return SND_OK;
 }
 
@@ -329,6 +338,21 @@ snd_result System::SetLanguage(Id language) noexcept {
   if (im.banks == nullptr) return SND_ERR_UNSUPPORTED;
   {
     base::LockGuard lock(im.gameMutex);
+    // A bank of `language` still draining from an earlier switch: keep it (cancel the
+    // drain) and do not load a second copy (BankManager returns the loaded handle).
+    for (std::uint32_t i = 0; i < im.drainingCount;) {
+      const bk::PreparedBank* pb = im.banks->Prepared(im.draining[i]);
+      if (pb != nullptr && pb->languageId == language) {
+        const HandleRef h = im.draining[i];
+        const cmd::BankUnload cu{h, kCancelUnloadWhenUnused, 0u};
+        if (RecordRaw(im, *pr, cmd::CommandType::BankUnload, cmd::CommandTraits<cmd::BankUnload>::kSize, &cu, sizeof(cu),
+                      cmd::Delivery::MustDeliver) == Rec::Ok) {
+          im.draining[i] = im.draining[--im.drainingCount];
+          continue;
+        }
+      }
+      ++i;
+    }
     snd_result r = SND_OK;
     const std::uint32_t n = im.banks->SetLanguage(language, im.languagePlan, kMaxLanguageSwitches, &r);
     if (r == SND_ERR_NOT_FOUND) return SND_ERR_NOT_FOUND;
@@ -420,7 +444,10 @@ snd_emitter_handle System::CreateEmitter() noexcept {
   SND_PRODUCER_OR(snd_emitter_handle{0})
   const HandleRef h = im.emitterSlots.Acquire();
   if (h.generation == 0u) return snd_emitter_handle{0};
-  Record(im, *pr, cmd::CreateEmitter{h});
+  if (ResultOf(Record(im, *pr, cmd::CreateEmitter{h})) != SND_OK) {  // D-11: refused, not lost
+    im.emitterSlots.Release(h);
+    return snd_emitter_handle{0};
+  }
   return snd_emitter_handle{h.Value()};
 }
 snd_result System::DestroyEmitter(snd_emitter_handle emitter) noexcept {
@@ -565,7 +592,10 @@ snd_transport_handle System::CreateTransport(const snd_transport_desc* desc) noe
   }
   const HandleRef h = im.transportSlots.Acquire();
   if (h.generation == 0u) return snd_transport_handle{0};
-  Record(im, *pr, cmd::CreateTransport{h, *desc});
+  if (ResultOf(Record(im, *pr, cmd::CreateTransport{h, *desc})) != SND_OK) {
+    im.transportSlots.Release(h);
+    return snd_transport_handle{0};
+  }
   return snd_transport_handle{h.Value()};
 }
 snd_result System::DestroyTransport(snd_transport_handle transport) noexcept {
@@ -638,7 +668,11 @@ snd_user_buffer_handle System::CreateUserBuffer(const snd_user_buffer_desc* desc
   ub.writePos.store(desc->mode == SND_USER_BUFFER_STATIC ? desc->frames : 0u, std::memory_order_relaxed);
   ub.readPos.store(0u, std::memory_order_relaxed);
   ub.generation.store(h.generation, std::memory_order_release);
-  Record(im, *pr, cmd::CreateUserBuffer{h, *desc});
+  if (ResultOf(Record(im, *pr, cmd::CreateUserBuffer{h, *desc})) != SND_OK) {
+    ub.generation.store(0u, std::memory_order_release);
+    im.userBufferSlots.Release(h);
+    return snd_user_buffer_handle{0};
+  }
   return snd_user_buffer_handle{h.Value()};
 }
 snd_result System::DestroyUserBuffer(snd_user_buffer_handle buffer) noexcept {
@@ -704,9 +738,7 @@ snd_result System::RecordLive(cmd::CommandType type, const void* payload, std::u
     return SND_OK;
   }
   const Rec r = RecordRaw(im, *pr, type, info->wireSize, payload, payloadBytes, info->delivery);
-  if (r == Rec::Ok) return SND_OK;
-  im.reserveOverflows.fetch_add(1u, std::memory_order_relaxed);
-  return SND_ERR_COMMAND_BUFFER_FULL;
+  return r == Rec::Ok ? SND_OK : SND_ERR_COMMAND_BUFFER_FULL;
 }
 
 #undef SND_PRODUCER_OR
