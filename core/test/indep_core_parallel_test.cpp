@@ -226,8 +226,16 @@ int HeldVoiceCase(std::uint32_t blockFrames, std::uint32_t rate) {
   // Blocks to cover the tail fade and some silence after it.
   const std::size_t heldBlocks = (N + 2 * B + B - 1) / B + 1;
   for (int attempt = 0; attempt < 40; ++attempt) {
-    std::this_thread::sleep_for(std::chrono::milliseconds(30));
-    fx.Steps(2);
+    // Start from a steady state: every voice back at its level (an earlier
+    // attempt may have left a release or a fade-in running).
+    bool steady = false;
+    for (int k = 0; k < 40 && !steady; ++k) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+      fx.Step();
+      steady = fx.sys->LastBlock().heldVoices == 0u && fx.sys->LastBlock().lateChunks == 0u &&
+               std::fabs(fx.At(fx.Total() - B) - full) < 1e-6f && std::fabs(fx.At(fx.Total() - 1) - full) < 1e-6f;
+    }
+    if (!steady) continue;
     fx.kind.callerSlowNs.store(blockFrames >= 256 ? 300000 : 150000);
     fx.kind.slowNs.store(30000000);  // the worker spins 30 ms: its chunks are late, its voices held
     const std::size_t lateStart = fx.Total();
