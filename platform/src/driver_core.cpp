@@ -1,5 +1,6 @@
 #include "snd/platform/driver_core.hpp"
 
+#include <cassert>
 #include <cstring>
 #include <initializer_list>
 
@@ -26,7 +27,6 @@ constexpr std::uint64_t PackAck(std::uint32_t gen, std::uint32_t channels, bool 
 }
 constexpr std::uint32_t AckGen(std::uint64_t v) noexcept { return static_cast<std::uint32_t>(v >> 48); }
 constexpr std::uint32_t AckChannels(std::uint64_t v) noexcept { return static_cast<std::uint32_t>((v >> 40) & 0xFFu); }
-constexpr bool AckFlush(std::uint64_t v) noexcept { return ((v >> 39) & 1u) != 0u; }
 constexpr std::uint64_t AckPos(std::uint64_t v) noexcept { return v & kPosMask; }
 
 // Exponential average with weight 1/16 (single writer).
@@ -70,6 +70,10 @@ bool DriverCore::Init(IAllocator& allocator, const DriverCoreDesc& desc, std::ui
   std::memset(scratch_, 0, scratchBytes);
   allocator_ = &allocator;
   ring_.Bind(ringStorage_, samples);
+  capSamples_.store(samples, std::memory_order_relaxed);
+  cfgBlock_.store(desc.blockFrames, std::memory_order_relaxed);
+  cfgAhead_.store(desc.renderAheadBlocks, std::memory_order_relaxed);
+  cfgLoadPercent_.store(desc.loadTargetPercent, std::memory_order_relaxed);
 
   request_.store(PackRequest(0, channels, sampleRate), std::memory_order_relaxed);
   ack_.store(PackAck(0, channels, false, 0), std::memory_order_relaxed);
@@ -86,11 +90,14 @@ bool DriverCore::Init(IAllocator& allocator, const DriverCoreDesc& desc, std::ui
   readerChannels_ = channels;
   requestedChannels_ = channels;
   fadeInPending_ = false;
+  fadePos_ = 0;
+  lastRequestGen_ = 0;
+  readerFloor_ = 0;
   lastCallbackNs_ = 0;
   pendingLost_.store(0, std::memory_order_relaxed);
   floor_.store(0, std::memory_order_relaxed);
   for (auto* c : {&callbacks_, &consumed_, &underruns_, &lostTotal_, &blocks_, &formatChanges_, &intervalMin_,
-                  &intervalMax_, &intervalAvg_, &renderLast_, &renderMax_, &renderAvg_}) {
+                  &intervalMax_, &intervalAvg_, &renderLast_, &renderMax_, &renderAvg_, &droppedTotal_}) {
     c->store(0, std::memory_order_relaxed);
   }
   statRate_.store(sampleRate, std::memory_order_relaxed);
@@ -119,7 +126,7 @@ std::uint64_t DriverCore::QueuedSamples() const noexcept {
 }
 
 std::uint64_t DriverCore::CapacityFrames(std::uint32_t channels) const noexcept {
-  return channels == 0u ? 0u : ring_.Capacity() / channels;
+  return channels == 0u ? 0u : capSamples_.load(std::memory_order_relaxed) / channels;
 }
 
 std::uint32_t DriverCore::EffectivePeriod() const noexcept {
@@ -129,10 +136,11 @@ std::uint32_t DriverCore::EffectivePeriod() const noexcept {
 }
 
 std::uint32_t DriverCore::TargetFor(std::uint32_t channels) const noexcept {
+  const std::uint64_t block = cfgBlock_.load(std::memory_order_relaxed);
   const std::uint64_t want = static_cast<std::uint64_t>(EffectivePeriod()) +
-                             static_cast<std::uint64_t>(desc_.renderAheadBlocks) * desc_.blockFrames;
+                             static_cast<std::uint64_t>(cfgAhead_.load(std::memory_order_relaxed)) * block;
   const std::uint64_t cap = CapacityFrames(channels);
-  const std::uint64_t limit = cap > desc_.blockFrames ? cap - desc_.blockFrames : 0u;
+  const std::uint64_t limit = cap > block ? cap - block : 0u;
   return static_cast<std::uint32_t>(want < limit ? want : limit);
 }
 
@@ -140,13 +148,15 @@ std::uint32_t DriverCore::TargetFrames() const noexcept {
   return TargetFor(statChannels_.load(std::memory_order_relaxed));
 }
 
-void DriverCore::RequestFormat(std::uint32_t channels, std::uint32_t rate) noexcept {
+std::uint32_t DriverCore::RequestFormat(std::uint32_t channels, std::uint32_t rate) noexcept {
   std::uint64_t cur = request_.load(std::memory_order_relaxed);
   for (;;) {
     const std::uint32_t ch = channels != 0u ? channels : ReqChannels(cur);
     const std::uint32_t r = rate != 0u ? rate : ReqRate(cur);
     const std::uint64_t next = PackRequest(ReqGen(cur) + 1u, ch, r);
-    if (request_.compare_exchange_weak(cur, next, std::memory_order_release, std::memory_order_relaxed)) return;
+    if (request_.compare_exchange_weak(cur, next, std::memory_order_release, std::memory_order_relaxed)) {
+      return ReqGen(next);
+    }
   }
 }
 
@@ -172,9 +182,11 @@ void DriverCore::ApplyFormatRequest() noexcept {
   if (channelChange || rateChange) Bump(formatChanges_);
   // The new format starts at the current write index; with a channel change
   // the reader drops everything before it (written in the old format).
-  const std::uint64_t w = ring_.WriteIndex();
-  if (channelChange) floor_.store(w, std::memory_order_relaxed);
-  ack_.store(PackAck(gen, channels_, channelChange, w), std::memory_order_release);
+  // The ack always carries the position of the LAST channel change, so a
+  // reader that missed it (a later rate-only ack overwrote it) still drops
+  // the data written before it in the old layout.
+  if (channelChange) floor_.store(ring_.WriteIndex(), std::memory_order_relaxed);
+  ack_.store(PackAck(gen, channels_, channelChange, floor_.load(std::memory_order_relaxed)), std::memory_order_release);
   statRate_.store(rate_, std::memory_order_relaxed);
   statChannels_.store(channels_, std::memory_order_relaxed);
   if (desc_.formatChanged != nullptr && (!announced_ || channelChange || rateChange)) {
@@ -233,25 +245,51 @@ void DriverCore::OnDeviceCallback(float* out, std::uint32_t frames, std::uint32_
   if (frames > maxFramesSeen_.load(std::memory_order_relaxed)) maxFramesSeen_.store(frames, std::memory_order_relaxed);
 
   // Write index first, then the ack: if the write index includes data in a
-  // new format, the ack published before it is visible too.
-  const std::uint64_t w = ring_.AcquireWriteIndex();
-  const std::uint64_t a = ack_.load(std::memory_order_acquire);
-  if (AckGen(a) != readerAckGen_) {
+  // new format, the ack published before it is visible too. After applying a
+  // new ack the write index is read again (it is then >= the ack position)
+  // and the ack re-checked, until both agree (the writer may have switched
+  // again in between).
+  std::uint64_t w = ring_.AcquireWriteIndex();
+  std::uint64_t a = ack_.load(std::memory_order_acquire);
+  bool settled = false;
+  for (int attempt = 0; attempt < 8; ++attempt) {
+    if (AckGen(a) == readerAckGen_) {
+      settled = true;
+      break;
+    }
+    const std::uint32_t oldChannels = readerChannels_;
     readerAckGen_ = AckGen(a);
     readerChannels_ = AckChannels(a);
-    if (AckFlush(a)) {
+    if (AckPos(a) != (readerFloor_ & kPosMask)) {
+      // A channel change happened at AckPos (>= the read index: the reader
+      // never reads data published after an ack it has not seen).
       const std::uint64_t r = ring_.ReadIndex();
       const std::uint64_t pos = r + ((AckPos(a) - r) & kPosMask);
+      readerFloor_ = pos;
+      // Frames in the old layout that are dropped: reported to the renderer
+      // with the next block like silence (D-66), counted separately.
+      const std::uint64_t dropped = oldChannels != 0u ? (pos - r) / oldChannels : 0u;
+      if (dropped > 0u) {
+        pendingLost_.fetch_add(dropped, std::memory_order_acq_rel);
+        Bump(droppedTotal_, dropped);
+      }
       ring_.SkipTo(pos);
       fadeInPending_ = true;
+      fadePos_ = 0;
     }
+    w = ring_.AcquireWriteIndex();
+    a = ack_.load(std::memory_order_acquire);
   }
 
   const std::size_t samplesOut = static_cast<std::size_t>(frames) * (channels == 0u ? 1u : channels);
-  if (channels != readerChannels_ || channels == 0u) {
-    if (channels != 0u && channels <= desc_.maxChannels && channels != requestedChannels_) {
+  if (!settled || channels != readerChannels_ || channels == 0u) {
+    // Ask (again) for the device layout when it is not the one requested
+    // last, or when the writer has already answered the last request with a
+    // different layout (the device flipped back and forth before it ran).
+    const bool answered = static_cast<std::int16_t>(static_cast<std::uint16_t>(readerAckGen_ - lastRequestGen_)) >= 0;
+    if (settled && channels != 0u && channels <= desc_.maxChannels && (channels != requestedChannels_ || answered)) {
       requestedChannels_ = channels;
-      RequestFormat(channels, 0u);
+      lastRequestGen_ = RequestFormat(channels, 0u);
     }
     std::memset(out, 0, samplesOut * sizeof(float));
     pendingLost_.fetch_add(frames, std::memory_order_acq_rel);
@@ -261,17 +299,25 @@ void DriverCore::OnDeviceCallback(float* out, std::uint32_t frames, std::uint32_
   requestedChannels_ = channels;
 
   const std::uint64_t r = ring_.ReadIndex();
-  const std::uint64_t availFrames = (w - r) / channels;
+#ifndef NDEBUG
+  assert(r <= w && "DriverCore: the read index ran past the write index");
+#endif
+  // Clamp: never read beyond the published data or more than the ring holds.
+  const std::uint64_t availSamples = w > r ? w - r : 0u;
+  const std::uint64_t cap = ring_.Capacity();
+  const std::uint64_t availFrames = (availSamples < cap ? availSamples : cap) / channels;
   const std::uint32_t n = availFrames < frames ? static_cast<std::uint32_t>(availFrames) : frames;
   if (n > 0u) ring_.Read(out, static_cast<std::uint64_t>(n) * channels);
   const std::uint32_t fade = desc_.fadeFrames;
   if (fadeInPending_ && n > 0u) {
-    const std::uint32_t len = fade < n ? fade : n;
-    for (std::uint32_t i = 0; i < len; ++i) {
-      const float g = static_cast<float>(i + 1u) / static_cast<float>(len + 1u);
+    // The ramp runs over `fade` frames whatever the callback lengths are:
+    // its position is kept across callbacks.
+    std::uint32_t i = 0;
+    for (; i < n && fadePos_ < fade; ++i, ++fadePos_) {
+      const float g = static_cast<float>(fadePos_ + 1u) / static_cast<float>(fade + 1u);
       for (std::uint32_t c = 0; c < channels; ++c) out[static_cast<std::size_t>(i) * channels + c] *= g;
     }
-    fadeInPending_ = false;
+    if (fadePos_ >= fade) fadeInPending_ = false;
   }
   if (n < frames) {
     if (n > 0u && fade > 0u) {
@@ -287,7 +333,8 @@ void DriverCore::OnDeviceCallback(float* out, std::uint32_t frames, std::uint32_
     Bump(underruns_);
     pendingLost_.fetch_add(frames - n, std::memory_order_acq_rel);
     Bump(lostTotal_, frames - n);
-    fadeInPending_ = true;
+    fadeInPending_ = fade > 0u;
+    fadePos_ = 0;
   }
 }
 
@@ -307,7 +354,9 @@ DriverStats DriverCore::Stats() const noexcept {
   s.renderAvgNs = renderAvg_.load(std::memory_order_relaxed);
   s.sampleRate = statRate_.load(std::memory_order_relaxed);
   s.channels = statChannels_.load(std::memory_order_relaxed);
-  s.budgetNs = BlockBudgetNs(desc_.blockFrames, s.sampleRate, desc_.loadTargetPercent);
+  s.budgetNs = BlockBudgetNs(cfgBlock_.load(std::memory_order_relaxed), s.sampleRate,
+                             cfgLoadPercent_.load(std::memory_order_relaxed));
+  s.droppedFrames = droppedTotal_.load(std::memory_order_relaxed);
   s.overBudgetBlocks = lod_.OverBudgetBlocks();
   s.loadLevel = lod_.Level();
   s.targetFrames = TargetFor(s.channels);

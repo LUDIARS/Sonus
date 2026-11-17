@@ -68,13 +68,13 @@ class Thread {
   void Join() noexcept;
   bool Joinable() const noexcept { return started_; }
   // Result of the priority request made by Start.
-  PriorityResult Priority() const noexcept { return priority_; }
+  PriorityResult Priority() const noexcept { return priority_.load(std::memory_order_relaxed); }  // any thread
 
  private:
   struct Native;
   alignas(8) unsigned char native_[16] = {};
   bool started_ = false;
-  PriorityResult priority_ = PriorityResult::Applied;
+  std::atomic<PriorityResult> priority_{PriorityResult::Applied};  // read by statistics on any thread
 };
 
 // Non-RT. Applies `priority` to the calling thread (same policy as above).

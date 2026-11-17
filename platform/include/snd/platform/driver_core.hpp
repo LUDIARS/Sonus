@@ -91,6 +91,7 @@ struct DriverStats {
   std::uint64_t framesConsumed = 0;     // frames handed to the device (incl. silence)
   std::uint64_t underruns = 0;          // callbacks that found the ring short
   std::uint64_t lostFrames = 0;         // silence inserted (underrun + format switch), total
+  std::uint64_t droppedFrames = 0;      // old-layout frames dropped at channel switches (also in RenderInfo::lostFrames)
   std::uint64_t blocksRendered = 0;
   std::uint64_t formatChanges = 0;      // format switches applied by the writer
   std::uint64_t intervalMinNs = 0;      // callback-to-callback interval
@@ -134,11 +135,11 @@ class DriverCore {
   DriverStats Stats() const noexcept;
   std::uint32_t TargetFrames() const noexcept;
   std::uint32_t LoadLevel() const noexcept { return lod_.Level(); }
-  std::uint32_t BlockFrames() const noexcept { return desc_.blockFrames; }
+  std::uint32_t BlockFrames() const noexcept { return cfgBlock_.load(std::memory_order_relaxed); }
   std::uint64_t CapacityFrames(std::uint32_t channels) const noexcept;
 
  private:
-  void RequestFormat(std::uint32_t channels, std::uint32_t rate) noexcept;
+  std::uint32_t RequestFormat(std::uint32_t channels, std::uint32_t rate) noexcept;  // returns the new gen
   void ApplyFormatRequest() noexcept;
   std::uint32_t EffectivePeriod() const noexcept;
   std::uint32_t TargetFor(std::uint32_t channels) const noexcept;
@@ -151,12 +152,17 @@ class DriverCore {
   OutputRing ring_;
 
   // Format handshake. request_: gen(16) | channels(8) | rate(32), absolute
-  // desired values, 0 = keep. ack_: gen(16) | channels(8) | flush(1) | pos(39).
+  // desired values, 0 = keep. ack_: gen(16) | channels(8) | changed(1) | pos(39), pos = write index of the last channel change.
   std::atomic<std::uint64_t> request_{0};
   std::atomic<std::uint64_t> ack_{0};
   std::atomic<std::uint32_t> devicePeriod_{0};
   std::atomic<std::uint32_t> maxFramesSeen_{0};
   std::atomic<std::uint64_t> floor_{0};  // write index of the last channel change
+  // Configuration read by Stats() from any thread (atomic: Init may run concurrently).
+  std::atomic<std::uint64_t> capSamples_{0};
+  std::atomic<std::uint32_t> cfgBlock_{0};
+  std::atomic<std::uint32_t> cfgAhead_{0};
+  std::atomic<double> cfgLoadPercent_{0.0};
 
   // Writer (audio thread) state.
   std::uint32_t writerGen_ = 0;
@@ -171,7 +177,10 @@ class DriverCore {
   std::uint32_t readerAckGen_ = 0;
   std::uint32_t readerChannels_ = 0;
   std::uint32_t requestedChannels_ = 0;
+  std::uint32_t lastRequestGen_ = 0;  // gen of the reader's last channel request
+  std::uint64_t readerFloor_ = 0;     // channel-change position the reader last applied
   bool fadeInPending_ = false;
+  std::uint32_t fadePos_ = 0;         // frames of the fade-in already applied
   std::uint64_t lastCallbackNs_ = 0;
 
   // Reader -> writer.
@@ -184,6 +193,7 @@ class DriverCore {
   std::atomic<std::uint64_t> lostTotal_{0};
   std::atomic<std::uint64_t> blocks_{0};
   std::atomic<std::uint64_t> formatChanges_{0};
+  std::atomic<std::uint64_t> droppedTotal_{0};
   std::atomic<std::uint64_t> intervalMin_{0};
   std::atomic<std::uint64_t> intervalMax_{0};
   std::atomic<std::uint64_t> intervalAvg_{0};
