@@ -10,3 +10,13 @@ foreach(_t model_test live_mixer_test live_profiler_test ui_declaration_test ui_
                              ${CMAKE_CURRENT_SOURCE_DIR})
   set_tests_properties(tool_${_t} PROPERTIES TIMEOUT 600)
 endforeach()
+
+# The executable itself, headless, on the build tool's sample project (its WAV files are
+# not in the repository: the build reports errors, the tool still shows the project).
+add_test(NAME tool_app_headless
+         COMMAND sonus-tool --headless --no-connect --frames 3 --frame-ms 1 --text-placeholders
+                 --project ${PROJECT_SOURCE_DIR}/buildtool/test/data/sample
+                 --build-dir ${CMAKE_CURRENT_BINARY_DIR}/sample-build
+                 --snapshot ${CMAKE_CURRENT_BINARY_DIR}/headless-mixer.ppm)
+add_test(NAME tool_app_bad_option COMMAND sonus-tool --size 10x10)
+set_tests_properties(tool_app_bad_option PROPERTIES WILL_FAIL TRUE)
