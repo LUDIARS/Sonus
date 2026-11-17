@@ -59,3 +59,10 @@ snd_add_test(integration_source_end_to_end_test
   LINK sonus sonus_core sonus_buildtool sonus_bank sonus_codec sonus_dsp sonus_io sonus_jobs sonus_platform sonus_base sonus_mocks)
 target_include_directories(integration_source_end_to_end_test PRIVATE ${PROJECT_SOURCE_DIR}/buildtool/test)
 set_tests_properties(integration_source_end_to_end_test PROPERTIES TIMEOUT 600)
+
+# Independent tests of the source module through core (indep_*), harness of source/test.
+snd_add_test(integration_indep_source_core_test
+  SOURCES indep_source_core_test.cpp
+  LINK sonus_source sonus_core sonus_buildtool sonus_bank sonus_dsp sonus_jobs sonus_io sonus_codec sonus_mocks)
+target_include_directories(integration_indep_source_core_test PRIVATE ${PROJECT_SOURCE_DIR}/buildtool/test ${PROJECT_SOURCE_DIR}/source/test)
+set_tests_properties(integration_indep_source_core_test PROPERTIES TIMEOUT 900)
