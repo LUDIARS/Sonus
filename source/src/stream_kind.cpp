@@ -45,25 +45,29 @@ class StreamInput final : public InputSource {
     else s_.curOff += n;
   }
   bool Exhausted() const noexcept override { return s_.preActive == 0u && s_.curValid == 0u && s_.eof != 0u; }
-  bool SkipToWrap(std::uint64_t) noexcept override {
+  bool SkipToWrap(std::uint64_t byte) noexcept override {
     if (s_.skipToWrap == 0u) {  // drop the rest of the record that holds the loop end
       s_.preActive = 0;
-      s_.skipToWrap = 1;
+      s_.skipToWrap = s_.wrapNoTag != 0u ? 0u : 1u;  // reads re-planned at the loop start carry no tag
+      s_.wrapNoTag = 0;
+      s_.wrapSkip = 0;
       if (s_.curValid != 0u) {
         ch_.Release(s_.cur);
         s_.curValid = 0;
       }
-    }
-    while (Next()) {
-      if ((s_.cur.tag & kTagWrapped) != 0u) {
-        s_.skipToWrap = 0;
+      if (s_.a.preload != nullptr && byte < s_.a.preloadBytes) {
+        // The loop start lies in the preload: go on from memory at once; the
+        // planner's wrapped read follows, its bytes up to the preload end are skipped.
+        s_.preActive = 1;
+        s_.preOff = byte;
+        s_.wrapSkip = s_.a.preloadBytes - byte;
         s_.eof = 0;
         return true;
       }
-      ch_.Release(s_.cur);
-      s_.curValid = 0;
     }
-    return false;
+    if (s_.curValid == 0u && !Next()) return false;  // Next() drops records up to the wrapped one
+    s_.eof = 0;
+    return true;
   }
   std::uint32_t Failure() const noexcept override { return s_.error.load(std::memory_order_relaxed); }
 
@@ -86,9 +90,21 @@ class StreamInput final : public InputSource {
         ch_.Release(rec);
         return false;
       }
+      if (s_.skipToWrap != 0u) {  // waiting for the loop's wrapped read: drop the reads past the loop end
+        if ((rec.tag & kTagWrapped) == 0u) {
+          ch_.Release(rec);
+          continue;
+        }
+        s_.skipToWrap = 0;
+      }
+      std::uint32_t skip = 0;
+      if (s_.wrapSkip != 0u) {  // bytes the preload already gave
+        skip = s_.wrapSkip < rec.bytes ? static_cast<std::uint32_t>(s_.wrapSkip) : rec.bytes;
+        s_.wrapSkip -= skip;
+      }
       s_.cur = rec;
       s_.curValid = 1;
-      s_.curOff = 0;
+      s_.curOff = skip;
       k_.MirrorReadPos(s_);
       return true;
     }
@@ -333,11 +349,11 @@ void StreamKind::Shutdown() noexcept {
 // ---------------------------------------------------------------------------
 // Decode (job, or audio thread while no job runs)
 // ---------------------------------------------------------------------------
-void StreamKind::Decode(StreamInst& s) noexcept {
+void StreamKind::Decode(StreamInst& s, std::uint64_t limit) noexcept {
   if (s.error.load(std::memory_order_relaxed) != 0u) return;
   StreamInput in(*this, s);
   const auto& r = schema::ReadColumn<SystemId::Render, ColumnId::Stream_ringRead>(*sv_.tables)[s.slot];
-  StreamSink sink(s, rings_.frames, RingWrite(s), r, ~std::uint64_t{0});
+  StreamSink sink(s, rings_.frames, RingWrite(s), r, limit);
   s.dec.Run(in, sink);
   SetRingWrite(s, sink.W());
   if (s.dec.error != 0u && s.error.load(std::memory_order_relaxed) == 0u) s.error.store(s.dec.error, std::memory_order_release);
@@ -358,6 +374,8 @@ void StreamKind::DropCurrent(StreamInst& s) noexcept {
   s.curValid = 0;
   s.curOff = 0;
   s.skipToWrap = 0;
+  s.wrapSkip = 0;
+  s.wrapNoTag = 0;
 }
 
 void StreamKind::SetupPlanner(StreamInst& s) noexcept {
@@ -685,6 +703,46 @@ void StreamKind::Release(const SlotIndex* slots, std::uint32_t count) noexcept {
   }
 }
 
+// SetLoop that cannot keep the read plan: keep the decoded PCM up to where the
+// old and the new loop differ (or to what is decoded), drop what lies past it,
+// and decode / read again from there under the new loop. Render keeps reading
+// the ring without a break. false when the ring is not one linear piece from
+// the playhead.
+bool StreamKind::KeepAndRedecode(StreamInst& s, const LoopRange& to) noexcept {
+  if (s.dec.awaitWrap || s.skipToWrap != 0u) return false;
+  const std::uint64_t total = s.a.h.total_frames;
+  const std::uint32_t loops = s.ringLoops;
+  const std::uint64_t oldEnd = s.loop.WrapsAfter(loops) ? s.loop.le : total;
+  const std::uint64_t newEnd = to.WrapsAfter(loops) ? to.le : total;
+  const std::uint64_t agree = oldEnd < newEnd ? oldEnd : newEnd;
+  const std::uint64_t r = RingRead(s);
+  const std::uint64_t held = RingWrite(s) - r;
+  if (s.dec.decPos < s.ringPos || s.dec.decPos - s.ringPos != held || s.ringPos >= agree) return false;
+  const std::uint64_t keepEnd = s.dec.decPos < agree ? s.dec.decPos : agree;
+  s.loop = to;
+  s.rloop = to;
+  SetRingWrite(s, r + (keepEnd - s.ringPos));
+  ResetForSeek(s, keepEnd, loops);  // IO and decoder from keepEnd (the ring is not touched)
+  if (keepEnd == newEnd && to.WrapsAfter(loops) && s.headerDone.load(std::memory_order_relaxed) != 0u) {
+    // The ring holds everything up to the new loop end: the decoder goes on at
+    // the loop start (from the preload when it holds it, else the first reads,
+    // planned from the loop start) and decodes the head now (bounded).
+    s.dec.carryHead = s.dec.carryCount = 0;
+    s.dec.drain = false;
+    s.dec.discard = 0;
+    s.dec.decPos = to.le;
+    s.dec.awaitWrap = true;
+    s.dec.ended = false;
+    s.ended.store(0u, std::memory_order_relaxed);
+    s.preActive = 0;
+    s.wrapNoTag = 1;
+    s.ioStart = EndByte(s.a, to.le, s.dataBytes);
+    SetupPlanner(s);  // the cursor at the loop end wraps to the loop start
+    Decode(s, readyFrames_);
+  }
+  return true;
+}
+
 void StreamKind::Control(const SourceControlOp* ops, std::uint32_t count) noexcept {
   for (std::uint32_t i = 0; i < count; ++i) {
     const SourceControlOp& op = ops[i];
@@ -734,9 +792,21 @@ void StreamKind::Control(const SourceControlOp* ops, std::uint32_t count) noexce
           s.planEnded = 0;
           break;
         }
-        s.pendingLoop = to;  // otherwise: re-read from the current position with the new loop
-        s.hasPendingLoop = 1;
-        target = s.renderPos;
+        const std::uint32_t want = s.reqGen.load(std::memory_order_relaxed);
+        if (want != s.adoptGen.load(std::memory_order_acquire)) {
+          // A seek is pending: its target stays, the voice follows the new loop from there.
+          s.pendingLoop = to;
+          s.hasPendingLoop = 1;
+          if (s.execGen.load(std::memory_order_relaxed) == want) {  // executed already: once more with the loop
+            s.reqGen.store(want + 1u, std::memory_order_release);
+          }
+          break;
+        }
+        const bool behind = to.WrapsAfter(s.ringLoops) && s.renderPos >= to.le;
+        if (!behind && !JobBusy(s.jobCounter) && s.hasPendingLoop == 0u && KeepAndRedecode(s, to)) break;
+        s.pendingLoop = to;  // otherwise: re-read with the new loop, from the loop start when the
+        s.hasPendingLoop = 1;  // loop end is behind the playhead (all forms), else from the position
+        target = behind ? to.lb : s.renderPos;
         break;
       }
       case ControlOp::Pause:
@@ -989,7 +1059,7 @@ void StreamKind::ScheduleBackground(const BlockInfo&) noexcept {
     // Decode job when the PCM ring has room and there is input.
     const std::uint64_t used = RingWrite(s) - RingRead(s);
     if (s.ended.load(std::memory_order_relaxed) != 0u || rings_.frames - used < rings_.frames / 4u) continue;
-    const bool input = s.preActive != 0u || s.curValid != 0u || Channel(i).Ready() != 0u || s.dec.drain ||
+    const bool input = s.preActive != 0u || s.curValid != 0u || Channel(i).Ready() != 0u || s.dec.drain || s.dec.awaitWrap ||
                        s.dec.carryHead < s.dec.carryCount || (s.eof != 0u && !s.dec.ended);
     if (!input) continue;
     if (!PostJob(sv_, sh_, &StreamKind::DecodeJob, &s, &s.jobCounter, &s.cancel, 2u) && sv_.postJob == nullptr) {

@@ -19,6 +19,8 @@ namespace snd::source::detail {
 class SampleKind;
 
 enum class SampleMode : std::uint8_t { Direct = 0, Ring = 1, Cache = 2 };
+inline constexpr std::uint32_t kReqSeek = 1u;
+inline constexpr std::uint32_t kReqLoop = 2u;
 
 // Decode context of a Ring-mode voice (count = maxDecoders).
 struct RingCtx {
@@ -39,9 +41,16 @@ struct RingCtx {
   // a voice is changed only by its RenderBatch). req: 0 none, 1 seek to
   // reqTarget, 2 loop change to reqLoop. Executed at the head of the next
   // RenderBatch once no job of the context runs; Publish posts no job meanwhile.
+  // Bits: kReqSeek (reqTarget, already mapped with the loop in force when the
+  // Seek came) and kReqLoop (reqLoop). Both may be pending: the seek's target
+  // is used as is and the voice follows the last loop.
   std::atomic<std::uint32_t> req{0};
   std::uint64_t reqTarget;
   LoopRange reqLoop;
+  std::uint32_t deferred;              // Render: a request waited for a running job (cross-fade when done)
+  // Job claim: 0 idle, 1 posted, 2 running, 3 claimed by Render (the posted
+  // job then returns without touching the decoder).
+  std::atomic<std::uint32_t> jobState{0};
   std::uint32_t listPos;               // position in the active list
   SampleKind* kind;
 };
@@ -97,6 +106,8 @@ class SampleKind final : public ISourceKind {
   bool LoopChangeFits(const RingCtx& c, const SampleInst& in, std::uint64_t pos, std::uint32_t loops,
                       const LoopRange& to, std::uint64_t* agree) const noexcept;
   void ExecuteRequest(RingCtx& c, SampleInst& in, const RenderItem& it, std::uint32_t& inlineBudget) noexcept;
+  bool DecoderFree(RingCtx& c) noexcept;
+  bool TakeBudget() noexcept;
   void DecodeRing(RingCtx& c, std::uint64_t limitFrames) noexcept;
   bool Ready(const SampleInst& in) const noexcept;
   void RenderDirect(SampleInst& in, const RenderItem& it, VoiceRenderStatus& st) noexcept;
@@ -117,6 +128,8 @@ class SampleKind final : public ISourceKind {
   RingPool rings_;
   PcmCache cache_;
   std::uint32_t readyFrames_ = 0;
+  std::uint32_t fadeFrames_ = 1;
+  std::atomic<std::int32_t> blockBudget_{4};  // seeks / loop changes decoded per block (all chunks)
   std::uint32_t live_ = 0;
   std::uint64_t block_ = 0;
   bool decoders_ = false;

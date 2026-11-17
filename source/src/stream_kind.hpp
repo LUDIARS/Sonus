@@ -66,6 +66,8 @@ struct StreamInst {
   std::uint32_t curValid;
   std::uint32_t curOff;
   std::uint32_t skipToWrap;
+  std::uint32_t wrapNoTag;      // the next wrap reads carry no wrapped tag (re-planned at the loop start)
+  std::uint64_t wrapSkip;       // bytes of the next reads already given by the preload (loop start in it)
   std::uint32_t preActive;     // preload input
   std::uint64_t preOff;
   std::uint64_t dataBytes;     // from the header
@@ -158,11 +160,12 @@ class StreamKind final : public ISourceKind {
  private:
   void Layout(Carver& c, const SourceLimits& l) noexcept;
   bool StartOne(const SourceStartRequest& r, SourceStartResult& res, std::uint32_t& inlineBudget) noexcept;
-  void Decode(StreamInst& s) noexcept;
+  void Decode(StreamInst& s, std::uint64_t limit = ~std::uint64_t{0}) noexcept;
   void ResetForSeek(StreamInst& s, std::uint64_t target, std::uint32_t loops) noexcept;
   void Execute(StreamInst& s, std::uint32_t gen, std::uint32_t kind, std::uint64_t target, std::uint32_t loops,
                std::uint32_t& inlineBudget) noexcept;
   bool LoopChangeFits(const StreamInst& s, const LoopRange& to) const noexcept;
+  bool KeepAndRedecode(StreamInst& s, const LoopRange& to) noexcept;
   void SetupPlanner(StreamInst& s) noexcept;
   void PostReads(StreamInst& s) noexcept;
   bool TryFree(StreamInst& s) noexcept;

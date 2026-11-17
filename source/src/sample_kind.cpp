@@ -118,6 +118,9 @@ bool SampleKind::Init(void* pool, std::size_t bytes, const SourceLimits& limits,
   const std::uint32_t half = rings_.frames / 2u;
   const std::uint32_t want = 8u * (limits.blockFrames == 0u ? 256u : limits.blockFrames);
   readyFrames_ = want < half ? want : half;
+  fadeFrames_ = (limits.sampleRate == 0u ? 48000u : limits.sampleRate) * kFadeMs / 1000u;
+  if (fadeFrames_ == 0u) fadeFrames_ = 1;
+  if (fadeFrames_ > 256u) fadeFrames_ = 256u;
   live_ = 0;
   activeCount_ = 0;
   block_ = 0;
@@ -154,7 +157,10 @@ void SampleKind::DecodeRing(RingCtx& c, std::uint64_t limit) noexcept {
 void SND_CALL SampleKind::RingJob(void* data) {
   RingCtx& c = *static_cast<RingCtx*>(data);
   if (std::atomic_ref<std::uint32_t>(c.cancel).load(std::memory_order_acquire) != 0u) return;
+  std::uint32_t posted = 1u;
+  if (!c.jobState.compare_exchange_strong(posted, 2u, std::memory_order_acq_rel)) return;  // claimed by Render
   c.kind->DecodeRing(c, ~std::uint64_t{0});
+  c.jobState.store(0u, std::memory_order_release);
 }
 
 void SampleKind::SeekRing(RingCtx& c, std::uint64_t target, std::uint32_t loops, std::uint32_t& inlineBudget) noexcept {
@@ -421,7 +427,7 @@ void SampleKind::Control(const SourceControlOp* ops, std::uint32_t count) noexce
           break;
         }
         c->reqLoop = to;  // Render keeps the agreeing part of the ring and decodes on (no gap)
-        c->req.store(2u, std::memory_order_release);
+        c->req.fetch_or(kReqLoop, std::memory_order_release);
         break;
       }
       case ControlOp::Pause:
@@ -429,11 +435,13 @@ void SampleKind::Control(const SourceControlOp* ops, std::uint32_t count) noexce
         break;
     }
     if (target == kNone) continue;
-    target = WrapInto(in.loop, target);
+    // A seek follows the loop in force when it comes (a pending SetLoop included).
+    const bool loopPending = c != nullptr && (c->req.load(std::memory_order_relaxed) & kReqLoop) != 0u;
+    target = WrapInto(loopPending ? c->reqLoop : in.loop, target);
     in.renderPos = target;
     if (c != nullptr) {
       c->reqTarget = target;
-      c->req.store(1u, std::memory_order_release);
+      c->req.fetch_or(kReqSeek, std::memory_order_release);
     } else {
       in.overridePos = target;
       in.hasOverride = 1;
@@ -547,13 +555,33 @@ void SampleKind::RenderCache(SampleInst& in, const RenderItem& it, VoiceRenderSt
   st.framesRendered = written;
 }
 
+bool SampleKind::TakeBudget() noexcept {
+  std::int32_t v = blockBudget_.load(std::memory_order_relaxed);
+  while (v > 0) {
+    if (blockBudget_.compare_exchange_weak(v, v - 1, std::memory_order_relaxed)) return true;
+  }
+  return false;
+}
+
+// The decoder of c may be used by Render now: no job in flight, or the posted
+// job has not started and is claimed (it will return without touching it).
+bool SampleKind::DecoderFree(RingCtx& c) noexcept {
+  if (!JobBusy(c.jobCounter)) return true;
+  std::uint32_t st = c.jobState.load(std::memory_order_acquire);
+  if (st == 3u) return true;
+  if (st != 1u) return false;
+  return c.jobState.compare_exchange_strong(st, 3u, std::memory_order_acq_rel) || st == 3u;
+}
+
 void SampleKind::ExecuteRequest(RingCtx& c, SampleInst& in, const RenderItem& it, std::uint32_t& inlineBudget) noexcept {
   const std::uint32_t q = c.req.load(std::memory_order_acquire);
-  if (q == 1u) {
+  if ((q & kReqSeek) != 0u) {
+    if ((q & kReqLoop) != 0u) in.loop = c.reqLoop;  // seek target as given, the last loop from here on
     it.playhead->frame = c.reqTarget;
     it.playhead->fraction = 0;
     SeekRing(c, c.reqTarget, it.playhead->loopCount, inlineBudget);
-  } else if (q == 2u) {
+    in.primed = 0;
+  } else if ((q & kReqLoop) != 0u) {
     const std::uint64_t pos = it.playhead->frame;
     const std::uint32_t loops = it.playhead->loopCount;
     const LoopRange to = c.reqLoop;
@@ -561,9 +589,10 @@ void SampleKind::ExecuteRequest(RingCtx& c, SampleInst& in, const RenderItem& it
     const bool fits = LoopChangeFits(c, in, pos, loops, to, &agree);
     in.loop = to;
     const std::uint64_t held = c.w.load(std::memory_order_relaxed) - c.r.load(std::memory_order_relaxed);
+    const bool behind = to.WrapsAfter(loops) && pos >= to.le;
     if (fits) {
       c.dec.loop = to;
-    } else if (pos < agree && c.dec.decPos >= pos && !c.dec.awaitWrap && agree - pos <= held) {
+    } else if (!behind && pos < agree && c.dec.decPos >= pos && !c.dec.awaitWrap && agree - pos <= held) {
       // Keep the ring up to where the loops differ, decode on from there.
       c.w.store(c.r.load(std::memory_order_relaxed) + (agree - pos), std::memory_order_release);
       c.dec.loop = to;
@@ -578,8 +607,11 @@ void SampleKind::ExecuteRequest(RingCtx& c, SampleInst& in, const RenderItem& it
         DecodeRing(c, readyFrames_);
       }
     } else {
-      SeekRing(c, WrapInto(to, pos), loops, inlineBudget);
-      it.playhead->frame = WrapInto(to, pos);
+      // A loop end behind the playhead: the voice goes to the loop start (all forms).
+      const std::uint64_t target = behind ? to.lb : pos;
+      SeekRing(c, target, loops, inlineBudget);
+      it.playhead->frame = target;
+      in.primed = 0;
     }
   }
   c.req.store(0u, std::memory_order_release);
@@ -588,9 +620,28 @@ void SampleKind::ExecuteRequest(RingCtx& c, SampleInst& in, const RenderItem& it
 void SampleKind::RenderRing(SampleInst& in, const RenderItem& it, VoiceRenderStatus& st, std::uint32_t& inlineBudget) noexcept {
   RingCtx& c = ctx_[in.ctx];
   if (in.virt != 0u) return;  // virtual (or not devirtualised yet): silence, never the stale ring
+  // Old frames for the cross-fade of a request that waited for a running job.
+  float old[kMaxChannels][256];
+  std::uint32_t oldFrames = 0;
   if (c.req.load(std::memory_order_acquire) != 0u) {
-    if (JobBusy(c.jobCounter)) return;  // a job still holds the decoder: next block
-    ExecuteRequest(c, in, it, inlineBudget);
+    if (!DecoderFree(c)) {
+      c.deferred = 1;  // a job is decoding: play on from the ring, switch when it is done
+    } else {
+      if (c.deferred != 0u) {
+        const std::uint64_t r0 = c.r.load(std::memory_order_relaxed);
+        const std::uint64_t av = c.w.load(std::memory_order_acquire) - r0;
+        oldFrames = fadeFrames_ < it.framesRequested ? fadeFrames_ : it.framesRequested;
+        if (av < oldFrames) oldFrames = static_cast<std::uint32_t>(av);
+        const std::uint32_t mask = rings_.frames - 1u;
+        for (std::uint32_t ch = 0; ch < it.channels && ch < c.channels; ++ch) {
+          for (std::uint32_t f = 0; f < oldFrames; ++f) old[ch][f] = c.ring[ch][(r0 + f) & mask];
+        }
+        c.deferred = 0;
+      }
+      std::uint32_t one = TakeBudget() ? 1u : 0u;
+      (void)inlineBudget;
+      ExecuteRequest(c, in, it, one);
+    }
   }
   const std::uint32_t ended = c.ended.load(std::memory_order_acquire);
   const std::uint32_t err = c.error.load(std::memory_order_acquire);
@@ -613,6 +664,15 @@ void SampleKind::RenderRing(SampleInst& in, const RenderItem& it, VoiceRenderSta
     }
     done += k;
   }
+  if (oldFrames != 0u) {  // D-15 short cross-fade from the old position to the target
+    for (std::uint32_t ch = 0; ch < it.channels && ch < c.channels; ++ch) {
+      float* o = it.out[ch] + it.frameOffset;
+      for (std::uint32_t f = 0; f < oldFrames; ++f) {
+        const float g = static_cast<float>(f + 1u) / static_cast<float>(oldFrames + 1u);
+        o[f] = (f < n ? o[f] : 0.0f) * g + old[ch][f] * (1.0f - g);
+      }
+    }
+  }
   r += n;
   c.r.store(r, std::memory_order_release);
   std::uint64_t pos = it.playhead->frame;
@@ -620,7 +680,7 @@ void SampleKind::RenderRing(SampleInst& in, const RenderItem& it, VoiceRenderSta
   AdvancePos(in.loop, pos, loops, n);
   it.playhead->frame = pos;
   it.playhead->loopCount = loops;
-  st.framesRendered = n;
+  st.framesRendered = n > oldFrames ? n : oldFrames;
   if (n < it.framesRequested) {
     if (err != 0u) {
       st.ended = n == 0u ? 1u : 0u;
@@ -693,6 +753,7 @@ void SampleKind::AdvanceVirtual(const AdvanceItem* items, std::uint32_t count, V
 // ---------------------------------------------------------------------------
 void SampleKind::ScheduleBackground(const BlockInfo& block) noexcept {
   block_ = block.index;
+  blockBudget_.store(4, std::memory_order_relaxed);  // seeks decoded by Render in the next block
   for (std::uint32_t k = 0; k < activeCount_;) {
     const std::uint32_t ci = active_[k];
     RingCtx& c = ctx_[ci];
@@ -712,7 +773,9 @@ void SampleKind::ScheduleBackground(const BlockInfo& block) noexcept {
     }
     const std::uint64_t used = c.w.load(std::memory_order_relaxed) - c.r.load(std::memory_order_acquire);
     if (rings_.frames - used < rings_.frames / 4u) continue;  // full enough
-    if (!PostJob(sv_, sh_, &SampleKind::RingJob, &c, &c.jobCounter, &c.cancel, 1u) && sv_.postJob == nullptr) {
+    c.jobState.store(1u, std::memory_order_release);
+    if (!PostJob(sv_, sh_, &SampleKind::RingJob, &c, &c.jobCounter, &c.cancel, 1u)) c.jobState.store(0u, std::memory_order_relaxed);
+    if (JobBusy(c.jobCounter) == false && sv_.postJob == nullptr) {
       DecodeRing(c, ~std::uint64_t{0});  // no job service: decode here (tests without services)
     }
   }
