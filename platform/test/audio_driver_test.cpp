@@ -213,9 +213,11 @@ SND_TEST(AudioDriver, StartFailuresUndoEverything) {
 }
 
 namespace {
+void* volatile gAllocSink = nullptr;
 struct AllocatingRenderer {
   static void Render(void*, float* out, std::uint32_t frames, std::uint32_t channels, const RenderInfo*) {
     int* p = new int(3);  // forbidden on the audio thread: reported by the RT checks
+    gAllocSink = p;       // escapes: the optimiser may not elide the allocation
     delete p;
     std::memset(out, 0, sizeof(float) * frames * channels);
   }

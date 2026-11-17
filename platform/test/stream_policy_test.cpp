@@ -217,9 +217,11 @@ SND_TEST(DeviceCallback, DeliverFramesSplitsIntoChunksWithFtzAndRtScope) {
 }
 
 namespace {
+void* volatile gAllocSink = nullptr;
 struct AllocatingCallback {
   static void Callback(void*, float*, std::uint32_t, std::uint32_t) {
     int* leak = new int(1);  // forbidden in the callback: must be reported
+    gAllocSink = leak;       // escapes: the optimiser may not elide the allocation
     delete leak;
   }
 };
