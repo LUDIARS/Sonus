@@ -136,6 +136,7 @@ class IndepKind final : public snd::source::ISourceKind {
   void Control(const snd::source::SourceControlOp* ops, std::uint32_t n) noexcept override {
     controls.fetch_add(n);
     for (std::uint32_t i = 0; i < n; ++i) {
+      if (static_cast<std::uint32_t>(ops[i].op) < 8u) controlsByOp[static_cast<std::uint32_t>(ops[i].op)].fetch_add(1);
       if (ops[i].sourceSlot < n_ && inUseSrc_[ops[i].sourceSlot].load(std::memory_order_acquire) != 0u) {
         controlBusy.fetch_add(1);
         controlBusyOps.fetch_or(1u << static_cast<std::uint32_t>(ops[i].op));
@@ -250,9 +251,10 @@ class IndepKind final : public snd::source::ISourceKind {
   std::atomic<std::uint64_t> overlap{0}, discont{0}, doubleBlock{0}, releasedBusy{0}, deadRender{0}, liveStart{0},
       controlBusy{0};
   std::atomic<std::uint64_t> slowNs{0};
-  std::atomic<std::uint64_t> callerSlowNs{0};
-  std::atomic<std::uint32_t> controlBusyOps{0};
-  std::atomic<std::uint64_t> timeLag{0};  // renders whose playhead is not clock - start (see RenderBatch)  // bit per ControlOp seen while busy  // per batch on the audio thread
+  std::atomic<std::uint64_t> callerSlowNs{0};       // per batch on the audio thread
+  std::atomic<std::uint32_t> controlBusyOps{0};     // bit per ControlOp seen while busy
+  std::atomic<std::uint64_t> timeLag{0};            // renders whose playhead is not clock - start
+  std::atomic<std::uint64_t> controlsByOp[8] = {};  // per snd::source::ControlOp
   std::atomic<std::uint64_t> slowBlockMask{0};  // 0: every block, else blocks with index % mask == 0
   std::atomic<std::uint32_t> postJobs{0};
   std::atomic<std::uint64_t> posted{0}, jobsRun{0}, startedSinceLastPost{0};
