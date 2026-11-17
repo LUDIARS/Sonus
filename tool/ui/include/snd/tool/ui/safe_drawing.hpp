@@ -5,8 +5,11 @@
 // non-polylines). Sonus is built without exceptions, so every shape is
 // checked here first and refused (counted in dropped()) instead: non-finite
 // values, coordinates beyond +-100000, negative sizes, and the estimated
-// raster work for a DPI scale up to kMaxDpi. Long polylines are split into
-// short pieces so that the work (bounding box x points) stays small.
+// raster work (Tela's formula: pixel bounding box x points, summed over the
+// drawing) for a DPI scale up to kMaxDpi, against Tela's budget (64M) less a margin. Long
+// polylines are split into short pieces so that the work stays small. Above
+// kMaxDpi a heavy canvas could still exceed Tela's budget; the hosts catch
+// Tela's exception at the boundary.
 #ifndef SND_TOOL_UI_SAFE_DRAWING_HPP
 #define SND_TOOL_UI_SAFE_DRAWING_HPP
 
@@ -21,9 +24,9 @@ class SafeDrawing {
  public:
   static constexpr std::uint32_t kMaxShapes = 256;
   static constexpr std::uint32_t kMaxPoints = 4096;
-  static constexpr float kMaxDpi = 4.0f;
-  static constexpr double kWorkBudget = 32.0e6;  // half of Tela's 64M
-  static constexpr std::uint32_t kPolylinePiece = 16;  // points per polyline piece
+  static constexpr float kMaxDpi = 2.0f;
+  static constexpr double kWorkBudget = 60.0e6;  // Tela: 64M
+  static constexpr std::uint32_t kPolylinePiece = 8;  // points per polyline piece
 
   bool Rectangle(tela::Rect r, tela::Color fill, tela::Stroke stroke = {{0, 0, 0, 0}, 0}, float radius = 0.0f);
   bool Ellipse(tela::Rect r, tela::Color fill, tela::Stroke stroke = {{0, 0, 0, 0}, 0});

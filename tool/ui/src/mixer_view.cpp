@@ -126,7 +126,8 @@ void DeclareBusStrip(tela::Document& doc, ViewContext& ctx, std::int32_t bus, fl
     MeterLook ml;
     ml.width = m.meterWidth;
     ml.height = m.faderHeight;
-    const BusMeter* meter = ctx.session.profiler().FindMeter(desc.id);
+    // The game reports the master bus with id 0 (SND_ID_NONE): the output.
+    const BusMeter* meter = ctx.session.profiler().FindMeter(desc.master ? 0u : desc.id);
     ml.live = meter != nullptr && ctx.session.connection().state() == LinkState::Online;
     if (meter != nullptr) {
       ml.channels = std::max<std::uint32_t>(1u, meter->channels);

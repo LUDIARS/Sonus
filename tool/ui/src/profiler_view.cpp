@@ -23,6 +23,7 @@ std::string Line(const char* fmt, double a, double b = 0, double c = 0) {
 }
 
 std::string BusName(const Project& p, std::uint32_t id) {
+  if (id == 0u) return "master";
   const std::int32_t i = p.FindBus(id);
   return i >= 0 ? p.buses()[static_cast<std::size_t>(i)].name : Hex32(id);
 }

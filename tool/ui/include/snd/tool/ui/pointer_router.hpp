@@ -89,7 +89,7 @@ class PointerRouter {
   std::int32_t drag_ = -1;
   std::int32_t armed_ = -1;
   std::string dragId_, armedId_;
-  float anchorY_ = 0.0f, anchorNorm_ = 0.0f;
+  float anchorY_ = 0.0f, anchorNorm_ = 0.0f, lastY_ = 0.0f;
   bool anchorFine_ = false;
   float armedY_ = 0.0f;
   // last press, for double clicks
