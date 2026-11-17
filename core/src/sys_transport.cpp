@@ -21,8 +21,23 @@ namespace {
 constexpr schema::SystemId kSys = schema::SystemId::UpdateTransport;
 constexpr double kTicksPerBeat = SND_TICKS_PER_BEAT;
 
+// Defensive limits (bad input that the API accepts, or a replay): every value the API
+// lets through (bpm > 0 finite) is clamped into [kMinBpm, kMaxBpm], so positions stay
+// far inside int64 and a block crosses a bounded number of beats.
+constexpr double kMinBpm = 1.0e-3;
+constexpr double kMaxBpm = 1.0e5;
+constexpr int kMaxBeatsPerBlock = 256;  // beat notifications per transport and block
+constexpr double kMaxWaitSamples = 4.0e18;  // a reservation further away fires "never" (clamped)
+
 double TicksPerSample(float bpm, float pitch, std::uint32_t rate) noexcept {
-  return static_cast<double>(bpm) / 60.0 * kTicksPerBeat * pitch / static_cast<double>(rate);
+  double b = bpm;
+  if (!(b >= kMinBpm)) b = kMinBpm;  // NaN too
+  if (b > kMaxBpm) b = kMaxBpm;
+  double p = pitch;
+  if (!std::isfinite(p)) p = 1.0;
+  if (p < 0.0) p = 0.0;
+  if (p > 16.0) p = 16.0;
+  return b / 60.0 * kTicksPerBeat * p / static_cast<double>(rate);
 }
 
 void PushFire(Impl& im, SlotIndex reservation, ReservationAction action, HandleRef target,
@@ -129,8 +144,10 @@ void UpdateTransport(Impl& im) noexcept {
           if (w.kind == SND_WHEN_BARS_AFTER) target = std::floor(cur / grid) * grid + grid * (w.count == 0u ? 1u : w.count);
           target += w.offsetTicks;
           const double tps = pos.ticksPerSample > 0.0 ? pos.ticksPerSample : 1e-9;
-          const double samples = (target - cur) / tps;
-          res.tick = static_cast<MusicalTicks>(im.clock + static_cast<ClockSample>(samples > 0.0 ? samples + 0.5 : 0.0));
+          double samples = (target - cur) / tps;
+          if (!(samples > 0.0)) samples = 0.0;  // NaN too
+          if (samples > kMaxWaitSamples) samples = kMaxWaitSamples;
+          res.tick = static_cast<MusicalTicks>(im.clock + static_cast<ClockSample>(samples + 0.5));
           break;
         }
         case SND_WHEN_NEXT_MARKER:
@@ -221,7 +238,9 @@ void UpdateTransport(Impl& im) noexcept {
     const std::int64_t before = pos.tick - static_cast<MusicalTicks>(whole);
     const std::int64_t firstBeat = (before + beatTicks - 1) / beatTicks;
     const std::int64_t lastBeat = pos.tick / beatTicks;
-    for (std::int64_t b = firstBeat; b <= lastBeat && b * beatTicks >= before && b * beatTicks < pos.tick; ++b) {
+    int notified = 0;
+    for (std::int64_t b = firstBeat;
+         b <= lastBeat && b * beatTicks >= before && b * beatTicks < pos.tick && notified < kMaxBeatsPerBlock; ++b, ++notified) {
       const SlotIndex s = base::rows::SlotAt(trows, d);
       const std::uint32_t bpb = sig.beatsPerBar == 0u ? 4u : sig.beatsPerBar;
       std::uint64_t handle = HandleRef{s, trows.generation[s]}.Value();

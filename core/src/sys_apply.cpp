@@ -15,6 +15,20 @@ namespace {
 
 constexpr schema::SystemId kSys = schema::SystemId::ApplyCommands;
 
+// Defensive limits for values the game API accepts but nothing should use literally
+// (stage-2 livelink decision R2: an extreme value must not overflow or reach UB).
+// Fades and times: NaN = the default (< 0), at most a day. Volumes: NaN / negative = 0,
+// at most +60 dB. Snapshot weights: [0, 1].
+constexpr float kMaxFadeSeconds = 86400.0f;
+constexpr float kMaxVolume = 1000.0f;
+float SaneFade(float s) noexcept { return std::isnan(s) ? -1.0f : (s > kMaxFadeSeconds ? kMaxFadeSeconds : s); }
+float SaneVolume(float v) noexcept { return !(v >= 0.0f) ? 0.0f : (v > kMaxVolume ? kMaxVolume : v); }
+float SaneWeight(float w) noexcept { return !(w >= 0.0f) ? 0.0f : (w > 1.0f ? 1.0f : w); }
+std::uint32_t FadeFrames(float seconds, std::uint32_t rate) noexcept {
+  const float s = SaneFade(seconds);
+  return s > 0.0f ? static_cast<std::uint32_t>(static_cast<double>(s) * rate) : 0u;
+}
+
 bool IsMusicalWhen(std::uint8_t kind) noexcept { return kind >= SND_WHEN_NEXT_BEAT && kind <= SND_WHEN_SEGMENT_END; }
 
 ReservationWhen ToReservationWhen(const snd_when& w) noexcept {
@@ -466,7 +480,8 @@ void ApplyOne(Impl& im, const cmd::CommandHeader& h, const std::uint8_t* p) noex
       break;
     }
     case CT::Stop: {
-      const auto c = Load<cmd::Stop>(p);
+      auto c = Load<cmd::Stop>(p);
+      c.fadeSeconds = SaneFade(c.fadeSeconds);
       if (!base::rows::IsCurrent(t.Playback.rows, c.playback)) break;
       snd_when w = c.when;
       SlotIndex ts = kNoSlot;
@@ -480,7 +495,8 @@ void ApplyOne(Impl& im, const cmd::CommandHeader& h, const std::uint8_t* p) noex
       break;
     }
     case CT::PauseResume: {
-      const auto c = Load<cmd::PauseResume>(p);
+      auto c = Load<cmd::PauseResume>(p);
+      c.fadeSeconds = SaneFade(c.fadeSeconds);
       PlaybackRequest* r = RequestOf(im, c.playback);
       if (r == nullptr) break;
       if (c.pause != 0u) {
@@ -493,7 +509,8 @@ void ApplyOne(Impl& im, const cmd::CommandHeader& h, const std::uint8_t* p) noex
       break;
     }
     case CT::SetScheduledStop: {
-      const auto c = Load<cmd::SetScheduledStop>(p);
+      auto c = Load<cmd::SetScheduledStop>(p);
+      c.fadeSeconds = SaneFade(c.fadeSeconds);
       PlaybackRequest* r = RequestOf(im, c.playback);
       if (r == nullptr) break;
       snd_when w = c.when;
@@ -567,7 +584,7 @@ void ApplyOne(Impl& im, const cmd::CommandHeader& h, const std::uint8_t* p) noex
       }
       TimedRamp& r = SND_W(Bus_volume)[d];
       const float from = RampValue(r, im.clock);
-      r = TimedRamp{from, c.volume, im.clock, static_cast<std::uint32_t>(c.fadeSeconds * im.cfg.sampleRate), 0u};
+      r = TimedRamp{from, SaneVolume(c.volume), im.clock, FadeFrames(c.fadeSeconds, im.cfg.sampleRate), 0u};
       break;
     }
     case CT::ApplySnapshot: {
@@ -580,7 +597,7 @@ void ApplyOne(Impl& im, const cmd::CommandHeader& h, const std::uint8_t* p) noex
       }
       TimedRamp& r = SND_W(Snapshot_request)[d].weight;
       const float from = RampValue(r, im.clock);
-      r = TimedRamp{from, c.weight, im.clock, static_cast<std::uint32_t>(c.timeSeconds * im.cfg.sampleRate), 0u};
+      r = TimedRamp{from, SaneWeight(c.weight), im.clock, FadeFrames(c.timeSeconds, im.cfg.sampleRate), 0u};
       break;
     }
     case CT::SetCategoryVolume:
@@ -599,8 +616,8 @@ void ApplyOne(Impl& im, const cmd::CommandHeader& h, const std::uint8_t* p) noex
       CategoryRequest& r = SND_W(Category_request)[d];
       if (static_cast<CT>(h.type) == CT::SetCategoryVolume) {
         const auto c = Load<cmd::SetCategoryVolume>(p);
-        r.volume = TimedRamp{RampValue(r.volume, im.clock), c.volume, im.clock,
-                             static_cast<std::uint32_t>(c.fadeSeconds * im.cfg.sampleRate), 0u};
+        r.volume = TimedRamp{RampValue(r.volume, im.clock), SaneVolume(c.volume), im.clock,
+                             FadeFrames(c.fadeSeconds, im.cfg.sampleRate), 0u};
       } else if (static_cast<CT>(h.type) == CT::PauseCategory) {
         r.paused = Load<cmd::PauseCategory>(p).paused;
       } else {
