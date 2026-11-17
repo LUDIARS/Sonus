@@ -247,3 +247,39 @@ SND_TEST(IndepDefect, Defect_core_language_switch_back_while_old_bank_unloading)
 }
 
 #endif
+
+#if defined(SND_INDEP_DEFECT_start_in_apply_block)
+// D-21 / 4.4: CLOCK_SAMPLE in the past ("PlayScheduled" with a time already
+// gone), CLOCK_SAMPLE inside the block that applies the command, and a
+// DELAY_US shorter than one block must start (at once / at that sample). The
+// reservation fires in UpdateTransport of the apply block, but RunEventLogic
+// ignores a Play fire entry whose playback is not PENDING yet (the new row is
+// still None until step 3, sys_event.cpp ApplyFireEntry); the reservation is
+// consumed and the playback stays PENDING for ever.
+SND_TEST(IndepDefect, Defect_core_scheduled_start_in_apply_block_never_starts) {
+  for (int variant = 0; variant < 3; ++variant) {
+    Fx fx;
+    fx.Load("b", OneEvent("E", 500.0f));
+    fx.Steps(4);
+    const std::size_t blockStart = fx.Total();  // the next RenderBlock applies the command
+    snd_when w{};
+    std::size_t expectAt = blockStart;
+    if (variant == 0) {
+      w = AtClock(1);  // past
+    } else if (variant == 1) {
+      w = AtClock(blockStart + 100);  // inside the apply block
+      expectAt = blockStart + 100;
+    } else {
+      w.kind = SND_WHEN_DELAY_US;
+      w.value = 1000;  // 48 frames
+      expectAt = blockStart + 48;
+    }
+    const snd_playback_handle p = fx.sys->Play(HashId("E"), NoEmitter(), &w);
+    fx.Steps(6);
+    fx.sys->Update();
+    SND_CHECK_MSG(fx.sys->GetPlaybackState(p) == SND_PLAYBACK_STATE_PLAYING, "variant %d: state %u", variant,
+                  fx.sys->GetPlaybackState(p));
+    SND_CHECK_MSG(std::fabs(fx.At(expectAt + 1) - kCenter * 0.5f) < 1e-5f, "variant %d: silent at the start", variant);
+  }
+}
+#endif

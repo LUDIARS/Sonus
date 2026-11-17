@@ -442,3 +442,22 @@ SND_TEST(IndepCmd, RenderInOddPiecesEqualsBlocks) {
   SND_CHECK(std::memcmp(got.data(), a.all.data(), got.size() * sizeof(float)) == 0);
 }
 
+
+// 4.1: a future start is PENDING; a stop while pending ends it STOPPED
+// without ever sounding. (Clocks inside / before the apply block:
+// Defect_core_scheduled_start_in_apply_block_never_starts.)
+SND_TEST(IndepCmd, PendingStartCanBeStopped) {
+  Fx fx;
+  fx.Load("b", OneEvent("E", 500.0f));
+  fx.Steps(4);
+  const std::size_t s = fx.Total();
+  const snd_when future = AtClock(s + 100 * 256);
+  const snd_playback_handle p = fx.sys->Play(HashId("E"), NoEmitter(), &future);
+  fx.Steps(3);
+  fx.sys->Update();
+  SND_CHECK_EQ(fx.sys->GetPlaybackState(p), SND_PLAYBACK_STATE_PENDING);
+  fx.sys->Stop(p, 0.0f, nullptr);
+  fx.Steps(110);
+  SND_CHECK(fx.Ended(p.value, SND_END_STOPPED));
+  SND_CHECK_EQ(fx.MaxAbs(s, fx.Total()), 0.0f);
+}
