@@ -480,3 +480,25 @@ SND_TEST(IndepSample, RingUnderrunIsSilentAndResumesExactly) {
   for (std::size_t i = 0; i < v.out[0].size(); ++i) e = std::fmax(e, std::fabs(v.out[0][i] - ref.ch[0][i]));
   SND_CHECK_MSG(e < 1e-6, "err %g", e);
 }
+
+// D-14 / D-58: a codec whose state is larger than decoderSlotBytes (64 KiB
+// here; 3-channel Opus needs 76 160 bytes) is refused with DECODER_POOL_FULL,
+// for the per-voice ring and for a stream; 2-channel Opus (52 800) plays.
+SND_TEST(IndepSample, DecoderStateLargerThanTheSlotIsRefused) {
+  if (!snd::codec::OpusAvailable()) return;
+  std::vector<AssetSpec> as;
+  as.push_back(Spec("o2", 9600, "compressed", "OPUS", "", 2));
+  as.push_back(Spec("o3", 9600, "compressed", "OPUS", "", 3));
+  as.push_back(Spec("s3", 9600, "stream", "OPUS", "", 3));
+  Built b = Build("islot", as);
+  SND_REQUIRE_MSG(b.ok, "%s", b.diag.c_str());
+  IndepDriver d(b, IndepDriver::Opt{});
+  SND_REQUIRE(d.Ok());
+  std::uint32_t det = 0;
+  SND_CHECK(d.Start(d.Sample(), d.Asset("o2"), 0, 0, &det) != snd::kInvalidSlot);
+  SND_CHECK_EQ(d.Start(d.Sample(), d.Asset("o3"), 0, 0, &det), snd::kInvalidSlot);
+  SND_CHECK_EQ(det, SND_END_DETAIL_DECODER_POOL_FULL);
+  det = 0;
+  SND_CHECK_EQ(d.Start(d.Stream(), d.Asset("s3"), 0, 0, &det), snd::kInvalidSlot);
+  SND_CHECK_EQ(det, SND_END_DETAIL_DECODER_POOL_FULL);
+}
