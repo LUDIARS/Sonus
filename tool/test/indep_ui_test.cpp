@@ -76,10 +76,9 @@ SND_TEST(IndepToolUi, DragWithoutVerticalMotionKeepsOrdinaryFaderValues) {
   }
 }
 
-// The same for a fader at -90 dB (the lowest audible value) or a bank value below -90 dB:
-// the law maps both to p = 0, and p = 0 is -inf, so a press with a sideways jitter
-// silences the bus.
-SND_TEST(IndepToolUi, Defect_fader_press_without_motion_at_minus90_silences) {
+// The same for a fader at -90 dB (the lowest audible value): the law maps it to p = 0, and
+// p = 0 is -inf; a press with a sideways jitter must still keep -90 dB (fixed, D-67a).
+SND_TEST(IndepToolUi, FaderPressWithoutMotionAtMinus90KeepsTheValue) {
   Rig t;
   const Target sfx{Control::BusFader, t.Bus("Sfx"), 0, 0};
   t.s.mixer().Set(sfx, -90.0f);
@@ -92,9 +91,9 @@ SND_TEST(IndepToolUi, Defect_fader_press_without_motion_at_minus90_silences) {
 }
 
 // A knob whose value does not survive the value -> norm -> value round trip exactly
-// (logarithmic Hz knob) changes on a press with a sideways jitter: an undo step and an
-// override row appear although nothing was turned.
-SND_TEST(IndepToolUi, Defect_knob_press_without_motion_changes_the_value) {
+// (logarithmic Hz knob) keeps its value and leaves no undo step on a press with a
+// sideways jitter.
+SND_TEST(IndepToolUi, KnobPressWithoutMotionKeepsTheValue) {
   Rig t;
   const Target damp{Control::EffectParam, t.Bus("Sfx"), 0, 4};  // delay DampingHz 500..20000, log
   const ui::KnobRange r{500.0f, 20000.0f, true, false};
@@ -217,7 +216,7 @@ SND_TEST(IndepToolUi, ParameterKnobDragIsOneStepWithTheOverride) {
   SND_CHECK_NEAR(t.Get(val), 0.25f, 1e-6);
 }
 
-SND_TEST(IndepToolUi, Defect_parameter_knob_wheel_is_two_undo_steps) {
+SND_TEST(IndepToolUi, ParameterKnobWheelIsOneUndoStep) {
   Rig t;
   const std::int32_t knob = t.tool.project.FindParameter(snd::HashId("Knob"));
   SND_REQUIRE(knob >= 0);
@@ -306,6 +305,7 @@ SND_TEST(IndepToolUi, TimingGraphWorkAtDpi2IsWithinTelasBudget) {
   ui::Palette pal = ui::MakePalette(tela::Theme{});
   ui::GraphLook g;
   g.width = 8000.0f;  // a 16384 px wide viewport at DPI 2
+  g.dpi = 2.0f;
   g.height = 160.0f;
   g.total = Spiky(240, 1000.0f);
   g.render = Spiky(240, 900.0f);
@@ -314,10 +314,11 @@ SND_TEST(IndepToolUi, TimingGraphWorkAtDpi2IsWithinTelasBudget) {
   SND_CHECK(TelaWork(d, 2.0f, g.width, g.height) <= 64.0e6);
 }
 
-SND_TEST(IndepToolUi, Defect_timing_graph_exceeds_telas_budget_at_dpi4) {
+SND_TEST(IndepToolUi, TimingGraphAtDpi4IsWithinTelasBudget) {
   ui::Palette pal = ui::MakePalette(tela::Theme{});
   ui::GraphLook g;
-  g.width = 2000.0f;  // the graph of an 8192 x 2048 viewport at DPI 4 (2048 logical wide)
+  g.width = 4090.0f;  // the widest graph at DPI 4: a 16384 px viewport is 4096 logical
+  g.dpi = 4.0f;
   g.height = 160.0f;
   g.total = Spiky(240, 1000.0f);
   g.render = Spiky(240, 900.0f);
@@ -325,7 +326,7 @@ SND_TEST(IndepToolUi, Defect_timing_graph_exceeds_telas_budget_at_dpi4) {
   const tela::Drawing d = ui::DrawTimingGraph(g, pal);
   const double work = TelaWork(d, 4.0f, g.width, g.height);
   SND_CHECK_MSG(work <= 64.0e6, "Tela work %.0f at DPI 4", work);
-  std::printf("timing graph 2000 x 160 logical at DPI 4: Tela work %.0f (budget 64000000)\n", work);
+  std::printf("timing graph 4090 x 160 logical at DPI 4: Tela work %.0f (budget 64000000)\n", work);
   // The real thing: the profiler screen of a connected tool at --dpi 4 (headless limit),
   // drawn by the CPU compositor in a child process.
   tooltest::ToolProject tool;
@@ -347,16 +348,27 @@ SND_TEST(IndepToolUi, Defect_timing_graph_exceeds_telas_budget_at_dpi4) {
   SND_REQUIRE(indep::Drive(s, game, [&] { return c->Received(ll::MessageType::BlockTiming) >= 240u; }));
   s.Disconnect();  // no network thread across fork
   ui::App app(s, ui::AppDesc{});
-  app.OnScreen(ui::Screen::Profiler);
-  app.SetViewport(8192, 2048, 4.0f);
-  app.Declare(indep::NowNs());
   SND_REQUIRE(s.profiler().timings().size() >= 240u);
-  const int r = indep::Isolated([&] {
-    tela::PixelSurface px;
-    return ui::Compose(app.runtime(), ui::ComposeOptions{}, &px) ? 0 : 3;
-  });
-  SND_CHECK_MSG(r == 0 || r == indep::kNotIsolated, "compose at DPI 4: child result %d (abort = %d)", r,
-                indep::kSignalBase + 6);
+  // The accepted range is 0.25 .. 4 (D-67a): both ends draw; outside it SetViewport clamps.
+  struct V {
+    int w, h;
+    float dpi, expect;
+  };
+  for (const V v : {V{8192, 2048, 4.0f, 4.0f}, V{16384, 1024, 4.0f, 4.0f}, V{16384, 1024, 0.25f, 0.25f},
+                    V{16384, 1024, 8.0f, 4.0f}, V{16384, 1024, 4.5f, 4.0f}, V{2048, 2048, 0.1f, 0.25f}}) {
+    app.SetViewport(v.w, v.h, v.dpi);
+    SND_CHECK_EQ(app.runtime().viewport().dpi_scale, v.expect);
+    for (ui::Screen sc : {ui::Screen::Profiler, ui::Screen::Mixer}) {
+      app.OnScreen(sc);
+      app.Declare(indep::NowNs());
+      const int r = indep::Isolated([&] {
+        tela::PixelSurface px;
+        return ui::Compose(app.runtime(), ui::ComposeOptions{true}, &px) ? 0 : 3;
+      });
+      SND_CHECK_MSG(r == 0 || r == indep::kNotIsolated, "%dx%d DPI %g screen %d: child result %d (abort = %d)", v.w,
+                    v.h, static_cast<double>(v.dpi), static_cast<int>(sc), r, indep::kSignalBase + 6);
+    }
+  }
 }
 
 // F3: the whole tool (mixer with meters, profiler) composes at DPI 1, 2 and with odd
@@ -405,4 +417,136 @@ SND_TEST(IndepToolUi, TimingGraphShowsTheLast240Blocks) {
   SND_CHECK_NEAR(shape.totalPoints.front().y, 100.0f - 60.0f / (1.1f * 299.0f) * 100.0f, 1e-2);
   SND_CHECK_NEAR(shape.totalPoints.back().y, 100.0f - 299.0f / (1.1f * 299.0f) * 100.0f, 1e-2);
   SND_CHECK_NEAR(shape.budgetY, 100.0f - 100.0f / (1.1f * 299.0f) * 100.0f, 1e-2);
+}
+
+// D-67a: a parameter knob's double click releases the override (as its Revert: off and the
+// tool's value back to the default) in one undo step; Undo brings the override back.
+SND_TEST(IndepToolUi, ParameterKnobDoubleClickReleasesAndUndoRestores) {
+  Rig t;
+  const std::int32_t knob = t.tool.project.FindParameter(snd::HashId("Knob"));
+  SND_REQUIRE(knob >= 0);
+  const Target val{Control::ParamOverride, knob, 0, 0}, on{Control::ParamOverrideOn, knob, 0, 0};
+  const tela::Point c = t.C(ui::ParameterId(snd::HashId("Knob")) + ".hit");
+  const float x = std::round(c.x), y = std::round(c.y);
+  // Nothing overridden: a double click changes nothing and leaves no step.
+  std::size_t u = t.Undos();
+  t.ptr.Down(x, y);
+  t.ptr.Up(x, y);
+  t.ptr.Advance(100);
+  t.ptr.Down(x, y);
+  t.ptr.Up(x, y);
+  t.ptr.Advance(1000);
+  SND_CHECK_EQ(t.Undos(), u);
+  SND_CHECK_EQ(t.Get(on), 0.0f);
+  // Turn it to 0.45 (override on), then double click.
+  t.ptr.Down(x, y);
+  t.ptr.Move(x, y - 30.0f);
+  t.ptr.Up(x, y - 30.0f);
+  t.ptr.Advance(1000);
+  SND_REQUIRE_EQ(t.Get(on), 1.0f);
+  SND_REQUIRE(std::fabs(t.Get(val) - 0.45f) < 1e-5f);
+  u = t.Undos();
+  t.ptr.Down(x, y);
+  t.ptr.Up(x, y);
+  t.ptr.Advance(100);
+  t.ptr.Down(x, y);
+  t.ptr.Up(x, y);
+  SND_CHECK_EQ(t.Get(on), 0.0f);
+  SND_CHECK_NEAR(t.Get(val), 0.25f, 1e-6);  // the bank default
+  SND_CHECK_EQ(t.Undos(), u + 1u);
+  for (const OverrideItem& it : t.s.mixer().Overrides()) SND_CHECK(it.target.control != Control::ParamOverrideOn);
+  SND_CHECK(t.s.mixer().Undo());
+  SND_CHECK_EQ(t.Get(on), 1.0f);
+  SND_CHECK_NEAR(t.Get(val), 0.45f, 1e-5);
+  SND_CHECK(t.s.mixer().Redo());
+  SND_CHECK_EQ(t.Get(on), 0.0f);
+  SND_CHECK_NEAR(t.Get(val), 0.25f, 1e-6);
+}
+
+// D-67a: a drag that starts at or below -90 dB (position 0) moves from 0+ on the first
+// vertical motion: up = the law just above -90 dB, down = -inf; no vertical motion keeps
+// the exact value (also below -90 dB).
+SND_TEST(IndepToolUi, DragFromBelowMinus90StartsAtZeroPlus) {
+  Rig t;
+  const Target sfx{Control::BusFader, t.Bus("Sfx"), 0, 0};
+  const tela::PlacedElement* hit = t.El(t.FaderHit("Sfx"));
+  SND_REQUIRE(hit != nullptr);
+  const float travel = hit->bounds.height - 18.0f;
+  for (float start : {-100.0f, kFaderOffDb, -90.0f}) {
+    t.s.mixer().Set(sfx, start);
+    t.app.Frame(tooltest::Now());
+    const tela::Point p = t.Cap("Sfx", start);
+    const std::size_t u = t.Undos();
+    t.ptr.Down(p.x, p.y);
+    t.ptr.Move(p.x + 3.0f, p.y);
+    SND_CHECK_EQ(t.Get(sfx), start);
+    t.ptr.Move(p.x + 3.0f, p.y - 2.0f);  // 2 px up
+    SND_CHECK_NEAR(t.Get(sfx), FaderPosToDb(2.0f / travel), 1e-3);
+    SND_CHECK(t.Get(sfx) > -90.0f && t.Get(sfx) < -60.0f);
+    t.ptr.Move(p.x + 3.0f, p.y + 2.0f);  // 2 px below the start
+    SND_CHECK_EQ(t.Get(sfx), kFaderOffDb);
+    t.ptr.Move(p.x, p.y);  // back to the start height: the exact start value
+    SND_CHECK_EQ(t.Get(sfx), start);
+    t.ptr.Up(p.x, p.y);
+    t.ptr.Advance(1000);
+    SND_CHECK_EQ(t.Undos(), u);  // ended where it started: no step
+  }
+}
+
+// D-67a: a value without an Ack for more than 2 s is "no answer" (orange lamp, footer
+// count); 2 s exactly is still waiting; the Ack brings the display back.
+SND_TEST(IndepToolUi, NoAnswerAfterTwoSecondsAndBackWhenTheAckComes) {
+  tooltest::ToolProject tool;
+  indep::ScriptedGame g;
+  SND_REQUIRE(tool.ok && g.ok);
+  Session s;
+  s.UseProject(tool.project);
+  SND_REQUIRE_EQ(s.Connect(indep::GameConn(g, tool.project.buildHash())), SND_OK);
+  SND_REQUIRE(indep::Drive(s, g, [&] { return s.connection().state() == LinkState::Online; }));
+  ui::App app(s, ui::AppDesc{});
+  g.holdAcks = true;
+  const std::uint64_t sec = 1000000000ull, t0 = indep::NowNs() + 10 * sec;  // UI clock (synthetic)
+  s.mixer().Set(Target{Control::BusFader, tooltest::Bus(tool.project, "Sfx"), 0, 0}, -6.0f);
+  app.Frame(t0);  // sent now
+  const auto end = std::chrono::steady_clock::now() + std::chrono::seconds(4);
+  while (g.heldAcks.size() != 1u && std::chrono::steady_clock::now() < end) {
+    g.Pump();
+    app.Frame(t0);
+    std::this_thread::sleep_for(std::chrono::microseconds(300));
+  }
+  SND_REQUIRE_EQ(g.heldAcks.size(), 1u);
+  const std::string lamp = ui::BusId(snd::HashId("Sfx")) + ".sync";
+  auto lampColor = [&] {
+    const tela::PlacedElement* e = Find(app.runtime(), lamp);
+    SND_CHECK(e != nullptr && !e->element.drawing.shapes().empty());
+    return (e != nullptr && !e->element.drawing.shapes().empty()) ? e->element.drawing.shapes()[0].fill : tela::Color{};
+  };
+  auto same = [](tela::Color a, tela::Color b) { return a.r == b.r && a.g == b.g && a.b == b.b && a.a == b.a; };
+  auto footer = [&] {
+    const tela::PlacedElement* e = Find(app.runtime(), "footer.sync");
+    return e != nullptr ? e->element.label : std::string();
+  };
+  SND_CHECK_EQ(s.sync().NoAnswer(t0 + 2 * sec), 0u);
+  SND_CHECK_EQ(s.sync().NoAnswer(t0 + 2 * sec + 1u), 1u);
+  app.Frame(t0 + 2 * sec);
+  SND_CHECK(footer().find("no answer 0") != std::string::npos);
+  SND_CHECK(same(lampColor(), app.palette().pending));
+  app.Frame(t0 + 2 * sec + 1u);
+  SND_CHECK(footer().find("no answer 1") != std::string::npos);
+  SND_CHECK(same(lampColor(), app.palette().mute));  // orange
+  SND_CHECK_EQ(s.sync().Count(CellState::Pending), 1u);  // nothing re-sent for it
+  SND_CHECK_EQ(g.Of(ll::MessageType::SetValue).size(), 1u);
+  g.ReleaseAcks();
+  g.holdAcks = false;
+  const auto end2 = std::chrono::steady_clock::now() + std::chrono::seconds(4);
+  while (s.sync().Count(CellState::Pending) != 0u && std::chrono::steady_clock::now() < end2) {
+    g.Pump();
+    app.Frame(t0 + 3 * sec);
+    std::this_thread::sleep_for(std::chrono::microseconds(300));
+  }
+  SND_CHECK_EQ(s.sync().Count(CellState::Pending), 0u);
+  SND_CHECK_EQ(s.sync().NoAnswer(t0 + 3 * sec), 0u);
+  app.Frame(t0 + 3 * sec);
+  SND_CHECK(footer().find("no answer 0") != std::string::npos);
+  SND_CHECK(same(lampColor(), app.palette().track));  // unlit: confirmed
 }

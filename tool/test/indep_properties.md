@@ -13,6 +13,7 @@
 | A4 | それ以外の Ack 失敗は「拒否」として残り、値がまた変わるまで再送しない。値が変われば送る | R |
 | A5 | 接続（再接続）のたびに「バンクと違う値」と「一度でも送った値」を送り直す（バンク値に戻した値も、一度送っていれば送る） | R |
 | A6 | 切断中の編集は送信待ちに残り、接続したら送る | R |
+| A11（D-67a 応答なし） | NoAnswerAfterTwoSecondsAndBackWhenTheAckComes |
 | A7 | ビルドハッシュ不一致: 既定は SyncDecision(mode 0) を送り、ミキサーが管理する値を全部送る。`--refuse-mismatch` なら mode 1 / 切断し、再試行しない | R, P§4 |
 | A8 | 本物の core + livelink で、送った値が出力の DC レベルに解析どおりに効く（dB → 振幅） | D 11.2 |
 | A9 | 切断しても上書きした値はゲーム側に残る（revertOnDisconnect でない限り） | D 11.2 |
@@ -107,32 +108,34 @@
 | B3（木） | SoloKeepsTheSoloedBusItsAncestorsAndDescendants |
 | B6, B7 | FaderRangeEffectParametersAndInitOnly |
 | B8, B9, C3, C5 | RandomEditsKeepOverridesUndoAndRevertConsistent、IndepToolLive.RevertRevertAllAndUndoReachTheGame |
-| B10 | `indep_ui_test` ParameterKnobDragIsOneStepWithTheOverride、Defect_parameter_knob_wheel_is_two_undo_steps |
+| B10 | `indep_ui_test` ParameterKnobDoubleClickReleasesAndUndoRestores、ParameterKnobDragIsOneStepWithTheOverride、ParameterKnobWheelIsOneUndoStep |
 | C1, C2, C4 | HistoryMergesAndRedoClearing、WheelOnAnotherControlStartsANewStep |
 | D1, D2 | FaderLawKnotsContinuityMonotonicityAndInverse |
-| D3 | DragWithoutVerticalMotionKeepsOrdinaryFaderValues、KnobShiftToggleMidDragDoesNotJump、Defect_fader_press_without_motion_at_minus90_silences、Defect_knob_press_without_motion_changes_the_value |
+| D3 | DragFromBelowMinus90StartsAtZeroPlus、DragWithoutVerticalMotionKeepsOrdinaryFaderValues、KnobShiftToggleMidDragDoesNotJump、FaderPressWithoutMotionAtMinus90KeepsTheValue、KnobPressWithoutMotionKeepsTheValue |
 | D4 | DoubleClickLimitsAreInclusiveAndPerControl |
 | D5, D6, D7 | WheelKnobAndMeterMappings |
-| D8, D9 | PeakHoldHoldsFallsAndLatchesClip、MeterHoldAndClipThroughTheProfiler、Defect_peak_hold_restarted_by_stale_meter |
+| D8, D9 | StaleMeterBoundaryAt500MsAndFallToSilence、MeterStopThenResumeRestartsTheHold、PeakHoldHoldsFallsAndLatchesClip、MeterHoldAndClipThroughTheProfiler、StaleMeterDoesNotRestartThePeakHold |
 | E1 | VoicesRealFirstThenLoudestFirst |
 | E3 | TimingGraphShowsTheLast240Blocks |
-| E4, E5, E6 | HeaderLayoutChecksumAndRoundTrip、TruncatedOrDamagedFilesAreRefused、RecordingStatesFollowAcksAndSettle、Defect_load_accepts_unreadable_records |
-| E7 | FuzzedProjectsNeverCrashTheModelsOrTheUi、Defect_duplicate_names_crash_the_ui |
+| E4, E5, E6 | HeaderFieldsAreCoveredAndVersion1IsRefused、HeaderLayoutChecksumAndRoundTrip、TruncatedOrDamagedFilesAreRefused、RecordingStatesFollowAcksAndSettle、LoadRefusesUnreadableRecordsAndKeepsThePrevious |
+| E7 | SharedNamesGetDistinctKeysAndRevertReachesEachRow、FuzzedProjectsNeverCrashTheModelsOrTheUi、DuplicateNamesDoNotCrashTheUi |
 | F1, F2 | SafeDrawingStopsExactlyAtTelasLimits |
-| F3 | TimingGraphWorkAtDpi2IsWithinTelasBudget、ScreensComposeAtOrdinaryDpiAndOddViewports、Defect_timing_graph_exceeds_telas_budget_at_dpi4 |
+| F3 | ctest tool_indep_app_dpi_{min,max,above,below}、TimingGraphWorkAtDpi2IsWithinTelasBudget、ScreensComposeAtOrdinaryDpiAndOddViewports、TimingGraphAtDpi4IsWithinTelasBudget |
 | G1 | ChaosConvergesToTheToolsState（TSan） |
 | H1 | ビルド構成の確認（テストではない） |
 
 E2（イベントログの新しい順）は画面の文字列でしか見えないため未テスト。
 
-## Defect_*（失敗するテスト = 実装の誤り）
+## 欠陥の履歴
 
-| テスト | 期待 | 実際 |
+最初の版で見つけた 7 件の `Defect_*`（下表）は c42b267 以降の修正で直り、テストは上の名前に改めた（すべて通る）。
+
+| 旧テスト名 | 新テスト名 | 欠陥の要約 |
 | --- | --- | --- |
-| Defect_fader_press_without_motion_at_minus90_silences | −90 dB（またはバンク値が −90 未満）のフェーダーを押して横にだけ動かしても値は変わらない | −90 → p = 0 → −∞ になり、バスが無音になる（取り消し 1 手も積まれる） |
-| Defect_knob_press_without_motion_changes_the_value | 押して横に動かしただけのノブは値も履歴も変わらない | 値 → 正規化 → 値の往復が厳密でない（対数ノブ等）ため値が 1 ulp ずれ、取り消し 1 手と上書きの差分が生じる |
-| Defect_parameter_knob_wheel_is_two_undo_steps | 上書きが無効のパラメータのノブをホイールで続けて回すと取り消し 1 手 | 最初のノッチ（上書きを有効にするグループ）と以降のノッチ（併合）で 2 手 |
-| Defect_peak_hold_restarted_by_stale_meter | ピークホールドはピークから 1.5 秒保持して 20 dB/秒で落ちる | 新しい BusMeters が来ない間（ゲームの停止・切断）も最後のメータを毎フレーム与え直し、保持が毎回やり直されて落ちない |
-| Defect_load_accepts_unreadable_records | チェックサムが合っていても読めないレコード列（未知の kind）の記録は「壊れている」として Load を拒否 | `Profiler::LoadRecording` は成功し、無効な要約（valid = false）を持つ |
-| Defect_duplicate_names_crash_the_ui | 同じ名前のバス（ビルドはエラー、ツールは開く）でもツールは落ちない | ランタイム ID が同じため Tela の要素 ID が重複し、Tela の例外で std::terminate。上書き一覧のキーも重複し、Revert は先頭の行にしか届かない |
-| Defect_timing_graph_exceeds_telas_budget_at_dpi4 | ヘッドレスが受け付ける `--dpi` ≤ 4 で描画が例外なく終わる | SafeDrawing の作業量の見積もりが DPI 2 固定のため、DPI 4 で予算超えの処理時間グラフを通し、Tela::Raster が例外 → std::terminate（8192×2048、DPI 4、交互に跳ねる処理時間） |
+| Defect_fader_press_without_motion_at_minus90_silences | FaderPressWithoutMotionAtMinus90KeepsTheValue | −90 dB を押して横に動かすと −∞ |
+| Defect_knob_press_without_motion_changes_the_value | KnobPressWithoutMotionKeepsTheValue | 往復誤差で値が 1 ulp ずれ、手が積まれる |
+| Defect_parameter_knob_wheel_is_two_undo_steps | ParameterKnobWheelIsOneUndoStep | 上書きを有効にするホイールが 2 手 |
+| Defect_peak_hold_restarted_by_stale_meter | StaleMeterDoesNotRestartThePeakHold | 古いメータで保持がやり直され落ちない |
+| Defect_load_accepts_unreadable_records | LoadRefusesUnreadableRecordsAndKeepsThePrevious | 読めないレコードの記録を読み込む |
+| Defect_duplicate_names_crash_the_ui | DuplicateNamesDoNotCrashTheUi | 同名で要素 ID が重複し std::terminate |
+| Defect_timing_graph_exceeds_telas_budget_at_dpi4 | TimingGraphAtDpi4IsWithinTelasBudget | DPI 4 で Tela の作業量予算を超えて std::terminate |

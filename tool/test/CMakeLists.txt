@@ -29,3 +29,17 @@ foreach(_t indep_model_test indep_sync_test indep_ui_test indep_concurrency_test
                              ${CMAKE_CURRENT_SOURCE_DIR})
   set_tests_properties(tool_${_t} PROPERTIES TIMEOUT 600)
 endforeach()
+# --dpi accepts 0.25 .. 4 (D-67a): both ends run, just outside is refused.
+add_test(NAME tool_indep_app_dpi_min
+         COMMAND sonus-tool --headless --no-connect --frames 1 --frame-ms 0 --dpi 0.25 --screen profiler
+                 --project ${PROJECT_SOURCE_DIR}/buildtool/test/data/sample
+                 --build-dir ${CMAKE_CURRENT_BINARY_DIR}/indep-dpi-min-build
+                 --snapshot ${CMAKE_CURRENT_BINARY_DIR}/indep-dpi-min.ppm)
+add_test(NAME tool_indep_app_dpi_max
+         COMMAND sonus-tool --headless --no-connect --frames 1 --frame-ms 0 --dpi 4 --size 4096x2048 --screen profiler
+                 --project ${PROJECT_SOURCE_DIR}/buildtool/test/data/sample
+                 --build-dir ${CMAKE_CURRENT_BINARY_DIR}/indep-dpi-max-build
+                 --snapshot ${CMAKE_CURRENT_BINARY_DIR}/indep-dpi-max.ppm)
+add_test(NAME tool_indep_app_dpi_above COMMAND sonus-tool --headless --no-connect --dpi 4.01)
+add_test(NAME tool_indep_app_dpi_below COMMAND sonus-tool --headless --no-connect --dpi 0.24)
+set_tests_properties(tool_indep_app_dpi_above tool_indep_app_dpi_below PROPERTIES WILL_FAIL TRUE)

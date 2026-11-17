@@ -18,6 +18,7 @@
 #include "snd/tool/ui/control_math.hpp"
 #include "snd/tool/ui/raster_compositor.hpp"
 #include "tool_fixture.hpp"
+#include "ui_helpers.hpp"
 
 using namespace snd::tool;
 using tooltest::G;
@@ -430,7 +431,7 @@ SND_TEST(IndepToolProfiler, MeterHoldAndClipThroughTheProfiler) {
 
 // D8: the hold is measured from the peak. When no new meter arrives (the game paused or the
 // connection dropped) the last message must not keep restarting the hold at every Poll.
-SND_TEST(IndepToolProfiler, Defect_peak_hold_restarted_by_stale_meter) {
+SND_TEST(IndepToolProfiler, StaleMeterDoesNotRestartThePeakHold) {
   tooltest::ToolProject tool;
   indep::ScriptedGame g;
   SND_REQUIRE(tool.ok && g.ok);
@@ -497,7 +498,7 @@ SND_TEST(IndepToolRecording, HeaderLayoutChecksumAndRoundTrip) {
   const std::vector<std::uint8_t> f = EncodeRecording(r);
   SND_REQUIRE_EQ(f.size(), 64u + r.records.size());
   SND_CHECK(std::memcmp(f.data(), "SNRC", 4) == 0);
-  SND_CHECK_EQ(Get32(f, 4), 1u);
+  SND_CHECK_EQ(Get32(f, 4), 2u);  // version 2 (D-67a)
   SND_CHECK_EQ(Get32(f, 8), 64u);
   SND_CHECK_EQ(Get32(f, 12), kRecordingOverflow);
   SND_CHECK_EQ(Get64(f, 16), 0x1111222233334444ull);
@@ -507,7 +508,10 @@ SND_TEST(IndepToolRecording, HeaderLayoutChecksumAndRoundTrip) {
   SND_CHECK_EQ(Get32(f, 40), 3u);
   SND_CHECK_EQ(Get32(f, 44), 0x10001u);
   SND_CHECK_EQ(Get64(f, 48), r.records.size());
-  SND_CHECK_EQ(Get64(f, 56), Fnv1a64(r.records.data(), r.records.size()));
+  // The checksum covers the header without its own field (56 bytes), then the records.
+  std::vector<std::uint8_t> covered(f.begin(), f.begin() + 56);
+  covered.insert(covered.end(), r.records.begin(), r.records.end());
+  SND_CHECK_EQ(Get64(f, 56), Fnv1a64(covered.data(), covered.size()));
   Recording back;
   std::string err;
   SND_REQUIRE(DecodeRecording(f.data(), f.size(), &back, &err));
@@ -545,8 +549,8 @@ SND_TEST(IndepToolRecording, TruncatedOrDamagedFilesAreRefused) {
   std::vector<std::uint8_t> longer = f;
   longer.push_back(0);
   SND_CHECK(!DecodeRecording(longer.data(), longer.size(), &out, &err));
-  // Every bit of magic, version, sizes, checksum and records is checked.
-  auto checked = [](std::size_t o) { return o < 12u || o >= 48u; };
+  // Every bit of the file is checked (version 2: the checksum covers the header too).
+  auto checked = [](std::size_t) { return true; };
   for (std::size_t o = 0; o < f.size(); ++o) {
     if (!checked(o)) continue;
     for (int bit = 0; bit < 8; ++bit) {
@@ -571,10 +575,42 @@ SND_TEST(IndepToolRecording, TruncatedOrDamagedFilesAreRefused) {
   SND_CHECK(!p.LoadRecording((dir.dir() / "missing.snrec").string(), &err));
 }
 
+// D-67a: version 2's checksum covers the header, so damage to any header field (build
+// hashes, rate, block size, platform, contract version, flags) is found; a version 1 file
+// (checksum over the records only) is not read.
+SND_TEST(IndepToolRecording, HeaderFieldsAreCoveredAndVersion1IsRefused) {
+  Recording r;
+  r.info = RecordingInfo{0, 0x1111222233334444ull, 0x5555666677778888ull, 48000, 256, 3, 0x10001};
+  r.records = Records();
+  const std::vector<std::uint8_t> f = EncodeRecording(r);
+  Recording out;
+  std::string err;
+  SND_REQUIRE(DecodeRecording(f.data(), f.size(), &out, &err));
+  struct Field {
+    const char* name;
+    std::size_t offset;
+  };
+  for (const Field fd : {Field{"flags", 12}, Field{"projectBuildHash", 16}, Field{"projectBuildHash.hi", 23},
+                         Field{"runtimeBuildHash", 24}, Field{"sampleRate", 32}, Field{"blockSize", 36},
+                         Field{"platform", 40}, Field{"contractVersion", 44}}) {
+    std::vector<std::uint8_t> d = f;
+    d[fd.offset] = static_cast<std::uint8_t>(d[fd.offset] + 1u);  // a plausible other value
+    err.clear();
+    SND_CHECK_MSG(!DecodeRecording(d.data(), d.size(), &out, &err), "%s change accepted", fd.name);
+    SND_CHECK(err.find("checksum") != std::string::npos);
+  }
+  // The same file written as version 1 (checksum over the records only).
+  std::vector<std::uint8_t> v1 = f;
+  v1[4] = 1;
+  const std::uint64_t old = Fnv1a64(r.records.data(), r.records.size());
+  for (int i = 0; i < 8; ++i) v1[56 + static_cast<std::size_t>(i)] = static_cast<std::uint8_t>(old >> (8 * i));
+  SND_CHECK(!DecodeRecording(v1.data(), v1.size(), &out, &err));
+}
+
 // E5 / E6: "Load: ... 壊れていれば拒否". A file whose checksum is right but whose records
 // cannot be read (unknown record kind, written by a broken game or edited and re-summed)
 // is broken and must be refused, not loaded with an invalid summary.
-SND_TEST(IndepToolRecording, Defect_load_accepts_unreadable_records) {
+SND_TEST(IndepToolRecording, LoadRefusesUnreadableRecordsAndKeepsThePrevious) {
   Recording r;
   r.records = Records();
   r.records[16] = 99;  // the second record's kind
@@ -583,8 +619,22 @@ SND_TEST(IndepToolRecording, Defect_load_accepts_unreadable_records) {
   const std::string path = (dir.dir() / "y.snrec").string();
   SND_REQUIRE(SaveRecording(path, r, &err));
   SND_CHECK(!Summarize(r.records.data(), r.records.size()).valid);
+  Recording out;
+  SND_CHECK(!LoadRecording(path, &out, &err));
+  // The profiler keeps what it had loaded before.
+  Recording good;
+  good.info.sampleRate = 44100;
+  good.records = Records();
+  const std::string goodPath = (dir.dir() / "good.snrec").string();
+  SND_REQUIRE(SaveRecording(goodPath, good, &err));
   Profiler p;
+  SND_REQUIRE(p.LoadRecording(goodPath, &err));
   SND_CHECK(!p.LoadRecording(path, &err));
+  SND_CHECK(p.loadedPath() == goodPath);
+  SND_CHECK_EQ(p.loaded().info.sampleRate, 44100u);
+  SND_CHECK(p.loaded().records == good.records);
+  SND_CHECK(p.loadedSummary().valid);
+  SND_CHECK_EQ(p.loadedSummary().lods, 2u);
 }
 
 // --- E7: project JSON fuzzing --------------------------------------------------------------
@@ -703,7 +753,7 @@ bool DuplicateIds(const Files& files) {
 
 // E7: malformed projects (truncated, wrong types, extreme numbers, cycles, many parameters,
 // random mutations) neither crash the models nor the UI; the override list stays
-// consistent. Projects with duplicate names are left to Defect_duplicate_names_crash_the_ui.
+// consistent (projects with duplicate names included).
 SND_TEST(IndepToolProject, FuzzedProjectsNeverCrashTheModelsOrTheUi) {
   const Files base = MixFiles();
   Rng rng{777};
@@ -757,10 +807,7 @@ SND_TEST(IndepToolProject, FuzzedProjectsNeverCrashTheModelsOrTheUi) {
   }
   std::uint32_t run = 0, skipped = 0;
   for (std::size_t i = 0; i < cases.size(); ++i) {
-    if (DuplicateIds(cases[i])) {
-      ++skipped;
-      continue;
-    }
+    if (DuplicateIds(cases[i])) ++skipped;  // run as well since D-67a (unique keys)
     const bool compose = i < 3 || i % 25 == 0;
     int r = indep::Isolated([&] { return Exercise(cases[i], compose); });
     if (r == indep::kNotIsolated) r = Exercise(cases[i], compose);
@@ -768,14 +815,14 @@ SND_TEST(IndepToolProject, FuzzedProjectsNeverCrashTheModelsOrTheUi) {
     SND_CHECK_MSG(r == 0, "case %zu: result %d", i, r);
   }
   SND_CHECK(run > 250u);
-  std::printf("fuzz: %u cases run, %u with duplicate names left out\n", run, skipped);
+  std::printf("fuzz: %u cases run, %u of them with duplicate names\n", run, skipped);
 }
 
 // A project with two buses (or categories, parameters) of the same name is reported as an
 // error by the build, but the tool still opens it ("the build reports errors, the tool
 // still shows the project"). Their runtime ids and therefore the Tela element ids are the
 // same, and Tela throws on duplicate ids: the tool ends in std::terminate.
-SND_TEST(IndepToolProject, Defect_duplicate_names_crash_the_ui) {
+SND_TEST(IndepToolProject, DuplicateNamesDoNotCrashTheUi) {
   Files c = MixFiles();
   c.emplace_back("buses/Sfx2.json", "{\"type\":\"bus\",\"guid\":\"" + G(60) + "\",\"name\":\"Sfx\",\"parent\":\"Master\"}");
   SND_REQUIRE(DuplicateIds(c));
@@ -923,4 +970,175 @@ SND_TEST(IndepToolProfiler, RecordingStatesFollowAcksAndSettle) {
   SND_REQUIRE(p.StartRecording(l.c));
   SND_REQUIRE(pollUntil(t0 + 300 * ms, RecordingState::Failed));
   SND_CHECK_EQ(p.recordingError(), SND_ERR_INVALID_ARGUMENT);
+}
+
+// --- D-67a: stale meters ------------------------------------------------------------------
+
+namespace {
+
+bool SendMeter(Linked& l, float peak, float rms) {
+  ll::MeterEntry e{};
+  e.busId = 0;
+  e.channels = 1;
+  e.peak[0] = peak;
+  e.rms[0] = rms;
+  const std::uint64_t n0 = l.c->Received(ll::MessageType::BusMeters);
+  l.g.SendList(ll::MessageType::BusMeters, std::vector<ll::MeterEntry>{e});
+  return indep::Drive(l.s, l.g, [&] { return l.c->Received(ll::MessageType::BusMeters) > n0; });
+}
+
+}  // namespace
+
+// A meter is stale only after more than 500 ms without a new one (500 ms exactly is fresh);
+// then peak and rms fall at 20 dB/s from the 500 ms mark down to -inf, and the hold falls
+// to the floor.
+SND_TEST(IndepToolProfiler, StaleMeterBoundaryAt500MsAndFallToSilence) {
+  Linked l;
+  SND_REQUIRE(l.c != nullptr);
+  SND_REQUIRE(SendMeter(l, 0.5f, 0.25f));
+  Profiler p;
+  const std::uint64_t ms = 1000000ull;
+  p.Poll(l.c, indep::NowNs());
+  const std::uint64_t r = p.FindMeter(0)->receivedNs;
+  SND_REQUIRE(r != 0u);
+  const float peakDb = LinearToDb(0.5f), rmsDb = LinearToDb(0.25f);
+  p.Poll(l.c, r + 500 * ms);
+  SND_CHECK(!p.FindMeter(0)->stale);
+  SND_CHECK_EQ(p.FindMeter(0)->peak[0], 0.5f);
+  SND_CHECK_EQ(p.FindMeter(0)->rms[0], 0.25f);
+  p.Poll(l.c, r + 500 * ms + 1u);
+  SND_CHECK(p.FindMeter(0)->stale);
+  SND_CHECK_NEAR(LinearToDb(p.FindMeter(0)->peak[0]), peakDb, 1e-4);
+  p.Poll(l.c, r + 1500 * ms);  // 1 s after the 500 ms mark: -20 dB
+  SND_CHECK_NEAR(LinearToDb(p.FindMeter(0)->peak[0]), peakDb - 20.0f, 1e-3);
+  SND_CHECK_NEAR(LinearToDb(p.FindMeter(0)->rms[0]), rmsDb - 20.0f, 1e-3);
+  p.Poll(l.c, r + 10000 * ms);  // far below the floor: -inf
+  SND_CHECK_EQ(p.FindMeter(0)->peak[0], 0.0f);
+  SND_CHECK_EQ(p.FindMeter(0)->rms[0], 0.0f);
+  SND_CHECK_EQ(p.FindMeter(0)->holdDb[0], kMeterFloorDb);
+}
+
+// The hold falls while the meters stop and restarts from the first new peak when they
+// come back (hold 200 ms, 100 dB/s here; times are the real receive and poll times).
+SND_TEST(IndepToolProfiler, MeterStopThenResumeRestartsTheHold) {
+  Linked l;
+  SND_REQUIRE(l.c != nullptr);
+  Profiler::Desc d;
+  d.hold.holdNs = 200000000ull;
+  d.hold.fallDbPerSecond = 100.0f;
+  Profiler p(d);
+  const double sec = 1e9;
+  SND_REQUIRE(SendMeter(l, 0.5f, 0.5f));
+  const std::uint64_t t1 = indep::NowNs();
+  p.Poll(l.c, t1);
+  const std::uint64_t r1 = p.FindMeter(0)->receivedNs;
+  const float a = LinearToDb(0.5f), b = LinearToDb(0.25f);
+  SND_CHECK_NEAR(p.FindMeter(0)->holdDb[0], a, 1e-4);
+  // The meters stop: wait past the stale mark (real time, the next meter must be newer).
+  while (indep::NowNs() < r1 + 700000000ull) std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  const std::uint64_t t2 = indep::NowNs();
+  p.Poll(l.c, t2);
+  const BusMeter* m = p.FindMeter(0);
+  SND_CHECK(m->stale);
+  SND_CHECK_NEAR(m->holdDb[0], std::max(kMeterFloorDb, static_cast<float>(a - (static_cast<double>(t2 - t1) / sec - 0.2) * 100.0)), 0.05);
+  const float fallen = static_cast<float>(a - (static_cast<double>(t2 - r1) / sec - 0.5) * 100.0);
+  if (fallen > kMeterFloorDb) {
+    SND_CHECK_NEAR(LinearToDb(m->peak[0]), fallen, 0.05);
+  } else {
+    SND_CHECK_EQ(m->peak[0], 0.0f);
+  }
+  // They come back with a lower peak: fresh again, the hold restarts at it.
+  SND_REQUIRE(SendMeter(l, 0.25f, 0.25f));
+  const std::uint64_t t3 = indep::NowNs();
+  p.Poll(l.c, t3);
+  m = p.FindMeter(0);
+  SND_CHECK(m->receivedNs > r1);
+  SND_CHECK(!m->stale || t3 - m->receivedNs > 500000000ull);
+  SND_CHECK_NEAR(m->holdDb[0], b, 1e-4);
+  if (!m->stale) SND_CHECK_EQ(m->peak[0], 0.25f);
+  p.Poll(l.c, t3 + 150000000ull);  // inside the 200 ms hold
+  SND_CHECK_NEAR(p.FindMeter(0)->holdDb[0], b, 1e-4);
+  p.Poll(l.c, t3 + 400000000ull);  // 200 ms of fall at 100 dB/s
+  SND_CHECK_NEAR(p.FindMeter(0)->holdDb[0], b - 20.0f, 1e-3);
+}
+
+// --- D-67a: keys of objects that share a name -----------------------------------------------
+
+// Three levels: a unique runtime id keeps its hex key; the same name with another GUID gets
+// "g" + GUID; the same name and the same GUID get "n" + position. Every row of the override
+// list has its own key and Revert(key) reaches exactly that object; the UI declares and draws.
+SND_TEST(IndepToolProject, SharedNamesGetDistinctKeysAndRevertReachesEachRow) {
+  Files c = MixFiles();
+  c.emplace_back("buses/Sfx2.json", "{\"type\":\"bus\",\"guid\":\"" + G(60) + "\",\"name\":\"Sfx\",\"parent\":\"Master\"}");
+  c.emplace_back("buses/Sfx3.json", "{\"type\":\"bus\",\"guid\":\"" + G(60) + "\",\"name\":\"Sfx\",\"parent\":\"Master\"}");
+  c.emplace_back("categories/SE2.json", "{\"type\":\"category\",\"guid\":\"" + G(61) + "\",\"name\":\"SE\"}");
+  c.emplace_back("parameters/Knob2.json", "{\"type\":\"parameter\",\"guid\":\"" + G(8) + "\",\"name\":\"Knob\"}");
+  ProjectDir dir("indep-keys");
+  for (const auto& f : c) dir.Write(f.first, f.second);
+  Session s;
+  s.LoadProject(dir.dir().string(), dir.out().string());  // with the build, as the tool does
+  const Project& p = s.project();
+  std::vector<std::int32_t> sfx;
+  std::set<std::string> busKeys;
+  for (std::size_t i = 0; i < p.buses().size(); ++i) {
+    SND_CHECK(busKeys.insert(p.buses()[i].key).second);
+    if (p.buses()[i].name == "Sfx") sfx.push_back(static_cast<std::int32_t>(i));
+    if (p.buses()[i].name == "Music") {
+      char hex[16];
+      std::snprintf(hex, sizeof hex, "%08x", p.buses()[i].id);
+      SND_CHECK(p.buses()[i].key == hex);  // unique: unchanged
+    }
+  }
+  SND_REQUIRE_EQ(sfx.size(), 3u);
+  std::uint32_t gKeys = 0, nKeys = 0;
+  for (std::int32_t i : sfx) {
+    const std::string& k = p.buses()[static_cast<std::size_t>(i)].key;
+    gKeys += k[0] == 'g' ? 1u : 0u;
+    nKeys += k[0] == 'n' ? 1u : 0u;
+    if (k[0] == 'g') SND_CHECK_EQ(k.size(), 33u);
+  }
+  SND_CHECK_EQ(gKeys, 1u);
+  SND_CHECK_EQ(nKeys, 2u);
+  SND_CHECK(p.categories().size() == 2u && p.categories()[0].key != p.categories()[1].key);
+  SND_CHECK(p.parameters().size() == 2u && p.parameters()[0].key != p.parameters()[1].key);
+  SND_CHECK(p.errorCount() > 0u);  // the build refuses the shared names
+
+  MixerModel& m = s.mixer();
+  float v = -3.0f;
+  for (std::int32_t i : sfx) m.Set(Target{Control::BusFader, i, 0, 0}, v--);
+  for (std::int32_t i = 0; i < 2; ++i) m.Set(Target{Control::CategoryFader, i, 0, 0}, -10.0f - static_cast<float>(i));
+  for (std::int32_t i = 0; i < 2; ++i) m.Set(Target{Control::ParamOverrideOn, i, 0, 0}, 1.0f);
+  std::set<std::string> keys;
+  for (const OverrideItem& it : m.Overrides()) SND_CHECK(keys.insert(it.key).second);
+  SND_CHECK_EQ(keys.size(), 7u);
+  snd::tool::ui::App app(s, snd::tool::ui::AppDesc{});
+  app.Frame(indep::NowNs());
+  const tela::PlacedElement* hdr = uitest::Find(app.runtime(), "hdr.project");
+  SND_CHECK(hdr != nullptr && hdr->element.label.find("errors") != std::string::npos);
+  // Revert each row by key: that one object goes back, the others stay.
+  while (!m.Overrides().empty()) {
+    const std::vector<OverrideItem> before = m.Overrides();
+    const OverrideItem first = before.front();
+    app.OnRevert(first.key);
+    const std::vector<OverrideItem> after = m.Overrides();
+    SND_CHECK_EQ(after.size() + 1u, before.size());
+    for (const OverrideItem& it : after) {
+      SND_CHECK(it.key != first.key);
+      for (const OverrideItem& o : before) {
+        if (o.key == it.key) SND_CHECK_EQ(o.value, it.value);
+      }
+    }
+    if (after.size() + 1u != before.size()) break;
+  }
+  const int r = indep::Isolated([&] {
+    s.mixer().Set(Target{Control::BusSolo, sfx[1], 0, 0}, 1.0f);
+    app.Frame(indep::NowNs());
+    std::set<std::string> ids;
+    for (const tela::PlacedElement& e : app.runtime().elements()) {
+      if (!ids.insert(e.element.id).second) return 2;
+    }
+    tela::PixelSurface px;
+    return snd::tool::ui::Compose(app.runtime(), snd::tool::ui::ComposeOptions{}, &px) ? 0 : 3;
+  });
+  SND_CHECK_MSG(r == 0 || r == indep::kNotIsolated, "child result %d", r);
 }
