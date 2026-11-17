@@ -4,6 +4,7 @@
 #include <cmath>
 #include <cstring>
 #include <new>
+#include <thread>
 
 #include "core_impl.hpp"
 #include "snd/base/allocator.hpp"
@@ -433,6 +434,9 @@ snd_result CreateImpl(Impl& im) noexcept {
       im.lp.playbackGen == nullptr || im.tp.seenSeq == nullptr) {
     return SND_ERR_OUT_OF_BUDGET;
   }
+  im.pub.streamStall = Arr<std::uint32_t>(im, g.maxStreams, MemTag::Tables);
+  im.pub.streamGen = Arr<std::uint32_t>(im, g.maxStreams, MemTag::Tables);
+  if (im.pub.streamStall == nullptr || im.pub.streamGen == nullptr) return SND_ERR_OUT_OF_BUDGET;
   im.pub.transportGen = Arr<std::uint32_t>(im, g.maxTransports, MemTag::Tables);
   im.pub.playbackGen = Arr<std::uint32_t>(im, std::size_t{g.maxPlaybacks} * 3u, MemTag::Tables);
   rd.voiceGen = Arr<std::uint32_t>(im, g.maxVirtual, MemTag::Tables);
@@ -558,6 +562,16 @@ snd_result CreateImpl(Impl& im) noexcept {
 
 void DestroyImpl(Impl& im) noexcept {
   im.rt.Shutdown();
+  // Source kinds first (stage 2, source): their Shutdown waits for the jobs they
+  // posted, which may read bank memory, so the banks must still be alive. Jobs
+  // still in the service queue are submitted first (PumpServices, done by
+  // System::Destroy), otherwise their done counters would never drop.
+  for (std::size_t k = 0; k < static_cast<std::size_t>(SourceKind::Count); ++k) {
+    if (im.kinds[k] != nullptr) im.kinds[k]->Shutdown();
+    im.kinds[k] = nullptr;
+  }
+  // Every job trampoline has returned before the records and the free list go away.
+  while (im.trampolinesInFlight.load(std::memory_order_acquire) != 0u) std::this_thread::yield();
   if (im.banks != nullptr) {
     for (std::uint32_t s = 0; s < im.cfg.maxBanks; ++s) {
       if (im.records != nullptr && im.records[s] != nullptr) FreeBankRecord(im, s);
@@ -568,9 +582,6 @@ void DestroyImpl(Impl& im) noexcept {
     for (std::uint32_t s = 0; s < im.cfg.maxBanks; ++s) {
       if (im.records[s] != nullptr) FreeBankRecord(im, s);
     }
-  }
-  for (std::size_t k = 0; k < static_cast<std::size_t>(SourceKind::Count); ++k) {
-    if (im.kinds[k] != nullptr) im.kinds[k]->Shutdown();
   }
   if (im.music != nullptr) im.music->Shutdown();
   if (im.triple != nullptr) base::notify::DestroyTripleBuffer(*im.triple, *im.alloc);
@@ -627,6 +638,7 @@ void System::Destroy(System* sys) noexcept {
   if (sys == nullptr) return;
   Impl* im = sys->impl_;
   IAllocator& a = *im->alloc;
+  sys->PumpServices();  // queued source jobs reach the job system (run inline if it is shut down)
   DestroyImpl(*im);
   for (std::uint32_t i = im->allocationCount; i-- > 0;) a.Free(im->allocations[i].p, im->allocations[i].tag);
   a.Free(im->allocations, MemTag::Misc);

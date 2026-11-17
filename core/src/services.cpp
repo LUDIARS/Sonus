@@ -83,15 +83,20 @@ std::uint32_t MusicPrimeFrames(void* ctx, ClipRef clip, std::uint64_t startFrame
 }
 
 namespace {
+// Runs the original job, returns its record, then signals completion: the
+// original's done counter drops after the record is back, and the very last
+// access to core is the in-flight count Destroy waits for.
 void SND_CALL JobTrampoline(void* data) {
   JobWrap& w = *static_cast<JobWrap*>(data);
   Impl& im = *w.owner;
-  RunJob(w.original);  // the original's cancel flag and done counter (contract)
+  const JobDesc job = w.original;
+  if (!IsJobCancelled(job) && job.fn != nullptr) job.fn(job.data);
   const std::uint32_t idx = w.index;
-  w.done = 0;
   // Release: everything the job did happens-before the epoch check that sees 0.
   std::atomic_ref<std::uint32_t>(w.epochBucket).store(0u, std::memory_order_release);
   im.jobWrapFree.Push(idx);
+  MarkJobDone(job);  // the submitter's done counter (contract), after core's record is free
+  im.trampolinesInFlight.fetch_sub(1u, std::memory_order_acq_rel);
 }
 }  // namespace
 
@@ -102,6 +107,7 @@ void System::PumpServices() noexcept {
   PostedJob pj;
   while (im.jobQueue.TryPop(pj)) {
     JobWrap& w = im.jobWraps[pj.wrap];
+    im.trampolinesInFlight.fetch_add(1u, std::memory_order_acq_rel);
     if (im.desc.jobs == nullptr) {  // no job system: run inline on this (non-RT) thread
       JobTrampoline(&w);
       continue;

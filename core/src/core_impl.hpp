@@ -310,7 +310,8 @@ enum PlaybackPrivFlags : std::uint32_t {
   kPbInstanceCounted = 1u << 5,
   kPbMusic = 1u << 6,
   kPbPausedState = 1u << 7,  // currently in Paused state (voices paused)
-  kPbTimedStop = 1u << 8,    // stopping by voice releases from a clock (sample accurate)
+  kPbSourceStarted = 1u << 8,  // a source accepted at least one voice (FlushSourceCalls)
+  kPbTimedStop = 1u << 9,    // stopping by voice releases from a clock (sample accurate)
 };
 struct PlaybackPriv {
   std::uint32_t flags;
@@ -519,6 +520,8 @@ struct TransportPriv {  // core's UpdateTransport when no music system is presen
 inline constexpr std::uint8_t kFireTransportGone = 0xFEu;  // core-internal FireEntry::lateRuleApplied
 
 struct PublishPriv {
+  std::uint32_t* streamStall = nullptr;   // [maxStreams] Stream.stallCount seen
+  std::uint32_t* streamGen = nullptr;     // [maxStreams] row generation it belongs to
   std::uint32_t* transportGen = nullptr;  // [maxTransports] generation seen live last block
   std::uint32_t* playbackGen = nullptr;   // [3 * maxPlaybacks] generation written per snapshot frame
 };
@@ -601,6 +604,7 @@ struct System::Impl {
   std::atomic<std::uint32_t> jobEpoch{0};
   std::atomic<std::uint32_t> jobsInFlight[2];
   std::atomic<std::uint32_t> droppedJobs{0}, droppedIo{0};
+  std::atomic<std::uint32_t> trampolinesInFlight{0};  // submitted wrapped jobs not finished (Destroy waits)
   base::Mutex serviceMutex;  // serialises PumpServices (epoch flips)
   source::SourceServices services{};
 

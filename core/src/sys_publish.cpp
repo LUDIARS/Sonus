@@ -65,6 +65,21 @@ void Publish(Impl& im) noexcept {
   st.virtual_voices = t.Voice.rows.count - (t.RealVoice.rows.count < t.Voice.rows.count ? t.RealVoice.rows.count : t.Voice.rows.count);
   st.streams = t.Stream.rows.count;
   st.lod_level = im.rd.lod;
+  // Stream stalls (6.3): the growth of Stream.stallCount (written by the Stream source in Render).
+  {
+    const schema::TableRows& sr = t.Stream.rows;
+    const std::uint32_t* stalls = SND_R(Stream_stallCount);
+    for (std::uint32_t s = 0; s < im.cfg.maxStreams; ++s) {
+      if (!base::rows::IsLive(sr, s)) continue;
+      if (im.pub.streamGen[s] != sr.generation[s]) {  // a new stream in this slot
+        im.pub.streamGen[s] = sr.generation[s];
+        im.pub.streamStall[s] = 0u;
+      }
+      const std::uint32_t now = stalls[s];
+      if (now > im.pub.streamStall[s]) im.streamStalls += now - im.pub.streamStall[s];
+      im.pub.streamStall[s] = now;
+    }
+  }
   st.stream_stalls = im.streamStalls;
   st.dropped_events = im.eventRing->dropped.load(std::memory_order_relaxed);
   for (std::uint32_t k = 0; k < SND_MEM_TAG_COUNT; ++k) st.memory_used[k] = 0;
