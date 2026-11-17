@@ -277,7 +277,8 @@ SND_TEST(MusicSystem, SameCommandsGiveBitIdenticalOutput) {
     RunScript(r, &a);
     snd::music::MusicTransitionRecord log[16];
     const std::uint32_t n = r.music.TransitionLog(log, 16);
-    SND_CHECK(n >= 3u);  // One -> Two (bridge), Two -> One / One -> Two (last position), -> One (When)
+    // One -> Two (rule with bridge); One then Two again while pending = cancelled; -> One (When grid).
+    SND_CHECK_EQ(n, 2u);
   }
   {
     Rig r;
