@@ -124,6 +124,9 @@ SND_TEST(ToolLiveProfiler, RecordingSaveAndLoadRoundTrip) {
   Profiler& p = t.s.profiler();
   SND_REQUIRE(p.StartRecording(t.s.connection().client()));
   SND_REQUIRE(t.rig.Run(t.s, [&] { return p.recordingState() == RecordingState::Recording; }));
+  // The game starts recording at a block boundary after the Ack: its first record (LOD) has
+  // arrived once the recording is really running. Commands after that are recorded.
+  SND_REQUIRE(t.rig.Run(t.s, [&] { return p.recordedBytes() > 0u; }));
   t.s.mixer().Set(Target{Control::BusFader, Bus(t.tool.project, "Sfx"), 0, 0}, -6.0f);
   t.rig.f.sys->Play(snd::HashId("Blip"), snd_emitter_handle{0}, nullptr);
   t.rig.Settle(t.s, 32);
