@@ -209,7 +209,8 @@ bool WasapiOutputDevice::InitializeExclusive() noexcept {
   WAVEFORMATEX* mix = nullptr;
   if (FAILED(client_->GetMixFormat(&mix)) || mix == nullptr) return false;
   const std::uint32_t rate = request_.sample_rate != 0u ? request_.sample_rate : mix->nSamplesPerSec;
-  const std::uint32_t channels = request_.channels != 0u ? request_.channels : mix->nChannels;
+  std::uint32_t channels = request_.channels != 0u ? request_.channels : mix->nChannels;
+  if (request_.channels == 0u && channels > SND_MAX_CHANNELS) channels = SND_MAX_CHANNELS;
   CoTaskMemFree(mix);
   if (channels == 0u || channels > SND_MAX_CHANNELS) return false;
   WAVEFORMATEXTENSIBLE fmt;
@@ -325,9 +326,12 @@ bool WasapiOutputDevice::StartStream() noexcept {
   if (!exclusive_ && FAILED(client_->GetCurrentPadding(&padding))) padding = bufferFrames_;
   const UINT32 n = bufferFrames_ > padding ? bufferFrames_ - padding : 0u;
   BYTE* data = nullptr;
-  if (n > 0u && SUCCEEDED(render_->GetBuffer(n, &data))) render_->ReleaseBuffer(n, AUDCLNT_BUFFERFLAGS_SILENT);
   streamBase_ = written_;
-  written_ += n;
+  // Only silence that WASAPI accepted counts as written (the clock origin).
+  if (n > 0u && SUCCEEDED(render_->GetBuffer(n, &data)) &&
+      SUCCEEDED(render_->ReleaseBuffer(n, AUDCLNT_BUFFERFLAGS_SILENT))) {
+    written_ += n;
+  }
   const HRESULT hr = client_->Start();
   if (FAILED(hr)) {
     HandleError(hr);

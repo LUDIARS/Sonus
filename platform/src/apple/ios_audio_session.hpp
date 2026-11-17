@@ -54,6 +54,8 @@ class IosAudioSession {
 
   std::uint32_t LastRouteReason() const noexcept { return routeReason_.load(std::memory_order_acquire); }
   bool LastInterruptionShouldResume() const noexcept { return shouldResume_.load(std::memory_order_acquire); }
+  // True if the last interruption notification was "began".
+  bool LastInterruptionBegan() const noexcept { return lastBegan_.load(std::memory_order_acquire); }
 
   // Called by the Objective-C observer (any thread).
   void Forward(std::uint32_t bits, std::uint32_t routeReason, bool shouldResume) noexcept;
@@ -64,6 +66,7 @@ class IosAudioSession {
   void* sinkUser_ = nullptr;
   std::atomic<std::uint32_t> routeReason_{0};
   std::atomic<bool> shouldResume_{false};
+  std::atomic<bool> lastBegan_{false};
 };
 
 }  // namespace snd::platform::detail::coreaudio

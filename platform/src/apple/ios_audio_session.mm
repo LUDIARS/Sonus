@@ -95,6 +95,9 @@ IosSessionInfo IosAudioSession::Query() const noexcept {
 void IosAudioSession::Forward(std::uint32_t bits, std::uint32_t routeReason, bool shouldResume) noexcept {
   if ((bits & kIosRouteChanged) != 0u) routeReason_.store(routeReason, std::memory_order_release);
   if ((bits & kIosInterruptEnded) != 0u) shouldResume_.store(shouldResume, std::memory_order_release);
+  if ((bits & (kIosInterruptBegan | kIosInterruptEnded)) != 0u) {
+    lastBegan_.store((bits & kIosInterruptBegan) != 0u, std::memory_order_release);
+  }
   sinkFn_(sinkUser_, bits);
 }
 

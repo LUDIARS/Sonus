@@ -4,6 +4,7 @@
 #include <cstdint>
 
 #include "snd/ext.h"
+#include "snd/types.h"
 
 namespace snd::platform::detail {
 
@@ -100,7 +101,10 @@ WasapiPlan PlanWasapiStream(std::uint32_t requestedRate, std::uint32_t requested
                             bool haveClient3, std::uint32_t mixRate, std::uint32_t mixChannels) noexcept {
   WasapiPlan p;
   p.sampleRate = requestedRate != 0u ? requestedRate : mixRate;
-  p.channels = requestedChannels != 0u ? requestedChannels : mixChannels;
+  // A mix format wider than SND_MAX_CHANNELS (7.1.4, ...) is opened with
+  // SND_MAX_CHANNELS and converted by WASAPI (same as Core Audio).
+  const std::uint32_t mixLimited = mixChannels > SND_MAX_CHANNELS ? SND_MAX_CHANNELS : mixChannels;
+  p.channels = requestedChannels != 0u ? requestedChannels : mixLimited;
   if (exclusive) {
     p.mode = WasapiMode::Exclusive;
   } else if (p.sampleRate == mixRate && p.channels == mixChannels) {

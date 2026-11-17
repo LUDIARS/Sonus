@@ -48,6 +48,12 @@ void AudioDriver::ThreadMain(void* self) noexcept { static_cast<AudioDriver*>(se
 void AudioDriver::Run() noexcept {
   ScopedFlushDenormals ftz;  // 2.4
   DriverMarker mark(this);
+  if (desc_.realtimeThread && deviceRate_ != 0u) {
+    // Apple: the time constraint from the real wake-up period (the device
+    // period, at least one block).
+    const std::uint64_t frames = devicePeriod_ > desc_.core.blockFrames ? devicePeriod_ : desc_.core.blockFrames;
+    SetCurrentThreadRealtimePeriod(frames * 1000000000ull / deviceRate_);
+  }
   WorkgroupMembership membership;
   std::uint32_t generation = 0;
   if (desc_.workgroupSource != nullptr) {
@@ -99,6 +105,8 @@ bool AudioDriver::Start(IOutputDevice& device, const DeviceDesc& deviceDesc, con
     device.SetEventListener(nullptr, nullptr);
     return false;
   }
+  deviceRate_ = device.SampleRate();
+  devicePeriod_ = device.PeriodFrames();
   running_.store(true, std::memory_order_release);
   ThreadDesc td;
   td.name = "snd-audio";
@@ -108,6 +116,9 @@ bool AudioDriver::Start(IOutputDevice& device, const DeviceDesc& deviceDesc, con
   if (ok) ok = ready_.WaitFor(static_cast<std::uint64_t>(desc.prefillTimeoutMs) * 1000000ull);
   if (ok) ok = device.Start();
   if (!ok) {
+    // Prefill timeout (or no thread / device): stop rendering after the
+    // block in progress, wait for that render call to return, undo.
+    core_.CancelService();
     running_.store(false, std::memory_order_release);
     wake_.Post();
     thread_.Join();

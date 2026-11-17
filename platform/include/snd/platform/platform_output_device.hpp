@@ -75,6 +75,7 @@ struct OutputDeviceOptions {
   // ALSA: configuration text used INSTEAD of the system configuration
   // (snd_pcm_open_lconf), e.g. "pcm.out { type null }". The text is parsed at
   // Open. Used by tests and by embedded setups without /usr/share/alsa.
+  // With it DeviceDesc::device_index must be 0 (Open fails otherwise).
   const char* alsaConfig = nullptr;
   // WASAPI: exclusive mode (IAudioClient::Initialize(AUDCLNT_SHAREMODE_EXCLUSIVE)).
   bool exclusive = false;

@@ -12,6 +12,10 @@
 //          kAudioOutputUnitProperty_CurrentDevice;
 //   iOS:   kAudioUnitSubType_RemoteIO with the AVAudioSession activated
 //          (category from OutputDeviceOptions, preferred rate and IO buffer).
+//          The route cannot be chosen: deviceName other than "default" or
+//          device_index >= 1 fails at Open.
+// A channel switch (channels 0 follows the device) is: stop, re-initialise,
+// post CHANGED, restart (D-62); a failed switch posts LOST.
 //
 // Device changes are handled on a private serial dispatch queue (the
 // listeners and notifications only post a bit), under the control lock that
@@ -22,7 +26,9 @@
 //         same UID appears again (reopenOnLoss) -> CHANGED;
 //   macOS nominal rate / buffer size changed -> CHANGED (client format kept);
 //   iOS interruption began -> SUSPENDED (the system stopped the unit);
-//       ended -> setActive:YES, restart if started -> RESUMED;
+//       ended with ShouldResume -> setActive:YES, restart if started -> RESUMED;
+//       ended without it -> stays SUSPENDED until the app calls Start() again
+//       (began / ended coalesced: the last one wins);
 //   iOS route change -> CHANGED / LOST by reason (RouteChangeEvent);
 //   iOS media services reset -> LOST, rebuild the session and the unit -> CHANGED.
 // The workgroup (D-65) is the unit's kAudioOutputUnitProperty_OSWorkgroup,
@@ -80,7 +86,8 @@ class CoreAudioOutputDevice final : public PlatformOutputDevice {
   // Under control_.
   bool BuildUnit() noexcept;        // create, configure, initialize (not started)
   void RefreshRoute() noexcept;     // period, latency, workgroup from the current device / session
-  bool Reconfigure(std::uint32_t channels) noexcept;  // new client channel count (stop, re-init, restart)
+  bool Reconfigure(std::uint32_t channels) noexcept;  // new client channel count (stop, re-init; not restarted)
+  void ApplyChannelsAndAnnounce(std::uint32_t channels) noexcept;  // switch, CHANGED, then restart (LOST on failure)
   void StopUnit() noexcept;         // AudioOutputUnitStop + wait for the last render to finish
   bool StartUnit() noexcept;
   void RefreshWorkgroup() noexcept;
@@ -110,6 +117,7 @@ class CoreAudioOutputDevice final : public PlatformOutputDevice {
 #if TARGET_OS_IPHONE
   IosAudioSession session_;
   bool sessionActive_ = false;
+  bool interrupted_ = false;  // SUSPENDED by an interruption, not resumed yet
 #else
   MacDeviceWatch watch_;
   AudioObjectID device_ = 0;  // chosen device (followDefault_ == false) / current default

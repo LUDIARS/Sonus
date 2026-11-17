@@ -79,6 +79,11 @@ class Thread {
 
 // Non-RT. Applies `priority` to the calling thread (same policy as above).
 PriorityResult SetCurrentThreadPriority(ThreadPriority priority, int realtimePriority = 80) noexcept;
+// Non-RT. Tells the OS the real period of the calling realtime thread. Apple:
+// re-applies the Mach time-constraint policy with period = `periodNs`,
+// computation = 50 % of it, constraint = the period (D-65). Other OSes:
+// Unsupported (nothing to do; SCHED_FIFO / MMCSS have no period).
+PriorityResult SetCurrentThreadRealtimePeriod(std::uint64_t periodNs) noexcept;
 // Non-RT. Names the calling thread (best effort).
 void SetCurrentThreadName(const char* name) noexcept;
 // Logical CPU count (>= 1).

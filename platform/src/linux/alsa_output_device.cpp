@@ -82,6 +82,9 @@ void AlsaOutputDevice::ClosePcm() noexcept {
 
 bool AlsaOutputDevice::Open(const DeviceDesc& desc, DeviceCallback cb, void* user) {
   if (open_ || cb == nullptr || desc.channels > SND_MAX_CHANNELS) return false;
+  // A private configuration has no enumeration order: device_index must be 0
+  // (select its PCMs with deviceName).
+  if (!config_.Empty() && desc.device_index != 0u) return false;
   // Device name (D-64): option > device_index (enumeration order) > "default".
   const char* name = optionName_.Get();
   OutputDeviceInfo info;

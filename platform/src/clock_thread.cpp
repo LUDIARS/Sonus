@@ -126,6 +126,7 @@ PriorityResult SetCurrentThreadPriority(ThreadPriority priority, int) noexcept {
   const int p = priority == ThreadPriority::Realtime ? THREAD_PRIORITY_TIME_CRITICAL : THREAD_PRIORITY_NORMAL;
   return SetThreadPriority(GetCurrentThread(), p) ? PriorityResult::Applied : PriorityResult::Failed;
 }
+PriorityResult SetCurrentThreadRealtimePeriod(std::uint64_t) noexcept { return PriorityResult::Unsupported; }
 void SetCurrentThreadName(const char*) noexcept {}
 #else
 struct Thread::Native {
@@ -155,6 +156,27 @@ void* Trampoline(void* p) {
   return nullptr;
 }
 
+#if defined(__APPLE__)
+// Nominal period until the caller knows the real one: one 256-frame block at 48 kHz.
+constexpr std::uint64_t kNominalRtPeriodNs = 5333333u;
+
+// Mach time-constraint policy: period, computation = 50 % of it, constraint = period.
+PriorityResult ApplyTimeConstraint(pthread_t t, std::uint64_t periodNs) noexcept {
+  mach_timebase_info_data_t tb{};
+  if (mach_timebase_info(&tb) != KERN_SUCCESS || tb.numer == 0u) return PriorityResult::Failed;
+  const auto toAbs = [&tb](std::uint64_t ns) { return static_cast<std::uint32_t>(ns * tb.denom / tb.numer); };
+  thread_time_constraint_policy_data_t policy{};
+  policy.period = toAbs(periodNs);
+  policy.computation = toAbs(periodNs / 2u);
+  policy.constraint = toAbs(periodNs);
+  policy.preemptible = 1;
+  const kern_return_t kr = thread_policy_set(pthread_mach_thread_np(t), THREAD_TIME_CONSTRAINT_POLICY,
+                                             reinterpret_cast<thread_policy_t>(&policy),
+                                             THREAD_TIME_CONSTRAINT_POLICY_COUNT);
+  return kr == KERN_SUCCESS ? PriorityResult::Applied : PriorityResult::Failed;
+}
+#endif
+
 PriorityResult ApplyPriority(pthread_t t, ThreadPriority priority, int rtPriority) noexcept {
 #if defined(__linux__)
   sched_param sp{};
@@ -175,19 +197,7 @@ PriorityResult ApplyPriority(pthread_t t, ThreadPriority priority, int rtPriorit
   // os_workgroup (workgroup.hpp) tells the scheduler the real deadline.
   (void)rtPriority;
   if (priority == ThreadPriority::Normal) return PriorityResult::Applied;
-  mach_timebase_info_data_t tb{};
-  if (mach_timebase_info(&tb) != KERN_SUCCESS || tb.numer == 0u) return PriorityResult::Failed;
-  constexpr std::uint64_t kPeriodNs = 5333333u;
-  const auto toAbs = [&tb](std::uint64_t ns) { return static_cast<std::uint32_t>(ns * tb.denom / tb.numer); };
-  thread_time_constraint_policy_data_t policy{};
-  policy.period = toAbs(kPeriodNs);
-  policy.computation = toAbs(kPeriodNs / 2u);
-  policy.constraint = toAbs(kPeriodNs);
-  policy.preemptible = 1;
-  const kern_return_t kr = thread_policy_set(pthread_mach_thread_np(t), THREAD_TIME_CONSTRAINT_POLICY,
-                                             reinterpret_cast<thread_policy_t>(&policy),
-                                             THREAD_TIME_CONSTRAINT_POLICY_COUNT);
-  return kr == KERN_SUCCESS ? PriorityResult::Applied : PriorityResult::Failed;
+  return ApplyTimeConstraint(t, kNominalRtPeriodNs);
 #else
   (void)t;
   (void)rtPriority;
@@ -270,6 +280,16 @@ void Thread::Join() noexcept {
 
 PriorityResult SetCurrentThreadPriority(ThreadPriority priority, int realtimePriority) noexcept {
   return ApplyPriority(pthread_self(), priority, realtimePriority);
+}
+
+PriorityResult SetCurrentThreadRealtimePeriod(std::uint64_t periodNs) noexcept {
+#if defined(__APPLE__)
+  if (periodNs == 0u) return PriorityResult::Failed;
+  return ApplyTimeConstraint(pthread_self(), periodNs);
+#else
+  (void)periodNs;
+  return PriorityResult::Unsupported;
+#endif
 }
 
 void SetCurrentThreadName(const char* name) noexcept {

@@ -133,6 +133,12 @@ SND_TEST(StreamPolicy, WasapiPlan) {
   SND_CHECK_EQ(p.mode, WasapiMode::SharedAutoConvert);
   SND_CHECK_EQ(p.channels, 2u);
   SND_CHECK_EQ(p.sampleRate, 48000u);
+  // A 7.1.4 mix (12 channels) with channels 0: limited to SND_MAX_CHANNELS, converted.
+  p = PlanWasapiStream(0, 0, false, true, 48000, 12);
+  SND_CHECK_EQ(p.channels, SND_MAX_CHANNELS);
+  SND_CHECK_EQ(p.mode, WasapiMode::SharedAutoConvert);
+  p = PlanWasapiStream(0, 0, true, true, 48000, 12);
+  SND_CHECK_EQ(p.channels, SND_MAX_CHANNELS);
   // Exclusive: the request (or the mix values) as is.
   p = PlanWasapiStream(96000, 0, true, true, 48000, 2);
   SND_CHECK_EQ(p.mode, WasapiMode::Exclusive);

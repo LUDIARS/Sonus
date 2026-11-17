@@ -16,6 +16,8 @@
 // gone (-ENODEV, -EBADFD, -EIO, ...) -> LOST, close, and with
 // OutputDeviceOptions::reopenOnLoss try to open the same name again every
 // reopenIntervalMs; success posts CHANGED with the new format.
+// With OutputDeviceOptions::alsaConfig only device_index 0 is accepted (the
+// PCM is chosen by deviceName); any other index fails at Open.
 #ifndef SND_PLATFORM_SRC_LINUX_ALSA_OUTPUT_DEVICE_HPP
 #define SND_PLATFORM_SRC_LINUX_ALSA_OUTPUT_DEVICE_HPP
 

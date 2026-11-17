@@ -52,7 +52,10 @@ struct AudioDriverDesc {
   // when its generation changes). Usually the same object as the device.
   const PlatformOutputDevice* workgroupSource = nullptr;
   bool realtimeThread = true;          // ThreadPriority::Realtime with fallback
-  std::uint32_t prefillTimeoutMs = 2000;  // Start fails if the first prefill takes longer
+  // Start fails if the first prefill takes longer. It still waits for the
+  // render call in progress to return (the render function is never
+  // abandoned mid-block); no further block is rendered after the timeout.
+  std::uint32_t prefillTimeoutMs = 2000;
 };
 
 struct AudioDriverStats {
@@ -94,6 +97,8 @@ class AudioDriver {
   DriverCore core_;
   AudioDriverDesc desc_{};
   IOutputDevice* device_ = nullptr;
+  std::uint32_t deviceRate_ = 0;    // at Start (thread time constraint)
+  std::uint32_t devicePeriod_ = 0;
   Thread thread_;
   Semaphore wake_{0};
   Semaphore ready_{0};

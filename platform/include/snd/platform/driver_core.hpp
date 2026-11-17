@@ -26,12 +26,18 @@
 //     reported to the renderer as RenderInfo::lostFrames of the next block
 //     so the shared clock advances by them (music and game time stay
 //     aligned, 2.2).
+//     The fade-in keeps its position across callbacks (always fadeFrames
+//     long). An underrun that starts exactly at a callback boundary cannot
+//     fade the previous output (already played): that click is accepted
+//     (no extra latency for an abnormal case).
 //   - Format change: `channels` in the callback is authoritative. When it
 //     differs from the ring's format the callback outputs silence (counted
 //     as lost frames) and asks the writer for the new count; the writer
 //     acknowledges with the ring position where the new format starts and
 //     calls FormatFn before rendering in it; the reader drops everything
-//     before that position. A sample-rate change (CHANGED event) is passed to
+//     before that position (those frames are added to the next block's
+//     RenderInfo::lostFrames, counted as DriverStats::droppedFrames). The
+//     reader asks again when the answer does not match the device any more. A sample-rate change (CHANGED event) is passed to
 //     FormatFn the same way without dropping audio. The renderer always gets
 //     the device's rate and channel count; resampling to an internal rate
 //     and up/down-mixing are the caller's (core's final stage, 2.2, 2.6).
@@ -130,6 +136,9 @@ class DriverCore {
   void OnDeviceChanged(std::uint32_t sampleRate, std::uint32_t periodFrames) noexcept;
   // Audio thread. Returns the number of blocks rendered.
   std::uint32_t Service(bool prefill) noexcept;
+  // Any thread. The running (and every later) Service returns before its next
+  // block; the block being rendered finishes. Cleared by Init.
+  void CancelService() noexcept { cancel_.store(true, std::memory_order_release); }
 
   // Any thread.
   DriverStats Stats() const noexcept;
@@ -157,6 +166,7 @@ class DriverCore {
   std::atomic<std::uint64_t> ack_{0};
   std::atomic<std::uint32_t> devicePeriod_{0};
   std::atomic<std::uint32_t> maxFramesSeen_{0};
+  std::atomic<bool> cancel_{false};
   std::atomic<std::uint64_t> floor_{0};  // write index of the last channel change
   // Configuration read by Stats() from any thread (atomic: Init may run concurrently).
   std::atomic<std::uint64_t> capSamples_{0};

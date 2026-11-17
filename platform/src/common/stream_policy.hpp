@@ -57,7 +57,8 @@ struct WasapiPlan {
 // Requested 0 = the mix format's value. Shared mode keeps the mix format when
 // the request matches it (lowest latency, IAudioClient3 if present) and lets
 // WASAPI convert rate and channels otherwise; the callback always sees the
-// requested format.
+// requested format. With channels 0 a mix format wider than SND_MAX_CHANNELS
+// is limited to SND_MAX_CHANNELS (and therefore converted).
 WasapiPlan PlanWasapiStream(std::uint32_t requestedRate, std::uint32_t requestedChannels, bool exclusive,
                             bool haveClient3, std::uint32_t mixRate, std::uint32_t mixChannels) noexcept;
 

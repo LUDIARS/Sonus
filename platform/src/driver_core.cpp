@@ -96,6 +96,7 @@ bool DriverCore::Init(IAllocator& allocator, const DriverCoreDesc& desc, std::ui
   lastCallbackNs_ = 0;
   pendingLost_.store(0, std::memory_order_relaxed);
   floor_.store(0, std::memory_order_relaxed);
+  cancel_.store(false, std::memory_order_relaxed);
   for (auto* c : {&callbacks_, &consumed_, &underruns_, &lostTotal_, &blocks_, &formatChanges_, &intervalMin_,
                   &intervalMax_, &intervalAvg_, &renderLast_, &renderMax_, &renderAvg_, &droppedTotal_}) {
     c->store(0, std::memory_order_relaxed);
@@ -205,7 +206,7 @@ std::uint32_t DriverCore::Service(bool prefill) noexcept {
   const std::uint32_t limit = prefill ? target / block + 1u : perPeriod + desc_.catchupBlocks;
   const std::uint64_t blockSamples = static_cast<std::uint64_t>(block) * ch;
   std::uint32_t n = 0;
-  while (n < limit) {
+  while (n < limit && !cancel_.load(std::memory_order_acquire)) {
     const std::uint64_t queued = QueuedSamples();
     if (queued / ch >= target) break;
     if (ring_.Capacity() - ring_.QueuedForWriter() < blockSamples) break;  // physical space

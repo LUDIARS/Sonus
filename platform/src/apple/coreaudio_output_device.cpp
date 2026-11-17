@@ -121,8 +121,11 @@ void CoreAudioOutputDevice::RefreshWorkgroup() noexcept {
     return;
   }
   if (workgroupCount_ == kMaxRetiredWorkgroups) {
-    os_release(static_cast<os_workgroup_t>(wg));  // keep the last one published
-    return;
+    // Full: release the oldest (threads that joined it hold their own
+    // reference, workgroup.hpp) and keep the new one.
+    os_release(static_cast<os_workgroup_t>(workgroups_[0]));
+    for (std::uint32_t i = 1; i < workgroupCount_; ++i) workgroups_[i - 1u] = workgroups_[i];
+    --workgroupCount_;
   }
   workgroups_[workgroupCount_++] = wg;
   Workgroup g;
@@ -198,7 +201,8 @@ bool CoreAudioOutputDevice::BuildUnit() noexcept {
 }
 
 bool CoreAudioOutputDevice::Reconfigure(std::uint32_t channels) noexcept {
-  const bool wasRunning = running_.load(std::memory_order_relaxed);
+  // Leaves the unit stopped: the caller posts CHANGED first and restarts
+  // afterwards, so CHANGED precedes the first callback in the new format (D-62).
   StopUnit();
   unit_.Uninitialize();
   if (unit_.SetClientFormat(rate_.load(std::memory_order_relaxed), channels) != noErr || unit_.Initialize() != noErr) {
@@ -206,8 +210,26 @@ bool CoreAudioOutputDevice::Reconfigure(std::uint32_t channels) noexcept {
   }
   clientChannels_ = channels;
   channels_.store(channels, std::memory_order_relaxed);
-  if (wasRunning) StartUnit();
   return true;
+}
+
+void CoreAudioOutputDevice::ApplyChannelsAndAnnounce(std::uint32_t channels) noexcept {
+  // channels == 0: the client layout is kept. Otherwise switch it; a failed
+  // switch is reported as LOST (never silent output without an event).
+  const bool restart = wantRunning_ && running_.load(std::memory_order_relaxed);
+  if (channels != 0u && channels != clientChannels_) {
+    if (!Reconfigure(channels)) {
+      lost_ = true;
+      PostEvent(DeviceEventKind::Lost, 0, 0, 0);
+      return;
+    }
+    RefreshRoute();
+    PostEvent(DeviceEventKind::Changed, Channels(), SampleRate(), PeriodFrames());
+    if (restart) StartUnit();
+    return;
+  }
+  RefreshRoute();
+  PostEvent(DeviceEventKind::Changed, Channels(), SampleRate(), PeriodFrames());
 }
 
 bool CoreAudioOutputDevice::Open(const DeviceDesc& desc, DeviceCallback cb, void* user) {
@@ -222,9 +244,10 @@ bool CoreAudioOutputDevice::Open(const DeviceDesc& desc, DeviceCallback cb, void
   lost_ = false;
   followDefault_ = optionName_.Empty() && desc.device_index == 0u;
 #if TARGET_OS_IPHONE
-  if (!followDefault_ && !(optionName_.Get() != nullptr && std::strcmp(optionName_.Get(), "default") == 0) &&
-      desc.device_index != 1u) {
-    return false;  // iOS has one output (the session route)
+  // iOS cannot choose the route (AVAudioSession does): only the default
+  // (deviceName unset or "default", device_index 0) opens.
+  if (desc.device_index != 0u || (!optionName_.Empty() && std::strcmp(optionName_.Get(), "default") != 0)) {
+    return false;
   }
   followDefault_ = true;
   if (manageSession_) {
@@ -268,6 +291,17 @@ bool CoreAudioOutputDevice::Start() {
   base::LockGuard g(control_);
   if (!open_) return false;
   wantRunning_ = true;
+#if TARGET_OS_IPHONE
+  if (interrupted_) {
+    // The app asks to resume after an interruption that did not say ShouldResume.
+    if (manageSession_ && !session_.Reactivate()) return false;
+    interrupted_ = false;
+    unit_.Stop();  // the system stopped it; reset our flag
+    if (!StartUnit()) return false;
+    PostEvent(DeviceEventKind::Resumed, Channels(), SampleRate(), PeriodFrames());
+    return true;
+  }
+#endif
   if (lost_ || running_.load(std::memory_order_relaxed)) return true;  // a lost device starts when back
   if (!StartUnit()) {
     wantRunning_ = false;
@@ -353,28 +387,47 @@ void CoreAudioOutputDevice::ProcessEvents() noexcept {
     }
     return;
   }
-  if ((bits & kIosInterruptBegan) != 0u) {
-    running_.store(false, std::memory_order_seq_cst);  // the system stopped the unit
-    PostEvent(DeviceEventKind::Suspended, 0, 0, 0);
-  }
-  if ((bits & kIosInterruptEnded) != 0u) {
-    if (manageSession_) session_.Reactivate();
-    unit_.Stop();  // reset our started flag; the unit was stopped by the system
-    if (wantRunning_) StartUnit();
-    PostEvent(DeviceEventKind::Resumed, Channels(), SampleRate(), PeriodFrames());
+  // Began and ended may be coalesced: follow the last one.
+  const bool anyInterrupt = (bits & (kIosInterruptBegan | kIosInterruptEnded)) != 0u;
+  if (anyInterrupt) {
+    const bool began = (bits & kIosInterruptEnded) == 0u ||
+                       ((bits & kIosInterruptBegan) != 0u && session_.LastInterruptionBegan());
+    if (began || !interrupted_) {
+      if (!interrupted_) {
+        running_.store(false, std::memory_order_seq_cst);  // the system stopped the unit
+        interrupted_ = true;
+        PostEvent(DeviceEventKind::Suspended, 0, 0, 0);
+      }
+    }
+    if (!began && session_.LastInterruptionShouldResume()) {
+      // Ended with ShouldResume: reactivate and continue. Without it the
+      // device stays SUSPENDED until the app calls Start() again.
+      if (!manageSession_ || session_.Reactivate()) {
+        interrupted_ = false;
+        unit_.Stop();  // reset our started flag; the unit was stopped by the system
+        if (wantRunning_) StartUnit();
+        PostEvent(DeviceEventKind::Resumed, Channels(), SampleRate(), PeriodFrames());
+      }
+    }
   }
   if ((bits & kIosRouteChanged) != 0u) {
     const IosSessionInfo s = session_.Query();
-    if (request_.channels == 0u && s.outputChannels != 0u && s.outputChannels != clientChannels_) {
-      Reconfigure(s.outputChannels <= SND_MAX_CHANNELS ? s.outputChannels : SND_MAX_CHANNELS);
+    std::uint32_t want = 0;
+    if (request_.channels == 0u && s.outputChannels != 0u) {
+      want = s.outputChannels <= SND_MAX_CHANNELS ? s.outputChannels : SND_MAX_CHANNELS;
     }
-    RefreshRoute();
-    const bool differs = Channels() != oldChannels || SampleRate() != oldRate || PeriodFrames() != oldPeriod;
-    const std::uint32_t ev = RouteChangeEvent(session_.LastRouteReason(), differs);
-    if (ev == SND_DEVICE_EVENT_LOST) {
-      PostEvent(DeviceEventKind::Lost, 0, 0, 0);
-    } else if (ev == SND_DEVICE_EVENT_CHANGED) {
-      PostEvent(DeviceEventKind::Changed, Channels(), SampleRate(), PeriodFrames());
+    const std::uint32_t reason = session_.LastRouteReason();
+    if (want != 0u && want != clientChannels_) {
+      ApplyChannelsAndAnnounce(want);  // CHANGED (or LOST) before the unit restarts
+    } else {
+      RefreshRoute();
+      const bool differs = Channels() != oldChannels || SampleRate() != oldRate || PeriodFrames() != oldPeriod;
+      const std::uint32_t ev = RouteChangeEvent(reason, differs);
+      if (ev == SND_DEVICE_EVENT_LOST) {
+        PostEvent(DeviceEventKind::Lost, 0, 0, 0);
+      } else if (ev == SND_DEVICE_EVENT_CHANGED) {
+        PostEvent(DeviceEventKind::Changed, Channels(), SampleRate(), PeriodFrames());
+      }
     }
   }
 #else
@@ -383,14 +436,13 @@ void CoreAudioOutputDevice::ProcessEvents() noexcept {
     // DefaultOutput already moved to the new device; adopt its format.
     const AudioObjectID dev = unit_.CurrentDevice();
     MacDeviceInfo info;
-    if (dev != 0 && MacQueryDevice(dev, &info) && request_.channels == 0u && info.outputChannels != 0u &&
-        info.outputChannels != clientChannels_) {
-      Reconfigure(info.outputChannels <= SND_MAX_CHANNELS ? info.outputChannels : SND_MAX_CHANNELS);
+    std::uint32_t want = 0;
+    if (dev != 0 && MacQueryDevice(dev, &info) && request_.channels == 0u && info.outputChannels != 0u) {
+      want = info.outputChannels <= SND_MAX_CHANNELS ? info.outputChannels : SND_MAX_CHANNELS;
     }
-    RefreshRoute();
     lost_ = false;
     statReopens_.fetch_add(1, std::memory_order_relaxed);
-    PostEvent(DeviceEventKind::Changed, Channels(), SampleRate(), PeriodFrames());
+    ApplyChannelsAndAnnounce(want);  // CHANGED before the restart; LOST if the switch fails
   }
   if ((bits & kMacDeviceDied) != 0u && !followDefault_) {
     MacDeviceInfo info;
