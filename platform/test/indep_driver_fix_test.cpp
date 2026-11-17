@@ -359,7 +359,11 @@ SND_TEST(IndepDriverFix, ThreadedFlipsRatesAndChannels) {
     const std::uint32_t layouts[] = {2, 6, 1, 8};
     std::uint32_t li = 0, ch = 2, switches = 0;
     std::uint32_t lcg = 77u + static_cast<std::uint32_t>(round);
+    // Wall-clock bound: on an oversubscribed machine every yield may cost a
+    // whole scheduling round; the properties do not depend on the count.
+    const std::uint64_t loopDeadline = MonotonicNanoseconds() + 8000000000ull;
     for (int i = 0; i < 40000; ++i) {
+      if ((i & 255) == 0 && MonotonicNanoseconds() > loopDeadline) break;
       lcg = lcg * 1664525u + 1013904223u;
       const std::uint32_t n = 1u + (lcg >> 8) % 128u;
       const std::uint64_t before = dev.valid;

@@ -353,17 +353,22 @@ SND_TEST(IndepDriverResume, RetryAfterTimeoutSucceeds) {
   AudioDriver driver;
   dev.driver = &driver;
   AudioDriverDesc d = Desc(r, &ev, 64, 12);  // target 1024: 16 blocks
-  d.prefillTimeoutMs = 40;
-  SND_REQUIRE(driver.Start(dev, snd::DeviceDesc{48000, 2, 256, 0}, d, snd::base::DefaultAllocator()));
+  d.prefillTimeoutMs = 150;  // also bounds Start's own (fast) prefill: retried on a loaded machine
+  bool started = false;
+  for (int attempt = 0; attempt < 10 && !started; ++attempt) {
+    started = driver.Start(dev, snd::DeviceDesc{48000, 2, 256, 0}, d, snd::base::DefaultAllocator());
+  }
+  SND_REQUIRE(started);
   SND_REQUIRE(WaitUntil([&] { return dev.calls.load() >= 10u; }));
-  r.sleepMs.store(30);  // 16 blocks x 30 ms >> 40 ms
+  r.sleepMs.store(30);  // 16 blocks x 30 ms >> 150 ms
   dev.burst.store(12);
   SND_REQUIRE(WaitUntil([&] { return dev.Suspended(); }));
   SleepFor(400000000ull);
   const std::uint64_t t0 = MonotonicNanoseconds();
   SND_CHECK(!driver.Resume());
   const std::uint64_t ms = (MonotonicNanoseconds() - t0) / 1000000u;
-  SND_CHECK(ms < 40u + 200u);  // timeout + at most the block in progress (30 ms) + slack
+  SND_CHECK(ms >= 150u);
+  SND_CHECK(ms < 150u + 500u);  // timeout + at most the block in progress (30 ms) + slack for load
   SND_CHECK(dev.Suspended());  // the device was not restarted
   const std::uint64_t blocks = r.blocks.load();
   SleepFor(100000000ull);

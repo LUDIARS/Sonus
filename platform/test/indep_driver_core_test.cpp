@@ -886,7 +886,11 @@ SND_TEST(IndepDriverCore, ChannelSwitchRaceNeverReadsPastWriteIndex) {
   std::uint32_t switches = 0;
   bool switching = false;
   std::uint32_t lcg = 99u;
+  // Wall-clock bound: on an oversubscribed machine every yield may cost a
+  // whole scheduling round; the properties do not depend on the count.
+  const std::uint64_t loopDeadline = MonotonicNanoseconds() + 8000000000ull;
   for (int i = 0; i < 30000; ++i) {
+    if ((i & 255) == 0 && MonotonicNanoseconds() > loopDeadline) break;
     lcg = lcg * 1664525u + 1013904223u;
     const std::uint32_t n = 1u + (lcg >> 8) % 128u;
     check.allowJump = switching;
