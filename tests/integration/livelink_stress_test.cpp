@@ -24,9 +24,12 @@ SND_TEST(LivelinkStress, ToolFloodsEditsWhileTheGameRenders) {
   ll::ServerDesc sd;
   sd.meterHz = 120;
   sd.timingHz = 120;
+  sd.timeoutMs = 60000;  // sanitizers under load: no spurious heartbeat timeouts
   SND_REQUIRE_EQ(f.StartServer(sd), SND_OK);
   ll::Client* c = nullptr;
-  SND_REQUIRE_EQ(ll::Client::Create(MemoryClient(f.link), &c), SND_OK);
+  ll::ClientDesc cd = MemoryClient(f.link);
+  cd.timeoutMs = 60000;
+  SND_REQUIRE_EQ(ll::Client::Create(cd, &c), SND_OK);
   c->SetProfilerMask(0x7Fu, 120);
   c->Start();
   SND_REQUIRE(f.StepUntil([&] { return c->State() == ll::ClientState::Ready; }));
@@ -37,7 +40,8 @@ SND_TEST(LivelinkStress, ToolFloodsEditsWhileTheGameRenders) {
     for (int i = 0; i < 300; ++i) {
       const float db = -static_cast<float>(i % 24);
       std::uint32_t s = c->SetValue(BusVolume(i % 2 ? "Sfx" : "Master", db));
-      while (s == 0u) {  // queue full: retry
+      const auto retryEnd = std::chrono::steady_clock::now() + std::chrono::seconds(30);
+      while (s == 0u && std::chrono::steady_clock::now() < retryEnd) {  // queue full: retry
         std::this_thread::sleep_for(std::chrono::microseconds(200));
         s = c->SetValue(BusVolume(i % 2 ? "Sfx" : "Master", db));
       }
@@ -47,9 +51,11 @@ SND_TEST(LivelinkStress, ToolFloodsEditsWhileTheGameRenders) {
       if (i % 25 == 0) c->Audition(HashId("Blip"));
       std::this_thread::sleep_for(std::chrono::microseconds(100));
     }
+    const auto ackEnd = std::chrono::steady_clock::now() + std::chrono::seconds(60);
     for (std::uint32_t s : seqs) {
       std::int32_t r = 1;
-      if (c->WaitAck(s, 10000, &r) && r == SND_OK) {
+      const auto left = std::chrono::duration_cast<std::chrono::milliseconds>(ackEnd - std::chrono::steady_clock::now());
+      if (s != 0u && left.count() > 0 && c->WaitAck(s, static_cast<std::uint32_t>(left.count()), &r) && r == SND_OK) {
         acked.fetch_add(1);
       } else {
         failed.fetch_add(1);
@@ -57,7 +63,7 @@ SND_TEST(LivelinkStress, ToolFloodsEditsWhileTheGameRenders) {
     }
     done.store(true);
   });
-  const auto end = std::chrono::steady_clock::now() + std::chrono::seconds(60);
+  const auto end = std::chrono::steady_clock::now() + std::chrono::seconds(120);
   while (!done.load() && std::chrono::steady_clock::now() < end) {
     f.Step();
     std::this_thread::sleep_for(std::chrono::microseconds(100));

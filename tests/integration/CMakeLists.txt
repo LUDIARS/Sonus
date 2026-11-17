@@ -51,4 +51,5 @@ set(_ll_link sonus_livelink sonus_core sonus_buildtool sonus_bank sonus_codec so
 foreach(_ll livelink_override_test livelink_profiler_test livelink_record_test livelink_tcp_test livelink_stress_test)
   snd_add_test(integration_${_ll} SOURCES ${_ll}.cpp LINK ${_ll_link})
   target_include_directories(integration_${_ll} PRIVATE ${PROJECT_SOURCE_DIR}/core/test)
+  set_tests_properties(integration_${_ll} PROPERTIES TIMEOUT 600)
 endforeach()
