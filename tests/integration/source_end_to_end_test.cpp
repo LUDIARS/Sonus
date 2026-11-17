@@ -21,6 +21,7 @@
 #include "snd/io/stream_pool.hpp"
 #include "snd/jobs/worker_pool.hpp"
 #include "snd/mocks/memory_file_system.hpp"
+#include "snd/source/runtime.hpp"
 #include "snd/test/test.hpp"
 
 namespace bt = snd::buildtool;
@@ -96,6 +97,7 @@ SND_TEST(SourceEndToEnd, ResidentCompressedAndStreamThroughCore) {
   snd_config_init(&cfg);
   cfg.jobs.realtime_workers = 2;
   cfg.max_streams = 4;
+  cfg.tuning.lod_down_blocks = 0;  // no load LOD (CONTRACTS.md 4): a busy machine must not virtualise voices
   snd::io::StreamPool streamPool;
   SND_REQUIRE(streamPool.Init(alloc, cfg.memory.stream_pool_bytes, cfg.memory.stream_chunk_bytes, cfg.max_streams));
   snd::io::IoScheduler io;
@@ -116,14 +118,24 @@ SND_TEST(SourceEndToEnd, ResidentCompressedAndStreamThroughCore) {
   snd::core::System* sys = nullptr;
   SND_REQUIRE_EQ(snd::core::System::Create(d, &sys), SND_OK);
   std::vector<float> out(256 * 2), all;
+  const snd::source::Runtime& runtime = *static_cast<const snd::source::Runtime*>(kinds.BankUser());
   auto step = [&] {
     sys->Update();
     sys->RenderBlock(out.data());
     all.insert(all.end(), out.begin(), out.end());
-    // About real time (a block is 5.3 ms), so that the IO thread and the decode
-    // workers keep up even on a loaded machine (TSan): the analytic checks below
-    // assume no stream underrun.
-    std::this_thread::sleep_for(std::chrono::milliseconds(4));
+    // The decode jobs posted for this block (per-voice rings, stream PCM) and
+    // the stream reads finish before the next block, whatever the machine's load
+    // (TSan): the analytic checks measure the data that arrived, not the
+    // scheduling (checked: no ring ran dry, no stream stalled).
+    workers.WaitIdle(2000000000ull);
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    const std::uint64_t e0 = io.DrainEpoch();
+    for (;;) {  // two drains of the IO thread after this block's posts, nothing queued or in flight
+      const snd::io::IoStats is = io.Stats();
+      if ((io.DrainEpoch() >= e0 + 2u && is.pending == 0u && is.inFlight == 0u) || std::chrono::steady_clock::now() > deadline) break;
+      io.Wake();
+      std::this_thread::sleep_for(std::chrono::microseconds(200));
+    }
   };
   const snd_bank_handle bank = sys->LoadBankAsync("Main.sndb");
   const auto until = std::chrono::steady_clock::now() + std::chrono::seconds(20);
@@ -134,6 +146,11 @@ SND_TEST(SourceEndToEnd, ResidentCompressedAndStreamThroughCore) {
   const snd_playback_handle adp = sys->Play(HashId("Adp"), snd_emitter_handle{0}, nullptr);
   const snd_playback_handle bgm = sys->Play(HashId("Bgm"), snd_emitter_handle{0}, nullptr);
   for (int i = 0; i < 120; ++i) step();
+  {  // what the levels below assume: no ring ran dry, no stream stalled
+    const snd::source::RuntimeStats rs = runtime.Stats();
+    SND_CHECK_EQ(rs.sampleUnderruns, 0u);
+    SND_CHECK_EQ(rs.streamStalls, 0u);
+  }
   // Mono voices on the stereo master: x 0.7071. The 8 kHz lowpass passes 1 kHz (-0.07 dB).
   const double k = 0.70710678;
   SND_CHECK_NEAR(Level(all, 4096, 16384, 440.0), 0.4 * k, 0.01);
@@ -143,6 +160,11 @@ SND_TEST(SourceEndToEnd, ResidentCompressedAndStreamThroughCore) {
   SND_CHECK_EQ(sys->GetPlaybackState(bgm), SND_PLAYBACK_STATE_PLAYING);
   // The 1 s effects end; the 2 s stream loop keeps playing through its loop point (4 s).
   for (int i = 0; i < 280; ++i) step();
+  {
+    const snd::source::RuntimeStats rs = runtime.Stats();
+    SND_CHECK_EQ(rs.sampleUnderruns, 0u);
+    SND_CHECK_EQ(rs.streamStalls, 0u);
+  }
   sys->Update();
   SND_CHECK_EQ(sys->GetPlaybackState(fx), SND_PLAYBACK_STATE_NONE);
   SND_CHECK_EQ(sys->GetPlaybackState(adp), SND_PLAYBACK_STATE_NONE);

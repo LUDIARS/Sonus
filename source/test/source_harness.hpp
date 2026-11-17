@@ -139,6 +139,7 @@ struct Options {
   std::uint64_t pcmCacheBytes = 4u << 20;
   std::uint32_t pcmPageBytes = 64u << 10;
   snd::IAllocator* allocator = nullptr;
+  bool loadLod = false;  // the load LOD (wall-clock budget, 2.4): off unless a test is about it
 };
 
 struct EndRec {
@@ -180,6 +181,7 @@ class Rig {
     cfg.jobs.realtime_workers = o.rtWorkers;
     cfg.max_voice_channels = o.maxVoiceChannels;
     cfg.max_real_voices = 160;
+    if (!o.loadLod) cfg.tuning.lod_down_blocks = 0;  // a busy machine must not virtualise voices
     cfg.max_virtual_voices = 256;
     snd::core::CoreDesc d;
     d.config = &cfg;

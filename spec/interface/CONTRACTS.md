@@ -187,6 +187,7 @@ minor（追加のみ）として扱ってよいもの: 新しい関数、列挙�
 - モックの差し替え点: C++ API では `Config.output.device = &nullDevice`, `Config.jobs.external = &jobs`, `Create(cfg, alloc, &memFs, &sys)`。
   C API では `snd::ToC(...)` で関数表にして渡す。
 - 枠組みとモックの API（ヘッダ）を変えるときは 2 節の手順に従う。実装の修正と機能の追加は tests 担当の判断でよい。
+- 負荷 LOD（2.4）は仕様どおり壁時計で判断する。テストは LOD そのものを試すもの以外 `Config.tuning.lod_down_blocks = 0` で LOD を切る（混んだ機械でボイスが仮想化されて結果が変わらないように）。
 
 ## 5. 設計書の矛盾・不足（段階0で見つけたもの）
 

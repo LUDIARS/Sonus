@@ -172,7 +172,7 @@ SND_TEST(SourceParallel, LoadStreams32Samples128) {
     SND_CHECK(r.ends.empty());  // nothing refused
     snd_stats cs{};
     r.sys->GetStats(&cs);
-    std::printf("[ LOAD ] playbacks %u, real %u, virtual %u (load LOD), streams %u\n", cs.playbacks, cs.real_voices,
+    std::printf("[ LOAD ] playbacks %u, real %u, virtual %u, streams %u\n", cs.playbacks, cs.real_voices,
                 cs.virtual_voices, cs.streams);
     SND_CHECK_EQ(cs.playbacks, 160u);
     SND_CHECK_EQ(cs.streams, 32u);
@@ -181,7 +181,7 @@ SND_TEST(SourceParallel, LoadStreams32Samples128) {
                 s.sampleUnderruns, s.jobsPosted, s.ioPosted);
     SND_CHECK_EQ(s.streamStalls, 0u);
 #if defined(NDEBUG)
-    SND_CHECK_EQ(voices, 160u);  // no load LOD in an optimised build
+    SND_CHECK_EQ(voices, 160u);  // every voice real (the load LOD is off in the rig)
     if (cpu >= 0.0) {
       SND_CHECK(cpu < 0.30 * budgetNs);  // CPU time of the audio thread and the RT workers
     } else if (MachineCalm()) {

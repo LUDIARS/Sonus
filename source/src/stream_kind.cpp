@@ -446,6 +446,14 @@ void StreamKind::SetupPlanner(StreamInst& s) noexcept {
   s.planner.Reset(base, base + s.dataBytes, lb, le, chunkBytes_);
   s.planner.Seek(base + s.ioStart);
   s.lastReadEnd = base + s.ioStart;
+  if (le == 0u && s.skipToWrap != 0u && (s.preActive != 0u || s.wrapSkip != 0u)) {
+    // The decoder took its last wrap inside the preload before this plan (the
+    // header came late): it reads the preload to its end and the reads planned
+    // now follow on from there (ioStart = preload end), with no wrapped read to
+    // wait for and nothing the preload already gave.
+    s.skipToWrap = 0;
+    s.wrapSkip = 0;
+  }
   s.wrapsPosted = s.dec.decLoops;  // wraps counted like the decoder's loops
   s.plannerSet = 1;
   s.planEnded = 0;

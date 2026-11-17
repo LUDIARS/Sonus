@@ -197,3 +197,83 @@ SND_TEST(SourceStreamLoop, InfiniteShortLoopStopsTheIoAndASeekLeavesIt) {
                 v.out[0].size() - b4, rest.size());
   SND_CHECK_EQ(v.ended, 1u);
 }
+
+// Loops inside the preload, across its end and after it (and without a
+// preload), every start (before, at, inside, past the loop end: wrapped into
+// it), loop counts 2, 3 and infinite, with the stream file answering at once
+// or held for a few blocks (the header comes after the decoder took its wraps
+// in the preload). Exact frames, no stall, the voice ends after the last pass.
+SND_TEST(SourceStreamLoop, PreloadLoopsStartsAndCounts) {
+  struct L {
+    const char* name;
+    const char* codec;
+    std::uint64_t lb, le;
+    bool preload;
+  };
+  const std::vector<L> loops = {
+      {"a", "PC16", 0, 700, true},       {"b", "PC16", 5000, 5003, true},    {"c", "PC16", 9000, 12000, true},
+      {"d", "PC16", 20000, 20700, true}, {"e", "ADPC", 0, 1500, true},       {"f", "ADPC", 4000, 4001, true},
+      {"g", "PC16", 0, 700, false},      {"h", "PC16", 20000, 22000, false}, {"i", "PC16", 3000, 40000, true},
+  };
+  std::vector<AssetSpec> as;
+  std::vector<std::string> extras;
+  for (const L& l : loops) {
+    char buf[128];
+    std::snprintf(buf, sizeof buf, "\"loop\": {\"start\": %llu, \"end\": %llu}%s", static_cast<unsigned long long>(l.lb),
+                  static_cast<unsigned long long>(l.le), l.preload ? "" : ", \"preloadMs\": 0");
+    extras.emplace_back(buf);
+  }
+  for (std::size_t i = 0; i < loops.size(); ++i) as.push_back(Spec(loops[i].name, 40000, loops[i].codec, extras[i].c_str()));
+  Built b = Build("sloopp", as);
+  SND_REQUIRE_MSG(b.ok, "%s", b.diag.c_str());
+  std::uint32_t runs = 0;
+  for (const L& l : loops) {
+    const Decoded ref = Reference(b, l.name);
+    SND_REQUIRE(ref.ok);
+    std::string path;
+    for (const auto& f : b.files) {
+      if (f.first.find(std::string("/") + l.name + "_") != std::string::npos) path = f.first;
+    }
+    SND_REQUIRE(!path.empty());
+    const std::uint64_t len = l.le - l.lb;
+    const std::vector<std::uint64_t> starts = {0, l.lb, l.lb + len / 2, l.le - 1, l.le + 37, l.lb >= 1000 ? l.lb - 1000 : 1};
+    for (std::uint64_t start : starts) {
+      if (start >= 40000) continue;
+      for (std::uint32_t count : {2u, 3u, 0u}) {
+        for (int hold : {0, 4}) {
+          IndepDriver d(b, IndepDriver::Opt{});
+          SND_REQUIRE(d.Ok());
+          if (hold != 0) d.fs.Hold(path);
+          IndepDriver::Voice v;
+          const std::uint64_t from = start >= l.le ? l.lb + (start - l.le) % len : start;
+          v.ph.frame = start;
+          v.slot = d.Start(d.Stream(), d.Asset(l.name), start, src::kStartLoop | (count << 16));
+          SND_REQUIRE(v.slot != snd::kInvalidSlot);
+          std::uint64_t end = 0;
+          std::uint32_t done = 0;
+          const std::size_t cap = count == 0u ? 60000u : SIZE_MAX;
+          const std::vector<float> m = Model(ref.ch[0], from, l.lb, l.le, count, cap, &end, &done);
+          const std::size_t blocks = m.size() / 256u + 200u;
+          for (std::size_t i = 0; i < blocks && v.ended == 0u && (v.out.empty() || v.out[0].size() < cap); ++i) {
+            if (hold != 0 && i == static_cast<std::size_t>(hold)) d.fs.Release(path);
+            d.Block(d.Stream(), {&v}, 256);
+          }
+          SND_REQUIRE(!v.out.empty());
+          const std::size_t got = count == 0u && v.out[0].size() > cap ? cap : v.out[0].size();
+          const double e = MaxDiff(v.out[0], 0, m);
+          const std::uint32_t stalls = d.Tables().Stream.col.stallCount[v.slot];
+          ++runs;
+          SND_CHECK_MSG(got == m.size() && e < 1e-6 && stalls == 0u,
+                        "%s loop %llu..%llu start %llu count %u hold %d: %zu of %zu frames, err %g, %u stalls", l.name,
+                        static_cast<unsigned long long>(l.lb), static_cast<unsigned long long>(l.le),
+                        static_cast<unsigned long long>(start), count, hold, got, m.size(), e, stalls);
+          if (count != 0u) {
+            SND_CHECK_EQ(v.ended, 1u);
+            SND_CHECK_EQ(v.ph.loopCount, done);
+          }
+        }
+      }
+    }
+  }
+  std::printf("  %u runs\n", runs);
+}
