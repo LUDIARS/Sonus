@@ -28,6 +28,7 @@ using namespace snd::platform;
 namespace {
 
 constexpr std::uint32_t kFrameMask = 0xFFFFu;
+int* volatile gSink = nullptr;
 
 inline float Encode(std::uint64_t frame, std::uint32_t channels, std::uint32_t c) {
   const std::uint32_t v = ((static_cast<std::uint32_t>(frame & kFrameMask) + 1u) << 7) | ((channels - 1u) << 3) | c;
@@ -74,8 +75,8 @@ struct Recorder {
     if (channels != self->announcedChannels || info->sampleRate != self->announcedRate) ++self->renderBeforeFormat;
     if (self->allocateInRender > 0u) {
       --self->allocateInRender;
-      volatile int* p = new int(3);
-      delete p;
+      gSink = new int(3);  // escapes through a volatile global: not elided in Release
+      delete gSink;
     }
     ++self->blocks;
     self->lostSum += info->lostFrames;
