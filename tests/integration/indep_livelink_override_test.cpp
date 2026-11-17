@@ -356,7 +356,11 @@ SND_TEST(IndepLivelinkAck, SetValueAckComesOnlyAfterTheAudioThreadApplied) {
   const std::uint32_t seq = s.tool->c->SetValue(lltest::BusVolume("Sfx", -6.0f), true);
   SND_REQUIRE(seq != 0u);
   // No block rendered: the server records and flushes, nothing is applied.
-  SND_REQUIRE(s.f.StepUntil([&] { return s.f.server->Stats().commandsRecorded >= 1u; }, 5000, 0) || true);
+  const auto until = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+  while (s.f.server->Stats().commandsRecorded < 1u && std::chrono::steady_clock::now() < until) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
+  SND_REQUIRE_EQ(s.f.server->Stats().commandsRecorded, 1u);
   std::this_thread::sleep_for(std::chrono::milliseconds(150));
   std::int32_t r = 99;
   SND_CHECK(!s.tool->c->TakeAck(seq, &r));
