@@ -874,7 +874,7 @@ void ApplyDeferred(Impl& im) noexcept {
 void ApplyCommands(Impl& im) noexcept {
   im.releasedEmitterCount = 0;
   im.releasedUserBufferCount = 0;
-  im.ev.musicInputCount = 0;
+  // Music inputs are reset after RunMusicLogic consumed them (sys_event.cpp RunMusic).
   ReleaseOwnedRows(im);
   ApplyDeferred(im);
   for (std::uint32_t pi = 0; pi < im.cfg.maxThreads; ++pi) {

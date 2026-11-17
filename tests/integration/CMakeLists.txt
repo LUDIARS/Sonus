@@ -43,3 +43,15 @@ snd_add_test(integration_core_end_to_end_test
   SOURCES core_end_to_end_test.cpp
   LINK sonus_core sonus_buildtool sonus_bank sonus_codec sonus_dsp sonus_io sonus_jobs sonus_platform sonus_base sonus_mocks)
 target_include_directories(integration_core_end_to_end_test PRIVATE ${PROJECT_SOURCE_DIR}/buildtool/test ${PROJECT_SOURCE_DIR}/core/test)
+
+# Stage 4: music through core (buildtool -> bank -> core + music system -> output).
+# Analytic checks: sample-exact segment boundaries, beat clocks, fade shapes,
+# transitions, playlists, stems, stalls, determinism and RT safety.
+set(_music_test_link sonus_music sonus_core sonus_buildtool sonus_bank sonus_codec sonus_dsp sonus_io sonus_jobs
+    sonus_platform sonus_base sonus_mocks)
+function(snd_music_test name)
+  snd_add_test(${name} SOURCES ${name}.cpp LINK ${_music_test_link})
+  target_include_directories(${name} PRIVATE ${PROJECT_SOURCE_DIR}/buildtool/test)
+  set_tests_properties(${name} PROPERTIES TIMEOUT 600)
+endfunction()
+snd_music_test(music_segment_test)

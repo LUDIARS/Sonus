@@ -889,9 +889,16 @@ void ApplyFireEntry(Ctx& c, const music::FireEntry& f) noexcept {
 void RunMusic(Ctx& c) noexcept {
   Impl& im = c.im;
   schema::Tables& t = c.t;
-  if (im.music == nullptr) return;
+  if (im.music == nullptr) {
+    im.ev.musicInputCount = 0;
+    return;
+  }
   music::MusicVoiceRequestList list{im.ev.musicRequests, 0u, im.ev.musicRequestCap};
   im.music->RunMusicLogic(im.musicFrame, t, im.ev.musicInputs, im.ev.musicInputCount, list);
+  // Inputs are consumed here (not at the next ApplyCommands): VoiceEnded inputs that
+  // FlushSourceCalls posts below (a source refused a music voice) reach the music system
+  // in the next block instead of being dropped.
+  im.ev.musicInputCount = 0;
   std::uint32_t nres = 0;
   for (std::uint32_t i = 0; i < list.count && i < list.capacity; ++i) {
     const music::MusicVoiceRequest& rq = list.requests[i];
@@ -901,13 +908,17 @@ void RunMusic(Ctx& c) noexcept {
     switch (rq.op) {
       case music::MusicVoiceOp::StartClip: {
         const BankRecord* br = RegisteredBank(im, rq.clip.bankSlot);
-        if (pd == kNoSlot || br == nullptr || rq.clip.clipIndex >= br->view->Rows(bf::chunk::CLIP)) {
+        // kClipRefAssetTrack: clipIndex names an ASST row (segments / stems), else a CLIP row.
+        const bool assetRow = rq.clip.trackIndex == kClipRefAssetTrack;
+        if (pd == kNoSlot || br == nullptr ||
+            (!assetRow && rq.clip.clipIndex >= br->view->Rows(bf::chunk::CLIP))) {
           res.endDetail = SND_END_DETAIL_BANK_UNLOADED;
           break;
         }
         const bk::BankView& v = *br->view;
-        const std::uint32_t ck = v.Column<bk::col::CLIP_kind>()[rq.clip.clipIndex];
-        const std::uint32_t target = v.Column<bk::col::CLIP_target>()[rq.clip.clipIndex];
+        const std::uint32_t ck =
+            assetRow ? static_cast<std::uint32_t>(bf::ClipKind::Asset) : v.Column<bk::col::CLIP_kind>()[rq.clip.clipIndex];
+        const std::uint32_t target = assetRow ? rq.clip.clipIndex : v.Column<bk::col::CLIP_target>()[rq.clip.clipIndex];
         if (ck != static_cast<std::uint32_t>(bf::ClipKind::Asset) || target >= br->assetCount) {
           res.endDetail = SND_END_DETAIL_WRONG_EVENT_KIND;
           break;
@@ -928,7 +939,8 @@ void RunMusic(Ctx& c) noexcept {
         if (er != nullptr) sc.priority = er->view->Column<bk::col::EVNT_priority>()[sc.ref.eventIndex];
         const SourceKind kind = a.form == source::LoadForm::Stream ? SourceKind::Stream : SourceKind::Sample;
         if (CreateVoice(c, sc, kind, nullptr, &a, a.codec.channels, rq.clip, sc.ref.eventIndex, rq.clip.trackIndex,
-                        rq.startClock, rq.startFrame, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f,
+                        rq.startClock, rq.startFrame, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f,
+                        rq.fadeSeconds > 0.0f ? rq.fadeSeconds : 0.0f,  // StartClip: fade-in
                         a.loopEnd != 0u ? source::kStartLoop : 0u, sc.busSlot, rq.tag, true, rq.syncGroup)) {
           res.voiceSlot = Priv(im, rq.playbackSlot).voiceListHead;
           im.ev.vs[res.voiceSlot].musicGain = rq.gain;
@@ -939,7 +951,7 @@ void RunMusic(Ctx& c) noexcept {
       }
       case music::MusicVoiceOp::StopVoice:
         if (rq.voiceSlot < im.cfg.maxVirtual) {
-          StopVoice(c, rq.voiceSlot, rq.fadeSeconds);
+          StopVoice(c, rq.voiceSlot, rq.fadeSeconds, rq.startClock);  // release from startClock (0 = now)
           res.voiceSlot = rq.voiceSlot;
         }
         break;

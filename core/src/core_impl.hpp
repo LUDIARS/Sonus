@@ -527,7 +527,7 @@ struct TransportPriv {  // core's UpdateTransport when no music system is presen
   std::uint64_t* seenSeq = nullptr;  // [maxReservations] Reservation.sequence initialised
   std::uint32_t* transportGen = nullptr;  // [maxTransports] row generation initialised
 };
-inline constexpr std::uint8_t kFireTransportGone = 0xFEu;  // core-internal FireEntry::lateRuleApplied
+// kFireTransportGone (FireEntry::lateRuleApplied for a destroyed transport): snd/core/core.hpp
 
 struct PublishPriv {
   std::uint32_t* streamStall = nullptr;   // [maxStreams] Stream.stallCount seen

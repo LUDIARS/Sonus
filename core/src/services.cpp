@@ -72,9 +72,12 @@ std::uint32_t MusicPrimeFrames(void* ctx, ClipRef clip, std::uint64_t startFrame
   const BankRecord* r = RegisteredBank(im, clip.bankSlot);
   if (r == nullptr) return 0;
   const bk::BankView& v = *r->view;
-  if (clip.clipIndex >= v.Rows(bf::chunk::CLIP)) return 0;
-  if (v.Column<bk::col::CLIP_kind>()[clip.clipIndex] != static_cast<std::uint32_t>(bf::ClipKind::Asset)) return 0;
-  const std::uint32_t asset = v.Column<bk::col::CLIP_target>()[clip.clipIndex];
+  std::uint32_t asset = clip.clipIndex;  // kClipRefAssetTrack: an ASST row (music segments / stems)
+  if (clip.trackIndex != kClipRefAssetTrack) {
+    if (clip.clipIndex >= v.Rows(bf::chunk::CLIP)) return 0;
+    if (v.Column<bk::col::CLIP_kind>()[clip.clipIndex] != static_cast<std::uint32_t>(bf::ClipKind::Asset)) return 0;
+    asset = v.Column<bk::col::CLIP_target>()[clip.clipIndex];
+  }
   if (asset >= r->assetCount) return 0;
   const source::SourceAsset& a = r->assets[asset];
   const SourceKind k = a.form == source::LoadForm::Stream ? SourceKind::Stream : SourceKind::Sample;
