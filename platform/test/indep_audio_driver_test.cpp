@@ -592,7 +592,7 @@ SND_TEST(IndepAudioDriver, EventsFromAnotherThreadDuringStartStop) {
 // DriverCore (DriverCore::Init assigns desc_ and rebinds the ring with plain
 // stores) while a monitoring thread (profiler, live link) may be reading the
 // statistics. Expected: polling Stats() during Start/Stop cycles is race-free.
-SND_TEST(IndepAudioDriver, Defect_platform_StatsWhileRestartingIsRaceFree) {
+SND_TEST(IndepAudioDriver, StatsWhileRestartingIsRaceFree) {
   ScriptDevice dev;
   dev.paced = false;
   Renderer r;

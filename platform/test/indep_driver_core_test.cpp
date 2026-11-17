@@ -580,7 +580,7 @@ SND_TEST(IndepDriverCore, UnderrunFadeShapesAndLostFrames) {
 // gain goes 0 -> 0.5 -> 1.0. Expected: the ramp continues over the following
 // callbacks until fadeFrames frames have been faded (gain still < 1 at frame
 // fadeFrames / 2).
-SND_TEST(IndepDriverCore, Defect_platform_FadeInTruncatedToCallbackLength) {
+SND_TEST(IndepDriverCore, FadeInSpansShortCallbacks) {
   Recorder r;
   DriverCore core;
   const std::uint32_t fade = 64;
@@ -680,7 +680,7 @@ SND_TEST(IndepDriverCore, ChannelSwitchNeverLeaksOldLayout) {
 // stream while the device is back to stereo, but it does not ask again
 // (requestedChannels_ is already 2), so every following callback is silent
 // forever. Expected: after a few wakes the device plays stereo audio again.
-SND_TEST(IndepDriverCore, Defect_platform_ChannelFlapBeforeServiceLeavesPermanentSilence) {
+SND_TEST(IndepDriverCore, ChannelFlapBeforeServiceRecovers) {
   Recorder r;
   DriverCore core;
   SND_REQUIRE(core.Init(snd::base::DefaultAllocator(), Desc(r, 128, 2, 0, 8, 1), 48000, 2, 256));
@@ -857,7 +857,7 @@ SND_TEST(IndepDriverCore, EntryPointsAreRtSafe) {
 // of the write index. Expected: reload the write index after seeing a new
 // ack (it is then >= AckPos), or clamp. Each round below repeats the scenario
 // to raise the chance of hitting the window.
-SND_TEST(IndepDriverCore, Defect_platform_ChannelSwitchRaceReadsPastWriteIndex) {
+SND_TEST(IndepDriverCore, ChannelSwitchRaceNeverReadsPastWriteIndex) {
  for (int round = 0; round < 3; ++round) {
   Recorder r;
   DriverCore core;
