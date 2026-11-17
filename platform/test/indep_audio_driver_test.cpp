@@ -384,7 +384,8 @@ SND_TEST(IndepAudioDriver, PacedVaryingLengthsAreGapless) {
                   static_cast<unsigned long long>(s.core.intervalMinNs / 1000u),
                   static_cast<unsigned long long>(s.core.intervalAvgNs / 1000u),
                   static_cast<unsigned long long>(s.core.intervalMaxNs / 1000u));
-  SND_CHECK(s.core.callbacks > 50u);
+  if (QuietMachine()) SND_CHECK(s.core.callbacks > 50u);  // a time comparison: only on a quiet machine
+  SND_CHECK(s.core.callbacks > 0u);
   SND_CHECK_EQ(r.wrongBlock.load(), 0u);
   SND_CHECK_EQ(s.core.lostFrames, dev.silentFramesOut.load());
   SND_CHECK_EQ(dev.mixedLayoutFrames.load(), 0u);

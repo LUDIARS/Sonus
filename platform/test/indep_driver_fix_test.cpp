@@ -149,7 +149,7 @@ SND_TEST(IndepDriverFix, ClockStaysAlignedThroughUnderruns) {
 // it ahead by 2 x dropped. Expected (property of 2.2): after the switch the
 // renderer clock is not further from the device time than without the
 // report, i.e. |offset| <= droppedFrames.
-SND_TEST(IndepDriverFix, Defect_platform_DroppedFramesAdvanceTheClockTwice) {
+SND_TEST(IndepDriverFix, DroppedFramesAdvanceTheClockTwice) {
   ClockRenderer r;
   DriverCore core;
   SND_REQUIRE(core.Init(snd::base::DefaultAllocator(), Desc(r, 64, 2), 48000, 2, 128));
@@ -177,10 +177,28 @@ SND_TEST(IndepDriverFix, Defect_platform_DroppedFramesAdvanceTheClockTwice) {
   SND_CHECK(dev.lastOffset <= static_cast<std::int64_t>(s.droppedFrames));
 }
 
-// Accounting of the fix: sum of RenderInfo::lostFrames == lostFrames +
-// droppedFrames (once everything pending has been reported); lostFrames ==
-// silence the device played; droppedFrames == old-layout frames queued at
-// the switch.
+// Offsets (renderer clock - device time) of the valid frames of one callback.
+struct OffsetRange {
+  std::int64_t lo = 0, hi = 0;
+  bool any = false;
+  void Feed(const float* out, std::uint32_t frames, std::uint32_t ch, std::uint64_t timeBefore) {
+    for (std::uint32_t f = 0; f < frames; ++f) {
+      std::uint32_t clk = 0, lch = 0, lc = 0;
+      if (!Dec(out[static_cast<std::size_t>(f) * ch], &clk, &lch, &lc)) continue;
+      const auto d = static_cast<std::int64_t>(
+          static_cast<std::int16_t>(static_cast<std::uint16_t>(clk - static_cast<std::uint32_t>((timeBefore + f) & kMask))));
+      if (!any || d < lo) lo = d;
+      if (!any || d > hi) hi = d;
+      any = true;
+    }
+  }
+};
+
+// Accounting under the decision (D-66, revised): RenderInfo::lostFrames carries
+// only the silence the device played (sum == Stats().lostFrames);
+// droppedFrames counts the old-layout frames queued at each switch; the
+// renderer clock minus the device time stays in [0, droppedFrames so far]
+// (0 while only underruns happen).
 SND_TEST(IndepDriverFix, LostAndDroppedAddUp) {
   ClockRenderer r;
   DriverCore core;
@@ -188,9 +206,11 @@ SND_TEST(IndepDriverFix, LostAndDroppedAddUp) {
   core.Service(true);
   std::vector<float> out(512 * 8);
   Device dev;
+  OffsetRange range;
   const std::uint32_t seq[] = {2, 6, 1, 8, 2, 6, 6, 1};
   std::uint64_t droppedExpect = 0;
   std::uint32_t cur = 2;
+  bool rangeOk = true;
   for (std::uint32_t ch : seq) {
     if (ch != cur) {
       // Everything queued in the old layout is dropped at this switch.
@@ -198,22 +218,72 @@ SND_TEST(IndepDriverFix, LostAndDroppedAddUp) {
       cur = ch;
     }
     for (int k = 0; k < 5; ++k) {
+      const std::uint64_t t = dev.time;
       core.OnDeviceCallback(out.data(), 100, ch);
       dev.Feed(out.data(), 100, ch);
+      OffsetRange one;
+      one.Feed(out.data(), 100, ch, t);
+      const std::int64_t allowed = static_cast<std::int64_t>(core.Stats().droppedFrames);
+      if (one.any && (one.lo < 0 || one.hi > allowed)) rangeOk = false;
+      if (one.any) range.Feed(out.data(), 100, ch, t);
       core.Service(false);
     }
   }
-  // Flush the pending report with one exact-fit callback and a render.
+  // Deliver any pending report with one exact-fit callback and a render.
   const std::uint32_t q = core.Stats().queuedFrames;
   core.OnDeviceCallback(out.data(), q, cur);
   dev.Feed(out.data(), q, cur);
   core.Service(false);
   const DriverStats s = core.Stats();
+  snd::test::Note("dropped %llu lost %llu, offset range [%lld, %lld]", static_cast<unsigned long long>(s.droppedFrames),
+                  static_cast<unsigned long long>(s.lostFrames), static_cast<long long>(range.lo),
+                  static_cast<long long>(range.hi));
   SND_CHECK_EQ(dev.badLayout, 0u);
   SND_CHECK_EQ(s.lostFrames, dev.silent);
   SND_CHECK_EQ(s.droppedFrames, droppedExpect);
-  SND_CHECK_EQ(r.lostSum, s.lostFrames + s.droppedFrames);
+  SND_CHECK_EQ(r.lostSum, s.lostFrames);
   SND_CHECK_EQ(s.framesConsumed, dev.time);
+  SND_CHECK(rangeOk);
+}
+
+// Clock offset under many switches mixed with underruns: always within
+// [0, droppedFrames so far]; it only grows at switches (underruns keep it).
+SND_TEST(IndepDriverFix, ClockOffsetBoundedUnderManySwitches) {
+  const std::uint32_t layouts[] = {1, 2, 6, 8};
+  for (int trial = 0; trial < 50; ++trial) {
+    ClockRenderer r;
+    DriverCore core;
+    SND_REQUIRE(core.Init(snd::base::DefaultAllocator(), Desc(r, 32, 2, 256), 48000, 2, 64));
+    core.Service(true);
+    std::vector<float> out(256 * 8);
+    Device dev;
+    std::uint32_t lcg = 500u + static_cast<std::uint32_t>(trial);
+    std::uint32_t ch = 2;
+    bool ok = true;
+    std::int64_t lastHi = 0;
+    for (int i = 0; i < 400; ++i) {
+      lcg = lcg * 1664525u + 1013904223u;
+      if (((lcg >> 12) & 15u) == 0u) ch = layouts[(lcg >> 16) % 4u];
+      const std::uint32_t n = 1u + (lcg >> 4) % 200u;
+      const std::uint64_t t = dev.time;
+      const std::uint64_t droppedBefore = core.Stats().droppedFrames;
+      core.OnDeviceCallback(out.data(), n, ch);
+      dev.Feed(out.data(), n, ch);
+      OffsetRange one;
+      one.Feed(out.data(), n, ch, t);
+      const DriverStats s = core.Stats();
+      if (one.any) {
+        if (one.lo < 0 || one.hi > static_cast<std::int64_t>(s.droppedFrames)) ok = false;
+        // Without a new drop the offset does not grow.
+        if (s.droppedFrames == droppedBefore && lastHi != 0 && one.hi > lastHi) ok = false;
+        lastHi = one.hi;
+      }
+      if (((lcg >> 20) & 3u) != 0u) core.Service(false);
+    }
+    if (!ok || dev.badLayout != 0u) snd::test::Note("trial %d failed (bad %llu)", trial, static_cast<unsigned long long>(dev.badLayout));
+    SND_CHECK(ok);
+    SND_CHECK_EQ(dev.badLayout, 0u);
+  }
 }
 
 // Defect 2 fix under rapid flips: the device layout changes on almost every
