@@ -37,7 +37,21 @@ cmake -S . -B build-tsan -G Ninja -DSND_SANITIZE=thread
 | `SND_SANITIZE` | 空 | `address,undefined` または `thread` |
 | `SND_RT_CHECKS` | テスト時 ON | RT 安全性の検出フック。OFF なら完全に消える |
 | `SND_LIVELINK` | ON | ライブリンクを含める（リリースでは OFF） |
-| `SND_BUILD_TOOL` | OFF | オーサリング GUI（未実装） |
+| `SND_BUILD_TOOL` | OFF | オーサリングツール `sonus-tool`（段階2: ミキサーとプロファイラ）。LUDIARS Tela が要る（下記） |
+
+オーサリングツール（`tool/README.md`）は UI に LUDIARS Tela を使う。Tela は同梱も自動取得もしないので、先にビルドして
+インストールし、`CMAKE_PREFIX_PATH`（または `Tela_DIR`）で渡す。既定の構成（`SND_BUILD_TOOL=OFF`）は Tela を必要としない。
+
+```sh
+cmake -S <tela> -B /tmp/tela-build -G Ninja -DCMAKE_INSTALL_PREFIX=/tmp/tela-prefix
+cmake --build /tmp/tela-build && cmake --install /tmp/tela-build
+cmake -S . -B build-tool -G Ninja -DSND_BUILD_TOOL=ON -DCMAKE_PREFIX_PATH=/tmp/tela-prefix
+cmake --build build-tool && ctest --test-dir build-tool --output-on-failure
+./build-tool/tool/sonus-tool --headless --project <dir> --snapshot mixer.ppm   # Linux（ウィンドウは Windows / macOS）
+```
+
+Windows / macOS のウィンドウには Tela を `TELA_BUILD_WINDOWS` / `TELA_BUILD_MACOS`（Pictor が要る）でビルドし、
+`sonus-tool --font <ttf>` で起動する。
 
 テストの便利な使い方:
 
@@ -57,7 +71,7 @@ contract/            凍結した契約（ヘッダのみ）。誰も直接編�
   test/                    契約の自己検査（ハッシュ、配置、所有者、コンパイル失敗の確認）
 base/ platform/ jobs/ io/ codec/ dsp/ bank/ core/ source/ music/ api/ physics/ livelink/ buildtool/
                      モジュール（設計書 12.1）。各自 include/snd/<module>/, src/, test/ を持つ
-tool/                オーサリング GUI（未着手）
+tool/                オーサリングツール（段階2: ミキサーとプロファイラ、UI は Tela）
 tests/
   framework/         テストランナー、ゴールデン音声比較、RT 安全性の記録とフック
   mocks/             無音出力デバイス、メモリ FS、決定論ジョブシステム

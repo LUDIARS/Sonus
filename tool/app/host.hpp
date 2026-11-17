@@ -5,6 +5,9 @@
 
 #include <cstdint>
 
+#include <tela/pixel_surface.hpp>
+#include <tela/runtime.hpp>
+
 #include "options.hpp"
 #include "snd/tool/ui/app.hpp"
 

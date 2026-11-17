@@ -31,6 +31,7 @@ struct AppDesc {
   bool hostOwnsViewport = false;
   ConnectionDesc connection;          // used by the Connect button
   std::string recordingPath = "sonus-recording.snrec";
+  float insetTop = 0.0f;  // logical pixels left free at the top (macOS: the title bar under Tela's overlay)
 };
 
 class App final : public ControlSink, public Actions {
@@ -44,6 +45,7 @@ class App final : public ControlSink, public Actions {
   void Declare(std::uint64_t nowNs);
   // Headless viewport (physical pixels). Ignored when the host owns the viewport.
   void SetViewport(int width, int height, float dpiScale);
+  void SetInsetTop(float logicalPixels);
   // `forward`: also hand the event to the Tela runtime (headless, tests).
   bool Pointer(const tela::HostPointerEvent& event, std::uint64_t timeMs, bool forward);
 

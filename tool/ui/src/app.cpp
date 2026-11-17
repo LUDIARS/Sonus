@@ -41,6 +41,10 @@ void App::SetViewport(int width, int height, float dpiScale) {
   runtime_.viewport(v);
 }
 
+void App::SetInsetTop(float logicalPixels) {
+  desc_.insetTop = std::isfinite(logicalPixels) ? std::clamp(logicalPixels, 0.0f, 200.0f) : 0.0f;
+}
+
 void App::Frame(std::uint64_t nowNs) {
   session_.Tick(nowNs);
   router_.Tick(runtime_);
@@ -52,7 +56,8 @@ void App::Declare(std::uint64_t nowNs) {
   const tela::Viewport& vp = runtime_.viewport();
   const float scale = vp.dpi_scale > 0.0f ? vp.dpi_scale : 1.0f;
   const float w = std::max(320.0f, static_cast<float>(vp.width) / scale);
-  const float h = std::max(240.0f, static_cast<float>(vp.height) / scale);
+  const float inset = std::isfinite(desc_.insetTop) ? std::clamp(desc_.insetTop, 0.0f, 200.0f) : 0.0f;
+  const float h = std::max(240.0f, static_cast<float>(vp.height) / scale - inset);
   {  // keep the mixer page in range (DeclareMixer's paging)
     const float areaW = std::max(kStripWidth, (w - 12.0f) - kSidePanelWidth - kStripGap);
     const std::uint32_t per = StripsPerPage(areaW);
@@ -64,7 +69,7 @@ void App::Declare(std::uint64_t nowNs) {
   std::vector<ControlBinding> controls;
   ViewContext ctx{session_, palette_, view_, *this, runtime_, controls, nowNs, desc_.recordingPath};
   tela::Document doc;
-  Panel(doc, "root", 0, 0, w, h, [&] {
+  Panel(doc, "root", 0, inset, w, h, [&] {
     Panel(doc, "header", 0, 0, w, kHeaderHeight, [&] { DeclareHeader(doc, ctx, w); });
     const float bodyH = h - kHeaderHeight - kFooterHeight;
     Panel(doc, "body", 0, kHeaderHeight, w, bodyH, [&] {
