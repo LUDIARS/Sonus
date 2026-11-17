@@ -22,7 +22,7 @@ void Work(void* p, const RtChunkContext& c) noexcept {
   ctx->calls[c.chunkIndex].fetch_add(1u, std::memory_order_relaxed);
   ctx->byThread[c.chunkIndex].store(c.threadIndex, std::memory_order_relaxed);
   if (c.chunkIndex == 0u) {  // keep the caller busy so that a worker claims chunk 1
-    const std::uint64_t until = snd::platform::MonotonicNanoseconds() + 2000000u;
+    const std::uint64_t until = snd::platform::MonotonicNanoseconds() + 10000000u;  // 10 ms
     while (snd::platform::MonotonicNanoseconds() < until) {
     }
   }
@@ -40,7 +40,10 @@ SND_TEST(RtClaimSteal, StalledClaimIsRunByTheCaller) {
   RtWorkerPool pool;
   SND_REQUIRE(pool.Init(snd::base::DefaultAllocator(), cfg));
   std::uint32_t stolenRuns = 0;
-  for (int run = 0; run < 10; ++run) {
+  int runs = 0;
+  // On a loaded machine the worker may not wake before the caller took both chunks:
+  // repeat until a run had a stolen chunk (bounded).
+  for (int run = 0; run < 40 && (run < 10 || stolenRuns == 0u); ++run, ++runs) {
     Ctx ctx{};
     RtRunResult r;
     {
@@ -63,7 +66,7 @@ SND_TEST(RtClaimSteal, StalledClaimIsRunByTheCaller) {
     SND_CHECK_EQ(ctx.calls[1].load(), 1u);
   }
   const RtWorkerPool::Stats st = pool.GetStats();
-  snd::test::Note("runs with a stolen chunk: %u / 10, stats.chunksStolen=%llu", stolenRuns,
+  snd::test::Note("runs with a stolen chunk: %u / %d, stats.chunksStolen=%llu", stolenRuns, runs,
                   static_cast<unsigned long long>(st.chunksStolen));
   SND_CHECK(stolenRuns > 0u);
   SND_CHECK_EQ(st.chunksStolen, static_cast<std::uint64_t>(stolenRuns));
