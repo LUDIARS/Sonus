@@ -461,3 +461,30 @@ SND_TEST(IndepCmd, PendingStartCanBeStopped) {
   SND_CHECK(fx.Ended(p.value, SND_END_STOPPED));
   SND_CHECK_EQ(fx.MaxAbs(s, fx.Total()), 0.0f);
 }
+
+// D-21: a musical When without a valid transport acts as IMMEDIATE and posts a
+// TRANSPORT_GONE warning; a Stop at a past clock stops now; P7: the position
+// counts the frames played.
+SND_TEST(IndepCmd, MusicalWhenWithoutTransportPastStopAndPosition) {
+  Fx fx;
+  fx.Load("b", OneEvent("E", 500.0f));
+  snd_when bar{};
+  bar.kind = SND_WHEN_NEXT_BAR;
+  bar.transport = snd_transport_handle{SND_HANDLE_MAKE(3, 9)};  // never issued
+  const snd_playback_handle p = fx.sys->Play(HashId("E"), NoEmitter(), &bar);
+  const std::size_t s = fx.Total();
+  fx.Steps(4);
+  SND_CHECK_NEAR(fx.At(s + 1), kCenter * 0.5f, 1e-5f);
+  bool warned = false;
+  for (const Err& e : fx.errors) warned = warned || e.detail == SND_END_DETAIL_TRANSPORT_GONE;
+  SND_CHECK(warned);
+  fx.sys->Update();
+  snd_position pos{};
+  SND_CHECK_EQ(fx.sys->GetPosition(p, &pos), SND_OK);
+  SND_CHECK_EQ(pos.frames, 4u * 256u);
+  SND_CHECK_NEAR(pos.seconds, 4.0 * 256.0 / 48000.0, 1e-9);
+  const snd_when past = AtClock(1);
+  fx.sys->Stop(p, 0.0f, &past);
+  fx.Steps(4);
+  SND_CHECK(fx.Ended(p.value, SND_END_STOPPED));
+}
