@@ -289,3 +289,32 @@ SND_TEST(IndepFixSample, EightChannelRingsUpToMaxDecoders) {
   std::printf("  pools (maxDecoders 64, maxStreams 32, maxVoiceChannels 8): Sample %.1f MiB, Stream %.1f MiB\n",
               double(d.Sample().PoolBytes(l)) / 1048576.0, double(d.Stream().PoolBytes(l)) / 1048576.0);
 }
+
+// A seek that arrives while the voice's decode job is posted but not finished
+// (a busy prefetch lane): the request waits for the job (the decoder is
+// shared), and the voice renders nothing meanwhile. Decision 1 asks for no hole
+// on data in memory; with a slow job the hole lasts until the job ends.
+SND_TEST(IndepFixSample, Defect_source_SeekWhileTheRingJobIsQueuedLeavesAHole) {
+  Built b = Build("fsl8", {Spec("ra", 96000, "compressed", "ADPC")});
+  SND_REQUIRE_MSG(b.ok, "%s", b.diag.c_str());
+  const Decoded ref = Reference(b, "ra");
+  SND_REQUIRE(ref.ok);
+  IndepDriver::Opt o;
+  o.manualJobs = true;
+  IndepDriver d(b, o);
+  SND_REQUIRE(d.Ok());
+  IndepDriver::Voice v;
+  v.slot = d.Start(d.Sample(), d.Asset("ra"), 0, 0);
+  for (int i = 0; i < 40 && d.queue.empty(); ++i) d.Block(d.Sample(), {&v}, 256);
+  SND_REQUIRE(!d.queue.empty());  // a decode job is posted, not run yet
+  d.Control(d.Sample(), v.slot, src::ControlOp::Seek, 50000);
+  const std::size_t before = v.out[0].size(), b0 = v.blocks.size();
+  d.Block(d.Sample(), {&v}, 256);  // the job is still queued
+  d.RunJobs();
+  for (int i = 0; i < 6; ++i) {
+    d.Block(d.Sample(), {&v}, 256);
+    d.RunJobs();
+  }
+  SND_CHECK_MSG(ShortBlocks(v, b0) == 0u, "%u short blocks (first %u frames)", ShortBlocks(v, b0), v.blocks[b0]);
+  SND_CHECK(MaxDiff(v.out[0], before, Model(ref.ch[0], 50000, 0, 0, 1000)) < 1e-6);
+}
