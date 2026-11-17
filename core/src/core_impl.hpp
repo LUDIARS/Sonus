@@ -363,7 +363,8 @@ struct VoiceStatic {
   float linearGain;          // synth / user buffer volume
   float sourceRate;          // source-rate kinds: frames per second of the source
   float musicGain;           // music SetGain target (1 default)
-  float musicGainStep;       // per block
+  float musicGainStep;       // per block, until musicGainTarget
+  float musicGainTarget;
   float fadeInSeconds;       // clip fade-in
   std::uint32_t nextInPlayback;  // voice list of a playback
   std::uint32_t musicTag;

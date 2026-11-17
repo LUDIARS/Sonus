@@ -394,6 +394,7 @@ bool CreateVoice(Ctx& c, StartContext& sc, SourceKind kind, const void* params, 
   vs.sourceRate = asset != nullptr && asset->codec.sample_rate != 0u ? static_cast<float>(asset->codec.sample_rate)
                                                                    : static_cast<float>(im.cfg.sampleRate);
   vs.musicGain = 1.0f;
+  vs.musicGainTarget = 1.0f;
   vs.fadeInSeconds = fadeInSeconds;
   vs.musicTag = musicTag;
   vs.firstClock = c.clock;
@@ -947,6 +948,7 @@ void RunMusic(Ctx& c) noexcept {
                         a.loopEnd != 0u ? source::kStartLoop : 0u, sc.busSlot, rq.tag, true, rq.syncGroup)) {
           res.voiceSlot = Priv(im, rq.playbackSlot).voiceListHead;
           im.ev.vs[res.voiceSlot].musicGain = rq.gain;
+          im.ev.vs[res.voiceSlot].musicGainTarget = rq.gain;
         } else {
           res.endDetail = sc.failDetail;
         }
@@ -964,7 +966,10 @@ void RunMusic(Ctx& c) noexcept {
         if (rq.voiceSlot < im.cfg.maxVirtual && base::rows::IsLive(t.Voice.rows, rq.voiceSlot)) {
           VoiceStatic& vs = im.ev.vs[rq.voiceSlot];
           const float blocks = rq.fadeSeconds * static_cast<float>(im.cfg.sampleRate) / static_cast<float>(im.cfg.blockFrames);
-          vs.musicGainStep = blocks <= 1.0f ? (rq.gain - vs.musicGain) : (rq.gain - vs.musicGain) / blocks;
+          // Linear per-block ramp to the target over fadeSeconds (EvaluateDspParams turns the
+          // per-block values into per-sample ramps); within one block: the target at once.
+          vs.musicGainTarget = rq.gain;
+          vs.musicGainStep = blocks <= 1.0f ? 0.0f : (rq.gain - vs.musicGain) / blocks;
           if (blocks <= 1.0f) vs.musicGain = rq.gain;
           vs.lowpassHz = vs.lowpassHz;  // unchanged
           res.voiceSlot = rq.voiceSlot;
@@ -1130,8 +1135,13 @@ void RunEventLogic(Impl& im) noexcept {
       if (lc.state == static_cast<std::uint8_t>(VoiceStateId::Starting) && lc.startClock < blockEnd) {
         lc.state = static_cast<std::uint8_t>(VoiceStateId::Playing);
       }
-      if (vs.musicGainStep != 0.0f) {
+      if (vs.musicGainStep != 0.0f) {  // music SetGain ramp: one step per block, ends on the target
         vs.musicGain += vs.musicGainStep;
+        if ((vs.musicGainStep > 0.0f && vs.musicGain >= vs.musicGainTarget) ||
+            (vs.musicGainStep < 0.0f && vs.musicGain <= vs.musicGainTarget)) {
+          vs.musicGain = vs.musicGainTarget;
+          vs.musicGainStep = 0.0f;
+        }
         if (vs.musicGain < 0.0f) vs.musicGain = 0.0f;
       }
       // Pause / resume asked while the voice was held (D-43: no Control then): send the
