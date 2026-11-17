@@ -401,8 +401,13 @@ SND_TEST(IndepLivelinkRecheck, CopyRecordingReportsTruncation) {
       }
       SND_CHECK(rr.Error() == ll::RecordError::None);
     }
-    // A new recording clears the flag.
-    SND_REQUIRE_EQ(t.Ack(t.c->StartRecording(true)), SND_OK);
+    // A new recording clears the flag (LIMIT_REACHED while the previous stop drains).
+    std::int32_t sr = SND_ERR_LIMIT_REACHED;
+    for (int k = 0; k < 200 && sr == SND_ERR_LIMIT_REACHED; ++k) {
+      sr = t.Ack(t.c->StartRecording(true));
+      if (sr == SND_ERR_LIMIT_REACHED) g.f.Steps(2);
+    }
+    SND_REQUIRE_EQ(sr, SND_OK);
     bool tr2 = true;
     t.c->CopyRecording(buf.data(), 0, &tr2);
     SND_CHECK(!tr2);
