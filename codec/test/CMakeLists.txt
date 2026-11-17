@@ -27,3 +27,10 @@ snd_add_test(codec_indep_encode_test SOURCES indep_encode_test.cpp LINK sonus_co
 snd_add_test(codec_indep_pool_test SOURCES indep_pool_registry_test.cpp LINK sonus_codec)
 snd_add_test(codec_indep_fuzz_test SOURCES indep_fuzz_test.cpp LINK sonus_codec)
 set_tests_properties(codec_indep_decode_test codec_indep_encode_test codec_indep_fuzz_test PROPERTIES TIMEOUT 900)
+
+# Independent Opus tests (written from bank-format.md §6.5 / D-56..D-60 and the RFCs).
+foreach(_t layout decode robust)
+  snd_add_test(codec_indep_opus_${_t}_test SOURCES indep_opus_${_t}_test.cpp LINK sonus_codec)
+  target_compile_definitions(codec_indep_opus_${_t}_test PRIVATE SND_INDEP_OPUS_EXPECTED=$<BOOL:${SND_CODEC_OPUS}>)
+  set_tests_properties(codec_indep_opus_${_t}_test PROPERTIES TIMEOUT 900)
+endforeach()
