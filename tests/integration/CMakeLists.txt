@@ -45,3 +45,11 @@ snd_add_test(integration_opus_pipeline_test
   LINK sonus_buildtool sonus_bank sonus_codec sonus_dsp sonus_io sonus_jobs sonus_platform sonus_base sonus_mocks)
 target_include_directories(integration_opus_pipeline_test PRIVATE ${PROJECT_SOURCE_DIR}/buildtool/test)
 set_tests_properties(integration_opus_pipeline_test PROPERTIES TIMEOUT 600)
+
+# Independent Opus tests: build tool output read with a reader written from
+# bank-format.md (§2-§6.5), Opus settings of project-format.md.
+snd_add_test(integration_indep_opus_bank_test
+  SOURCES indep_opus_bank_test.cpp
+  LINK sonus_buildtool sonus_bank sonus_codec sonus_dsp sonus_io sonus_jobs sonus_platform sonus_base sonus_mocks)
+target_include_directories(integration_indep_opus_bank_test PRIVATE ${PROJECT_SOURCE_DIR}/buildtool/test ${PROJECT_SOURCE_DIR}/codec/test)
+set_tests_properties(integration_indep_opus_bank_test PROPERTIES TIMEOUT 600)
