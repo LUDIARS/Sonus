@@ -279,7 +279,7 @@ struct Server::Impl final : FrameReader::Handler {
       commandsRefused.Add();
       return SND_ERR_LIMIT_REACHED;
     }
-    if (track && !sessionAnnounced) {  // results are matched by session (a new Server on the same runtime)
+    if (!sessionAnnounced) {  // before any command, so that every edit carries the session  // results are matched by session (a new Server on the same runtime)
       cmd::LiveSetValue m{};
       m.field = kFieldSession;
       m.value = session;

@@ -308,3 +308,77 @@ SND_TEST(LivelinkOverride, CommandsBeforeTheHandshakeCloseTheConnection) {
   SND_CHECK(f.StepUntil([&] { q.Pump(1); return q.closed; }));
   SND_CHECK(f.server->Stats().protocolErrors >= 2u);
 }
+
+// D-80: a Server destroyed with edits accepted but not applied; the next Server's tool
+// edits the same bus before any block runs. Whatever order the two producers' arenas
+// are applied in, the old session's edits are dropped (counted) and the new value wins.
+SND_TEST(LivelinkOverride, OldSessionEditsNeverOverwriteTheNewServersValues) {
+  Fixture f;
+  f.Load(DevBank());
+  f.sys->Play(HashId("Tone"), snd_emitter_handle{0}, nullptr);
+  f.Steps(16);
+  const float base = f.LastLeft();
+  SND_REQUIRE(f.link.Init(snd::base::DefaultAllocator(), 1u << 20));
+  auto newServer = [&] {
+    ll::ServerDesc sd;
+    sd.system = f.sys;
+    sd.runtime = f.rt;
+    sd.allocator = &snd::base::DefaultAllocator();
+    sd.acceptor = &f.link.acceptor();
+    ll::Server* s = nullptr;
+    if (ll::Server::Create(sd, &s) != SND_OK || s->Start() != SND_OK) {
+      ll::Server::Destroy(s);
+      return static_cast<ll::Server*>(nullptr);
+    }
+    return s;
+  };
+  auto readyWithoutRendering = [&](ll::Client* c, ll::Server* s) {
+    const auto until = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    while (!(c->State() == ll::ClientState::Ready && s->Connected()) && std::chrono::steady_clock::now() < until) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    return s->Connected();
+  };
+  auto waitRecorded = [&](ll::Server* s, std::uint32_t n) {
+    const auto until = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    while (s->Stats().commandsRecorded < n && std::chrono::steady_clock::now() < until) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(30));  // published by the server's Flush
+    return s->Stats().commandsRecorded >= n;
+  };
+  const ll::RuntimeDrops before = f.rt->Drops();
+  // Old Server: two edits accepted, never applied while it lives.
+  ll::Server* a = newServer();
+  SND_REQUIRE(a != nullptr);
+  ll::Client* ca = nullptr;
+  SND_REQUIRE_EQ(ll::Client::Create(MemoryClient(f.link), &ca), SND_OK);
+  ca->Start();
+  SND_REQUIRE(readyWithoutRendering(ca, a));
+  SND_REQUIRE(ca->SetValue(BusVolume("Sfx", -20.0f), true) != 0u);
+  SND_REQUIRE(ca->OverrideParam(HashId("Knob"), 0.9f, true, false) != 0u);
+  SND_REQUIRE(waitRecorded(a, 2u));
+  ll::Server::Destroy(a);
+  ll::Client::Destroy(ca);
+  // New Server: its own edit of the same bus, still before any block.
+  ll::Server* b = newServer();
+  SND_REQUIRE(b != nullptr);
+  ll::Client* cb = nullptr;
+  SND_REQUIRE_EQ(ll::Client::Create(MemoryClient(f.link), &cb), SND_OK);
+  cb->Start();
+  SND_REQUIRE(readyWithoutRendering(cb, b));
+  const std::uint32_t seq = cb->SetValue(BusVolume("Sfx", -6.0f), true);
+  SND_REQUIRE(seq != 0u);
+  SND_REQUIRE(waitRecorded(b, 1u));
+  std::int32_t r = 1;
+  SND_CHECK(f.StepUntil([&] { return cb->TakeAck(seq, &r); }));
+  SND_CHECK_EQ(r, SND_OK);
+  f.Steps(8);
+  SND_CHECK_NEAR(f.LastLeft() / base, std::pow(10.0, -6.0 / 20.0), 1e-4);
+  const ll::RuntimeDrops after = f.rt->Drops();
+  SND_CHECK_EQ(after.staleEdits - before.staleEdits, 2u);  // the old SetValue and OverrideParam
+  SND_CHECK_EQ(b->Stats().staleResults, 1u);               // the old SetValue's result, dropped
+  SND_CHECK_EQ(f.rt->applier().Remembered(), 1u);          // only the new edit's cell
+  ll::Client::Destroy(cb);
+  ll::Server::Destroy(b);
+}

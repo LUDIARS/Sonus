@@ -84,6 +84,7 @@ struct RecordEnd {
 
 struct RuntimeDrops {
   std::uint32_t log = 0, timing = 0, stalls = 0, lod = 0, results = 0, records = 0;
+  std::uint32_t staleEdits = 0;  // edits of an earlier Server's session, not applied (D-80)
 };
 
 // Snapshots published through TripleSlots (live link thread reads them).
@@ -117,7 +118,13 @@ class LiveRuntime {
   void RequestRecording(bool on) noexcept { recordRequest_.store(on ? 1u : 0u, std::memory_order_release); }
   bool Recording() const noexcept { return recording_.load(std::memory_order_acquire) != 0u; }
   // A new session number for a Server (never 0, never reused while the runtime lives).
-  std::uint32_t NewSession() noexcept { return nextSession_.fetch_add(1u, std::memory_order_relaxed); }
+  // The newest session is the only one whose edits are applied: edits recorded by an
+  // earlier Server and applied after a newer Server started are dropped (D-80).
+  std::uint32_t NewSession() noexcept {
+    const std::uint32_t s = nextSession_.fetch_add(1u, std::memory_order_relaxed);
+    latestSession_.store(s, std::memory_order_release);
+    return s;
+  }
 
   // --- channels (consumer: the live link thread) ---------------------------------------
   base::SpscRing<LogEntry>& log() noexcept { return log_; }
@@ -187,6 +194,9 @@ class LiveRuntime {
   std::atomic<std::uint32_t> recordRequest_{0};
   std::atomic<std::uint32_t> recording_{0};
   std::atomic<std::uint32_t> nextSession_{1};
+  std::atomic<std::uint32_t> latestSession_{0};
+  std::atomic<std::uint32_t> dropStale_{0};
+  bool StaleProducer() const noexcept;  // audio thread: the arena being applied is of an older session
   std::uint32_t* producerSession_ = nullptr;  // [max_registered_threads] audio thread: last marker per producer
   std::uint32_t producerCount_ = 0;
   std::uint32_t currentProducer_ = 0xFFFFFFFFu;  // producer of the arena being applied

@@ -693,6 +693,7 @@ void ApplyOne(Impl& im, const cmd::CommandHeader& h, const std::uint8_t* p) noex
       if (im.desc.liveCommand != nullptr) im.desc.liveCommand(im.desc.liveUser, static_cast<CT>(h.type), p);
       break;
     case CT::LiveOverride: {
+      if (im.desc.liveTap.admit != nullptr && !im.desc.liveTap.admit(im.desc.liveTap.user, CT::LiveOverride)) break;
       const auto c = Load<cmd::LiveOverride>(p);
       ApplyPriv& ap = im.ap;
       std::uint32_t at = kNoSlot;
@@ -720,6 +721,7 @@ void ApplyOne(Impl& im, const cmd::CommandHeader& h, const std::uint8_t* p) noex
       break;
     }
     case CT::LiveClearOverrides:
+      if (im.desc.liveTap.admit != nullptr && !im.desc.liveTap.admit(im.desc.liveTap.user, CT::LiveClearOverrides)) break;
       for (std::uint32_t i = 0; i < im.ap.overrideCount; ++i) im.ap.overrides[i].used = 0u;
       im.ap.overrideCount = 0;
       break;

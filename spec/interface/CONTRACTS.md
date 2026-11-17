@@ -149,6 +149,16 @@ minor（追加のみ）として扱ってよいもの: 新しい関数、列挙�
 | D-54 | DSP インスタンスプールの予約量はランタイムが決める: `BankManager` は読み込み時（検証ジョブ、通常ワーカー）に、実際の Config（`sampleRate`、`blockSize`、バスのチャンネル数）でバンクの EFFX / EFPV / EFBL からエフェクト記述を作り、`dsp::ComputeDspPoolNeed` を計算し直して予約する（bank は dsp に依存できないので、計算は `BankManagerDesc::dsp.compute` で構成ルートが渡す）。バスのチャンネル数は自分 → 親の順に 0 でない値、根まで 0 なら「出力（マスター）のチャンネル数」（`BankManagerDesc::outputChannels`、既定 2）。バンクの `DSPN` は照合用の目安で、ランタイムの値と違っても失敗にしない（`PreparedBank::builtDspNeed` に残す）。バンク形式は変えない | ビルド時の値はランタイムの Config を知らない。プラグインの状態サイズもランタイムでしか分からない |
 | D-55 | `snd::WhenKind::ClockSample` を `AtClockSample` に改名した（内部ヘッダの `snd::ClockSample` 型と同じ名前で、公開ヘッダと内部ヘッダを同じ翻訳単位で読むと `-Wshadow` で失敗した）。公開と内部を同時に読む翻訳単位がコンパイルできることを `contract_test` が確かめる | 段階2の api は両方を読む |
 
+### 段階2 livelink での決定
+
+| # | 決定 | 理由 |
+| --- | --- | --- |
+| D-76 | ライブリンクの結果はセッションで照合する。Server は最初のコマンドより前に印（`LiveSetValue{objectId 0, field 0xFFFFFFFE, value = セッション番号}`、livelink 内部の約束）を記録し、`LiveRuntime` は producer ごとに最新の印を覚えて適用結果に付ける。Server は自分のセッション以外の結果を捨てて数える（`ServerStats::staleResults`）。戻しの印は `field 0xFFFFFFFF` | 同じ `LiveRuntime` で Server を作り直すと、前の Server の未適用のコマンドの結果が新しい Server の Ack に結び付いた。`LiveSetValue` に空きの欄が無いので、印のコマンドで区切る |
+| D-77 | 再生（Replayer）が core に渡すコマンドは、規則の表（`livelink/command_check.hpp` の `kCommandRules`）で検査する。表は種別ごとに「API の入口の規則」（いまの `recorder.cpp` と完全に同じ。API が受けるものは通し、弾くものは弾く）と「記録側が書く値の決まり」（ハンドルの形、scope と target、0/1、フラグ、0 以上に揃えたフェード）の 2 つを持つ。api 段で C API の入口もこの表を使う | 記録は外部入力。API と再生の規則が食い違うと、API で受けたものが再生で消える、またはその逆になる |
+| D-78 | core は API が受ける極端な値で落ちない・UB にならない: bpm は 1e-3〜1e5、pitch は 0〜16（非有限は 1）、1 ブロックで通知する拍は 256 まで、予約の待ちは 4e18 サンプルで頭打ち（NaN は 0）、フェード・時間は NaN を既定値、上限 1 日、音量は 0〜1000（+60 dB）、スナップショットの重みは 0〜1。契約 1.2 で API の入口を締める（範囲は段階2 livelink の報告） | API が受ける値（巨大な bpm や音量、+Inf のフェード）で無限ループや非有限の出力、整数変換の UB が出た |
+| D-79 | ライブリンクの応答と背圧: 各 seq にちょうど 1 回答える。適用された結果の Ack は seq 順、受け付け時の拒否の Ack はそれより前の適用待ちより先に届くことがある。受信は適用待ちの結果と応答の送信待ちの空きの分だけ行い、コマンドバッファの空きは見ない（`SND_ERR_COMMAND_BUFFER_FULL` の再送はツールの責任）。切断は心拍のタイムアウトか、ツールが送信をまったく読まないときだけ（livelink-protocol.md §5 の末尾） | Ack を大量に求めると送信待ちがあふれ、読んでいるツールを切断していた |
+| D-80 | 古いセッションの編集は適用しない: `LiveRuntime` は最新のセッション番号を知っており、それより古いセッションのアリーナにある編集（`LiveSetValue`、`LiveReplaceChunk`、`LiveOverride`、`LiveClearOverrides`）を適用せず捨てて数える（`RuntimeDrops::staleEdits`、ReplaceChunk の枠は解放）。core は `LiveTap::admit` で `LiveOverride` / `LiveClearOverrides` の適用前に問い合わせる | 前の Server が Destroy の時点で公開しきれなかったアリーナが新しい Server の後に適用され、新しいツールの値を古い値で上書きしえた |
+
 ### `Config` の項目（13.2 と本文の上限・「仮」の値）
 
 | 項目 | 既定 | 出典 |
@@ -251,3 +261,4 @@ bank / buildtool:
 | 1.0 | 2026-11-15 | 段階0で凍結 |
 | 1.0（バンク形式 2.0） | 2026-11-15 | バンク形式 2.0: headerChecksum をヘッダ全体に、予約バイト 0 を検証、`ALIS` チャンク、行の並びの規則、`loopEnd`/`SEEK`/ストリームファイル/エンディアン/`fileBytes` の明文化（bank-format.md §7） |
 | 1.1 | 2026-11-15 | 段階1の持ち越し A1-1〜A1-10 を反映（D-43〜D-55）: 遅れたチャンクの規則と `Voice.renderHold`、`RealVoice.resamplerState` の廃止と `Config.maxVoiceChannels` / `maxPitchRatio`、Stream を Direct 表に、`snd_effect_desc.sample_rate`、依存表の buildtool に dsp、bank-format.md の追記（形式 2.0 のまま）、`SND_ERR_BANK_ALREADY_LOADED` と `snd_declare_language`（コマンド `DeclareLanguage`）、`decode` の約束、ハンドルの払い出し、RT スレッドのスタック、`notify.hpp` の注記、`CCodec` の既定構築、検証規則の共有ヘッダ `bank_check.hpp`（D-53）、DSP プールの予約をランタイムで計算（D-54）、`WhenKind::AtClockSample`（D-55）、RealVoice を Direct 表にして playhead / renderStatus を RealVoice に（D-43）、Bank を D-46 の対象から外す。列の削除と Stream の索引方式の変更は厳密には追加ではないが、段階0以降にそれらを使う実装が無く、契約も未公開なので minor として扱った（受け入れ側の決定） |
+| 1.1（段階2 livelink） | 2026-11-17 | D-76〜D-80 を追加（契約ヘッダは変えない。core への追加: `CoreDesc::liveTap`、`LiveTap::admit`、`System::Live*`。livelink-protocol.md に応答・背圧・セッションの段落を追加。ライブリンクの版は 1.0 のまま） |

@@ -19,6 +19,7 @@ P Load(const void* p) noexcept {
 }
 
 LiveRuntime* Self(void* u) noexcept { return static_cast<LiveRuntime*>(u); }
+inline void Bump(std::atomic<std::uint32_t>& c) noexcept { c.fetch_add(1u, std::memory_order_relaxed); }
 
 }  // namespace
 
@@ -115,6 +116,12 @@ void LiveRuntime::Install(core::CoreDesc* d) noexcept {
     Self(u)->OnStall(s, ev, n, b);
   };
   d->liveTap.block = [](void* u, core::System& sys) noexcept { Self(u)->OnBlock(sys); };
+  d->liveTap.admit = [](void* u, cmd::CommandType) noexcept {
+    LiveRuntime* rt = Self(u);
+    if (!rt->StaleProducer()) return true;
+    Bump(rt->dropStale_);
+    return false;
+  };
 }
 
 void LiveRuntime::SetProfiler(std::uint32_t mask, std::uint32_t meterHz) noexcept {
@@ -159,15 +166,13 @@ RuntimeDrops LiveRuntime::Drops() const noexcept {
   d.lod = dropLod_.load(std::memory_order_relaxed);
   d.results = dropResults_.load(std::memory_order_relaxed);
   d.records = dropRecords_.load(std::memory_order_relaxed);
+  d.staleEdits = dropStale_.load(std::memory_order_relaxed);
   return d;
 }
 
 // ---------------------------------------------------------------------------
 // Audio thread
 // ---------------------------------------------------------------------------
-namespace {
-inline void Bump(std::atomic<std::uint32_t>& c) noexcept { c.fetch_add(1u, std::memory_order_relaxed); }
-}  // namespace
 
 void LiveRuntime::PushLog(std::uint32_t kind, std::uint32_t id, std::uint32_t handleSlot, std::uint32_t detail) noexcept {
   if (!log_.TryPush(LogEntry{clock_, kind, id, handleSlot, detail})) Bump(dropLog_);
@@ -180,6 +185,12 @@ void LiveRuntime::PushRecord(const void* rec, std::uint32_t bytes) noexcept {
   }
 }
 
+bool LiveRuntime::StaleProducer() const noexcept {
+  if (currentProducer_ >= producerCount_) return false;
+  const std::uint32_t s = producerSession_[currentProducer_];
+  return s != 0u && s < latestSession_.load(std::memory_order_acquire);
+}
+
 void LiveRuntime::OnCommand(core::System& sys, cmd::CommandType type, const void* payload) noexcept {
   const bool known = currentProducer_ < producerCount_;
   ApplyResult r{static_cast<std::uint32_t>(type), SND_OK, 0u, 0u, known ? producerSession_[currentProducer_] : 0u, 0u};
@@ -187,6 +198,12 @@ void LiveRuntime::OnCommand(core::System& sys, cmd::CommandType type, const void
     const auto c = Load<cmd::LiveSetValue>(payload);
     if (c.field == kFieldSession && c.objectId == 0u) {  // the commands that follow belong to this session
       if (known) producerSession_[currentProducer_] = static_cast<std::uint32_t>(c.value);
+      return;
+    }
+    if (StaleProducer()) {  // D-80: an earlier Server's edit is not applied (its result is dropped there)
+      Bump(dropStale_);
+      r.result = SND_ERR_INVALID_HANDLE;
+      if (!results_.TryPush(r)) Bump(dropResults_);
       return;
     }
     const ApplyOutcome o = applier_.SetValue(sys, c);
@@ -200,7 +217,11 @@ void LiveRuntime::OnCommand(core::System& sys, cmd::CommandType type, const void
     bool ours = false;
     for (std::uint32_t i = 0; i < chunkCount_ && !ours; ++i) ours = p == &chunks_[i];
     const std::uint32_t st = ours ? p->state.load(std::memory_order_acquire) : PendingChunk::kFree;
-    if (st == PendingChunk::kCancelled) {
+    if (ours && StaleProducer() && (st == PendingChunk::kQueued || st == PendingChunk::kCancelled)) {
+      Bump(dropStale_);  // D-80: not applied; the slot goes back to the pool
+      p->state.store(PendingChunk::kFree, std::memory_order_release);
+      r.result = SND_ERR_INVALID_HANDLE;
+    } else if (st == PendingChunk::kCancelled) {
       p->state.store(PendingChunk::kFree, std::memory_order_release);  // its Server is gone
       r.result = SND_ERR_INVALID_HANDLE;
     } else if (st != PendingChunk::kQueued) {
