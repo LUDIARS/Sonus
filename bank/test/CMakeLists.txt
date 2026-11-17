@@ -130,3 +130,8 @@ set_tests_properties(bank_indep_slotorder11_test PROPERTIES TIMEOUT 1200)
 # Fails on purpose: with two copies of a dependency (same bankId, other hash), the slot order decides.
 snd_add_test(Defect_bank_dependency_hash_copy_test SOURCES defect_bank_dependency_hash_copy_test.cpp fixture_bank.cpp
   LINK sonus_bank sonus_io sonus_mocks)
+# Copies waiting (UNLOADING / earlier outcome) mixed with really missing dependencies, real threads (2743264). TSan x20.
+snd_add_test(bank_indep_mixed11_thread_test SOURCES indep_bank_mixed11_thread_test.cpp fixture_bank.cpp
+  LINK sonus_bank sonus_io sonus_jobs sonus_mocks)
+target_link_libraries(bank_indep_mixed11_thread_test PRIVATE Threads::Threads)
+set_tests_properties(bank_indep_mixed11_thread_test PROPERTIES TIMEOUT 600)
