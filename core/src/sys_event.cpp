@@ -287,14 +287,25 @@ SlotIndex StealVictim(Ctx& c, std::uint32_t group, std::uint32_t newPriority) no
 // Releases a voice: its level fades linearly from `at` (0 = this block's start) over
 // fadeSeconds (short fade when 0) and is silent from lifecycle.stopClock on. Render
 // applies the release per sample (sample-accurate timed stops, C12).
-void StopVoice(Ctx& c, SlotIndex v, float fadeSeconds, ClockSample at = 0) noexcept {
+void StopVoice(Ctx& c, SlotIndex v, float fadeSeconds, ClockSample at = 0, bool shorten = false) noexcept {
   Impl& im = c.im;
   schema::Tables& t = c.t;
   const std::uint32_t d = base::rows::DenseOf(t.Voice.rows, v);
   if (d == kNoSlot) return;
   VoiceLifecycle& lc = SND_W(Voice_lifecycle)[d];
-  if (lc.state == static_cast<std::uint8_t>(VoiceStateId::Releasing) ||
-      lc.state == static_cast<std::uint8_t>(VoiceStateId::Ending)) {
+  if (lc.state == static_cast<std::uint8_t>(VoiceStateId::Ending)) return;
+  if (lc.state == static_cast<std::uint8_t>(VoiceStateId::Releasing)) {
+    // Already releasing: only a shorter end (the unload discard) changes it, and the
+    // envelope continues from its current level down to 0 within fadeSeconds.
+    const float sr = static_cast<float>(im.cfg.sampleRate);
+    const ClockSample newStop = c.clock + static_cast<ClockSample>(fadeSeconds * sr + 0.5f);
+    if (!shorten || !(fadeSeconds > 0.0f) || newStop >= lc.stopClock) return;
+    const float relFrames = lc.releaseSeconds * sr;
+    float level = relFrames > 0.0f ? static_cast<float>(lc.stopClock - c.clock) / relFrames : 0.0f;
+    level = level > 1.0f ? 1.0f : level;
+    if (level <= 0.0f) return;
+    lc.releaseSeconds = fadeSeconds / level;
+    lc.stopClock = newStop;
     return;
   }
   lc.state = static_cast<std::uint8_t>(VoiceStateId::Releasing);
@@ -710,8 +721,9 @@ bool StartPlayback(Ctx& c, std::uint32_t d, ClockSample startClock) noexcept {
 }
 
 // Stops a playback. at == 0: the playback fade (per block). at != 0 (Stop / SetScheduledStop
-// with a When): every voice fades from the sample `at` (sample accurate), and the playback
-// ends once its voices are gone.
+// with a When) and the unload discard: every voice fades from the sample `at` (the block
+// start for a discard; sample accurate), and the playback ends once its voices are gone.
+// A paused playback takes the at == 0 path (it does not sound again).
 void BeginStop(Ctx& c, std::uint32_t d, float fadeSeconds, bool discard, ClockSample at = 0) noexcept {
   Impl& im = c.im;
   schema::Tables& t = c.t;
@@ -724,12 +736,18 @@ void BeginStop(Ctx& c, std::uint32_t d, float fadeSeconds, bool discard, ClockSa
     fadeSeconds = br != nullptr ? br->view->Column<bk::col::EVNT_fadeOutMs>()[ref.eventIndex] * 0.001f : 0.0f;
   }
   if (discard) fadeSeconds = im.cfg.shortFadeSeconds;
+  // A paused (or pausing) playback does not sound again for a timed stop (or a
+  // discard): it stops like an untimed Stop sent while paused (from the current level).
+  const bool paused = (pp.flags & (kPbPausedUser | kPbPausedCategory | kPbPausedState)) != 0u;
+  if (paused) at = 0u;
   pp.flags |= kPbStopping;
-  if (at != 0u && !discard) {
+  // Timed stops, and the unload discard (D-15: exactly shortFadeMs from this block,
+  // per sample), release every voice; the playback ends once they are gone.
+  if (!paused && (at != 0u || discard)) {
     pp.flags |= kPbTimedStop;
     for (SlotIndex v = pp.voiceListHead, guard = 0; v != kNoSlot && guard < im.cfg.maxVirtual; ++guard) {
       const SlotIndex next = im.ev.vs[v].nextInPlayback;
-      StopVoice(c, v, fadeSeconds, at);
+      StopVoice(c, v, fadeSeconds, at, discard);
       v = next;
     }
   } else {
@@ -1225,8 +1243,10 @@ void RunEventLogic(Impl& im) noexcept {
     const bool wantPause = (pp.flags & (kPbPausedUser | kPbPausedCategory)) != 0u && (pp.flags & kPbStopping) == 0u;
     // Fade (stop / pause / resume): logic.fadeGain = value at the end of this block.
     const bool fadeStop = (pp.flags & kPbStopping) != 0u && (pp.flags & kPbTimedStop) == 0u;
-    const float target = fadeStop ? 0.0f : (wantPause ? 0.0f : 1.0f);
     const float g0 = lg.fadeGain;
+    // A playback stopping by voice releases keeps its level (the releases fade it).
+    const bool timedStop = (pp.flags & kPbStopping) != 0u && (pp.flags & kPbTimedStop) != 0u;
+    const float target = fadeStop ? 0.0f : (timedStop ? g0 : (wantPause ? 0.0f : 1.0f));
     float g1 = g0;
     if ((pp.flags & kPbPausedState) != 0u && !wantPause) {  // resume from Paused
       pp.flags &= ~kPbPausedState;

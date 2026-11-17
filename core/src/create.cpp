@@ -418,6 +418,10 @@ snd_result CreateImpl(Impl& im) noexcept {
   rd.tail = Arr<float>(im, std::size_t{g.realTotal} * kMaxChannels, MemTag::Tables);
   rd.tailBus = Arr<std::uint32_t>(im, g.realTotal, MemTag::Tables);
   rd.tailChannels = Arr<std::uint32_t>(im, g.realTotal, MemTag::Tables);
+  rd.tailFadeLeft = Arr<std::uint32_t>(im, g.realTotal, MemTag::Tables);
+  rd.tailFade = Arr<float>(im, std::size_t{g.realTotal} * kMaxChannels, MemTag::Tables);
+  rd.tailFadeBus = Arr<std::uint32_t>(im, g.realTotal, MemTag::Tables);
+  rd.tailFadeChannels = Arr<std::uint32_t>(im, g.realTotal, MemTag::Tables);
   rd.busBuf = Arr<float>(im, std::size_t{g.busCap} * kMaxChannels * g.blockFrames, MemTag::Tables);
   rd.busOrder = Arr<std::uint32_t>(im, g.busCap, MemTag::Tables);
   rd.peak = Arr<dsp::PeakMeterState>(im, g.busCap, MemTag::Tables);
@@ -445,7 +449,8 @@ snd_result CreateImpl(Impl& im) noexcept {
   if (rd.voiceGen == nullptr) return SND_ERR_OUT_OF_BUDGET;
   im.fifo = Arr<float>(im, std::size_t{g.blockFrames} * g.outChannels, MemTag::Tables);
   if (rd.resamplerPool == nullptr || rd.lastAssign == nullptr || rd.stateChannels == nullptr || rd.fade == nullptr ||
-      rd.tail == nullptr || rd.tailBus == nullptr || rd.tailChannels == nullptr || rd.busBuf == nullptr ||
+      rd.tail == nullptr || rd.tailBus == nullptr || rd.tailChannels == nullptr || rd.tailFadeLeft == nullptr || rd.tailFade == nullptr || rd.tailFadeBus == nullptr ||
+      rd.tailFadeChannels == nullptr || rd.busBuf == nullptr ||
       rd.busOrder == nullptr || rd.peak == nullptr || rd.rms == nullptr || rd.loudness == nullptr ||
       rd.outBuf == nullptr || im.pub.transportGen == nullptr || im.pub.playbackGen == nullptr ||
       im.fifo == nullptr || !InitRenderSet(im, rd.sets[0]) || !InitRenderSet(im, rd.sets[1])) {

@@ -85,7 +85,11 @@ struct ArenaView {
 struct Producer {
   // 0 free, 1 owned by a registered thread, 2 retiring: unregistered with an arena
   // that could not be published yet; Update publishes it, then frees the producer.
+  // 3: Update is publishing a retiring producer (back to 0 or 2 right after).
   std::atomic<std::uint32_t> active{0};
+  // The thread that unregistered last (ThreadToken()); 0 while owned. A thread that
+  // registers again takes the same producer back (its arena continues, order kept).
+  std::atomic<std::uintptr_t> lastThread{0};
   base::ArenaCycle cycle;
   ArenaView* arenas = nullptr;  // [arenasPerThread]
   std::uint32_t seq = 0;        // producer private
@@ -451,7 +455,9 @@ struct ItemInput {
   std::uint32_t releaseActive;  // the voice releases: per-sample envelope below
   std::int64_t releaseStop;     // lifecycle.stopClock - block clock (frames, may be past the block)
   float releaseFrames;          // release length in frames
-  std::uint32_t reserved;
+  std::uint32_t fadeActive;     // the assignment fade (D-15) moves this block: per-sample below
+  float fade0;                  // assignment fade gain at the block start
+  float fadeDelta;              // change per frame (+ fade in, - steal fade out), clamped to [0, 1]
   PanMatrix pan;             // target matrix (unscaled) at block end
   // Outputs (chunk writes):
   float tail[kMaxChannels];  // last output frame per bus channel (late-chunk fade, D-15)
@@ -494,6 +500,10 @@ struct RenderPriv {
   float* tail = nullptr;                  // [realTotal * kMaxChannels] last output (D-15 fade of held voices)
   std::uint32_t* tailBus = nullptr;       // [realTotal]
   std::uint32_t* tailChannels = nullptr;
+  std::uint32_t* tailFadeLeft = nullptr;  // [realTotal] frames left of the D-15 tail fade (may span blocks)
+  float* tailFade = nullptr;              // [realTotal * kMaxChannels] the faded values (tail at the hold)
+  std::uint32_t* tailFadeBus = nullptr;   // [realTotal]
+  std::uint32_t* tailFadeChannels = nullptr;
   std::uint32_t* busGen = nullptr;        // [busCap] generation of the bus row seen (new rows: reset state)
   std::uint32_t* voiceGen = nullptr;      // [maxVirtual] generation of the voice row initialised
   std::uint64_t* holdBlock = nullptr;     // [maxVirtual] block whose chunk was late (hold start)
@@ -735,6 +745,7 @@ void RebuildBusGraph(Impl& im) noexcept;                                  // aud
 
 // Game-side producer helpers.
 std::uint32_t CurrentProducer(const Impl& im) noexcept;  // kNoSlot when not registered
+std::uintptr_t ThreadToken() noexcept;  // identity of the calling thread (never 0)
 bool IsOwnerThread(const Impl& im) noexcept;
 bool TlsRegister(const Impl& im, std::uint32_t producer) noexcept;
 void TlsUnregister(const Impl& im) noexcept;

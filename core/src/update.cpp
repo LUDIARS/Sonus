@@ -157,8 +157,9 @@ snd_result System::Update() noexcept {
   // Retiring producers (UnregisterThread with an unpublished arena).
   for (std::uint32_t p = 1; p < im.cfg.maxThreads; ++p) {
     Producer& pr = im.producers[p];
-    if (pr.active.load(std::memory_order_acquire) != 2u) continue;
-    if (PublishProducer(im, pr)) pr.active.store(0u, std::memory_order_release);
+    std::uint32_t expected = 2u;  // 2 -> 3: the thread cannot take it back meanwhile
+    if (!pr.active.compare_exchange_strong(expected, 3u, std::memory_order_acq_rel)) continue;
+    pr.active.store(PublishProducer(im, pr) ? 0u : 2u, std::memory_order_release);
   }
 
   // Ends (lossless, D-16) and slot returns (D-46).

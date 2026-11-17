@@ -1,5 +1,6 @@
 // Shared helpers: event records for Publish, bank / event lookup, curves,
 // and the thread-local registration of producer threads.
+#include <atomic>
 #include <cmath>
 
 #include "core_impl.hpp"
@@ -121,6 +122,15 @@ std::uint32_t CurrentProducer(const Impl& im) noexcept {
     if (r.serial == im.serial) return r.producer;
   }
   return kNoSlot;
+}
+// A number taken from a process-wide counter the first time a thread asks: unique
+// over the process lifetime (a later thread never gets an earlier thread's number,
+// unlike thread ids or thread-local addresses, which are reused after a join).
+std::uintptr_t ThreadToken() noexcept {
+  static std::atomic<std::uintptr_t> next{0};
+  static thread_local std::uintptr_t token = 0;
+  if (token == 0u) token = next.fetch_add(1u, std::memory_order_relaxed) + 1u;
+  return token;
 }
 bool IsOwnerThread(const Impl& im) noexcept { return CurrentProducer(im) == 0u; }
 

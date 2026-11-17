@@ -103,6 +103,14 @@ void PostProcessItem(Impl& im, RenderSet& set, const source::RenderItem& it, Ite
       for (std::uint32_t c = 0; c < in.channels; ++c) voiceOut[c][f] *= e;
     }
   }
+  // Assignment fade (D-15: steal fade out, devirtualise / hold-release fade in), per sample.
+  if (in.fadeActive != 0u) {
+    for (std::uint32_t f = 0; f < frames; ++f) {
+      float e = in.fade0 + in.fadeDelta * static_cast<float>(f + 1u);
+      e = e < 0.0f ? 0.0f : (e > 1.0f ? 1.0f : e);
+      for (std::uint32_t c = 0; c < in.channels; ++c) voiceOut[c][f] *= e;
+    }
+  }
   // Sample-accurate stop: silence after frameEnd.
   if (in.frameEnd < frames) {
     for (std::uint32_t c = 0; c < in.channels; ++c) std::memset(voiceOut[c] + in.frameEnd, 0, sizeof(float) * (frames - in.frameEnd));
@@ -295,6 +303,27 @@ void InitRenderState(Impl& im, SlotIndex r, SlotIndex v, std::uint32_t vd, const
   (void)v;
 }
 
+// Adds this block's part of the D-15 fade of a held voice's last output.
+void FadeTail(Impl& im, SlotIndex r, std::uint32_t frames) noexcept {
+  RenderPriv& rd = im.rd;
+  schema::Tables& t = im.tables;
+  const std::uint32_t total = im.cfg.shortFadeFrames == 0u ? 1u : im.cfg.shortFadeFrames;
+  std::uint32_t left = rd.tailFadeLeft[r];
+  const std::uint32_t n = left < frames ? left : frames;
+  SlotIndex bus = rd.tailFadeBus[r];
+  if (bus != kNoSlot && !base::rows::IsLive(t.Bus.rows, bus)) bus = kNoSlot;  // freed meanwhile
+  float* dst = bus == kNoSlot ? rd.outBuf : rd.busBuf + std::size_t{bus} * kMaxChannels * frames;
+  const float* tail = rd.tailFade + std::size_t{r} * kMaxChannels;
+  const std::uint32_t done = total - left;
+  for (std::uint32_t o = 0; o < rd.tailFadeChannels[r] && o < kMaxChannels; ++o) {
+    const float v0 = tail[o];
+    for (std::uint32_t f = 0; f < n; ++f) {
+      dst[std::size_t{o} * frames + f] += v0 * (1.0f - static_cast<float>(done + f + 1u) / static_cast<float>(total));
+    }
+  }
+  rd.tailFadeLeft[r] = left - n;
+}
+
 }  // namespace
 
 void Render(Impl& im) noexcept {
@@ -416,13 +445,19 @@ void Render(Impl& im) noexcept {
     it.pitch = Ramp{in.ratio0, in.ratio1};
     // Gain, with the steal fade (out) / devirtualise fade (in).
     const Ramp gain = SND_R(Voice_gain)[d];
-    const float fadeStep = im.cfg.shortFadeFrames == 0u ? 1.0f : static_cast<float>(frames) / im.cfg.shortFadeFrames;
+    // D-15: the fade lasts shortFadeFrames exactly (it may span blocks), per sample.
+    const float perFrame = im.cfg.shortFadeFrames == 0u ? 1.0f : 1.0f / static_cast<float>(im.cfg.shortFadeFrames);
     const float f0 = rd.fade[r];
-    float f1 = as.fadingOut != 0u ? f0 - fadeStep : f0 + fadeStep;
-    f1 = f1 < 0.0f ? 0.0f : (f1 > 1.0f ? 1.0f : f1);
-    rd.fade[r] = f1;
-    in.gain0 = ((in.flags & kItemInitPan) != 0u ? gain.end : gain.start) * f0;
-    in.gain1 = gain.end * f1;
+    const float fadeTarget = as.fadingOut != 0u ? 0.0f : 1.0f;
+    if (f0 != fadeTarget) {
+      in.fadeActive = 1u;
+      in.fade0 = f0;
+      in.fadeDelta = as.fadingOut != 0u ? -perFrame : perFrame;
+      float f1 = f0 + in.fadeDelta * static_cast<float>(frames);
+      rd.fade[r] = f1 < 0.0f ? 0.0f : (f1 > 1.0f ? 1.0f : f1);
+    }
+    in.gain0 = (in.flags & kItemInitPan) != 0u ? gain.end : gain.start;
+    in.gain1 = gain.end;
     t.RealVoice.col.appliedGain[r] = gain.end;
     // Pan (basic 3D or 2D balance).
     const SlotIndex em = SND_R(Voice_emitterSlot)[d];
@@ -519,19 +554,20 @@ void Render(Impl& im) noexcept {
       rd.holdBlock[set.items[i].voiceSlot] = im.block;
       ++im.profile.heldVoices;
       vStatus[d].late = 1u;
-      // D-15: fade the voice's last output to silence instead of cutting it.
-      SlotIndex bus = rd.tailBus[r];
-      if (bus != kNoSlot && !base::rows::IsLive(t.Bus.rows, bus)) bus = kNoSlot;  // freed meanwhile
-      float* dst = bus == kNoSlot ? rd.outBuf : rd.busBuf + std::size_t{bus} * kMaxChannels * frames;
-      const std::uint32_t fadeFrames = im.cfg.shortFadeFrames == 0u ? 1u : (im.cfg.shortFadeFrames < frames ? im.cfg.shortFadeFrames : frames);
-      for (std::uint32_t o = 0; o < rd.tailChannels[r] && o < kMaxChannels; ++o) {
-        const float v0 = tail[o];
-        for (std::uint32_t f = 0; f < fadeFrames; ++f) {
-          dst[std::size_t{o} * frames + f] += v0 * (1.0f - static_cast<float>(f + 1u) / static_cast<float>(fadeFrames));
-        }
+      // D-15: fade the voice's last output to silence instead of cutting it (below).
+      float* from = rd.tailFade + std::size_t{r} * kMaxChannels;
+      for (std::uint32_t o = 0; o < kMaxChannels; ++o) {
+        from[o] = tail[o];
         tail[o] = 0.0f;
       }
+      rd.tailFadeBus[r] = rd.tailBus[r];
+      rd.tailFadeChannels[r] = rd.tailChannels[r];
+      rd.tailFadeLeft[r] = im.cfg.shortFadeFrames == 0u ? 1u : im.cfg.shortFadeFrames;
     }
+  }
+  // Tail fades of held voices (D-15, shortFadeFrames long, continued across blocks).
+  for (SlotIndex r = 0; r < im.cfg.realTotal; ++r) {
+    if (rd.tailFadeLeft[r] != 0u) FadeTail(im, r, frames);
   }
   im.profile.renderedVoices = set.itemCount;
   im.profile.parallel = rd.parallel;

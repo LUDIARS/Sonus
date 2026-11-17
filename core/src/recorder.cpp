@@ -3,6 +3,7 @@
 #include <bit>
 #include <cmath>
 #include <cstring>
+#include <thread>
 
 #include "core_impl.hpp"
 #include "snd/internal/rt_check.hpp"
@@ -240,18 +241,46 @@ bool RecordBankUnload(Impl& im, const cmd::BankUnload& c) noexcept {
 // ---------------------------------------------------------------------------
 // Threads
 // ---------------------------------------------------------------------------
+namespace {
+// Takes producer p for the calling thread: from `from` (0 free, 2 retiring) to 1.
+bool TakeProducer(Impl& im, std::uint32_t p, std::uint32_t from, snd_result& res) noexcept {
+  std::uint32_t expected = from;
+  if (!im.producers[p].active.compare_exchange_strong(expected, 1u, std::memory_order_acq_rel)) return false;
+  if (!TlsRegister(im, p)) {
+    im.producers[p].active.store(from, std::memory_order_release);
+    res = SND_ERR_LIMIT_REACHED;
+    return true;
+  }
+  im.producers[p].lastThread.store(0u, std::memory_order_relaxed);
+  res = SND_OK;
+  return true;
+}
+}  // namespace
+
 snd_result System::RegisterThread() noexcept {
   Impl& im = *impl_;
   if (CurrentProducer(im) != kNoSlot) return SND_OK;
+  snd_result res = SND_OK;
+  // The same thread registering again takes its producer back: a retiring one keeps
+  // its unpublished arena, so the thread's commands stay in order (sonus.h).
+  const std::uintptr_t me = ThreadToken();
   for (std::uint32_t p = 1; p < im.cfg.maxThreads; ++p) {
-    std::uint32_t expected = 0;
-    if (im.producers[p].active.compare_exchange_strong(expected, 1u, std::memory_order_acq_rel)) {
-      if (!TlsRegister(im, p)) {
-        im.producers[p].active.store(0u, std::memory_order_release);
-        return SND_ERR_LIMIT_REACHED;
+    Producer& pr = im.producers[p];
+    if (pr.lastThread.load(std::memory_order_acquire) != me) continue;
+    for (;;) {
+      const std::uint32_t s = pr.active.load(std::memory_order_acquire);
+      if (s == 3u) {  // Update is publishing it: a short wait
+        std::this_thread::yield();
+        continue;
       }
-      return SND_OK;
+      if ((s == 2u || s == 0u) && TakeProducer(im, p, s, res)) return res;
+      if (s == 2u || s == 0u || s == 3u) continue;  // changed under us: look again
+      break;                                         // owned by another thread
     }
+    break;
+  }
+  for (std::uint32_t p = 1; p < im.cfg.maxThreads; ++p) {
+    if (TakeProducer(im, p, 0u, res)) return res;
   }
   return SND_ERR_LIMIT_REACHED;
 }
@@ -265,7 +294,9 @@ snd_result System::UnregisterThread() noexcept {
   TlsUnregister(im);
   // Not published (every other arena is still with the audio thread): the producer
   // retires; the owner's Update publishes the arena once one came back, then frees
-  // the producer. Its number is not reused before that.
+  // the producer. Its number is not reused before that, except by this same thread
+  // registering again (RegisterThread), which continues the arena.
+  im.producers[p].lastThread.store(ThreadToken(), std::memory_order_relaxed);
   im.producers[p].active.store(published ? 0u : 2u, std::memory_order_release);
   return SND_OK;
 }

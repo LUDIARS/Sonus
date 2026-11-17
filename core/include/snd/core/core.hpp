@@ -14,6 +14,14 @@
 //   registered   the owner and every thread that called RegisterThread().
 //                Recording functions (Play, Stop, SetParam, ...) record a
 //                command into the calling thread's arena and return at once.
+//                UnregisterThread() while the thread's arena cannot be published
+//                yet retires its producer (the owner's Update publishes it later).
+//                The same thread registering again before that takes the same
+//                producer back and continues its arena, so its commands stay in
+//                order. "The same thread" is told by a per-thread number core
+//                takes from a process-wide counter on the thread's first
+//                RegisterThread (thread_local): never reused, so a later thread
+//                (even one that gets the same OS thread id) is a different thread.
 //   any          queries (GetPlaybackState, GetStats, ...), PumpServices().
 //   audio        RenderBlock() / Render(): the device driver (platform) or a
 //                test drives them; one block at a time, never concurrently.
