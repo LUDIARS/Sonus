@@ -163,15 +163,32 @@ SND_TEST(IndepCmd, FallbackDeliversStopAndLastParameterValues) {
   SND_CHECK_EQ(fx.sys->SetParamGlobal(HashId("Vol"), 0.3f), SND_OK);
   SND_CHECK_EQ(fx.sys->SetParamGlobal(HashId("Vol"), 1.0f), SND_OK);  // same key: last value
   SND_CHECK_EQ(fx.sys->SetParamGlobal(HashId("J2"), 1.0f), SND_OK);
-  SND_CHECK_EQ(fx.sys->SetParamGlobal(HashId("J3"), 1.0f), SND_OK);   // 4 keys: Junk, Vol, J2, J3
-  fx.sys->SetParamGlobal(HashId("J4"), 1.0f);                         // 5th key: lost
+  SND_CHECK_EQ(fx.sys->SetParamGlobal(HashId("J3"), 1.0f), SND_OK);
+  SND_CHECK_EQ(fx.sys->SetParamGlobal(HashId("J4"), 1.0f), SND_OK);  // 4 keys: the table is full, nothing lost
   fx.Steps(6);
   SND_CHECK(fx.Ended(p.value, SND_END_STOPPED));
   SND_CHECK_EQ(fx.CountEnds(qh.value), 0u);
   SND_CHECK_NEAR(fx.LastMean(), kCenter * 0.5f * 0.1f, 1e-5f);
   snd_stats s1{};
+  fx.sys->Update();
   fx.sys->GetStats(&s1);
-  SND_CHECK(s1.reserve_overflows > s0.reserve_overflows);
+  // D-11 (stage 2): reserve_overflows counts lost values only, not coalesced ones.
+  SND_CHECK_EQ(s1.reserve_overflows, s0.reserve_overflows);
+  // Next frame: fill both regions again, then 6 keys into a 4-entry table:
+  // exactly 2 values are lost and counted; the 4 that fit are applied.
+  for (int i = 0; i < 128 + 8; ++i) fx.sys->SetParamGlobal(HashId("Junk"), 0.5f);
+  SND_CHECK_EQ(fx.sys->SetParamGlobal(HashId("Vol"), 0.0f), SND_OK);
+  fx.sys->SetParamGlobal(HashId("J2"), 0.0f);
+  fx.sys->SetParamGlobal(HashId("J3"), 0.0f);
+  fx.sys->SetParamGlobal(HashId("J4"), 0.0f);
+  fx.sys->SetParamGlobal(HashId("J5"), 0.0f);  // lost
+  fx.sys->SetParamGlobal(HashId("J6"), 0.0f);  // lost
+  fx.Steps(6);
+  SND_CHECK_NEAR(fx.LastMean(), kCenter * 0.5f, 1e-5f);  // Vol = 0 arrived
+  snd_stats s2{};
+  fx.sys->Update();
+  fx.sys->GetStats(&s2);
+  SND_CHECK_EQ(s2.reserve_overflows, s1.reserve_overflows + 2u);
 }
 
 // C8: several registered threads record at the same time; every command arrives.
@@ -197,7 +214,7 @@ SND_TEST(IndepCmd, OtherThreadsRecordConcurrentlyAndEverythingArrives) {
         if ((i % 10) == 9) fx.sys->Flush();
       }
       // Publish whatever is still held (all arenas may have been in flight;
-      // see Defect_core_unregister_loses_unpublished_commands) before leaving.
+      // see core_unregister_loses_unpublished_commands) before leaving.
       for (int k = 0; k < 3; ++k) {
         const std::uint64_t b0 = rendered.load();
         while (rendered.load() < b0 + 2u) std::this_thread::yield();
@@ -445,7 +462,7 @@ SND_TEST(IndepCmd, RenderInOddPiecesEqualsBlocks) {
 
 // 4.1: a future start is PENDING; a stop while pending ends it STOPPED
 // without ever sounding. (Clocks inside / before the apply block:
-// Defect_core_scheduled_start_in_apply_block_never_starts.)
+// core_scheduled_start_in_apply_block_never_starts.)
 SND_TEST(IndepCmd, PendingStartCanBeStopped) {
   Fx fx;
   fx.Load("b", OneEvent("E", 500.0f));

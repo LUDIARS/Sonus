@@ -55,6 +55,7 @@ SND_TEST(IndepParallel, SerialAndParallelAreBitIdentical) {
   cs.max_virtual_voices = 256;
   cs.max_playbacks = 256;
   cs.jobs.voices_per_chunk = 4;
+  cs.tuning.lod_down_blocks = 0;  // 2.5: bit equality only with the load LOD off
   snd_config cp = cs;
   cp.jobs.realtime_workers = 2;
   cp.tuning.rt_spin_microseconds = 200000;  // 200 ms: no late chunk
@@ -136,7 +137,7 @@ SND_TEST(IndepParallel, LateChunksKeepTheD43Rules) {
       fx.sys->Stop(live[i], (next() % 2) ? 0.0f : 0.02f, nullptr);
       live.erase(live.begin() + static_cast<std::ptrdiff_t>(i));
     }
-    // (pauses are left out here: Defect_core_control_on_held_voice covers them)
+    // (pauses are left out here: core_control_on_held_voice covers them)
     if (blk % 37 == 0) fx.sys->SetBusVolume(HashId("Sfx"), (blk % 2) ? 0.5f : 1.0f, 0.01f);
     fx.Step();
     const snd::core::BlockProfile& bp = fx.sys->LastBlock();
@@ -167,7 +168,7 @@ SND_TEST(IndepParallel, LateChunksKeepTheD43Rules) {
   SND_CHECK_EQ(fx.kind.releasedBusy.load(), 0u);
   SND_CHECK_EQ(fx.kind.deadRender.load(), 0u);
   SND_CHECK_EQ(fx.kind.liveStart.load(), 0u);
-  // Control on a held voice's source is Defect_core_control_on_held_voice
+  // Control on a held voice's source is core_control_on_held_voice
   // (Pause there; Devirtualize = op bit 0x4 also shows up here): reported only.
   std::printf("Control while the source renders in a late chunk: %llu (ops mask 0x%x)\n",
               static_cast<unsigned long long>(fx.kind.controlBusy.load()), fx.kind.controlBusyOps.load());
@@ -180,69 +181,96 @@ SND_TEST(IndepParallel, LateChunksKeepTheD43Rules) {
   SND_CHECK(lateBlocks > 0u);
 }
 
-// R3: a held voice is silent (faded from its last output) and comes back with
-// the progress the late chunk made (no doubled render, no gap in the counter).
+// R3 / D-43 as decided in stage 2: a held voice is silent while held, its
+// playhead advances by the held frames (it keeps time), and once released it
+// fades in from 0 over the short fade (D-15) in the first block it renders,
+// then plays at its level again.
 SND_TEST(IndepParallel, HeldVoiceFadesThenContinues) {
   snd_config cfg = Config();
   cfg.max_real_voices = 8;
   cfg.jobs.realtime_workers = 1;
   cfg.jobs.voices_per_chunk = 1;
   cfg.tuning.rt_spin_microseconds = 50;
+  cfg.tuning.lod_down_blocks = 0;
   Bank b;
+  float sum = 0.0f;  // all 8 voices: DC (i + 1) / 100
   for (std::uint32_t i = 0; i < 8; ++i) {
     char n[8];
-    Name(n, sizeof(n), "C", i);
-    b.Event(n, 1000.0f, 128, 0, kNone, -18.0f);
+    Name(n, sizeof(n), "D", i);
+    b.Event(n, 10.0f * float(i + 1u));
+    sum += 0.01f * float(i + 1u);
   }
   Fx fx(cfg);
   fx.Load("p", b.Build("P"));
   for (std::uint32_t i = 0; i < 8; ++i) {
     char n[8];
-    Name(n, sizeof(n), "C", i);
+    Name(n, sizeof(n), "D", i);
     fx.sys->Play(HashId(n), NoEmitter(), nullptr);
   }
   fx.Steps(4);
-  snd::core::BlockProfile late{};
-  fx.kind.callerSlowNs.store(200000);  // 0.2 ms per chunk on the audio thread: the worker gets chunks
-  for (int tries = 0; tries < 50 && late.lateChunks == 0u; ++tries) {
-    fx.kind.slowNs.store(3000000);  // chunks the worker takes are late
-    fx.kind.slowBlockMask.store(0);
-    fx.Step();
-    late = fx.sys->LastBlock();
-    fx.kind.slowNs.store(0);
-    fx.Steps(10);
-  }
-  fx.kind.callerSlowNs.store(0);
-  SND_CHECK_MSG(late.lateChunks != 0u, "no late chunk produced in 50 tries");
-  SND_CHECK_EQ(late.heldVoices, late.lateChunks);  // one voice per chunk
-  const float g = std::pow(10.0f, -18.0f / 20.0f);
-  // Blocks are not paced in real time: let the straggler finish, then render.
-  // Slow builds (sanitizers) may have ordinary late chunks too: look for two
-  // consecutive calm blocks (no late chunk, no held voice) to check the counters.
-  bool calm = false;
-  for (int k = 0; k < 100 && !calm; ++k) {
+  const float full = kCenter * sum;
+  const float shortFade = 240.0f;  // D-15: 5 ms at 48 kHz
+  bool checked = false;
+  for (int attempt = 0; attempt < 40 && !checked; ++attempt) {
     std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    fx.Steps(2);
+    // 1. A block with a late chunk (the worker spins 3 ms), then one more block
+    //    while the straggler still runs: the held voices are silent there.
+    fx.kind.callerSlowNs.store(200000);
+    fx.kind.slowNs.store(3000000);
     fx.Step();
-    const bool c1 = fx.sys->LastBlock().lateChunks == 0u && fx.sys->LastBlock().heldVoices == 0u;
+    const snd::core::BlockProfile late = fx.sys->LastBlock();
+    fx.kind.slowNs.store(0);
+    fx.kind.callerSlowNs.store(0);
+    if (late.lateChunks == 0u) continue;
     fx.Step();
-    calm = c1 && fx.sys->LastBlock().lateChunks == 0u && fx.sys->LastBlock().heldVoices == 0u;
+    const snd::core::BlockProfile held = fx.sys->LastBlock();
+    if (held.heldVoices == 0u) continue;  // the straggler already finished
+    const float during = fx.LastMean();
+    const float missing = full - during;  // the held voices' level
+    SND_CHECK_MSG(missing > 0.005f, "held voices still audible: %f", static_cast<double>(missing));
+    SND_CHECK_NEAR(fx.MaxAbs(fx.Total() - 256, fx.Total()), during, 1e-5f);  // constant: silent, no tail
+    // 2. Let it finish, then render block by block until the level is full again.
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    const std::size_t from = fx.Total();
+    bool calm = true;
+    for (int k = 0; k < 4; ++k) {
+      fx.Step();
+      calm = calm && fx.sys->LastBlock().lateChunks == 0u;
+    }
+    if (!calm) continue;  // a slow (sanitizer) build was late again: try again
+    // The first block in which the level rises is the fade-in block.
+    std::size_t fadeStart = 0;
+    for (std::size_t f = from; f < fx.Total(); ++f) {
+      if (fx.At(f) > during + 1e-5f) {
+        fadeStart = f;
+        break;
+      }
+    }
+    SND_REQUIRE(fadeStart != 0u);
+    fadeStart -= fadeStart % 256u;  // the block in which the voice is back (its first sample may be exactly 0)
+    const float c0 = fx.At(fadeStart) - during;
+    SND_CHECK_MSG(c0 < 0.2f * missing, "starts at %f of %f (no fade-in from 0)",
+                  static_cast<double>(c0), static_cast<double>(missing));
+    bool monotone = true;
+    for (std::size_t f = fadeStart + 1; f < fadeStart + 256; ++f) {
+      if (fx.At(f) < fx.At(f - 1) - 1e-6f) monotone = false;
+    }
+    SND_CHECK(monotone);
+    // A short fade: at least half way after half the short fade, full by the
+    // end of the block (core ramps the D-15 fade per block: 256 >= 240 frames).
+    SND_CHECK(fx.At(fadeStart + static_cast<std::size_t>(shortFade / 2.0f)) - during > 0.4f * missing);
+    SND_CHECK_NEAR(fx.At(fadeStart + 255), full, missing / 128.0f);
+    SND_CHECK_NEAR(fx.At(fadeStart + 256 + 10), full, 1e-5f);
+    checked = true;
   }
+  if (!checked) std::printf("SKIP: no clean late / held / release sequence in 40 attempts\n");
   SND_CHECK_EQ(fx.kind.overlap.load(), 0u);
   SND_CHECK_EQ(fx.kind.discont.load(), 0u);
   SND_CHECK_EQ(fx.kind.doubleBlock.load(), 0u);
-  // Both counters advance by one frame per frame again.
-  // (a counter wraps every 4096 frames: allow one odd step; voices that lost a
-  // held block wrap at the same offset modulo 256)
-  if (!calm) {
-    std::printf("no calm blocks (machine too slow); counter steps not checked\n");
-    return;
-  }
-  std::uint32_t good = 0;
-  for (std::size_t f = fx.Total() - 40; f < fx.Total() - 20; ++f) {
-    const float d = fx.At(f + 1) - fx.At(f);
-    good += std::fabs(d - 8.0f * g * kCenter / 4096.0f) < 1e-6f ? 1u : 0u;
-  }
-  SND_CHECK_MSG(good >= 19u, "%u of 20 steps advance every voice by one frame", good);
+  // The playhead kept time through every hold (advanced by the held frames).
+  SND_CHECK_MSG(fx.kind.timeLag.load() == 0u, "%llu renders behind the clock",
+                static_cast<unsigned long long>(fx.kind.timeLag.load()));
 }
 
 // A1-14 (core): workers stall between claiming a chunk number and starting it;

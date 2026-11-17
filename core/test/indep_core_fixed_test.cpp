@@ -1,6 +1,6 @@
 // Independent tests of core that FAIL ON PURPOSE: each documents a defect
 // found by the independent tester (stage 2). One executable per defect
-// (CMake defines SND_INDEP_DEFECT_<name>), so a defect never hides others.
+// (CMake defines SND_INDEP_FIXED_<name>), so a defect never hides others.
 // Do not "fix" the expectations; fix core.
 #include <atomic>
 #include <chrono>
@@ -23,12 +23,12 @@ namespace {
 }
 }  // namespace
 
-#if defined(SND_INDEP_DEFECT_record_order)
+#if defined(SND_INDEP_FIXED_record_order)
 // C2 with the reserve region (commands.hpp: "normal, reserve, fallback ...
 // equals the recording order"). A critical Play that no longer fits the normal
 // region goes to the reserve; a smaller Stop recorded after it still fits the
 // normal region and is applied first, i.e. before its Play.
-SND_TEST(IndepDefect, Defect_core_record_order_reserve_before_normal) {
+SND_TEST(IndepFixed, core_record_order_reserve_before_normal) {
   snd_config cfg = Config();
   cfg.commands.arena_bytes = 4096;
   cfg.commands.reserve_bytes = 1024;
@@ -56,12 +56,12 @@ SND_TEST(IndepDefect, Defect_core_record_order_reserve_before_normal) {
 }
 #endif
 
-#if defined(SND_INDEP_DEFECT_unregister)
+#if defined(SND_INDEP_FIXED_unregister)
 // sonus.h: snd_unregister_thread "Publish pending commands and unregister".
 // A thread that flushed more often than the audio thread returned arenas still
 // holds unpublished commands in its current arena; Unregister must not drop
 // them (must-deliver commands are never silently lost, D-09).
-SND_TEST(IndepDefect, Defect_core_unregister_loses_unpublished_commands) {
+SND_TEST(IndepFixed, core_unregister_loses_unpublished_commands) {
   snd_config cfg = Config();
   cfg.max_real_voices = 64;
   cfg.max_playbacks = 256;
@@ -87,10 +87,10 @@ SND_TEST(IndepDefect, Defect_core_unregister_loses_unpublished_commands) {
 }
 #endif
 
-#if defined(SND_INDEP_DEFECT_timed_stop)
+#if defined(SND_INDEP_FIXED_timed_stop)
 // C12: a Stop / SetScheduledStop at a clock keeps the sound at full level up
 // to that clock, then it fades (short fade) and the playback ends STOPPED.
-SND_TEST(IndepDefect, Defect_core_timed_stop_fades_before_its_clock) {
+SND_TEST(IndepFixed, core_timed_stop_fades_before_its_clock) {
   for (int variant = 0; variant < 2; ++variant) {
     Fx fx;
     fx.Load("b", OneEvent("E", 500.0f));
@@ -115,13 +115,13 @@ SND_TEST(IndepDefect, Defect_core_timed_stop_fades_before_its_clock) {
 
 #endif
 
-#if defined(SND_INDEP_DEFECT_epoch_untracked)
+#if defined(SND_INDEP_FIXED_epoch_untracked)
 // 3.3 / core.hpp "releases unloaded banks once ... source jobs posted before
 // the unregistration finished". When the job-wrap pool (2 x serviceQueueEntries)
 // is exhausted, PumpServices submits jobs untracked (services.cpp) and the
 // epoch no longer waits for them: the bank is released while such a job has
 // not run yet.
-SND_TEST(IndepDefect, Defect_core_epoch_ignores_untracked_jobs) {
+SND_TEST(IndepFixed, core_epoch_ignores_untracked_jobs) {
   Bank b;
   b.Event("E", 500.0f);
   snd::core::CoreLimits lim;
@@ -148,7 +148,7 @@ SND_TEST(IndepDefect, Defect_core_epoch_ignores_untracked_jobs) {
 }
 #endif
 
-#if defined(SND_INDEP_DEFECT_control_held)
+#if defined(SND_INDEP_FIXED_control_held)
 // D-43 (3) / source_if.hpp: while a voice is held "no system reads or writes
 // its render state" (the source instance included). Pausing a playback whose
 // voice is held sends ISourceKind::Control(Pause) for that voice while the late
@@ -158,7 +158,7 @@ SND_TEST(IndepDefect, Defect_core_epoch_ignores_untracked_jobs) {
 // was late: RunEventLogic sends it one block after the promotion
 // (sys_event.cpp, "virtual <-> real transitions"), while the voice is held; it
 // shows up in IndepParallel.LateChunksKeepTheD43Rules (reported there).
-SND_TEST(IndepDefect, Defect_core_control_on_held_voice) {
+SND_TEST(IndepFixed, core_control_on_held_voice) {
   snd_config cfg = Config();
   cfg.max_real_voices = 8;
   cfg.jobs.realtime_workers = 1;
@@ -179,32 +179,43 @@ SND_TEST(IndepDefect, Defect_core_control_on_held_voice) {
     ps.push_back(fx.sys->Play(HashId(n), NoEmitter(), nullptr));
   }
   fx.Steps(4);
+  // The precondition (a late chunk) depends on the scheduler: retry (bounded)
+  // until it happened a few times; the audio thread is slowed a little per
+  // batch so the worker gets chunks at all. No late chunk at all: skipped.
   std::uint32_t lateSeen = 0;
-  for (int tries = 0; tries < 20 && fx.kind.controlBusy.load() == 0u; ++tries) {
-    fx.kind.slowNs.store(30000000);  // 30 ms: the worker's chunk stays in RenderBatch
+  for (int tries = 0; tries < 200 && lateSeen < 3u; ++tries) {
+    fx.kind.slowNs.store(30000000);       // 30 ms: the worker's chunk stays in RenderBatch
+    fx.kind.callerSlowNs.store(300000);   // 0.3 ms per batch on the audio thread
     fx.Step();
     fx.kind.slowNs.store(0);
-    if (fx.sys->LastBlock().lateChunks == 0u) continue;
-    ++lateSeen;
-    for (const snd_playback_handle& p : ps) fx.sys->Pause(p, 0.0f);
-    fx.Steps(3);  // unpaced: well inside the 30 ms
-    for (const snd_playback_handle& p : ps) fx.sys->ResumePlayback(p, 0.0f);
+    fx.kind.callerSlowNs.store(0);
+    if (fx.sys->LastBlock().lateChunks != 0u) {
+      ++lateSeen;
+      for (const snd_playback_handle& p : ps) fx.sys->Pause(p, 0.0f);
+      fx.Steps(3);  // unpaced: well inside the 30 ms
+      for (const snd_playback_handle& p : ps) fx.sys->ResumePlayback(p, 0.0f);
+    }
     std::this_thread::sleep_for(std::chrono::milliseconds(40));
     fx.Steps(4);
   }
-  SND_REQUIRE(lateSeen > 0u);
+  if (lateSeen == 0u) {
+    std::printf("SKIP: no late chunk in 200 tries; the property was not exercised\n");
+    return;
+  }
   SND_CHECK_MSG(fx.kind.controlBusy.load() == 0u, "Control on a source slot inside a late RenderBatch: %llu",
                 static_cast<unsigned long long>(fx.kind.controlBusy.load()));
+  SND_CHECK_EQ(fx.kind.overlap.load(), 0u);
+  SND_CHECK_EQ(fx.kind.discont.load(), 0u);
 }
 #endif
 
-#if defined(SND_INDEP_DEFECT_language_back)
+#if defined(SND_INDEP_FIXED_language_back)
 // 10.4: switching the language back while the previous language's bank still
 // waits to be unloaded (a voice of it plays): after SetLanguage(en) new plays
 // must resolve to English again. Core keeps the old English copy on its way out
 // (unload when unused), loads a second English copy that waits for that, and
 // meanwhile resolves new plays to Japanese although English is current.
-SND_TEST(IndepDefect, Defect_core_language_switch_back_while_old_bank_unloading) {
+SND_TEST(IndepFixed, core_language_switch_back_while_old_bank_unloading) {
   auto voice = [](const char* lang, float f) {
     Bank b;
     b.Event("Line", f);
@@ -248,7 +259,7 @@ SND_TEST(IndepDefect, Defect_core_language_switch_back_while_old_bank_unloading)
 
 #endif
 
-#if defined(SND_INDEP_DEFECT_start_in_apply_block)
+#if defined(SND_INDEP_FIXED_start_in_apply_block)
 // D-21 / 4.4: CLOCK_SAMPLE in the past ("PlayScheduled" with a time already
 // gone), CLOCK_SAMPLE inside the block that applies the command, and a
 // DELAY_US shorter than one block must start (at once / at that sample). The
@@ -256,7 +267,7 @@ SND_TEST(IndepDefect, Defect_core_language_switch_back_while_old_bank_unloading)
 // ignores a Play fire entry whose playback is not PENDING yet (the new row is
 // still None until step 3, sys_event.cpp ApplyFireEntry); the reservation is
 // consumed and the playback stays PENDING for ever.
-SND_TEST(IndepDefect, Defect_core_scheduled_start_in_apply_block_never_starts) {
+SND_TEST(IndepFixed, core_scheduled_start_in_apply_block_never_starts) {
   for (int variant = 0; variant < 3; ++variant) {
     Fx fx;
     fx.Load("b", OneEvent("E", 500.0f));

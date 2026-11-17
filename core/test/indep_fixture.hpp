@@ -66,7 +66,8 @@ class IndepKind final : public snd::source::ISourceKind {
         lastExit_(new std::atomic<std::uint64_t>[maxSlots]),
         lastBlock_(new std::atomic<std::uint64_t>[maxSlots]),
         framesRendered_(new std::atomic<std::uint64_t>[maxSlots]),
-        live_(new std::atomic<std::uint32_t>[maxSlots]) {
+        live_(new std::atomic<std::uint32_t>[maxSlots]),
+        startClock_(new std::atomic<std::uint64_t>[maxSlots]) {
     for (std::uint32_t i = 0; i < cap_; ++i) {
       inUseSrc_[i].store(0);
       inUseReal_[i].store(0);
@@ -74,6 +75,7 @@ class IndepKind final : public snd::source::ISourceKind {
       lastBlock_[i].store(0);
       framesRendered_[i].store(0);
       live_[i].store(0);
+      startClock_[i].store(0);
     }
   }
   snd::SourceKind Kind() const noexcept override { return snd::SourceKind::Oscillator; }
@@ -116,6 +118,7 @@ class IndepKind final : public snd::source::ISourceKind {
       lastBlock_[s].store(0);
       framesRendered_[s].store(0);
       live_[s].store(1);
+      startClock_[s].store(r[i].startClock);
       res[i].sourceSlot = s;
       starts.fetch_add(1);
       startedSinceLastPost.fetch_add(1);
@@ -176,6 +179,10 @@ class IndepKind final : public snd::source::ISourceKind {
       std::uint64_t frame = it.playhead->frame;
       if (frame != lastExit_[it.sourceSlot].load()) discont.fetch_add(1);
       if (lastBlock_[it.sourceSlot].exchange(b.block.index + 1u) == b.block.index + 1u) doubleBlock.fetch_add(1);
+      // Keeps time: an endless voice started before this block is at clock - start
+      // (only meaningful without pauses; not part of ViolationSum).
+      const std::uint64_t st0 = startClock_[it.sourceSlot].load();
+      if (it.frameOffset == 0u && st0 <= b.block.clock && frame != b.block.clock - st0) timeLag.fetch_add(1);
       std::uint32_t written = 0;
       for (std::uint32_t f = 0; f < it.framesRequested; ++f) {
         if (in.mode == 2 && frame >= in.length) {
@@ -244,7 +251,8 @@ class IndepKind final : public snd::source::ISourceKind {
       controlBusy{0};
   std::atomic<std::uint64_t> slowNs{0};
   std::atomic<std::uint64_t> callerSlowNs{0};
-  std::atomic<std::uint32_t> controlBusyOps{0};  // bit per ControlOp seen while busy  // per batch on the audio thread
+  std::atomic<std::uint32_t> controlBusyOps{0};
+  std::atomic<std::uint64_t> timeLag{0};  // renders whose playhead is not clock - start (see RenderBatch)  // bit per ControlOp seen while busy  // per batch on the audio thread
   std::atomic<std::uint64_t> slowBlockMask{0};  // 0: every block, else blocks with index % mask == 0
   std::atomic<std::uint32_t> postJobs{0};
   std::atomic<std::uint64_t> posted{0}, jobsRun{0}, startedSinceLastPost{0};
@@ -257,6 +265,7 @@ class IndepKind final : public snd::source::ISourceKind {
   std::unique_ptr<std::atomic<std::uint32_t>[]> inUseSrc_, inUseReal_;
   std::unique_ptr<std::atomic<std::uint64_t>[]> lastExit_, lastBlock_, framesRendered_;
   std::unique_ptr<std::atomic<std::uint32_t>[]> live_;
+  std::unique_ptr<std::atomic<std::uint64_t>[]> startClock_;
 };
 
 inline snd_config Config() {
