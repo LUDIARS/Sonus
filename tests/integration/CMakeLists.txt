@@ -85,3 +85,8 @@ snd_add_test(integration_indep_load_cpu_test
   LINK sonus_source sonus_core sonus_buildtool sonus_bank sonus_dsp sonus_jobs sonus_io sonus_codec sonus_mocks)
 target_include_directories(integration_indep_load_cpu_test PRIVATE ${PROJECT_SOURCE_DIR}/buildtool/test ${PROJECT_SOURCE_DIR}/source/test)
 set_tests_properties(integration_indep_load_cpu_test PROPERTIES TIMEOUT 600)
+snd_add_test(integration_indep_source_reload3_test
+  SOURCES indep_source_reload3_test.cpp
+  LINK sonus_source sonus_core sonus_buildtool sonus_bank sonus_dsp sonus_jobs sonus_io sonus_codec sonus_mocks)
+target_include_directories(integration_indep_source_reload3_test PRIVATE ${PROJECT_SOURCE_DIR}/buildtool/test ${PROJECT_SOURCE_DIR}/source/test)
+set_tests_properties(integration_indep_source_reload3_test PROPERTIES TIMEOUT 900)
