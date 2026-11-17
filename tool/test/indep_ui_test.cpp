@@ -345,7 +345,11 @@ SND_TEST(IndepToolUi, TimingGraphAtDpi4IsWithinTelasBudget) {
     bt.budgetMicroseconds = 2000.0f;
     game.Send(ll::MessageType::BlockTiming, &bt, sizeof bt);
   }
-  SND_REQUIRE(indep::Drive(s, game, [&] { return c->Received(ll::MessageType::BlockTiming) >= 240u; }));
+  // Wait on the session profiler's own copy (taken inside Tick): the client's count can run
+  // one frame ahead of it.
+  SND_REQUIRE(indep::Drive(s, game, [&] {
+    return c->Received(ll::MessageType::BlockTiming) >= 240u && s.profiler().timings().size() >= 240u;
+  }));
   s.Disconnect();  // no network thread across fork
   ui::App app(s, ui::AppDesc{});
   SND_REQUIRE(s.profiler().timings().size() >= 240u);
