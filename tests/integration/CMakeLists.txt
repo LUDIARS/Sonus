@@ -48,7 +48,7 @@ target_include_directories(integration_core_end_to_end_test PRIVATE ${PROJECT_SO
 # tests' analytic Sample kind and a dev bank written with the build tool's writer.
 set(_ll_link sonus_livelink sonus_core sonus_buildtool sonus_bank sonus_codec sonus_dsp sonus_io sonus_jobs
     sonus_platform sonus_base sonus_mocks)
-foreach(_ll livelink_override_test)
+foreach(_ll livelink_override_test livelink_profiler_test livelink_record_test)
   snd_add_test(integration_${_ll} SOURCES ${_ll}.cpp LINK ${_ll_link})
   target_include_directories(integration_${_ll} PRIVATE ${PROJECT_SOURCE_DIR}/core/test)
 endforeach()
