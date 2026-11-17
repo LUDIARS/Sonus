@@ -188,8 +188,10 @@ inline double LeftMean(const lltest::Fixture& f) {
 struct Tool {
   lltest::Fixture& f;
   ll::Client* c = nullptr;
-  explicit Tool(lltest::Fixture& fx, ll::ClientDesc d = {}) : f(fx) {
-    if (d.connector == nullptr) d = lltest::MemoryClient(f.link);
+  // Memory link client of the fixture.
+  explicit Tool(lltest::Fixture& fx) : Tool(fx, lltest::MemoryClient(fx.link)) {}
+  // Any client description (TCP when d.connector is null).
+  Tool(lltest::Fixture& fx, const ll::ClientDesc& d) : f(fx) {
     if (ll::Client::Create(d, &c) == SND_OK) c->Start();
   }
   ~Tool() { ll::Client::Destroy(c); }
