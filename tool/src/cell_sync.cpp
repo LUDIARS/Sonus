@@ -61,6 +61,13 @@ std::int32_t CellSync::Find(const CellAddress& a) const {
   return -1;
 }
 
+std::uint32_t CellSync::NoAnswer(std::uint64_t nowNs) const {
+  std::uint32_t n = 0;
+  for (const CellStatus& s : cells_) n += IsNoAnswer(s, nowNs) ? 1u : 0u;
+  for (const CellStatus& s : params_) n += IsNoAnswer(s, nowNs) ? 1u : 0u;
+  return n;
+}
+
 std::uint32_t CellSync::Count(CellState st) const {
   std::uint32_t n = 0;
   for (const CellStatus& s : cells_) n += s.state == st ? 1u : 0u;
@@ -69,7 +76,7 @@ std::uint32_t CellSync::Count(CellState st) const {
 }
 
 void CellSync::Update(livelink::Client* client, const std::vector<Cell>& cells, const std::vector<ParamCell>& params,
-                      bool sessionStarted, bool sendAll) {
+                      bool sessionStarted, bool sendAll, std::uint64_t nowNs) {
   // A different cell layout (new project) starts over from the bank values.
   bool same = addresses_.size() == cells.size();
   for (std::size_t i = 0; same && i < cells.size(); ++i) same = addresses_[i] == cells[i].address;
@@ -121,6 +128,7 @@ void CellSync::Update(livelink::Client* client, const std::vector<Cell>& cells, 
       continue;
     }
     s.seq = seq;
+    s.sentNs = nowNs;
     s.state = CellState::Pending;
     s.everSent = true;
     ++stats_.sent;
@@ -144,6 +152,7 @@ void CellSync::Update(livelink::Client* client, const std::vector<Cell>& cells, 
       continue;
     }
     s.seq = seq;
+    s.sentNs = nowNs;
     s.state = CellState::Pending;
     s.everSent = true;
     ++stats_.sent;

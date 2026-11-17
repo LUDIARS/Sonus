@@ -2,12 +2,15 @@
 //
 // A file is a 64-byte header followed by the record stream exactly as the game
 // sent it (RecordData). Little endian, like the protocol.
-//   0  char[4] magic "SNRC"      4 u32 version (1)      8 u32 headerBytes (64)
+//   0  char[4] magic "SNRC"      4 u32 version (2)      8 u32 headerBytes (64)
 //   12 u32 flags (bit0: the client's buffer overflowed, the stream is incomplete)
 //   16 u64 projectBuildHash (the tool's)   24 u64 runtimeBuildHash (HelloReply)
 //   32 u32 sampleRate   36 u32 blockSize   40 u32 platform   44 u32 contractVersion
-//   48 u64 recordBytes  56 u64 FNV-1a 64 of the records
+//   48 u64 recordBytes  56 u64 FNV-1a 64 of header bytes [0, 56) followed by the records
 // Records are platform specific (protocol §7); the header says which game wrote them.
+// Decoding (and so loading) refuses a file whose records cannot all be read
+// (RecordReader: unknown kind, bad sizes...), even when its checksum is right.
+// Version 1 (checksum over the records only) is no longer read.
 #ifndef SND_TOOL_RECORDING_FILE_HPP
 #define SND_TOOL_RECORDING_FILE_HPP
 
@@ -17,7 +20,7 @@
 
 namespace snd::tool {
 
-inline constexpr std::uint32_t kRecordingFileVersion = 1;
+inline constexpr std::uint32_t kRecordingFileVersion = 2;
 inline constexpr std::uint32_t kRecordingHeaderBytes = 64;
 
 struct RecordingInfo {

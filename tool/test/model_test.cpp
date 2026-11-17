@@ -297,9 +297,16 @@ SND_TEST(ToolRecordingFile, EncodeDecodeAndDamage) {
   r.info.platform = 7;
   r.info.contractVersion = 0x10001;
   r.info.flags = kRecordingOverflow;
-  for (int i = 0; i < 64; ++i) r.records.push_back(static_cast<std::uint8_t>(i * 7));
+  {  // two readable records (protocol §7): a LOD record and a bank map
+    const snd::livelink::RecordLod lod{static_cast<std::uint32_t>(snd::livelink::RecordKind::Lod), 1u, 10u};
+    const snd::livelink::RecordBankMap bm{static_cast<std::uint32_t>(snd::livelink::RecordKind::BankMap), 3u, 4u};
+    const auto* a = reinterpret_cast<const std::uint8_t*>(&lod);
+    const auto* b = reinterpret_cast<const std::uint8_t*>(&bm);
+    r.records.insert(r.records.end(), a, a + sizeof lod);
+    r.records.insert(r.records.end(), b, b + sizeof bm);
+  }
   const std::vector<std::uint8_t> bytes = EncodeRecording(r);
-  SND_CHECK_EQ(bytes.size(), 64u + 64u);
+  SND_CHECK_EQ(bytes.size(), 64u + 32u);
   SND_CHECK(std::memcmp(bytes.data(), "SNRC", 4) == 0);
   Recording back;
   std::string err;
@@ -307,17 +314,26 @@ SND_TEST(ToolRecordingFile, EncodeDecodeAndDamage) {
   SND_CHECK(back.info == r.info);
   SND_CHECK(back.records == r.records);
   std::vector<std::uint8_t> bad = bytes;
-  bad[100] ^= 1u;
+  bad[80] ^= 1u;  // a record byte
+  SND_CHECK(!DecodeRecording(bad.data(), bad.size(), &back, &err));
+  SND_CHECK_EQ(err, std::string("checksum mismatch"));
+  bad = bytes;
+  bad[33] ^= 1u;  // the header's sample rate: covered by the checksum (version 2)
   SND_CHECK(!DecodeRecording(bad.data(), bad.size(), &back, &err));
   SND_CHECK_EQ(err, std::string("checksum mismatch"));
   SND_CHECK(!DecodeRecording(bytes.data(), bytes.size() - 1, &back, &err));
   bad = bytes;
   bad[0] = 'X';
   SND_CHECK(!DecodeRecording(bad.data(), bad.size(), &back, &err));
-  // Garbage records: the summary says where the stream breaks.
-  const RecordingSummary s = Summarize(r.records.data(), r.records.size());
+  // Unreadable records (an unknown kind) with a right checksum: refused.
+  Recording broken = r;
+  broken.records[16] = 99;
+  const RecordingSummary s = Summarize(broken.records.data(), broken.records.size());
   SND_CHECK(!s.valid);
   SND_CHECK(!s.error.empty());
+  const std::vector<std::uint8_t> bb = EncodeRecording(broken);
+  SND_CHECK(!DecodeRecording(bb.data(), bb.size(), &back, &err));
+  SND_CHECK_EQ(err, std::string("unreadable records"));
 }
 
 SND_TEST(ToolMeter, PeakHoldHoldsThenFalls) {
@@ -337,4 +353,77 @@ SND_TEST(ToolMeter, PeakHoldHoldsThenFalls) {
   h.Update(1.0f, 2000000000ull, prm);
   SND_CHECK(h.clipped());
   SND_CHECK_EQ(LinearToDb(0.0f), kMeterFloorDb);
+}
+
+SND_TEST(ToolMixer, ParameterRevertTurnsOffAndResetsTheValue) {
+  tooltest::ProjectDir p("parrev");
+  WriteTree(p);
+  Project pr;
+  SND_REQUIRE(pr.Load(p.dir().string()));
+  MixerModel m;
+  m.Bind(pr);
+  const Target on{Control::ParamOverrideOn, 1, 0, 0}, val{Control::ParamOverride, 1, 0, 0};  // Speed, default 1
+  m.Set(val, 7.0f);
+  m.Set(on, 1.0f);
+  std::vector<OverrideItem> items = m.Overrides();
+  SND_REQUIRE_EQ(items.size(), 1u);
+  const std::size_t undo = m.history().UndoCount();
+  SND_CHECK(m.Revert(items[0]));
+  SND_CHECK_EQ(m.Get(on), 0.0f);
+  SND_CHECK_EQ(m.Get(val), 1.0f);  // a new override starts from the bank default
+  SND_CHECK_EQ(m.history().UndoCount(), undo + 1u);
+  SND_CHECK(m.Undo());
+  SND_CHECK_EQ(m.Get(val), 7.0f);
+  SND_CHECK(m.RevertAll());
+  SND_CHECK_EQ(m.Get(val), 1.0f);
+}
+
+SND_TEST(ToolMixer, KeyedSeriesBackToTheStartLeavesNoStep) {
+  tooltest::ProjectDir p("wheelback");
+  WriteTree(p);
+  Project pr;
+  SND_REQUIRE(pr.Load(p.dir().string()));
+  MixerModel m;
+  m.Bind(pr);
+  const Target fa{Control::BusFader, Bus(pr, "A"), 0, 0};
+  const std::size_t undo = m.history().UndoCount();
+  m.Set(fa, -2.0f, 5);
+  m.Set(fa, -1.0f, 5);
+  m.Set(fa, -3.0f, 5);  // the bank value again
+  SND_CHECK_EQ(m.history().UndoCount(), undo);
+  m.Set(fa, -4.0f, 5);  // the series goes on: one step from -3
+  SND_CHECK_EQ(m.history().UndoCount(), undo + 1u);
+  SND_CHECK(m.Undo());
+  SND_CHECK_EQ(m.Get(fa), -3.0f);
+}
+
+SND_TEST(ToolProject, DuplicateNamesGetUniqueKeys) {
+  tooltest::ProjectDir p("dup");
+  WriteTree(p);
+  p.Write("buses/A2.json", "{\"type\": \"bus\", \"guid\": \"" + tooltest::G(30) + "\", \"name\": \"A\", \"parent\": \"Master\"}");
+  p.Write("buses/A3.json", "{\"type\": \"bus\", \"guid\": \"" + tooltest::G(30) + "\", \"name\": \"A\", \"parent\": \"Master\"}");
+  Project pr;
+  pr.Load(p.dir().string());
+  std::vector<std::string> keys;
+  for (const BusDesc& b : pr.buses()) {
+    for (const std::string& k : keys) SND_CHECK(k != b.key);
+    keys.push_back(b.key);
+    if (b.name == "B") SND_CHECK_EQ(b.key, Hex32(snd::HashId("B")));  // unique: the runtime id
+  }
+  bool guidKey = false, serialKey = false;
+  for (const std::string& k : keys) {
+    guidKey = guidKey || (k.size() == 33 && k[0] == 'g');
+    serialKey = serialKey || k[0] == 'n';
+  }
+  SND_CHECK(guidKey && serialKey);
+}
+
+SND_TEST(ToolSync, NoAnswerAfterTwoSeconds) {
+  CellStatus s;
+  s.state = CellState::Pending;
+  s.sentNs = 1000;
+  SND_CHECK(!CellSync::IsNoAnswer(s, 1000 + kAckTimeoutNs));
+  SND_CHECK(CellSync::IsNoAnswer(s, 1001 + kAckTimeoutNs));
+  s.state = CellState::Synced;
+  SND_CHECK(!CellSync::IsNoAnswer(s, 1001 + kAckTimeoutNs));
 }

@@ -64,6 +64,7 @@ class App final : public ControlSink, public Actions {
   void ControlBegin(const Target& t) override;
   void ControlSet(const Target& t, float value, std::uint32_t mergeKey) override;
   void ControlEnd(const Target& t) override;
+  void ControlReset(const Target& t) override;
   // Actions
   void OnScreen(Screen s) override;
   void OnConnectToggle() override;

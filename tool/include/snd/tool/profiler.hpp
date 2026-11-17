@@ -2,7 +2,9 @@
 //
 // Poll() copies what the live link client buffered (once per UI frame, UI
 // thread): block timings of the last history window, the latest voice list
-// (sorted by audibility, loudest first), the latest bus meters with peak hold,
+// (real voices first -- VoiceInfo.isVirtual is a boolean, any non-zero value is virtual
+// -- then by audibility, loudest first), the latest bus meters with peak hold (fed only
+// by new BusMeters; meters older than 500 ms fall to -inf, they do not freeze),
 // memory usage, the event log, stream stalls and LOD changes. Everything is a
 // copy; the views read it without touching the client.
 //
@@ -55,8 +57,10 @@ struct BusMeter {
   float rms[SND_MAX_CHANNELS] = {};
   float holdDb[SND_MAX_CHANNELS] = {};  // peak hold (meter_ballistics.hpp) at the last Poll
   bool clipped = false;
+  bool stale = false;  // no new meters for kStaleMeterNs: peak / rms are falling
   std::uint64_t receivedNs = 0;
 };
+inline constexpr std::uint64_t kStaleMeterNs = 500000000ull;
 
 enum class RecordingState : std::uint8_t { Idle = 0, Starting = 1, Recording = 2, Stopping = 3, Ready = 4, Failed = 5 };
 const char* RecordingStateName(RecordingState s);
@@ -114,6 +118,7 @@ class Profiler {
   std::vector<BusMeter> meters_;
   std::vector<std::uint32_t> holdIds_;
   std::vector<PeakHold> holds_;  // holdIds_[i] * SND_MAX_CHANNELS + channel
+  std::uint64_t lastMeterNs_ = 0;
   livelink::MemoryUsage memory_{};
   bool hasMemory_ = false;
   std::vector<LogLine> log_;

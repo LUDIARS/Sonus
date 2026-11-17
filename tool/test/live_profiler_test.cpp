@@ -155,3 +155,23 @@ SND_TEST(ToolLiveProfiler, RecordingSaveAndLoadRoundTrip) {
   SND_CHECK(!t.s.LoadRecording(path));
   SND_CHECK(p.loaded().records == live);
 }
+
+SND_TEST(ToolLiveProfiler, StaleMetersFallToMinusInfinity) {
+  Setup t;
+  t.rig.Play("Tone");
+  SND_REQUIRE(t.rig.Run(t.s, [&] {
+    const BusMeter* m = t.s.profiler().FindMeter(0u);
+    return m != nullptr && m->peak[0] > 0.1f;
+  }, 20000));
+  const std::uint64_t now = tooltest::Now();
+  // No new meters (the game is not rendered): 400 ms later still fresh, 10 s later gone.
+  t.s.profiler().Poll(t.s.connection().client(), now + 400000000ull);
+  const BusMeter* m = t.s.profiler().FindMeter(0u);
+  SND_CHECK(!m->stale && m->peak[0] > 0.1f);
+  t.s.profiler().Poll(t.s.connection().client(), now + 10000000000ull);
+  m = t.s.profiler().FindMeter(0u);
+  SND_CHECK(m->stale);
+  SND_CHECK_EQ(m->peak[0], 0.0f);
+  SND_CHECK_EQ(m->rms[0], 0.0f);
+  SND_CHECK_EQ(m->holdDb[0], kMeterFloorDb);
+}

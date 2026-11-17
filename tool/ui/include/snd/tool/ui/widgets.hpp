@@ -1,7 +1,9 @@
 // Drawings of the tool's controls (Tela has panel / text / button / canvas
 // only; faders, knobs, meters and graphs are drawn here on canvases). Every
 // function returns the drawing in the canvas's local logical coordinates and,
-// where a test needs it, the geometry it used (control_math.hpp rules).
+// where a test needs it, the geometry it used (control_math.hpp rules). Each look
+// has the DPI scale the canvas is painted at (SafeDrawing's budget; default: the
+// largest the tool accepts).
 #ifndef SND_TOOL_UI_WIDGETS_HPP
 #define SND_TOOL_UI_WIDGETS_HPP
 
@@ -12,10 +14,12 @@
 
 #include "snd/tool/ui/control_math.hpp"
 #include "snd/tool/ui/palette.hpp"
+#include "snd/tool/ui/safe_drawing.hpp"
 
 namespace snd::tool::ui {
 
 struct FaderLook {
+  float dpi = kMaxDpiScale;
   float width = 40.0f;
   float height = 300.0f;
   float capHeight = 18.0f;
@@ -30,6 +34,7 @@ struct FaderShape {
 tela::Drawing DrawFader(const FaderLook& look, const Palette& p, FaderShape* shape = nullptr);
 
 struct KnobLook {
+  float dpi = kMaxDpiScale;
   float size = 36.0f;
   float norm = 0.0f;
   float bankNorm = 0.0f;
@@ -44,6 +49,7 @@ struct KnobShape {
 tela::Drawing DrawKnob(const KnobLook& look, const Palette& p, KnobShape* shape = nullptr);
 
 struct MeterLook {
+  float dpi = kMaxDpiScale;
   float width = 30.0f;
   float height = 300.0f;
   std::uint32_t channels = 2;
@@ -64,12 +70,15 @@ tela::Drawing DrawMeter(const MeterLook& look, const Palette& p, MeterShape* sha
 tela::Color MeterZoneColor(float db, const Palette& p);
 
 struct GraphLook {
+  float dpi = kMaxDpiScale;
   float width = 600.0f;
   float height = 200.0f;
   std::vector<float> total;   // logic + render per block (us), oldest first
   std::vector<float> render;  // render only
   float budget = 0.0f;        // us
 };
+// The two series get half of the drawing's shapes each; when Tela's budget needs it they are
+// drawn with fewer points (GraphShape keeps the exact points).
 struct GraphShape {
   GraphScale scale;
   float budgetY = 0.0f;
@@ -79,9 +88,10 @@ inline constexpr std::uint32_t kGraphMaxPoints = 240;
 tela::Drawing DrawTimingGraph(const GraphLook& look, const Palette& p, GraphShape* shape = nullptr);
 
 // A small state light (mute / solo / sync state): filled with `on` or the track colour.
-tela::Drawing DrawLight(float width, float height, bool lit, tela::Color on, const Palette& p);
+tela::Drawing DrawLight(float width, float height, bool lit, tela::Color on, const Palette& p,
+                        float dpi = kMaxDpiScale);
 // A horizontal usage bar: fraction of the width filled (accent, or budget colour above 1).
-tela::Drawing DrawUsageBar(float width, float height, float fraction, const Palette& p);
+tela::Drawing DrawUsageBar(float width, float height, float fraction, const Palette& p, float dpi = kMaxDpiScale);
 
 }  // namespace snd::tool::ui
 

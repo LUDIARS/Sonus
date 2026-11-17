@@ -117,6 +117,28 @@ std::vector<T> TreeOrder(const std::vector<T>& items, const std::vector<std::int
   return out;  // items in a parent cycle are left out
 }
 
+// Keys: see BusDesc::key.
+template <class T>
+void AssignKeys(std::vector<T>& items) {
+  char b[48];
+  for (std::size_t i = 0; i < items.size(); ++i) {
+    std::uint32_t sameId = 0, sameGuid = 0;
+    for (const T& o : items) {
+      sameId += o.id == items[i].id ? 1u : 0u;
+      sameGuid += o.guid == items[i].guid ? 1u : 0u;
+    }
+    if (sameId == 1u) {
+      std::snprintf(b, sizeof b, "%08x", items[i].id);
+    } else if (sameGuid == 1u) {
+      std::snprintf(b, sizeof b, "g%016llx%016llx", static_cast<unsigned long long>(items[i].guid.hi),
+                    static_cast<unsigned long long>(items[i].guid.lo));
+    } else {
+      std::snprintf(b, sizeof b, "n%zu", i);
+    }
+    items[i].key = b;
+  }
+}
+
 }  // namespace
 
 bool ParseGuid(const std::string& text, Guid* out) {
@@ -348,8 +370,11 @@ bool Project::Load(const std::string& dir, const std::string& skipDir) {
     p.defaultValue = Number(o.doc.Find("default"), p.minValue);
     parameters_.push_back(std::move(p));
   }
-  std::sort(parameters_.begin(), parameters_.end(),
-            [](const ParameterDesc& a, const ParameterDesc& b) { return a.name < b.name; });
+  std::stable_sort(parameters_.begin(), parameters_.end(),
+                   [](const ParameterDesc& a, const ParameterDesc& b) { return a.name < b.name; });
+  AssignKeys(buses_);
+  AssignKeys(categories_);
+  AssignKeys(parameters_);
   return errorCount() == 0;
 }
 

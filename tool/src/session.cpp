@@ -43,7 +43,7 @@ void Session::Tick(std::uint64_t nowNs) {
   }
   livelink::Client* c = connection_.client();
   const bool sendAll = ev.sessionStarted && connection_.mismatch();
-  sync_.Update(c, mixer_.Cells(), mixer_.ParamCells(), ev.sessionStarted, sendAll);
+  sync_.Update(c, mixer_.Cells(), mixer_.ParamCells(), ev.sessionStarted, sendAll, nowNs);
   if (sync_.stats().refused != refusedSeen_) {
     refusedSeen_ = sync_.stats().refused;
     Message(std::string("value refused by the game: ") + ResultName(sync_.stats().lastError));

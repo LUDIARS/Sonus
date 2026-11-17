@@ -3,7 +3,6 @@
 
 #include <algorithm>
 #include <cmath>
-#include <cstdio>
 
 #include "snd/format/bank_format.hpp"
 
@@ -11,12 +10,6 @@ namespace snd::tool {
 namespace {
 
 namespace bf = snd::bank_format;
-
-std::string Hex(std::uint32_t v) {
-  char b[16];
-  std::snprintf(b, sizeof b, "%08x", v);
-  return b;
-}
 
 bool Valid(std::int32_t i, std::size_t n) { return i >= 0 && static_cast<std::size_t>(i) < n; }
 
@@ -287,21 +280,21 @@ std::vector<OverrideItem> MixerModel::Overrides() const {
         const BusDesc& b = project_->buses()[a];
         it.label = b.name + " volume";
         it.muted = buses_[a].muted || SoloMuted(c.owner.a);
-        it.key = "bus." + Hex(b.id) + ".vol";
+        it.key = "bus." + b.key + ".vol";
         break;
       }
       case Control::EffectParam: {
         const BusDesc& b = project_->buses()[a];
         const EffectDesc& e = b.effects[static_cast<std::size_t>(c.owner.b)];
         it.label = b.name + " " + e.type + " " + e.params[static_cast<std::size_t>(c.owner.c)].name;
-        it.key = "fx." + Hex(b.id) + "." + std::to_string(c.owner.b) + "." + std::to_string(c.owner.c);
+        it.key = "fx." + b.key + "." + std::to_string(c.owner.b) + "." + std::to_string(c.owner.c);
         break;
       }
       case Control::CategoryFader: {
         const CategoryDesc& d = project_->categories()[a];
         it.label = d.name + " volume";
         it.muted = categories_[a].muted;
-        it.key = "cat." + Hex(d.id) + ".vol";
+        it.key = "cat." + d.key + ".vol";
         break;
       }
       default: break;
@@ -316,7 +309,7 @@ std::vector<OverrideItem> MixerModel::Overrides() const {
     it.label = "parameter " + p.name;
     it.bankValue = p.defaultValue;
     it.value = params_[i].value;
-    it.key = "par." + Hex(p.id);
+    it.key = "par." + p.key;
     out.push_back(std::move(it));
   }
   return out;
@@ -344,8 +337,9 @@ bool MixerModel::Revert(const OverrideItem& item) {
       changed |= Set(Target{Control::CategoryMute, t.a, 0, 0}, 0.0f);
       break;
     case Control::ParamOverrideOn:
-    case Control::ParamOverride:
+    case Control::ParamOverride:  // off, and the tool's value back to the bank default
       changed |= Set(Target{Control::ParamOverrideOn, t.a, 0, 0}, 0.0f);
+      changed |= Set(Target{Control::ParamOverride, t.a, 0, 0}, BankValue(Target{Control::ParamOverride, t.a, 0, 0}));
       break;
     default: changed |= Set(t, BankValue(t)); break;
   }
@@ -376,7 +370,9 @@ bool MixerModel::RevertAll() {
   }
   for (std::size_t i = 0; i < params_.size(); ++i) {
     const Target t{Control::ParamOverrideOn, static_cast<std::int32_t>(i), 0, 0};
+    const Target v{Control::ParamOverride, static_cast<std::int32_t>(i), 0, 0};
     if (IsEditable(t)) changed |= Set(t, 0.0f);
+    if (IsEditable(v)) changed |= Set(v, BankValue(v));
   }
   EndGroup();
   return changed;

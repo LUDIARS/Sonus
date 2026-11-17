@@ -15,7 +15,7 @@ tela::Stroke Line(tela::Color c, float w) { return tela::Stroke{c, w}; }
 }  // namespace
 
 tela::Drawing DrawFader(const FaderLook& l, const Palette& p, FaderShape* shape) {
-  SafeDrawing d;
+  SafeDrawing d(l.dpi);
   d.Rectangle(tela::Rect{0, 0, l.width, l.height}, p.canvas);
   const FaderGeometry g{l.height, l.capHeight};
   const float cx = l.width * 0.5f;
@@ -42,7 +42,7 @@ tela::Drawing DrawFader(const FaderLook& l, const Palette& p, FaderShape* shape)
 }
 
 tela::Drawing DrawKnob(const KnobLook& l, const Palette& p, KnobShape* shape) {
-  SafeDrawing d;
+  SafeDrawing d(l.dpi);
   d.Rectangle(tela::Rect{0, 0, l.size, l.size}, p.canvas);
   const float r = l.size * 0.5f - 2.0f;
   const tela::Point c{l.size * 0.5f, l.size * 0.5f};
@@ -76,7 +76,7 @@ tela::Color MeterZoneColor(float db, const Palette& p) {
 }
 
 tela::Drawing DrawMeter(const MeterLook& l, const Palette& p, MeterShape* shape) {
-  SafeDrawing d;
+  SafeDrawing d(l.dpi);
   d.Rectangle(tela::Rect{0, 0, l.width, l.height}, p.canvas);
   const std::uint32_t n = std::clamp<std::uint32_t>(l.channels, 1u, 8u);
   const float gap = 2.0f;
@@ -112,7 +112,7 @@ tela::Drawing DrawMeter(const MeterLook& l, const Palette& p, MeterShape* shape)
 }
 
 tela::Drawing DrawTimingGraph(const GraphLook& l, const Palette& p, GraphShape* shape) {
-  SafeDrawing d;
+  SafeDrawing d(l.dpi);
   d.Rectangle(tela::Rect{0, 0, l.width, l.height}, p.canvas);
   const std::size_t n = std::min<std::size_t>(l.total.size(), kGraphMaxPoints);
   const std::size_t first = l.total.size() - n;
@@ -137,21 +137,22 @@ tela::Drawing DrawTimingGraph(const GraphLook& l, const Palette& p, GraphShape* 
       const std::size_t ri = first + i;
       render.push_back(tela::Point{x, s.scale.Y(ri < l.render.size() ? l.render[ri] : 0.0f, 0.0f, l.height)});
     }
-    d.Polyline(render, Line(p.accentSoft, 1.0f));
-    d.Polyline(s.totalPoints, Line(p.accent, 1.5f));
+    const std::uint32_t share = (SafeDrawing::kMaxShapes - d.shapes()) / 2u;
+    d.Polyline(s.totalPoints, Line(p.accent, 1.5f), share);  // the main series first
+    d.Polyline(render, Line(p.accentSoft, 1.0f), share);
   }
   if (shape != nullptr) *shape = std::move(s);
   return d.Take();
 }
 
-tela::Drawing DrawLight(float width, float height, bool lit, tela::Color on, const Palette& p) {
-  SafeDrawing d;
+tela::Drawing DrawLight(float width, float height, bool lit, tela::Color on, const Palette& p, float dpi) {
+  SafeDrawing d(dpi);
   d.Rectangle(tela::Rect{0, 0, width, height}, lit ? on : p.track, NoStroke(), std::min(width, height) * 0.5f);
   return d.Take();
 }
 
-tela::Drawing DrawUsageBar(float width, float height, float fraction, const Palette& p) {
-  SafeDrawing d;
+tela::Drawing DrawUsageBar(float width, float height, float fraction, const Palette& p, float dpi) {
+  SafeDrawing d(dpi);
   d.Rectangle(tela::Rect{0, 0, width, height}, p.track);
   const float f = std::isfinite(fraction) ? std::clamp(fraction, 0.0f, 1.0f) : 0.0f;
   if (f > 0.0f) d.Rectangle(tela::Rect{0, 0, width * f, height}, fraction > 1.0f ? p.budget : p.accent);

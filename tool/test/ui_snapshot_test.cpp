@@ -45,7 +45,7 @@ SND_TEST(ToolUiSnapshot, LiveMixerAndProfilerImages) {
   d.connection.meterHz = 200;
   ui::App app(s, d);
   SND_REQUIRE_EQ(s.Connect(d.connection), SND_OK);
-  auto run = [&](auto pred) { return rig.f.StepUntil([&] { app.Frame(tooltest::Now()); return pred(); }); };
+  auto run = [&](auto pred) { return rig.f.StepUntil([&] { app.Frame(tooltest::Now()); return pred(); }, 60000); };
   SND_REQUIRE(run([&] { return s.connection().state() == LinkState::Online; }));
   // Some state to show: Music at -10 dB, the delay's dry level, a parameter override, Sfx soloed.
   s.mixer().Set(Target{Control::BusFader, tooltest::Bus(tool.project, "Music"), 0, 0}, -10.0f);

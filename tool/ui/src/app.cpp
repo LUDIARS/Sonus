@@ -5,6 +5,7 @@
 #include <cmath>
 
 #include "snd/tool/ui/layout_metrics.hpp"
+#include "snd/tool/ui/safe_drawing.hpp"
 
 namespace snd::tool::ui {
 
@@ -23,7 +24,9 @@ App::App(Session& session, const AppDesc& desc)
 void App::SetViewport(int width, int height, float dpiScale) {
   if (desc_.hostOwnsViewport) return;
   // Tela's limits (Runtime::viewport throws outside them).
-  if (!(std::isfinite(dpiScale) && dpiScale >= 0.25f && dpiScale <= 8.0f)) dpiScale = 1.0f;
+  // The DPI scales the tool accepts (as --dpi): kMinDpiScale .. kMaxDpiScale, clamped.
+  if (!std::isfinite(dpiScale)) dpiScale = 1.0f;
+  dpiScale = std::clamp(dpiScale, kMinDpiScale, kMaxDpiScale);
   if (width < 1) width = 1;
   if (height < 1) height = 1;
   if (width > 16384) width = 16384;
@@ -67,7 +70,7 @@ void App::Declare(std::uint64_t nowNs) {
     if (view_.mixerPage >= pages) view_.mixerPage = pages - 1u;
   }
   std::vector<ControlBinding> controls;
-  ViewContext ctx{session_, palette_, view_, *this, runtime_, controls, nowNs, desc_.recordingPath};
+  ViewContext ctx{session_, palette_, view_, *this, runtime_, controls, nowNs, desc_.recordingPath, scale};
   tela::Document doc;
   Panel(doc, "root", 0, inset, w, h, [&] {
     Panel(doc, "header", 0, 0, w, kHeaderHeight, [&] { DeclareHeader(doc, ctx, w); });
@@ -98,16 +101,29 @@ void App::ControlBegin(const Target&) { session_.mixer().BeginGroup(); }
 void App::ControlSet(const Target& t, float value, std::uint32_t mergeKey) {
   MixerModel& m = session_.mixer();
   // A parameter knob turns its override on (one edit with the value).
+  // With a merge key (wheel) both changes carry it, so the series stays one step.
   if (t.control == Control::ParamOverride && m.Get(Target{Control::ParamOverrideOn, t.a, 0, 0}) == 0.0f) {
-    m.BeginGroup();
-    m.Set(t, value);
-    m.Set(Target{Control::ParamOverrideOn, t.a, 0, 0}, 1.0f);
-    m.EndGroup();
+    if (mergeKey == 0u) m.BeginGroup();
+    m.Set(t, value, mergeKey);
+    m.Set(Target{Control::ParamOverrideOn, t.a, 0, 0}, 1.0f, mergeKey);
+    if (mergeKey == 0u) m.EndGroup();
     return;
   }
   m.Set(t, value, mergeKey);
 }
 void App::ControlEnd(const Target&) { session_.mixer().EndGroup(); }
+void App::ControlReset(const Target& t) {
+  MixerModel& m = session_.mixer();
+  if (t.control == Control::ParamOverride) {  // release the override (as its Revert)
+    OverrideItem it;
+    it.target = Target{Control::ParamOverrideOn, t.a, 0, 0};
+    m.Revert(it);
+    return;
+  }
+  m.BeginGroup();
+  m.Set(t, m.BankValue(t));
+  m.EndGroup();
+}
 
 // --- Actions ---------------------------------------------------------------------------------
 void App::OnScreen(Screen s) { view_.screen = s; }

@@ -50,6 +50,7 @@ struct ViewContext {
   std::vector<ControlBinding>& controls;
   std::uint64_t nowNs = 0;
   std::string recordingPath;     // where Save writes / Load reads
+  float dpi = 1.0f;              // the viewport's DPI scale (drawing budgets)
 };
 
 bool IsPressed(const tela::Runtime& runtime, const std::string& id);
@@ -59,10 +60,13 @@ void DeclareFooter(tela::Document& doc, ViewContext& ctx, float width);
 void DeclareMixer(tela::Document& doc, ViewContext& ctx, float width, float height);
 void DeclareProfiler(tela::Document& doc, ViewContext& ctx, float width, float height);
 
-// Stable element ids (tests and hosts).
+// Stable element ids (tests and hosts): "bus." / "cat." / "par." + the object's key
+// (BusDesc::key). These helpers give the id of an object whose runtime id is unique in
+// its project (every project that builds); objects that share a name get GUID keys.
 std::string BusId(std::uint32_t busRuntimeId);       // "bus.0a1b2c3d"
 std::string CategoryId(std::uint32_t categoryId);    // "cat.0a1b2c3d"
 std::string ParameterId(std::uint32_t parameterId);  // "par.0a1b2c3d"
+
 
 }  // namespace snd::tool::ui
 

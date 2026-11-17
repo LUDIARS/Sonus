@@ -168,9 +168,10 @@ class LiveRig {
     d.name = "tool-test";
     return d;
   }
-  // Renders blocks and ticks the session until pred() (true) or the timeout.
+  // Renders blocks and ticks the session until pred() (true) or the timeout. The timeout is
+  // long on purpose: under sanitizers and parallel ctest a few seconds are not enough.
   template <class Pred>
-  bool Run(snd::tool::Session& s, Pred&& pred, std::uint32_t timeoutMs = 5000) {
+  bool Run(snd::tool::Session& s, Pred&& pred, std::uint32_t timeoutMs = 60000) {
     return f.StepUntil([&] {
       s.Tick(Now());
       return pred();

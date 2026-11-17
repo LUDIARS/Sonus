@@ -59,7 +59,8 @@ void PointerRouter::StartDrag(std::int32_t control, float y, bool fine) {
   dragId_ = b.hitId;
   anchorY_ = y;
   lastY_ = y;
-  anchorNorm_ = ToNorm(b, sink_.ControlValue(b.target));
+  anchorValue_ = sink_.ControlValue(b.target);
+  anchorNorm_ = ToNorm(b, anchorValue_);
   anchorFine_ = fine;
   wheelId_.clear();
   sink_.ControlBegin(b.target);
@@ -107,9 +108,7 @@ bool PointerRouter::Pointer(tela::Runtime& runtime, const tela::HostPointerEvent
         havePress_ = false;
         armed_ = -1;
         armedId_.clear();
-        sink_.ControlBegin(b.target);
-        sink_.ControlSet(b.target, sink_.ControlDefault(b.target), 0);
-        sink_.ControlEnd(b.target);
+        sink_.ControlReset(b.target);
         return true;
       }
       havePress_ = true;
@@ -133,12 +132,18 @@ bool PointerRouter::Pointer(tela::Runtime& runtime, const tela::HostPointerEvent
       }
       const ControlBinding& b = controls_[static_cast<std::size_t>(drag_)];
       if (fine != anchorFine_) {  // re-anchor at the previous position so that the value does not jump
-        anchorNorm_ = ToNorm(b, sink_.ControlValue(b.target));
+        anchorValue_ = sink_.ControlValue(b.target);
+        anchorNorm_ = ToNorm(b, anchorValue_);
         anchorY_ = lastY_;
         anchorFine_ = fine;
       }
       lastY_ = y;
       const float travel = b.travel > 0.0f ? b.travel : 1.0f;
+      if (y == anchorY_) {  // no vertical motion: the exact value, never a round trip through the law
+        sink_.ControlSet(b.target, anchorValue_, 0);
+        used = true;
+        break;
+      }
       const float norm = std::clamp(anchorNorm_ + (anchorY_ - y) / travel * (fine ? kFineFactor : 1.0f), 0.0f, 1.0f);
       sink_.ControlSet(b.target, FromNorm(b, norm), 0);
       used = true;

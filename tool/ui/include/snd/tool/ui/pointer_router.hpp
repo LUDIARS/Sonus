@@ -15,7 +15,10 @@
 // after the adapter (Windows) or before it (macOS: the drag then starts on the
 // first move after Tela granted the press).
 //
-// Rules (control_math.hpp): drag relative to the start; Shift (kModShift) =
+// Rules (control_math.hpp): drag relative to the start; no vertical motion since the
+// start (or since a Shift re-anchor) leaves the exact value (a press, a sideways jitter:
+// no change, no undo step, even where the value -> position mapping is not exact, e.g.
+// -90 dB and below at position 0); Shift (kModShift) =
 // 1/10, re-anchored when Shift changes mid-drag; a second press on the same
 // control within 400 ms and 4 px sets the bank value (one undo step, no drag);
 // wheel notches step the value and merge into one undo step per control while
@@ -42,6 +45,13 @@ class ControlSink {
   virtual void ControlBegin(const Target& t) = 0;
   virtual void ControlSet(const Target& t, float value, std::uint32_t mergeKey) = 0;
   virtual void ControlEnd(const Target& t) = 0;
+  // Double click: back to the bank value (one undo step). A parameter override knob is
+  // released instead (App).
+  virtual void ControlReset(const Target& t) {
+    ControlBegin(t);
+    ControlSet(t, ControlDefault(t), 0);
+    ControlEnd(t);
+  }
 };
 
 enum class ControlKind : std::uint8_t { Fader = 0, Knob = 1 };
@@ -89,7 +99,7 @@ class PointerRouter {
   std::int32_t drag_ = -1;
   std::int32_t armed_ = -1;
   std::string dragId_, armedId_;
-  float anchorY_ = 0.0f, anchorNorm_ = 0.0f, lastY_ = 0.0f;
+  float anchorY_ = 0.0f, anchorNorm_ = 0.0f, anchorValue_ = 0.0f, lastY_ = 0.0f;
   bool anchorFine_ = false;
   float armedY_ = 0.0f;
   // last press, for double clicks

@@ -40,9 +40,13 @@ void EditHistory::Push(const Change& change, std::uint32_t mergeKey) {
     MergeInto(open_.changes, change);
     return;
   }
-  if (mergeKey != 0u && !closedLast_ && !done_.empty() && done_.back().mergeKey == mergeKey &&
-      done_.back().changes.size() == 1u && done_.back().changes[0].target == change.target) {
-    done_.back().changes[0].after = change.after;
+  if (mergeKey != 0u && !closedLast_ && !done_.empty() && done_.back().mergeKey == mergeKey) {
+    Edit& last = done_.back();
+    MergeInto(last.changes, change);
+    // A series that came back to where it started is no edit (like a drag).
+    bool any = false;
+    for (const Change& c : last.changes) any = any || c.before != c.after;
+    if (!any) done_.pop_back();
     undone_.clear();
     return;
   }

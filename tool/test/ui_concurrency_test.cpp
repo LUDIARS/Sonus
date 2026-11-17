@@ -43,7 +43,11 @@ SND_TEST(ToolUiConcurrency, UiThreadAgainstRunningGameAndNetworkThreads) {
   const auto end = std::chrono::steady_clock::now() + std::chrono::milliseconds(1500);
   std::uint32_t frame = 0, drags = 0;
   bool online = false;
-  while (std::chrono::steady_clock::now() < end || !online) {
+  // At least 1.5 s, and enough frames for every action below (drags, drops) however slow
+  // the machine is (TSan, parallel ctest); bounded by 120 s.
+  const auto limit = std::chrono::steady_clock::now() + std::chrono::seconds(120);
+  while ((std::chrono::steady_clock::now() < end || !online || frame < 200u || drags < 12u) &&
+         std::chrono::steady_clock::now() < limit) {
     app.Frame(tooltest::Now());
     online = online || s.connection().state() == LinkState::Online;
     ++frame;
@@ -70,7 +74,7 @@ SND_TEST(ToolUiConcurrency, UiThreadAgainstRunningGameAndNetworkThreads) {
   }
   // Let everything settle with the threads still running.
   s.mixer().Set(Target{Control::BusFader, sfx, 0, 0}, -9.0f);
-  const auto settle = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+  const auto settle = std::chrono::steady_clock::now() + std::chrono::seconds(60);
   bool synced = false;
   while (std::chrono::steady_clock::now() < settle && !synced) {
     app.Frame(tooltest::Now());

@@ -4,8 +4,9 @@
 // pushed between BeginGroup and EndGroup form one edit (a fader drag, "revert
 // all"); inside a group, changes of the same target merge (first `before`,
 // last `after`). Outside a group, a change with a non-zero merge key merges
-// into the previous edit when that edit has the same key and the same single
-// target (wheel notches on one control). Undo returns the changes to apply in
+// into the previous edit when that edit has the same key and nothing else came between
+// (wheel notches on one control, with what the first notch turned on); changes of the
+// same target merge, and a series that ends where it started leaves no edit. Undo returns the changes to apply in
 // reverse order with before/after swapped; a new edit clears the redo list.
 #ifndef SND_TOOL_EDIT_HISTORY_HPP
 #define SND_TOOL_EDIT_HISTORY_HPP

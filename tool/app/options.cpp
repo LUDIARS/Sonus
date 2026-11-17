@@ -4,6 +4,8 @@
 #include <charconv>
 #include <cstring>
 
+#include "snd/tool/ui/safe_drawing.hpp"
+
 namespace snd::tool::app {
 namespace {
 
@@ -31,7 +33,7 @@ const char* Usage() {
          "  --frames <n>           headless: frames to run (default 30)\n"
          "  --frame-ms <ms>        headless: time between frames (default 33)\n"
          "  --size <W>x<H>         window / snapshot size in physical pixels (default 1280x800)\n"
-         "  --dpi <scale>          headless DPI scale (default 1)\n"
+         "  --dpi <scale>          headless DPI scale, 0.25 .. 4 (default 1)\n"
          "  --text-placeholders    headless without Pictor: draw bars where text goes\n";
 }
 
@@ -96,8 +98,9 @@ bool ParseOptions(int argc, char** argv, Options* o, std::string* error) {
         return false;
       }
     } else if (a == "--dpi") {
-      if (!value(&v) || !Number(v, &o->dpi) || !(o->dpi >= 0.5f && o->dpi <= 4.0f)) {
-        *error = "--dpi expects 0.5 .. 4";
+      // The same range as App::SetViewport (safe_drawing.hpp kMinDpiScale .. kMaxDpiScale).
+      if (!value(&v) || !Number(v, &o->dpi) || !(o->dpi >= ui::kMinDpiScale && o->dpi <= ui::kMaxDpiScale)) {
+        *error = "--dpi expects 0.25 .. 4";
         return false;
       }
     } else if (a == "--text-placeholders") {

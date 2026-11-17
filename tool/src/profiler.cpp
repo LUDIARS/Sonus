@@ -2,12 +2,23 @@
 #include "snd/tool/profiler.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <cstring>
 
 #include "snd/livelink/client.hpp"
 #include "snd/types.h"
 
 namespace snd::tool {
+namespace {
+
+// `linear` lowered by `db` (0 below the meter floor).
+float Fallen(float linear, float db) {
+  if (db <= 0.0f) return linear;
+  const float d = LinearToDb(linear) - db;
+  return d <= kMeterFloorDb ? 0.0f : std::pow(10.0f, d / 20.0f);
+}
+
+}  // namespace
 
 const char* RecordingStateName(RecordingState s) {
   switch (s) {
@@ -27,6 +38,7 @@ void Profiler::Clear() {
   meters_.clear();
   holdIds_.clear();
   holds_.clear();
+  lastMeterNs_ = 0;
   hasMemory_ = false;
   log_.clear();
   stalls_ = lods_ = 0;
@@ -45,19 +57,30 @@ void Profiler::Poll(livelink::Client* client, std::uint64_t nowNs) {
   const std::uint32_t nv = client->CopyVoices(voices_.data(), desc_.maxVoices);
   voices_.resize(std::min(nv, desc_.maxVoices));
   std::stable_sort(voices_.begin(), voices_.end(), [](const livelink::VoiceInfo& a, const livelink::VoiceInfo& b) {
-    if (a.isVirtual != b.isVirtual) return a.isVirtual < b.isVirtual;
+    const bool va = a.isVirtual != 0u, vb = b.isVirtual != 0u;  // any non-zero value is "virtual"
+    if (va != vb) return !va;
     return a.audibility > b.audibility;
   });
   // meters with peak hold
   std::vector<livelink::MeterEntry> me(desc_.maxMeters);
   std::uint64_t meterNs = 0;
   const std::uint32_t nm = std::min(client->CopyMeters(me.data(), desc_.maxMeters, &meterNs), desc_.maxMeters);
+  // A snapshot is new when its receive time changed: only a new one feeds the peak hold.
+  // A snapshot older than kStaleMeterNs is stale (the game stopped sending): its bars fall
+  // like the hold (fallDbPerSecond after kStaleMeterNs) and the hold keeps falling to -inf.
+  const bool fresh = meterNs != lastMeterNs_;
+  lastMeterNs_ = meterNs;
+  const std::uint64_t age = nowNs > meterNs ? nowNs - meterNs : 0u;
+  const float staleFallDb = age > kStaleMeterNs ? static_cast<float>(static_cast<double>(age - kStaleMeterNs) * 1e-9 *
+                                                                     desc_.hold.fallDbPerSecond)
+                                                : 0.0f;
   meters_.resize(nm);
   for (std::uint32_t i = 0; i < nm; ++i) {
     BusMeter& m = meters_[i];
     m.busId = me[i].busId;
     m.channels = std::min<std::uint32_t>(me[i].channels, SND_MAX_CHANNELS);
     m.receivedNs = meterNs;
+    m.stale = staleFallDb > 0.0f;
     std::size_t slot = 0;
     while (slot < holdIds_.size() && holdIds_[slot] != m.busId) ++slot;
     if (slot == holdIds_.size()) {
@@ -66,10 +89,10 @@ void Profiler::Poll(livelink::Client* client, std::uint64_t nowNs) {
     }
     m.clipped = false;
     for (std::uint32_t c = 0; c < SND_MAX_CHANNELS; ++c) {
-      m.peak[c] = c < m.channels ? me[i].peak[c] : 0.0f;
-      m.rms[c] = c < m.channels ? me[i].rms[c] : 0.0f;
+      m.peak[c] = c < m.channels ? Fallen(me[i].peak[c], staleFallDb) : 0.0f;
+      m.rms[c] = c < m.channels ? Fallen(me[i].rms[c], staleFallDb) : 0.0f;
       PeakHold& h = holds_[slot * SND_MAX_CHANNELS + c];
-      if (c < m.channels) h.Update(m.peak[c], nowNs, desc_.hold);
+      if (c < m.channels && fresh) h.Update(me[i].peak[c], nowNs, desc_.hold);
       m.holdDb[c] = h.HeldDb(nowNs, desc_.hold);
       m.clipped = m.clipped || h.clipped();
     }

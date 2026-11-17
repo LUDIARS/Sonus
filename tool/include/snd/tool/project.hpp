@@ -51,6 +51,11 @@ struct EffectDesc {
 };
 
 struct BusDesc {
+  // Stable unique key of the object in this project (element ids, override keys): the
+  // runtime id in hex when no other object of the kind has the same id (always, in a
+  // project that builds); otherwise "g" + the GUID (32 hex), or "n" + the position when
+  // the GUID is shared too.
+  std::string key;
   std::string name;
   Id id = 0;
   Guid guid;
@@ -64,6 +69,11 @@ struct BusDesc {
 };
 
 struct CategoryDesc {
+  // Stable unique key of the object in this project (element ids, override keys): the
+  // runtime id in hex when no other object of the kind has the same id (always, in a
+  // project that builds); otherwise "g" + the GUID (32 hex), or "n" + the position when
+  // the GUID is shared too.
+  std::string key;
   std::string name;
   Id id = 0;
   Guid guid;
@@ -73,6 +83,11 @@ struct CategoryDesc {
 };
 
 struct ParameterDesc {
+  // Stable unique key of the object in this project (element ids, override keys): the
+  // runtime id in hex when no other object of the kind has the same id (always, in a
+  // project that builds); otherwise "g" + the GUID (32 hex), or "n" + the position when
+  // the GUID is shared too.
+  std::string key;
   std::string name;
   Id id = 0;
   Guid guid;

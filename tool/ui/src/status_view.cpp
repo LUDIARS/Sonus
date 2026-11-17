@@ -32,7 +32,7 @@ void DeclareHeader(tela::Document& doc, ViewContext& ctx, float width) {
   if (st == LinkState::Online) on = conn.mismatch() ? ctx.palette.pending : ctx.palette.solo;
   if (st == LinkState::Connecting || st == LinkState::Handshake) on = ctx.palette.pending;
   const float lx = width - 470.0f;
-  Canvas(doc, "link.light", DrawLight(12, 12, st != LinkState::Offline, on, ctx.palette), lx, 14, 12, 12);
+  Canvas(doc, "link.light", DrawLight(12, 12, st != LinkState::Offline, on, ctx.palette, ctx.dpi), lx, 14, 12, 12);
   std::string text = std::string(LinkStateName(st)) + "  " + conn.Target();
   if (st == LinkState::Online) {
     char b[96];
@@ -50,10 +50,10 @@ void DeclareFooter(tela::Document& doc, ViewContext& ctx, float width) {
   const auto& msgs = ctx.session.messages();
   const CellSync& sync = ctx.session.sync();
   char b[96];
-  std::snprintf(b, sizeof b, "pending %u  unsent %u  refused %u", sync.Count(CellState::Pending),
-                sync.Count(CellState::Unsent), sync.Count(CellState::Failed));
-  Text(doc, "footer.msg", msgs.empty() ? std::string() : msgs.back(), 6, 2, width - 260, 22, 0.7f);
-  Text(doc, "footer.sync", b, width - 250, 2, 244, 22, 0.7f);
+  std::snprintf(b, sizeof b, "pending %u  no answer %u  unsent %u  refused %u", sync.Count(CellState::Pending),
+                sync.NoAnswer(ctx.nowNs), sync.Count(CellState::Unsent), sync.Count(CellState::Failed));
+  Text(doc, "footer.msg", msgs.empty() ? std::string() : msgs.back(), 6, 2, width - 340, 22, 0.7f);
+  Text(doc, "footer.sync", b, width - 330, 2, 324, 22, 0.7f);
 }
 
 }  // namespace snd::tool::ui

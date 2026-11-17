@@ -31,6 +31,7 @@ std::string BusName(const Project& p, std::uint32_t id) {
 void DeclareGraph(tela::Document& doc, ViewContext& ctx, float w) {
   const Profiler& prof = ctx.session.profiler();
   GraphLook g;
+  g.dpi = ctx.dpi;
   g.width = w;
   g.height = kGraphHeight;
   for (const TimingPoint& t : prof.timings()) {
@@ -122,7 +123,7 @@ void DeclareBottom(tela::Document& doc, ViewContext& ctx, float y, float w) {
       if (budget != 0u) label += " / " + FormatBytes(budget);
       Text(doc, id, label, cx, cy, colW * 0.62f, 20, 0.5f);
       const float frac = budget != 0u ? static_cast<float>(static_cast<double>(used) / static_cast<double>(budget)) : 0.0f;
-      Canvas(doc, id + ".bar", DrawUsageBar(colW * 0.34f, 8, frac, ctx.palette), cx + colW * 0.64f, cy + 7, colW * 0.34f, 8);
+      Canvas(doc, id + ".bar", DrawUsageBar(colW * 0.34f, 8, frac, ctx.palette, ctx.dpi), cx + colW * 0.64f, cy + 7, colW * 0.34f, 8);
     }
   }, 6.0f);
   const float rx = memW + 8.0f, rw = w - memW - 8.0f;

@@ -186,12 +186,26 @@ SND_TEST(ToolUiRaster, ComposeRefusesWhatTelaWouldRefuse) {
     g.total.push_back(i % 2 == 0 ? 0.0f : 1000.0f);
     g.render.push_back(i % 2 == 0 ? 1000.0f : 0.0f);
   }
-  ui::GraphShape gs;
-  const tela::Drawing gd = ui::DrawTimingGraph(g, ui::MakePalette(tela::Theme{}), &gs);
-  std::size_t points = 0;
-  for (const tela::Shape& sh : gd.shapes()) points += sh.points.size();
-  SND_CHECK(points >= 2u * ui::kGraphMaxPoints);
-  SND_CHECK(!big.Rectangle(tela::Rect{0, 0, 4000, 4000}, tela::Color{}));  // work budget (over 60M at DPI 2)
+  // At DPI 1 every point is drawn; at DPI 4 the work stays in the budget (series thinned).
+  for (float dpi : {1.0f, ui::kMaxDpiScale}) {
+    g.dpi = dpi;
+    ui::GraphShape gs;
+    const tela::Drawing gd = ui::DrawTimingGraph(g, ui::MakePalette(tela::Theme{}), &gs);
+    std::size_t points = 0, shapes = 0;
+    for (const tela::Shape& sh : gd.shapes()) {
+      points += sh.points.size();
+      ++shapes;
+    }
+    SND_CHECK_EQ(gs.totalPoints.size(), static_cast<std::size_t>(ui::kGraphMaxPoints));
+    SND_CHECK(shapes <= ui::SafeDrawing::kMaxShapes);
+    if (dpi == 1.0f) SND_CHECK(points >= 2u * ui::kGraphMaxPoints);
+    ui::SafeDrawing probe(dpi);  // the same drawing re-admitted shape by shape stays in the budget
+    for (const tela::Shape& sh : gd.shapes()) {
+      if (sh.kind == tela::ShapeKind::polyline) SND_CHECK(probe.Polyline(sh.points, sh.stroke));
+    }
+  }
+  ui::SafeDrawing big2(2.0f);
+  SND_CHECK(!big2.Rectangle(tela::Rect{0, 0, 4000, 4000}, tela::Color{}));  // work budget (over 60M at DPI 2)
   std::vector<tela::Point> line;
   for (int i = 0; i < 1000; ++i) line.push_back(tela::Point{static_cast<float>(i), static_cast<float>(i % 7)});
   ui::SafeDrawing poly;

@@ -28,6 +28,23 @@ std::uint64_t Get64(const std::uint8_t* p) {
 
 }  // namespace
 
+
+namespace {
+// FNV-1a 64 over the header without its checksum field, then the records.
+std::uint64_t Checksum(const std::uint8_t* header, const std::uint8_t* records, std::uint64_t bytes) {
+  std::uint64_t h = 0xcbf29ce484222325ull;
+  auto feed = [&h](const std::uint8_t* p, std::uint64_t n) {
+    for (std::uint64_t i = 0; i < n; ++i) {
+      h ^= p[i];
+      h *= 0x100000001b3ull;
+    }
+  };
+  feed(header, 56);
+  feed(records, bytes);
+  return h;
+}
+}  // namespace
+
 std::uint64_t Fnv1a64(const std::uint8_t* data, std::uint64_t bytes) {
   std::uint64_t h = 0xcbf29ce484222325ull;
   for (std::uint64_t i = 0; i < bytes; ++i) {
@@ -87,8 +104,8 @@ std::vector<std::uint8_t> EncodeRecording(const Recording& r) {
   Put32(h + 40, r.info.platform);
   Put32(h + 44, r.info.contractVersion);
   Put64(h + 48, r.records.size());
-  Put64(h + 56, Fnv1a64(r.records.data(), r.records.size()));
   if (!r.records.empty()) std::memcpy(h + kRecordingHeaderBytes, r.records.data(), r.records.size());
+  Put64(h + 56, Checksum(out.data(), r.records.data(), r.records.size()));
   return out;
 }
 
@@ -105,7 +122,9 @@ bool DecodeRecording(const std::uint8_t* data, std::uint64_t bytes, Recording* o
   const std::uint64_t recordBytes = Get64(data + 48);
   if (recordBytes != bytes - headerBytes) return fail("record size does not match the file size");
   const std::uint8_t* records = data + headerBytes;
-  if (Fnv1a64(records, recordBytes) != Get64(data + 56)) return fail("checksum mismatch");
+  if (Checksum(data, records, recordBytes) != Get64(data + 56)) return fail("checksum mismatch");
+  const RecordingSummary summary = Summarize(records, recordBytes);
+  if (!summary.valid) return fail("unreadable records");
   Recording r;
   r.info.flags = Get32(data + 12);
   r.info.projectBuildHash = Get64(data + 16);

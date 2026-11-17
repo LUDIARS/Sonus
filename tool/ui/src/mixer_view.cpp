@@ -12,12 +12,14 @@
 namespace snd::tool::ui {
 namespace {
 
-tela::Color SyncColor(const CellSync& sync, std::int32_t cell, const Palette& p, bool* lit) {
+// Yellow: waiting for the Ack; orange: no answer for 2 s; red: refused.
+tela::Color SyncColor(const CellSync& sync, std::int32_t cell, const Palette& p, std::uint64_t nowNs, bool* lit) {
   *lit = false;
   if (cell < 0 || static_cast<std::size_t>(cell) >= sync.cells().size()) return p.track;
   const CellStatus& s = sync.cells()[static_cast<std::size_t>(cell)];
   *lit = s.state != CellState::Synced;
-  return s.state == CellState::Failed ? p.failed : p.pending;
+  if (s.state == CellState::Failed) return p.failed;
+  return CellSync::IsNoAnswer(s, nowNs) ? p.mute : p.pending;
 }
 
 std::string Short(const std::string& s, std::size_t n) { return s.size() <= n ? s : s.substr(0, n); }
@@ -36,6 +38,7 @@ void DeclareFader(tela::Document& doc, ViewContext& ctx, const std::string& base
                   float bankDb, bool silenced, const StripMetrics& m) {
   const std::string hit = base + ".fader.hit";
   FaderLook look;
+  look.dpi = ctx.dpi;
   look.width = m.faderWidth;
   look.height = m.faderHeight;
   look.capHeight = m.capHeight;
@@ -59,14 +62,14 @@ void DeclareBusStrip(tela::Document& doc, ViewContext& ctx, std::int32_t bus, fl
   const MixerModel& mixer = ctx.session.mixer();
   const BusDesc& desc = project.buses()[static_cast<std::size_t>(bus)];
   const MixerModel::BusStrip& strip = mixer.buses()[static_cast<std::size_t>(bus)];
-  const std::string base = BusId(desc.id);
+  const std::string base = "bus." + desc.key;
   Actions* a = &ctx.actions;
   Panel(doc, base, x, y, m.width, m.height, [&] {
     Text(doc, base + ".name", Short(desc.name, 14), 0, 0, m.inner - 12, m.nameHeight, 0.7f);
     bool lit = false;
     const CellSync& sync = ctx.session.sync();
-    const tela::Color sc = SyncColor(sync, sync.Find(mixer.Cells()[static_cast<std::size_t>(bus)].address), ctx.palette, &lit);
-    Canvas(doc, base + ".sync", DrawLight(8, 8, lit, sc, ctx.palette), m.inner - 9, 6, 8, 8);
+    const tela::Color sc = SyncColor(sync, sync.Find(mixer.Cells()[static_cast<std::size_t>(bus)].address), ctx.palette, ctx.nowNs, &lit);
+    Canvas(doc, base + ".sync", DrawLight(8, 8, lit, sc, ctx.palette, ctx.dpi), m.inner - 9, 6, 8, 8);
     // Effect parameter knobs (first knobSlots parameters over all effects).
     std::uint32_t slot = 0, hidden = 0;
     const float cellW = m.inner / static_cast<float>(m.knobColumns);
@@ -85,6 +88,7 @@ void DeclareBusStrip(tela::Document& doc, ViewContext& ctx, std::int32_t bus, fl
         const std::string kid = base + ".fx" + std::to_string(e) + "." + std::to_string(pi);
         const KnobRange range{pd.minValue, pd.maxValue, pd.logScale, pd.integer};
         KnobLook look;
+        look.dpi = ctx.dpi;
         look.size = m.knobSize;
         look.norm = KnobToNorm(strip.params[e][pi], range);
         look.bankNorm = KnobToNorm(pd.projectValue, range);
@@ -113,17 +117,18 @@ void DeclareBusStrip(tela::Document& doc, ViewContext& ctx, std::int32_t bus, fl
     // Mute / solo with their lights.
     const Target mute{Control::BusMute, bus, 0, 0}, solo{Control::BusSolo, bus, 0, 0};
     Button(doc, base + ".mute", "M", [a, mute] { a->OnToggle(mute); }, 0, m.buttonsTop, m.buttonWidth, m.buttonHeight);
-    Canvas(doc, base + ".mute.led", DrawLight(m.buttonWidth - 8, 3, strip.muted, ctx.palette.mute, ctx.palette), 4,
+    Canvas(doc, base + ".mute.led", DrawLight(m.buttonWidth - 8, 3, strip.muted, ctx.palette.mute, ctx.palette, ctx.dpi), 4,
            m.buttonsTop + m.buttonHeight - 4, m.buttonWidth - 8, 3);
     Button(doc, base + ".solo", "S", [a, solo] { a->OnToggle(solo); }, m.buttonWidth + 4, m.buttonsTop,
            m.buttonWidth, m.buttonHeight);
-    Canvas(doc, base + ".solo.led", DrawLight(m.buttonWidth - 8, 3, strip.soloed, ctx.palette.solo, ctx.palette),
+    Canvas(doc, base + ".solo.led", DrawLight(m.buttonWidth - 8, 3, strip.soloed, ctx.palette.solo, ctx.palette, ctx.dpi),
            m.buttonWidth + 8, m.buttonsTop + m.buttonHeight - 4, m.buttonWidth - 8, 3);
     // Fader and meter.
     const bool soloMuted = mixer.SoloMuted(bus);
     DeclareFader(doc, ctx, base, Target{Control::BusFader, bus, 0, 0}, strip.faderDb,
                  mixer.BankValue(Target{Control::BusFader, bus, 0, 0}), strip.muted || soloMuted, m);
     MeterLook ml;
+    ml.dpi = ctx.dpi;
     ml.width = m.meterWidth;
     ml.height = m.faderHeight;
     // The game reports the master bus with id 0 (SND_ID_NONE): the output.
@@ -152,7 +157,7 @@ void DeclareCategoryStrip(tela::Document& doc, ViewContext& ctx, std::int32_t ca
   const MixerModel& mixer = ctx.session.mixer();
   const CategoryDesc& desc = project.categories()[static_cast<std::size_t>(cat)];
   const MixerModel::CategoryStrip& strip = mixer.categories()[static_cast<std::size_t>(cat)];
-  const std::string base = CategoryId(desc.id);
+  const std::string base = "cat." + desc.key;
   Actions* a = &ctx.actions;
   Panel(doc, base, x, y, m.width, m.height, [&] {
     Text(doc, base + ".name", "cat " + Short(desc.name, 10), 0, 0, m.inner - 12, m.nameHeight, 0.7f);
@@ -162,12 +167,12 @@ void DeclareCategoryStrip(tela::Document& doc, ViewContext& ctx, std::int32_t ca
     for (const Cell& c : mixer.Cells()) {
       if (c.owner.control == Control::CategoryFader && c.owner.a == cat) addr = c.address;
     }
-    const tela::Color sc = SyncColor(sync, sync.Find(addr), ctx.palette, &lit);
-    Canvas(doc, base + ".sync", DrawLight(8, 8, lit, sc, ctx.palette), m.inner - 9, 6, 8, 8);
+    const tela::Color sc = SyncColor(sync, sync.Find(addr), ctx.palette, ctx.nowNs, &lit);
+    Canvas(doc, base + ".sync", DrawLight(8, 8, lit, sc, ctx.palette, ctx.dpi), m.inner - 9, 6, 8, 8);
     Text(doc, base + ".kind", "category", 0, m.knobTop, m.inner, 18, 0.55f);
     const Target mute{Control::CategoryMute, cat, 0, 0};
     Button(doc, base + ".mute", "M", [a, mute] { a->OnToggle(mute); }, 0, m.buttonsTop, m.buttonWidth, m.buttonHeight);
-    Canvas(doc, base + ".mute.led", DrawLight(m.buttonWidth - 8, 3, strip.muted, ctx.palette.mute, ctx.palette), 4,
+    Canvas(doc, base + ".mute.led", DrawLight(m.buttonWidth - 8, 3, strip.muted, ctx.palette.mute, ctx.palette, ctx.dpi), 4,
            m.buttonsTop + m.buttonHeight - 4, m.buttonWidth - 8, 3);
     DeclareFader(doc, ctx, base, Target{Control::CategoryFader, cat, 0, 0}, strip.faderDb,
                  mixer.BankValue(Target{Control::CategoryFader, cat, 0, 0}), strip.muted, m);
@@ -212,13 +217,14 @@ void DeclareSide(tela::Document& doc, ViewContext& ctx, float x, float height) {
       if (!pd.global) continue;
       if (py + 32.0f > height - 8.0f) break;
       const MixerModel::ParamState& ps = mixer.parameters()[i];
-      const std::string base = ParameterId(pd.id);
+      const std::string base = "par." + pd.key;
       const KnobRange range{std::min(pd.minValue, pd.maxValue), std::max(pd.minValue, pd.maxValue), false, pd.isSwitch};
       char b[96];
       std::snprintf(b, sizeof b, "%s %.3g%s", Short(pd.name, 16).c_str(), static_cast<double>(ps.value),
                     ps.enabled ? " (override)" : "");
       Text(doc, base + ".name", b, 0, py + 4, w - 150, 22, 0.55f);
       KnobLook look;
+      look.dpi = ctx.dpi;
       look.size = 28;
       look.norm = KnobToNorm(ps.value, range);
       look.bankNorm = KnobToNorm(pd.defaultValue, range);

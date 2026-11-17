@@ -230,3 +230,22 @@ SND_TEST(ToolUiGesture, CancelEndsTheDragAndKeepsTheValue) {
   SND_CHECK(!t.app.router().dragging());
   SND_CHECK(!t.s.mixer().history().InGroup());
 }
+
+SND_TEST(ToolUiGesture, ParameterKnobDoubleClickReleasesTheOverride) {
+  Rig t;
+  const std::int32_t knob = t.tool.project.FindParameter(snd::HashId("Knob"));
+  const Target on{Control::ParamOverrideOn, knob, 0, 0}, val{Control::ParamOverride, knob, 0, 0};
+  t.s.mixer().Set(val, 0.9f);
+  t.s.mixer().Set(on, 1.0f);
+  t.app.Frame(tooltest::Now());
+  const tela::Point c = Center(t.El(ui::ParameterId(snd::HashId("Knob")) + ".hit"));
+  const std::size_t undo = t.s.mixer().history().UndoCount();
+  t.ptr.Down(c.x, c.y);
+  t.ptr.Up(c.x, c.y);
+  t.ptr.Advance(100);
+  t.ptr.Down(c.x, c.y);
+  t.ptr.Up(c.x, c.y);
+  SND_CHECK_EQ(t.s.mixer().Get(on), 0.0f);
+  SND_CHECK_EQ(t.s.mixer().Get(val), 0.25f);  // the bank default
+  SND_CHECK_EQ(t.s.mixer().history().UndoCount(), undo + 1u);
+}

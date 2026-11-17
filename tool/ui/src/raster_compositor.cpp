@@ -21,7 +21,7 @@ bool FiniteRect(const tela::Rect& r) {
 // logical coordinates at origin 0.
 void Fill(tela::PixelSurface& out, tela::Rect clipPx, tela::Color c, float scale) {
   if (clipPx.width <= 0.0f || clipPx.height <= 0.0f) return;
-  SafeDrawing d;
+  SafeDrawing d(scale);
   d.Rectangle(tela::Rect{clipPx.x / scale, clipPx.y / scale, clipPx.width / scale, clipPx.height / scale}, c);
   tela::paint_drawing(out, d.drawing(), tela::Point{0, 0}, scale, clipPx);
 }

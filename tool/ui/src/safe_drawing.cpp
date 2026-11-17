@@ -19,18 +19,32 @@ bool ValidStroke(const tela::Stroke& s) {
          std::isfinite(s.glow.radius) && s.glow.radius >= 0.0f && s.glow.radius <= 64.0f;
 }
 
+tela::Rect Extent(const std::vector<tela::Point>& p, std::size_t a, std::size_t b) {
+  float x0 = p[a].x, x1 = p[a].x, y0 = p[a].y, y1 = p[a].y;
+  for (std::size_t i = a; i < b; ++i) {
+    x0 = std::min(x0, p[i].x);
+    x1 = std::max(x1, p[i].x);
+    y0 = std::min(y0, p[i].y);
+    y1 = std::max(y1, p[i].y);
+  }
+  return tela::Rect{x0, y0, x1 - x0, y1 - y0};
+}
+
 }  // namespace
 
-bool SafeDrawing::Admit(tela::Rect extent, float strokeWidth, std::uint32_t points) {
-  if (shapes_ + 1 > kMaxShapes || points_ + points > kMaxPoints) {
-    ++dropped_;
-    return false;
-  }
-  const double pad = strokeWidth / 2.0 + 2.0;
-  const double w = (extent.width + 2.0 * pad) * kMaxDpi + 1.0;
-  const double h = (extent.height + 2.0 * pad) * kMaxDpi + 1.0;
-  const double work = w * h * std::max<std::uint32_t>(1u, points);
-  if (work_ + work > kWorkBudget) {
+SafeDrawing::SafeDrawing(float dpi)
+    : dpi_(std::isfinite(dpi) ? std::clamp(dpi, kMinDpiScale, 8.0f) : kMaxDpiScale) {}
+
+double SafeDrawing::Work(tela::Rect e, const tela::Stroke& stroke, std::size_t points) const {
+  // Tela's pixel_extent (without the clip, which only makes it smaller).
+  const double pad = stroke.width / 2.0 + stroke.glow.radius + 1.0 / dpi_;
+  const double w = (e.width + 2.0 * pad) * dpi_;
+  const double h = (e.height + 2.0 * pad) * dpi_;
+  return (std::ceil(w) + 2.0) * (std::ceil(h) + 2.0) * static_cast<double>(std::max<std::size_t>(1u, points));
+}
+
+bool SafeDrawing::Admit(double work, std::uint32_t points) {
+  if (shapes_ + 1 > kMaxShapes || points_ + points > kMaxPoints || work_ + work > kWorkBudget) {
     ++dropped_;
     return false;
   }
@@ -45,7 +59,7 @@ bool SafeDrawing::Rectangle(tela::Rect r, tela::Color fill, tela::Stroke stroke,
     ++dropped_;
     return false;
   }
-  if (!Admit(r, stroke.width, 0)) return false;
+  if (!Admit(Work(r, stroke, 0), 0)) return false;
   drawing_.rectangle(r, fill, stroke, radius);
   return true;
 }
@@ -55,45 +69,62 @@ bool SafeDrawing::Ellipse(tela::Rect r, tela::Color fill, tela::Stroke stroke) {
     ++dropped_;
     return false;
   }
-  if (!Admit(r, stroke.width, 0)) return false;
+  if (!Admit(Work(r, stroke, 0), 0)) return false;
   drawing_.ellipse(r, fill, stroke);
   return true;
 }
 
-bool SafeDrawing::Line(tela::Point a, tela::Point b, tela::Stroke stroke) {
-  return Polyline({a, b}, stroke);
-}
+bool SafeDrawing::Line(tela::Point a, tela::Point b, tela::Stroke stroke) { return Polyline({a, b}, stroke); }
 
-bool SafeDrawing::Polyline(const std::vector<tela::Point>& points, tela::Stroke stroke) {
-  if (points.size() < 2 || !ValidStroke(stroke)) {
+bool SafeDrawing::Polyline(const std::vector<tela::Point>& input, tela::Stroke stroke, std::uint32_t maxShapes) {
+  if (input.size() < 2 || !ValidStroke(stroke)) {
     ++dropped_;
     return false;
   }
-  for (const tela::Point& p : points) {
+  for (const tela::Point& p : input) {
     if (!Finite(p.x) || !Finite(p.y)) {
       ++dropped_;
       return false;
     }
   }
-  bool all = true;
-  for (std::size_t start = 0; start + 1 < points.size(); start += kPolylinePiece - 1) {
-    const std::size_t end = std::min(points.size(), start + kPolylinePiece);
-    std::vector<tela::Point> piece(points.begin() + static_cast<std::ptrdiff_t>(start),
-                                   points.begin() + static_cast<std::ptrdiff_t>(end));
-    float x0 = piece[0].x, x1 = piece[0].x, y0 = piece[0].y, y1 = piece[0].y;
-    for (const tela::Point& p : piece) {
-      x0 = std::min(x0, p.x);
-      x1 = std::max(x1, p.x);
-      y0 = std::min(y0, p.y);
-      y1 = std::max(y1, p.y);
+  const std::uint32_t shapeRoom = std::min(maxShapes, kMaxShapes - shapes_);
+  std::vector<tela::Point> pts = input;
+  for (;;) {
+    const std::size_t m = pts.size();
+    // Piece sizes to try: the whole polyline, then kPolylinePiece, then smaller.
+    std::vector<std::size_t> sizes{m};
+    for (std::size_t k = std::min<std::size_t>(kPolylinePiece, m - 1); k >= 2; --k) sizes.push_back(k);
+    for (std::size_t k : sizes) {
+      const std::size_t pieces = (m - 1 + (k - 2)) / (k - 1);
+      const std::size_t points = m + pieces - 1;
+      if (pieces > shapeRoom || points_ + points > kMaxPoints) continue;
+      double work = 0.0;
+      for (std::size_t start = 0; start + 1 < m; start += k - 1) {
+        const std::size_t end = std::min(m, start + k);
+        work += Work(Extent(pts, start, end), stroke, end - start);
+      }
+      if (work_ + work > kWorkBudget) continue;
+      for (std::size_t start = 0; start + 1 < m; start += k - 1) {
+        const std::size_t end = std::min(m, start + k);
+        drawing_.polyline(std::vector<tela::Point>(pts.begin() + static_cast<std::ptrdiff_t>(start),
+                                                   pts.begin() + static_cast<std::ptrdiff_t>(end)),
+                          stroke);
+      }
+      work_ += work;
+      shapes_ += static_cast<std::uint32_t>(pieces);
+      points_ += static_cast<std::uint32_t>(points);
+      if (m != input.size()) ++thinned_;
+      return true;
     }
-    if (!Admit(tela::Rect{x0, y0, x1 - x0, y1 - y0}, stroke.width, static_cast<std::uint32_t>(piece.size()))) {
-      all = false;
-      break;
-    }
-    drawing_.polyline(std::move(piece), stroke);
+    if (m <= 2) break;
+    // Thin: every other point, the first and the last kept.
+    std::vector<tela::Point> next;
+    for (std::size_t i = 0; i < m; i += 2) next.push_back(pts[i]);
+    if ((m - 1) % 2 != 0) next.push_back(pts.back());
+    pts = std::move(next);
   }
-  return all;
+  ++dropped_;
+  return false;
 }
 
 }  // namespace snd::tool::ui
