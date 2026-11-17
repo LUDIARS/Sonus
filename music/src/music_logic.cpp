@@ -25,6 +25,12 @@ MusicPb* Acquire(State& s, const schema::Tables& t, SlotIndex playback, const Ev
   if (playback >= s.limits.maxPlaybacks) return nullptr;
   const std::uint32_t pd = base::rows::DenseOf(t.Playback.rows, playback);
   if (pd == kInvalidSlot) return nullptr;
+  if ((event.flags & kEventRefMusic) == 0u) {  // music API on a playback of a normal event
+    PushNote(s, notify::EventType::Warning, static_cast<std::uint32_t>(SND_ERR_INVALID_ARGUMENT),
+             HandleRef{playback, t.Playback.rows.generation[playback]}.Value(), s.blockStart, 0,
+             static_cast<std::uint16_t>(SND_END_DETAIL_WRONG_EVENT_KIND));
+    return nullptr;
+  }
   const std::uint32_t gen = t.Playback.rows.generation[playback];
   if (MusicPb* pb = PbOf(s, playback); pb != nullptr) {
     if (pb->generation == gen) return pb;

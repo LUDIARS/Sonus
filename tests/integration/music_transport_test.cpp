@@ -286,3 +286,16 @@ SND_TEST(MusicTransport, MusicPlaybackQuantisedOnAnotherTransportWithPickup) {
   }
   SND_CHECK(bar0);
 }
+
+SND_TEST(MusicTransport, MusicApiOnANormalPlaybackWarns) {
+  T x;
+  SND_REQUIRE(x.ok());
+  const snd_playback_handle p = x.r.sys->Play(HashId("H0"), snd_emitter_handle{0}, nullptr);
+  x.r.Step();
+  x.r.sys->SetMusicState(p, HashId("S"), nullptr);
+  x.r.Steps(2);
+  x.r.sys->Update();
+  bool warned = false;
+  for (const ErrorRec& e : x.r.ev.errors) warned = warned || (e.object == p.value && e.detail == SND_END_DETAIL_WRONG_EVENT_KIND);
+  SND_CHECK(warned);
+}
