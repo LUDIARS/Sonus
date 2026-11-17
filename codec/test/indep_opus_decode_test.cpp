@@ -337,7 +337,7 @@ SND_TEST(IndepOpusDecode, HoldLimitIsExact) {
 // end is consumed and dropped)". After the last playable frame, whatever follows
 // - another packet or the zero padding of a stream file's last sector (6.3) -
 // must not turn the call into an error (the frames of that call would be lost).
-SND_TEST(IndepOpusDecode, Defect_opus_InputPastTheEndIsDropped) {
+SND_TEST(IndepOpusDecode, InputPastTheEndIsDropped) {
   if (!snd::codec::OpusAvailable()) return;
   Encoded e;
   SND_REQUIRE(opusref::Encode(Broadband(2, 4800, 5), ce::OpusSettings{}, &e));

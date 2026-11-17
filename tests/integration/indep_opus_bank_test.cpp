@@ -601,3 +601,157 @@ SND_TEST(IndepOpusBank, OffBuildRejectsOpusAssets) {
   SND_CHECK(d.items().size() > 0);
   SND_CHECK(!mini::fs::exists(proj.out() / "Main.sndb"));
 }
+
+// --- Re-check after the decisions of 2026-11-17 ---------------------------------------
+
+// Opus with loadForm "pcm" (explicit or the default) is a build error, also
+// when codec and loadForm come from different layers (platforms.default <
+// platforms[platform] < convert.default < convert[platform]; loadForm is per asset).
+SND_TEST(IndepOpusBank, PcmLoadFormIsAnErrorForOpus) {
+  if (!snd::codec::OpusAvailable()) return;
+  struct Case {
+    const char* name;
+    const char* platforms;  // project "platforms" object ("" = none)
+    const char* convert;    // asset "convert" object
+    const char* loadForm;   // "" = default (pcm)
+    bool okLnx, okWin;
+  };
+  const Case cases[] = {
+      {"projDefault", "{\"default\": {\"codec\": \"OPUS\"}}", "{}", "", false, false},
+      {"projLnx", "{\"LNX_\": {\"codec\": \"OPUS\"}}", "{}", "", false, true},
+      {"convLnxExplicitPcm", "", "{\"LNX_\": {\"codec\": \"OPUS\"}}", "pcm", false, true},
+      {"projOpusConvLnxPc16", "{\"default\": {\"codec\": \"OPUS\"}}", "{\"LNX_\": {\"codec\": \"PC16\"}}", "", true, false},
+      {"convDefaultOpusLnxPcm16", "", "{\"default\": {\"codec\": \"OPUS\"}, \"LNX_\": {\"codec\": \"PC16\"}}", "pcm", true, false},
+      {"compressed", "{\"default\": {\"codec\": \"OPUS\"}}", "{}", "compressed", true, true},
+      {"decompressCache", "{\"default\": {\"codec\": \"OPUS\"}}", "{}", "decompressCache", true, true},
+      {"stream", "", "{\"default\": {\"codec\": \"OPUS\"}}", "stream", true, true},
+  };
+  for (const Case& c : cases) {
+    for (const char* plat : {"LNX_", "WIN_"}) {
+      mini::Project proj(std::string("indep-opus-lf-") + c.name + plat);
+      if (c.platforms[0] != '\0') proj.Add("project.json", "project", "P", std::string("\"platforms\": ") + c.platforms);
+      Base(proj);
+      proj.Wav("audio/a.wav", ToPcm(opusref::Tones(1, 4800, {500}, 0.2), 48000));
+      std::string body = std::string("\"file\": \"audio/a.wav\", \"convert\": ") + c.convert;
+      if (c.loadForm[0] != '\0') body += std::string(", \"loadForm\": \"") + c.loadForm + "\"";
+      proj.Add("assets/a.json", "asset", "a", body);
+      Event(proj, "a");
+      bt::BuildOptions o = proj.Options();
+      o.encoders = &bt::CodecEncoders();
+      SND_REQUIRE(bt::ParsePlatform(plat, &o.platform));
+      bt::Diagnostics d;
+      const bool built = proj.Build(o, &d);
+      const bool want = std::string(plat) == "LNX_" ? c.okLnx : c.okWin;
+      SND_CHECK_MSG(built == want, "%s on %s: built %d\n%s", c.name, plat, built ? 1 : 0, mini::Dump(d).c_str());
+      if (!want) {
+        // The message names the field and the forms that work.
+        SND_CHECK_MSG(mini::HasDiag(d, bt::Severity::Error, "loadForm") &&
+                          mini::HasDiag(d, bt::Severity::Error, "compressed") &&
+                          mini::HasDiag(d, bt::Severity::Error, "decompressCache") &&
+                          mini::HasDiag(d, bt::Severity::Error, "stream"),
+                      "%s on %s:\n%s", c.name, plat, mini::Dump(d).c_str());
+        SND_CHECK(!mini::fs::exists(proj.out() / "Main.sndb"));
+      }
+    }
+  }
+}
+
+// Rate conversion (project-format.md, all codecs): frames = ceil(n x 48000 / rate),
+// loop points floor(x x 48000 / rate). Checked on ASST of PC16 and OPUS assets.
+SND_TEST(IndepOpusBank, RateConversionRounding) {
+  if (!snd::codec::OpusAvailable()) return;
+  struct Src {
+    std::uint32_t rate;
+    std::uint64_t frames, loopStart, loopEnd;  // loopEnd 0 = no loop
+  };
+  const Src srcs[] = {
+      {44100, 44100, 441, 44000},  // exact frames
+      {44100, 44107, 1, 44107},
+      {44100, 1, 0, 0},            // 1 frame -> 2
+      {22050, 22050, 1, 22049},
+      {22050, 22051, 0, 0},
+      {22050, 147, 0, 147},        // 147 -> 320 exactly
+      {96000, 96001, 3, 95999},
+      {96000, 1, 0, 0},            // 0.5 -> 1
+      {96000, 96000, 2, 96000},
+      {8000, 8001, 1, 8000},       // x6 exactly
+      {48000, 4801, 5, 4800},      // no conversion
+  };
+  auto ceilDiv = [](std::uint64_t a, std::uint64_t b) { return (a + b - 1) / b; };
+  mini::Project proj("indep-opus-rates");
+  Base(proj);
+  int i = 0;
+  std::vector<std::string> names;
+  for (const Src& s : srcs) {
+    const std::string wav = "audio/r" + std::to_string(i) + ".wav";
+    proj.Wav(wav, ToPcm(opusref::Tones(1, s.frames, {300}, 0.2, s.rate), s.rate), bt::WavSampleFormat::Float32);
+    std::string loop;
+    if (s.loopEnd != 0) {
+      loop = ", \"loop\": {\"start\": " + std::to_string(s.loopStart) + ", \"end\": " + std::to_string(s.loopEnd) + "}";
+    }
+    for (const char* codec : {"PC16", "OPUS"}) {
+      const std::string n = std::string(codec == std::string("OPUS") ? "o" : "p") + std::to_string(i);
+      proj.Add("assets/" + n + ".json", "asset", n,
+               "\"file\": \"" + wav + "\", \"loadForm\": \"compressed\"" + loop +
+                   ", \"convert\": {\"default\": {\"codec\": \"" + codec + "\", \"sampleRate\": 48000}}");
+      Event(proj, n);
+      names.push_back(n);
+    }
+    ++i;
+  }
+  bt::BuildOptions o = proj.Options();
+  o.encoders = &bt::CodecEncoders();
+  bt::Diagnostics d;
+  SND_REQUIRE_MSG(proj.Build(o, &d), "%s", mini::Dump(d).c_str());
+  RawBank bank(mini::ReadBytes(proj.out() / "Main.sndb"));
+  SND_REQUIRE(bank.error.empty());
+  const Table t = bank.Tab("ASST");
+  i = 0;
+  for (const Src& s : srcs) {
+    const std::uint64_t wantFrames = s.rate == 48000 ? s.frames : ceilDiv(s.frames * 48000u, s.rate);
+    const std::uint64_t wantLs = s.loopStart * 48000u / s.rate, wantLe = s.loopEnd * 48000u / s.rate;
+    for (const char* pre : {"p", "o"}) {
+      const std::string n = pre + std::to_string(i);
+      std::uint32_t row = 0xFFFFFFFFu;
+      for (std::uint32_t r = 0; r < t.rows; ++r) {
+        if (t.Get(A_id, r, 0) == snd::HashId(n)) row = r;
+      }
+      SND_REQUIRE(row != 0xFFFFFFFFu);
+      SND_CHECK_EQ(t.Get(A_sampleRate, row, 0), 48000u);
+      SND_CHECK_MSG(t.Get(A_totalFrames, row, 0) == wantFrames, "%s: %u Hz x %llu -> %llu (want %llu)", n.c_str(),
+                    s.rate, static_cast<unsigned long long>(s.frames),
+                    static_cast<unsigned long long>(t.Get(A_totalFrames, row, 0)),
+                    static_cast<unsigned long long>(wantFrames));
+      if (s.loopEnd != 0) {
+        SND_CHECK_MSG(t.Get(12, row, 0) == wantLs && t.Get(13, row, 0) == wantLe,
+                      "%s: loop [%llu, %llu) -> [%llu, %llu) (want [%llu, %llu))", n.c_str(),
+                      static_cast<unsigned long long>(s.loopStart), static_cast<unsigned long long>(s.loopEnd),
+                      static_cast<unsigned long long>(t.Get(12, row, 0)), static_cast<unsigned long long>(t.Get(13, row, 0)),
+                      static_cast<unsigned long long>(wantLs), static_cast<unsigned long long>(wantLe));
+      }
+    }
+    ++i;
+  }
+  (void)names;
+  // Degenerate loop: floor maps [0, 1) at 96 kHz to [0, 0), which would read as
+  // "no loop" (loopEnd 0). The spec does not say what happens; report what the build does.
+  mini::Project p2("indep-opus-rates-degenerate");
+  Base(p2);
+  p2.Wav("audio/a.wav", ToPcm(opusref::Tones(1, 9600, {300}, 0.2, 96000), 96000), bt::WavSampleFormat::Float32);
+  p2.Add("assets/a.json", "asset", "a",
+         "\"file\": \"audio/a.wav\", \"loadForm\": \"compressed\", \"loop\": {\"start\": 0, \"end\": 1}, "
+         "\"convert\": {\"default\": {\"codec\": \"OPUS\"}}");
+  Event(p2, "a");
+  bt::BuildOptions o2 = p2.Options();
+  o2.encoders = &bt::CodecEncoders();
+  bt::Diagnostics d2;
+  const bool built = p2.Build(o2, &d2);
+  if (built) {
+    RawBank b2(mini::ReadBytes(p2.out() / "Main.sndb"));
+    const Table t2 = b2.Tab("ASST");
+    std::printf("  degenerate loop [0,1) at 96 kHz -> ASST loop [%llu, %llu) (floor gives [0, 0))\n",
+                static_cast<unsigned long long>(t2.Get(12, 0, 0)), static_cast<unsigned long long>(t2.Get(13, 0, 0)));
+  } else {
+    std::printf("  degenerate loop [0,1) at 96 kHz: build failed\n%s", mini::Dump(d2).c_str());
+  }
+}
