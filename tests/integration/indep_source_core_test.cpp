@@ -297,3 +297,36 @@ SND_TEST(IndepSourceCore, ThreadsHoldsTinyCacheAndUnload) {
     }
   }
 }
+
+// A primed start (stream without preload) is not followed by a spurious
+// Virtualize / Devirtualize from core (sys_event.cpp derives them from the
+// previous block's real slot): the stream is seeked once (its start; one
+// StreamChannel Cancel) and not primed a second time.
+SND_TEST(IndepSourceCore, PrimedStartIsNotReseeked) {
+  AssetSpec a;
+  a.name = "np";
+  a.pcm = Signal(1, 48000, 60000, &Ramp);
+  a.loadForm = "stream";
+  a.codec = "PC16";
+  a.extra = "\"preloadMs\": 0";
+  Built b = Build("idevirt", {a});
+  SND_REQUIRE_MSG(b.ok, "%s", b.diag.c_str());
+  Options o;
+  o.fsLatency = 2;
+  o.maxStreams = 1;
+  Rig r(o);
+  SND_REQUIRE(r.Ok());
+  r.Load(b);
+  const std::uint32_t e0 = r.io.Channel(0).Epoch();
+  const snd_playback_handle p = r.Play("np");
+  std::uint32_t primingSteps = 0;
+  for (int i = 0; i < 200; ++i) {
+    r.Step();
+    r.sys->Update();
+    if (r.sys->GetPlaybackState(p) == SND_PLAYBACK_STATE_PRIMING) ++primingSteps;
+  }
+  const std::uint32_t cancels = r.io.Channel(0).Epoch() - e0;
+  std::printf("  priming blocks %u, stream channel cancels %u, first sound at frame %zu\n", primingSteps, cancels,
+              FirstNonZero(r, 0));
+  SND_CHECK_MSG(cancels <= 1u, "%u cancels: the primed stream was re-seeked after its start", cancels);
+}
