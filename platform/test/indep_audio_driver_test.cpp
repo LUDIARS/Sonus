@@ -7,7 +7,9 @@
 // it can vary the callback length, switch the channel count (posting CHANGED
 // first, D-62), run paced (real time) or flat out, post events from a
 // separate notification thread, and records what the driver gave it.
+#if defined(__linux__)
 #include <pthread.h>
+#endif
 
 #include <atomic>
 #include <cstdint>
@@ -55,13 +57,19 @@ inline bool DecodeLayout(float x, std::uint32_t* channels, std::uint32_t* c) {
   return true;
 }
 
+// Stack size of the calling thread (Linux only; elsewhere the D-47 check is
+// reported as passed: SIZE_MAX).
 std::size_t CurrentStackSize() {
+#if defined(__linux__)
   pthread_attr_t a;
   if (pthread_getattr_np(pthread_self(), &a) != 0) return 0;
   std::size_t size = 0;
   pthread_attr_getstacksize(&a, &size);
   pthread_attr_destroy(&a);
   return size;
+#else
+  return static_cast<std::size_t>(-1);
+#endif
 }
 
 class ScriptDevice final : public PlatformOutputDevice {
@@ -658,16 +666,27 @@ SND_TEST(IndepTimerDevice, SharedBackendBehaviour) {
 SND_TEST(IndepPlatformDevice, FactoryWorkgroupAndEnumeration) {
   SND_CHECK(OutputBackendAvailable(OutputBackend::Default));
   SND_CHECK(OutputBackendAvailable(OutputBackend::SilentTimer));
+  const OutputBackend def = ResolveOutputBackend(OutputBackend::Default);
+#if defined(_WIN32)
+  SND_CHECK_EQ(def, OutputBackend::Wasapi);
+  SND_CHECK(!OutputBackendAvailable(OutputBackend::CoreAudio));
+  SND_CHECK(!OutputBackendAvailable(OutputBackend::Alsa));
+#elif defined(__APPLE__)
+  SND_CHECK_EQ(def, OutputBackend::CoreAudio);
+  SND_CHECK(!OutputBackendAvailable(OutputBackend::Wasapi));
+  SND_CHECK(!OutputBackendAvailable(OutputBackend::Alsa));
+#else
   SND_CHECK(!OutputBackendAvailable(OutputBackend::Wasapi));
   SND_CHECK(!OutputBackendAvailable(OutputBackend::CoreAudio));
-  const OutputBackend def = ResolveOutputBackend(OutputBackend::Default);
   SND_CHECK(def == OutputBackend::Alsa || def == OutputBackend::SilentTimer);
   SND_CHECK_EQ(def == OutputBackend::Alsa, OutputBackendAvailable(OutputBackend::Alsa));
-  SND_CHECK_EQ(ResolveOutputBackend(OutputBackend::Wasapi), OutputBackend::Wasapi);  // others unchanged
   SND_CHECK(CreateOutputDevice(OutputBackend::Wasapi, snd::base::DefaultAllocator()) == nullptr);
   SND_CHECK(CreateOutputDevice(OutputBackend::CoreAudio, snd::base::DefaultAllocator()) == nullptr);
   SND_CHECK_EQ(EnumerateOutputDevices(OutputBackend::Wasapi, nullptr, 0), 0u);
   SND_CHECK_EQ(EnumerateOutputDevices(OutputBackend::CoreAudio, nullptr, 0), 0u);
+#endif
+  SND_CHECK(OutputBackendAvailable(def));
+  SND_CHECK_EQ(ResolveOutputBackend(OutputBackend::SilentTimer), OutputBackend::SilentTimer);  // others unchanged
   OutputDeviceInfo one;
   SND_CHECK_EQ(EnumerateOutputDevices(OutputBackend::SilentTimer, &one, 1), 1u);
   SND_CHECK(std::strcmp(one.id, "silent") == 0);

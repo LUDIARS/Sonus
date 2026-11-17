@@ -444,6 +444,7 @@ SND_TEST(IndepAlsa, AudioDriverOddSizesAccounting) {
   SND_CHECK(ok);
   SND_CHECK_EQ(rr.bad, 0u);
   SND_CHECK_EQ(valid + s.core.lostFrames, s.core.framesConsumed);
+  SND_CHECK(silent >= s.core.lostFrames);  // + the device's silent prefill
   SND_CHECK(valid > 0u);
 }
 
