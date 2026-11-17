@@ -8,7 +8,9 @@
 //
 //   Commands are appended as [CommandHeader][payload], 8-byte aligned, size a
 //   multiple of 8. Every command first goes to the normal region. When it is
-//   full:
+//   full (and, so that the application order equals the recording order, for
+//   every later command of the same arena once the reserve or the fallback
+//   section is in use):
 //     - Delivery::MustDeliver commands (stop, parameters, release, ...) go to
 //       the reserve region;
 //     - Play-family commands go to the reserve only if the event priority is
@@ -20,9 +22,11 @@
 //       are dropped and counted (stats.rejected_commands).
 //   If the reserve is also full, must-deliver commands are coalesced into the
 //   arena's OverflowFallback section (stop/destroy bitsets, last-value table
-//   for parameters/switches; CONTRACTS.md D-11). Losing a command is then
+//   for parameters/switches; CONTRACTS.md D-11). A must-deliver command the
+//   fallback cannot represent is refused synchronously instead
+//   (SND_ERR_COMMAND_BUFFER_FULL / invalid handle). Losing a command is then
 //   impossible except for parameter values beyond overflowParamSlots, which
-//   is counted in stats.reserve_overflows.
+//   is counted in stats.reserve_overflows (coalesced commands are not counted).
 //
 // Applying (audio thread, ApplyCommands, block start):
 //   Producers are drained in registration order (2.1). Within an arena the
