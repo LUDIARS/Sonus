@@ -42,6 +42,7 @@ struct BankOpts {
   bool withLimiter = false;
   float limiterDb = -12.0f;
   const char* extraEvent = nullptr;
+  bool withKnobCurve = false;  // "Tone" volume follows Knob: 0 -> 0 dB, 1 -> -20 dB (linear in dB)
 };
 
 inline std::vector<std::uint8_t> IndepBank(const BankOpts& o = {}) {
@@ -49,7 +50,7 @@ inline std::vector<std::uint8_t> IndepBank(const BankOpts& o = {}) {
   bt::BankWriter w;
   bt::TableBuilder ev(bf::chunk::EVNT), tr(bf::chunk::TRAK), cl(bf::chunk::CLIP), bu(bf::chunk::BUSS),
       as(bf::chunk::ASST), pa(bf::chunk::PARM), ca(bf::chunk::CATG), vg(bf::chunk::VLGR), fx(bf::chunk::EFFX),
-      fp(bf::chunk::EFPV);
+      fp(bf::chunk::EFPV), cu(bf::chunk::CURV), cp(bf::chunk::CPNT);
   std::uint32_t r = bu.AddRow();
   bu.U32(c::BUSS_id, r, HashId("Sfx"));
   bu.U32(c::BUSS_parent, r, 1u);
@@ -113,6 +114,21 @@ inline std::vector<std::uint8_t> IndepBank(const BankOpts& o = {}) {
     cl.U32(c::CLIP_loopCount, k, loopCount);
   };
   event("Tone", 0u, o.withCategory, false);
+  if (o.withKnobCurve) {
+    ev.U32(c::EVNT_curveFirst, 0u, 0u);
+    ev.U32(c::EVNT_curveCount, 0u, 1u);
+    const std::uint32_t k = cu.AddRow();
+    cu.U32(c::CURV_pointFirst, k, 0u);
+    cu.U32(c::CURV_pointCount, k, 2u);
+    cu.U32(c::CURV_input, k, HashId("Knob"));
+    cu.U32(c::CURV_target, k, static_cast<std::uint32_t>(bf::CurveTarget::Volume));
+    std::uint32_t q = cp.AddRow();
+    cp.F32(c::CPNT_x, q, 0.0f);
+    cp.F32(c::CPNT_y, q, 0.0f);
+    q = cp.AddRow();
+    cp.F32(c::CPNT_x, q, 1.0f);
+    cp.F32(c::CPNT_y, q, -20.0f);
+  }
   event("Blip", 1u, false, false);
   event("ToneG", 0u, false, o.withGroup);
   if (o.extraEvent != nullptr) event(o.extraEvent, 0u, false, false);
@@ -130,6 +146,8 @@ inline std::vector<std::uint8_t> IndepBank(const BankOpts& o = {}) {
   w.AddTable(vg);
   w.AddTable(fx);
   w.AddTable(fp);
+  w.AddTable(cu);
+  w.AddTable(cp);
   bt::BankHeaderInfo hi;
   hi.bankId = HashId(o.name);
   hi.projectBuildHash = o.hash;

@@ -6,7 +6,8 @@
 //      however many times Servers are recreated;
 //   P2 every such edit is counted once (RuntimeDrops::staleEdits);
 //   P3 the ReplaceChunk slot of a dropped chunk goes back to the pool (no leak);
-//   P4 the disconnect revert of an earlier Server is dropped the same way;
+//   P4 the disconnect revert of an earlier Server is applied (amended D-87), the newer
+//      Server's values stay;
 //   P5 reconnecting to the SAME Server is not a new session: its edits apply.
 #include <chrono>
 #include <thread>
@@ -135,9 +136,9 @@ SND_TEST(IndepLivelinkD87, OldServersNeverOverwriteTheNewestValues) {
   SND_CHECK_EQ(f.rt->Drops().staleEdits - staleBefore, 5u);
 }
 
-// P4: a revertOnDisconnect Server is destroyed with an override applied; its disconnect
-// revert is still unapplied when the next Server's first edit arrives. The newer edit
-// holds; the revert is dropped and counted (ClearOverrides + the revert marker).
+// P4 (D-87 amended): a revertOnDisconnect Server is destroyed with an edit applied; its
+// disconnect revert is still unapplied when the next Server's first edit arrives. The
+// revert is applied (the earlier edit goes back), the newer edit holds.
 SND_TEST(IndepLivelinkD87, EarlierServersDisconnectRevertDoesNotTouchTheNewerValues) {
   Fixture f;
   f.Load(IndepBank(), "a.sndb");
@@ -169,10 +170,10 @@ SND_TEST(IndepLivelinkD87, EarlierServersDisconnectRevertDoesNotTouchTheNewerVal
   SND_CHECK_EQ(r, SND_OK);
   const double lvl = Level(f) / base;
   const std::uint32_t dropped = f.rt->Drops().staleEdits - stale0;
-  // The newer Master edit holds; the Sfx override of the earlier tool is not reverted
-  // (D-87 drops the revert like any old edit: reported as a spec gap).
-  SND_CHECK_NEAR(lvl, DbRatio(-6.0 - 3.0), 1e-3);
-  SND_CHECK_EQ(dropped, 2u);
+  // D-87 (amended): the earlier Server's revert is applied: its Sfx -6 dB goes back to the
+  // bank value; the newer Master -3 dB stays; nothing of the revert is dropped.
+  SND_CHECK_NEAR(lvl, DbRatio(-3.0), 1e-3);
+  SND_CHECK_EQ(dropped, 0u);
   SND_CHECK_EQ(f.server->Stats().revertsLost, 0u);
   ll::Client::Destroy(c);
 }
