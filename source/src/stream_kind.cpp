@@ -356,6 +356,11 @@ void StreamKind::SetupPlanner(StreamInst& s) noexcept {
 
 void StreamKind::ResetForSeek(StreamInst& s, std::uint64_t target) noexcept {
   io::StreamChannel& ch = Channel(s.slot);
+  if (s.hasPendingLoop != 0u) {
+    s.loop = s.pendingLoop;
+    s.hasPendingLoop = 0;
+  }
+  s.dec.loop = s.loop;
   ch.Cancel();
   DropCurrent(s);
   SetRingWrite(s, RingRead(s));
@@ -524,6 +529,7 @@ bool StreamKind::StartOne(const SourceStartRequest& r, SourceStartResult& res, s
   s.headerPosted = 0;
   s.pendingSeek = 0;
   s.pendingStop = 0;
+  s.hasPendingLoop = 0;
   s.virt = (r.flags & kStartVirtual) != 0u ? 1u : 0u;
   s.errorCounted = 0;
   s.primed = 0;
@@ -625,9 +631,10 @@ void StreamKind::Control(const SourceControlOp* ops, std::uint32_t count) noexce
         break;
       case ControlOp::SetLoop: {
         const bool loop = op.frame2 != 0u || op.frame != 0u;
-        s.loop = MakeLoop(s.a, loop, op.frame, op.frame2, s.loop.count);
-        ctl->loopStartFrame = s.loop.lb;
-        ctl->loopEndFrame = s.loop.le;
+        s.pendingLoop = MakeLoop(s.a, loop, op.frame, op.frame2, s.loop.count);
+        s.hasPendingLoop = 1;  // applied with the seek, when no job reads the loop
+        ctl->loopStartFrame = s.pendingLoop.lb;
+        ctl->loopEndFrame = s.pendingLoop.le;
         target = s.renderPos;  // re-read with the new loop from the current position
         break;
       }
@@ -639,7 +646,7 @@ void StreamKind::Control(const SourceControlOp* ops, std::uint32_t count) noexce
         break;
     }
     if (target == kNone) continue;
-    target = WrapInto(s.loop, target);
+    target = WrapInto(s.hasPendingLoop != 0u ? s.pendingLoop : s.loop, target);
     s.pendingSeek = 1;
     s.seekTarget = target;
     s.hasOverride = 1;

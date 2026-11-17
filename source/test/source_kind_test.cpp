@@ -242,3 +242,31 @@ SND_TEST(SourceKind, NoAllocationAfterInit) {
   }
   SND_CHECK_EQ(alloc.count, afterInit);
 }
+
+// SetLoop (Control): loop off while playing a loop -> continues to the end.
+SND_TEST(SourceKind, SetLoopOffRunsOutFromThePosition) {
+  std::vector<AssetSpec> as;
+  as.push_back(Spec("pcm", 20000, "pcm", "PC16", "\"loop\": {\"start\": 4000, \"end\": 9001}"));
+  as.push_back(Spec("rad", 20000, "compressed", "ADPC", "\"loop\": {\"start\": 4000, \"end\": 9001}"));
+  as.push_back(Spec("sad", 20000, "stream", "ADPC", "\"loop\": {\"start\": 4000, \"end\": 9001}"));
+  Built b = Build("ksetloop", as);
+  SND_REQUIRE_MSG(b.ok, "%s", b.diag.c_str());
+  for (const AssetSpec& a : as) {
+    const Decoded ref = Reference(b, a.name);
+    SND_REQUIRE(ref.ok);
+    KindDriver d(b, KindDriver::Opt{});
+    SND_REQUIRE(d.Ok());
+    src::ISourceKind& k = a.loadForm == "stream" ? d.Stream() : d.Sample();
+    KindDriver::Voice v;
+    v.slot = d.Start(k, d.Asset(a.name), 0, src::kStartLoop);
+    RenderUntil(d, k, v, 15000);
+    const std::size_t at = v.out[0].size();
+    const std::uint64_t pos = v.ph.frame;
+    d.Control(k, v.slot, src::ControlOp::SetLoop, 0, 0);
+    RenderUntil(d, k, v, ~std::size_t{0}, 2000);
+    SND_CHECK(v.ended != 0u);
+    SND_CHECK_EQ(v.out[0].size() - at, ref.h.total_frames - pos);
+    SND_CHECK_MSG(MaxDiff(v.out[0], Slice(ref.ch[0], pos, ref.h.total_frames - pos), at, ref.h.total_frames - pos) < 1e-6,
+                  "%s", a.name.c_str());
+  }
+}

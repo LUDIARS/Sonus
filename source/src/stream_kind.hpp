@@ -86,6 +86,8 @@ struct StreamInst {
   std::uint32_t pendingSeek;
   std::uint64_t seekTarget;
   std::uint32_t pendingStop;    // virtualised: drop IO and buffered data
+  std::uint32_t hasPendingLoop; // SetLoop waiting for the seek
+  LoopRange pendingLoop;
   std::uint32_t virt;
   std::uint32_t seq;
   std::uint32_t errorCounted;

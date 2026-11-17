@@ -164,6 +164,7 @@ void SampleKind::SeekRing(RingCtx& c, std::uint64_t target, std::uint32_t& inlin
   c.ended.store(0u, std::memory_order_relaxed);
   c.error.store(0u, std::memory_order_relaxed);
   c.dec.error = 0;
+  if (c.inst != kNone) c.dec.loop = inst_[c.inst].loop;  // SetLoop (Control) reaches the decoder here
   std::uint64_t byte = 0;
   c.dec.SeekTo(target, &byte);
   c.inputOff = byte;
@@ -383,10 +384,7 @@ void SampleKind::Control(const SourceControlOp* ops, std::uint32_t count) noexce
       case ControlOp::SetLoop: {
         const bool loop = op.frame2 != 0u || op.frame != 0u;
         in.loop = MakeLoop(in.a, loop, op.frame, op.frame2, in.loop.count);
-        if (in.mode == SampleMode::Ring) {
-          ctx_[in.ctx].dec.loop = in.loop;  // applied by the next seek (no job may hold it now)
-          target = in.renderPos;
-        }
+        if (in.mode == SampleMode::Ring) target = in.renderPos;  // the decoder takes the loop at the seek
         break;
       }
       case ControlOp::Pause:
