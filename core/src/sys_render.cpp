@@ -327,7 +327,7 @@ void Render(Impl& im) noexcept {
         if (r != kNoSlot && r < im.cfg.realTotal) {
           // D-43: the state is what the late chunk wrote; the voice also missed the
           // blocks it was held (and this one): advance it like a virtual voice to
-          // catch up with the clock; it renders again from the next block.
+          // catch up with the clock, then fade in from 0 (D-15) from the next block.
           const std::uint64_t missed = im.block > rd.holdBlock[v] ? im.block - rd.holdBlock[v] : 0u;
           source::ISourceKind* src = im.kinds[static_cast<std::size_t>(SND_R(Voice_sourceKind)[d])];
           const SlotIndex srcSlot = SND_R(Voice_sourceSlot)[d];
@@ -344,6 +344,7 @@ void Render(Impl& im) noexcept {
           vPlayhead[d] = t.RealVoice.col.playhead[r];
           vStatus[d] = t.RealVoice.col.renderStatus[r];
           vStatus[d].late = 0u;
+          rd.fade[r] = 0.0f;
         }
         vHold[d] = VoiceRenderHold{};
       } else {
