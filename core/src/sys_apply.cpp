@@ -689,6 +689,7 @@ void ApplyOne(Impl& im, const cmd::CommandHeader& h, const std::uint8_t* p) noex
       SND_W(Transport_lifetime)[d] = TransportLifetime{0u, 0u};
       SND_W(Transport_initial)[d] =
           TransportInit{c.desc.bpm, TimeSignature{c.desc.beats_per_bar, c.desc.beat_unit}, c.desc.start_playing, 0u};
+      if (c.transport.slot < im.cfg.maxTransports) im.ap.transportCreated[c.transport.slot] = c.transport.generation;
       break;
     }
     case CT::DestroyTransport: {

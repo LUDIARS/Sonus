@@ -46,6 +46,9 @@ class Server;
 namespace snd::platform {
 class AudioDriver;
 }  // namespace snd::platform
+namespace snd::jobs {
+class WorkerPool;
+}  // namespace snd::jobs
 namespace snd::source {
 class Runtime;
 }  // namespace snd::source
@@ -100,6 +103,7 @@ struct Parts {
   music::MusicSystem* music = nullptr;
   const source::Runtime* sources = nullptr;
   io::IoScheduler* io = nullptr;
+  jobs::WorkerPool* workers = nullptr;      // nullptr with Config.jobs.external
   platform::AudioDriver* driver = nullptr;  // nullptr when the driver did not start
   livelink::LiveRuntime* live = nullptr;
   livelink::Server* server = nullptr;

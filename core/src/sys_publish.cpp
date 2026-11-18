@@ -46,6 +46,13 @@ void Publish(Impl& im) noexcept {
     if (im.pub.transportGen[s] != 0u && im.pub.transportGen[s] != live) {
       base::notify::PublishRelease(im.transportRelease, s, im.pub.transportGen[s]);
     }
+    // Created and destroyed in the same block (snd_create_transport then
+    // snd_destroy_transport in one arena): no Publish saw the row, the slot goes back too.
+    const std::uint32_t created = im.ap.transportCreated[s];
+    im.ap.transportCreated[s] = 0u;
+    if (created != 0u && created != live && created != im.pub.transportGen[s]) {
+      base::notify::PublishRelease(im.transportRelease, s, created);
+    }
     im.pub.transportGen[s] = live;
   }
   // 2. Event ring: music notifications, then core's records of this block.

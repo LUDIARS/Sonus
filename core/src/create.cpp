@@ -352,6 +352,8 @@ snd_result CreateImpl(Impl& im) noexcept {
   ap.implicitOwnerGen = Arr<std::uint32_t>(im, g.maxEmitters, MemTag::Tables);
   ap.userBufferRefs = Arr<std::uint32_t>(im, g.maxUserBuffers, MemTag::Tables);
   ap.userBufferDestroy = Arr<std::uint32_t>(im, g.maxUserBuffers, MemTag::Tables);
+  ap.transportCreated = Arr<std::uint32_t>(im, g.maxTransports, MemTag::Tables);
+  if (ap.transportCreated == nullptr) return SND_ERR_OUT_OF_BUDGET;
   ap.banks = Arr<BankAudio>(im, g.maxBanks, MemTag::Tables);
   ap.overrides = Arr<LiveOverride>(im, lim.maxLiveOverrides, MemTag::Tables);
   if (ap.emitterChain == nullptr || ap.playbackChain == nullptr || ap.emitterBlockNext == nullptr ||

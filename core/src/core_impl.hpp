@@ -288,6 +288,9 @@ struct ApplyPriv {
   std::uint32_t* implicitOwnerGen = nullptr; // [maxEmitters] playback generation owning an implicit emitter, 0 none
   std::uint32_t* userBufferRefs = nullptr;   // [maxUserBuffers]
   std::uint32_t* userBufferDestroy = nullptr;// [maxUserBuffers] 1 = destroy requested
+  // [maxTransports] generation of a standalone transport row created this block (0 = none):
+  // Publish returns the slot even when the row was destroyed again before it (same block).
+  std::uint32_t* transportCreated = nullptr;
   std::uint32_t reservationCursor = 0;
   std::uint64_t reservationSeq = 0;
   std::uint32_t playCounter = 0;

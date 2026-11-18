@@ -413,6 +413,7 @@ Parts PartsOf(snd_system* sys) noexcept {
   p.music = &sys->music;
   p.sources = sys->kinds.SourceRuntime();
   p.io = &sys->io;
+  p.workers = sys->ownWorkers ? &sys->workers : nullptr;
   p.driver = sys->driverStarted ? &sys->driver : nullptr;
   p.live = sys->live;
   p.server = sys->server;
