@@ -15,7 +15,7 @@
  * versions (snd/format/<name>.hpp) which are listed in CONTRACTS.md.
  */
 #define SND_CONTRACT_VERSION_MAJOR 1
-#define SND_CONTRACT_VERSION_MINOR 1
+#define SND_CONTRACT_VERSION_MINOR 2
 #define SND_CONTRACT_VERSION ((SND_CONTRACT_VERSION_MAJOR << 16) | SND_CONTRACT_VERSION_MINOR)
 
 #if defined(__cplusplus)

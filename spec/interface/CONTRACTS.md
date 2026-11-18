@@ -3,12 +3,8 @@
 設計書 `spec/architecture/design.md`（版 0.2）の 12.2 で凍結すると決めた 7 項目を、このリポジトリのどのファイルが表すか、
 どう変えるか、段階0で何を決めたかをまとめる。段階1以降の並列実装はこの文書と下記のファイルだけを入力にする。
 
-- 契約の版: **1.1**（`SND_CONTRACT_VERSION_MAJOR = 1`, `SND_CONTRACT_VERSION_MINOR = 1`、`contract/public/include/snd/version.h`）。1.1 の変更は 3 節の D-43〜D-55 と 7 節
-- 契約 1.2 の追加（3 節の D-88〜D-96）はヘッダに入っているが、**版の数字はまだ 1.1 のまま**（受け入れ側の判断待ち）。
-  `contract/test/contract11_test.cpp` が `SND_CONTRACT_VERSION_MINOR == 1` を `static_assert` で、
-  `contract11_internal_test.cpp` が「`DeclareLanguage` が最後のコマンド種別」を検査しており、版を 2 に上げるにはこの 2 つの
-  1.1 のテストのアサーションを「1.1 以上」に緩める必要がある。既存テストのアサーションは書き換えない約束なので api 段では
-  行っていない（1.2 は新しいコマンド種別を足さず、既存の予約欄 `variant` で表したので後者は壊していない）
+- 契約の版: **1.2**（`SND_CONTRACT_VERSION_MAJOR = 1`, `SND_CONTRACT_VERSION_MINOR = 2`、`contract/public/include/snd/version.h`）。1.1 の変更は 3 節の D-43〜D-55、1.2 の変更は D-88〜D-99 と 7 節
+- 1.2 への版の更新は受け入れ側の決定（ユーザー承認）。凍結ファイルの変更は `version.h` の MINOR と、`contract/test/contract11_test.cpp` の版の検査を「major が 1、minor が 1 以上」に緩めたこと。1.2 は新しいコマンド種別を足さず、既存の予約欄を `variant` にして表した（1.1 の記録は 0 を書いていたので互換）
 - バンク形式: **2.0**（`snd::bank_format::kFormatMajor/Minor`）
 - ライブリンク: **1.0**（`snd::livelink::kProtocolMajor/Minor`）
 
@@ -236,7 +232,7 @@ minor（追加のみ）として扱ってよいもの: 新しい関数、列挙�
 
 ### 契約 1.2（api 段）での決定
 
-契約 1.2 の候補一覧のうち api 段で入れたもの。すべて追加（minor）。版の数字は冒頭の注記のとおり 1.1 のまま。
+契約 1.2 の候補一覧のうち api 段で入れたもの。すべて追加（minor）。版は 1.2（冒頭、受け入れ側の決定・ユーザー承認）。
 
 | # | 決定 | 理由 |
 | --- | --- | --- |
@@ -351,4 +347,4 @@ bank / buildtool:
 | 1.1（段階2 platform） | 2026-11-17 | 出力バックエンド（ALSA、WASAPI、Core Audio）と駆動部品の決定 D-61〜D-66 を追記。契約ヘッダと版は変えていない（platform の公開ヘッダでの決定）。ルートの `CMakeLists.txt` に iOS のときだけ `enable_language(OBJCXX)` を追加 |
 | 1.1（段階2 livelink） | 2026-11-17 | D-83〜D-87 を追加（契約ヘッダは変えない。core への追加: `CoreDesc::liveTap`、`LiveTap::admit`、`System::Live*`。livelink-protocol.md に応答・背圧・セッションの段落を追加。ライブリンクの版は 1.0 のまま） |
 | 1.1（ツール D-67） | 2026-11-17 | **D-67 ツールの UI は LUDIARS Tela**（設計書 11 章・15.2 の「Dear ImGui か Qt か」をユーザーの決定で置き換え）。契約の版は変えない（tool は凍結対象の外）。(1) Tela は同梱も自動取得もしない: `-DSND_BUILD_TOOL=ON` のときだけ `tool/CMakeLists.txt` が `find_package(Tela CONFIG REQUIRED)` で読む（`Tela_DIR` / `CMAKE_PREFIX_PATH`）。既定の構成（OFF）は Tela を必要としない。(2) 使う部品: `Tela::Core`（宣言・配置・ヒット領域・ボタンの状態・ジェスチャーの所有）と `Tela::Raster`（CPU 描画）をすべての OS で、`Tela::Windows`（`WindowsView`）/ `Tela::MacOS`（`MacOSOverlay`）と `Tela::Pictor`（文字）をホストだけで。Linux はウィンドウのホストが無いので `--headless` で画像を出す。(3) サードパーティ依存の例外: Tela（LUDIARS 自前）と、Tela のホストが要る Pictor（Windows / macOS のホストのみ）。(4) 例外と RTTI: Sonus のコードは従来どおり `-fno-exceptions -fno-rtti`。Tela は検証失敗で例外を投げるので、宣言・描画の前に Sonus 側で範囲を検査して投げない呼び方だけをする（`tool/ui/safe_drawing.hpp`、`App::SetViewport` 等）。投げうる Tela のホスト API（`PictorSurface`、`WindowsView`、`MacOSOverlay`）を呼ぶ `tool/app/host_windows.cpp`・`host_macos.mm`・`pictor_text.cpp` だけを `-fexceptions` でコンパイルし、境界ですべて捕まえる。(5) フォントは同梱しない: ウィンドウのホストは `--font <ttf>` が必須。**D-67a**（独立テスト後の決定）: 受け付ける DPI は 0.25〜4（`--dpi` と `App::SetViewport` で同じ。8 では最悪の処理時間グラフが Tela の作業予算に収まらない）、図形の作業量は実際の DPI で見積もり、超えるときは線を分けるか点を間引く。記録ファイルは版 2（チェックサムがヘッダとレコードを覆い、読めないレコードは拒否）。詳細は `tool/README.md` |
-| 1.2（api 段、版の数字は 1.1 のまま） | 2026-11-18 | D-88〜D-99（D-97〜D-99 は独立テスト後の受け入れの決定）: `snd_set_transport_pitch`（`cmd::SetTempo` の `variant`、`ReservationAction::SetPitch`、EvaluateDspParams の読み出し 2 つ）、`snd_play_stinger`（`cmd::SetMusicState` の `variant`、MSTG.timing、`kStingerPayloadRuleTiming`）、`transport_beats` の注記と `RenderItem` 末尾の 2 欄、`SND_TICKS_PER_BEAT` の注記、`Config` 末尾の容量 6 つ（`SND_CONFIG_TOP_1_2`）、D-82 の定数を `music_if.hpp` へ、`CallbackParams` の注記、規則表の 1.2 の規則。C API の本実装と構成ルート、Callback / UserBuffer 種別、出力の橋渡し、同じブロックで作って壊したトランスポートのスロット返却（core）。版の数字を 2 に上げるには 1.1 のテスト 2 つのアサーションの更新が要る（冒頭の注記） |
+| 1.2（api 段） | 2026-11-18 | D-88〜D-99（D-97〜D-99 は独立テスト後の受け入れの決定）: `snd_set_transport_pitch`（`cmd::SetTempo` の `variant`、`ReservationAction::SetPitch`、EvaluateDspParams の読み出し 2 つ）、`snd_play_stinger`（`cmd::SetMusicState` の `variant`、MSTG.timing、`kStingerPayloadRuleTiming`）、`transport_beats` の注記と `RenderItem` 末尾の 2 欄、`SND_TICKS_PER_BEAT` の注記、`Config` 末尾の容量 6 つ（`SND_CONFIG_TOP_1_2`）、D-82 の定数を `music_if.hpp` へ、`CallbackParams` の注記、規則表の 1.2 の規則。C API の本実装と構成ルート、Callback / UserBuffer 種別、出力の橋渡し、同じブロックで作って壊したトランスポートのスロット返却（core）。版を 1.2 に上げた（`SND_CONTRACT_VERSION_MINOR = 2`、`contract11_test.cpp` の版の検査を「minor が 1 以上」に。受け入れ側の決定、ユーザー承認） |

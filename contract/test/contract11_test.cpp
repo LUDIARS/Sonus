@@ -10,8 +10,9 @@
 #include "snd/test/test.hpp"
 
 SND_TEST(Contract11, VersionIsOnePointOne) {
-  static_assert(SND_CONTRACT_VERSION_MAJOR == 1 && SND_CONTRACT_VERSION_MINOR == 1);
-  SND_CHECK_EQ(SND_CONTRACT_VERSION, (1u << 16) | 1u);
+  static_assert(SND_CONTRACT_VERSION_MAJOR == 1 && SND_CONTRACT_VERSION_MINOR >= 1);
+  SND_CHECK_EQ(SND_CONTRACT_VERSION >> 16, 1u);
+  SND_CHECK((SND_CONTRACT_VERSION & 0xFFFFu) >= 1u);
 }
 
 // D-44: new Config fields at the END of snd_config (1.0 layout is a prefix).
