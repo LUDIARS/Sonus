@@ -246,14 +246,14 @@ void CallbackKind::RenderBatch(const source::RenderBatch& batch, VoiceRenderStat
     const std::uint64_t clock = batch.block.clock + off;
     const double bps = it.transportBeats >= 0.0 ? it.transportBeatsPerSample : 0.0;
     const double beats = it.transportBeats >= 0.0 ? it.transportBeats + static_cast<double>(off) * bps : -1.0;
-    // Reference point for the render-ahead job (seqlock: odd while writing).
-    const std::uint32_t s0 = in.seq.load(std::memory_order_relaxed);
-    in.seq.store(s0 + 1u, std::memory_order_relaxed);
-    std::atomic_thread_fence(std::memory_order_release);
-    in.refPos.store(pos, std::memory_order_relaxed);
-    in.refClock.store(clock, std::memory_order_relaxed);
-    in.refBeats.store(beats, std::memory_order_relaxed);
-    in.refBps.store(bps, std::memory_order_relaxed);
+    // Reference point for the render-ahead job (seqlock: odd while writing). No fences
+    // (TSan does not model them): the odd mark is an acq_rel RMW, the fields are
+    // release stores, so a reader that sees a new field also sees the odd mark.
+    const std::uint32_t s0 = in.seq.fetch_add(1u, std::memory_order_acq_rel);
+    in.refPos.store(pos, std::memory_order_release);
+    in.refClock.store(clock, std::memory_order_release);
+    in.refBeats.store(beats, std::memory_order_release);
+    in.refBps.store(bps, std::memory_order_release);
     in.seq.store(s0 + 2u, std::memory_order_release);
     it.playhead->frame = pos + n;
     st.framesRendered = n;
@@ -374,12 +374,11 @@ void CallbackKind::RunJob(CallbackRing& ring) noexcept {
       std::this_thread::yield();
       continue;
     }
-    refPos = in.refPos.load(std::memory_order_relaxed);
-    refClock = in.refClock.load(std::memory_order_relaxed);
-    refBeats = in.refBeats.load(std::memory_order_relaxed);
-    refBps = in.refBps.load(std::memory_order_relaxed);
-    std::atomic_thread_fence(std::memory_order_acquire);
-    if (in.seq.load(std::memory_order_relaxed) == s0) break;
+    refPos = in.refPos.load(std::memory_order_acquire);
+    refClock = in.refClock.load(std::memory_order_acquire);
+    refBeats = in.refBeats.load(std::memory_order_acquire);
+    refBps = in.refBps.load(std::memory_order_acquire);
+    if (in.seq.load(std::memory_order_acquire) == s0) break;
   }
   ring.written.store(w, std::memory_order_release);
   while (w < end) {
