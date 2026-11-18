@@ -346,3 +346,20 @@ SND_TEST(OpusPipeline, CacheKeyAndRateWarning) {
   bt::Diagnostics d5;
   SND_CHECK(!proj.Build(o, &d5));
 }
+
+// D-57: Opus has no resident-PCM form; the default loadForm "pcm" is a build error naming the choices.
+SND_TEST(OpusPipeline, PcmLoadFormIsABuildError) {
+  if (!snd::codec::OpusAvailable()) return;
+  mini::Project proj("opus-pcmform");
+  BaseProject(proj);
+  proj.Wav("audio/t.wav", Tones(48000, 4800, {1000}, 0.5));
+  proj.Add("assets/a.json", "asset", "a", "\"file\": \"audio/t.wav\", \"convert\": {\"default\": {\"codec\": \"OPUS\"}}");
+  AddEvent(proj, "a");
+  bt::BuildOptions o = proj.Options();
+  o.encoders = &bt::CodecEncoders();
+  bt::Diagnostics d;
+  SND_CHECK(!proj.Build(o, &d));
+  SND_CHECK_MSG(mini::HasDiag(d, bt::Severity::Error, "codec OPUS cannot use loadForm \"pcm\""), "%s",
+                mini::Dump(d).c_str());
+  SND_CHECK(mini::HasDiag(d, bt::Severity::Error, "\"compressed\""));
+}

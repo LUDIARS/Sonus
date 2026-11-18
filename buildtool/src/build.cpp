@@ -877,6 +877,16 @@ void Builder::EmitAsset(BankTables& t, const Object& a, const std::string& langu
   if (!ConvertAsset(a, language, &c)) return;
   const std::uint32_t form = p_.Enum(a, a.doc, "loadForm", kLoadForm, 0, d_);
   const EncodedAsset& e = c.enc;
+  // Opus is never decoded PCM: the "pcm" form (resident PCM) does not apply (D-57).
+  if (e.codec == SND_CODEC_OPUS && form == static_cast<std::uint32_t>(bf::LoadForm::PcmResident)) {
+    const Value* lf = a.doc.Find("loadForm");
+    p_.ErrorAt(a, lf != nullptr ? *lf : a.doc,
+               "asset '" + a.name +
+                   "': codec OPUS cannot use loadForm \"pcm\" (the default); choose \"compressed\" (resident Opus), "
+                   "\"decompressCache\" or \"stream\"",
+               d_);
+    return;
+  }
   t.asst.U32(col::ASST_loadForm, r, form);
   t.asst.U32(col::ASST_codec, r, e.codec);
   t.asst.U32(col::ASST_channels, r, c.channels);

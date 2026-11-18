@@ -102,8 +102,10 @@
 | `signal` | `auto` | `auto` / `music` / `voice`（libopus の `OPUS_SET_SIGNAL`。`voice` と低いビットレートで SILK が選ばれる） |
 | `independentFrames` | true | パケット間の予測をしない（`OPUS_SET_PREDICTION_DISABLED`）。true ならシーク・ループの再開がサンプル単位で正確（CELT）。false は同じビットレートで少し高音質だが、シーク後は収束するだけ |
 
+- `loadForm` は `compressed` / `decompressCache` / `stream` のどれか。既定の `pcm`（展開済み PCM の常駐）は Opus には使えずビルドエラー。
 - `sampleRate` に 48000 以外（0 以外）を指定すると警告して無視し、48 kHz に変換して符号化する（`--werror` ではエラー）。
-- `channels` は 1〜8。3 以上は WAV のチャンネル順（L R C LFE BL BR SL SR）とみなしてサラウンドとして符号化する。
+  変換後のフレーム数はどのコーデックでも `ceil(元のフレーム数 × 変換後のレート / 元のレート)`、ループ点は `floor(元の位置 × 変換後のレート / 元のレート)`。丸めた結果ループ終端がループ開始以下になる場合は、終端を開始 + 1 にする（ループ区間は常に 1 フレーム以上。ループ終端 0 は「ループなし」と区別がつかないため）。
+- `channels` は 1〜8。3 以上はサラウンドとして符号化する。チャンネル数ごとの入力の並び（WAV の順）と Opus の内部の並びの対応は `bank-format.md` §6.5 の表に従う（4ch は L R BL BR、5ch は L R C BL BR）。
   3 以上はデコーダの状態が既定の `decoderSlotBytes`（64 KiB）を超えるので、必要なバイト数を警告する（192 KiB 以上が要る、D-58）。
 - 設定とエンコーダの版（libopus の版を含む）は差分ビルドのキャッシュキーに入る。
 - `SND_CODEC_OPUS=OFF` でビルドしたツールでは `OPUS` はエラー（エンコーダが無い）。
