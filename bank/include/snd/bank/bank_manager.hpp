@@ -64,7 +64,12 @@
 // copy of the dependency will ever be registered (a really missing bank, a
 // cycle); every such bank of a round fails together, so the outcome does not
 // depend on slot order. Dependencies are matched by bankId and buildHash only,
-// not by language (which language copy a dependency should resolve to is
+// not by language: a dependency resolves to a registered copy whose bankId AND
+// content hash match, in whatever slot (several such copies: the one requested
+// first gets the reference). Only when no matching copy is registered and no
+// copy of that bankId can still come does the bank fail ("built as ... but ... is loaded" when only a
+// mismatching copy is loaded; this is decided once nothing is reading or
+// validating any more). Not by language (which language copy a dependency should resolve to is
 // left to stage 2, snd_set_language). Side effect
 // of the request order: a later, unrelated bank also waits to register until
 // the earlier requests finished reading and validating.

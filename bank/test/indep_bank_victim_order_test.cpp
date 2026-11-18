@@ -1,7 +1,7 @@
 // Independent test (D-50 / 10.3, re-check of a228470): "if the dependency will
 // be registered, the dependant must not fail with SND_ERR_BANK_DEPENDENCY".
 //
-// Defect_*: fails on purpose. Two copies of bank X: the EARLIER request (q)
+// (Reported as a defect; fixed in 2743264.) Formerly failing: Two copies of bank X: the EARLIER request (q)
 // depends on a bank that is never requested, the LATER one (p) has no
 // dependency and waits for q's outcome (decision C). B depends on X. Nothing is
 // loading any more, so Pump fails "one bank whose dependency is missing at a
@@ -30,7 +30,7 @@ fixture::Bank Make(const char* name, const char* dep, std::uint64_t hash) {
 }
 }  // namespace
 
-SND_TEST(BankVictimOrder, Defect_DependantFailsAlthoughItsDependencyRegisters) {
+SND_TEST(BankVictimOrder, DependantFailsAlthoughItsDependencyRegisters) {
   for (int order = 0; order < 2; ++order) {
     Env e(8);
     SND_REQUIRE(e.m != nullptr);
