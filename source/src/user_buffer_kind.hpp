@@ -1,4 +1,4 @@
-// UserBuffer kind (design.md 5.1; source_if.hpp UserBufferControl; CONTRACTS.md D-91).
+// UserBuffer kind (design.md 5.1; source_if.hpp UserBufferControl; CONTRACTS.md D-94).
 //
 // Plays game-owned sample memory (snd_create_user_buffer) at the buffer's rate
 // (a source-rate kind: core resamples and applies the pitch).
@@ -6,8 +6,9 @@
 //           (snd_write_user_buffer); RenderBatch reads what was written and
 //           advances UserBufferControl::readPos. Missing frames are silence
 //           (VoiceRenderStatus::starved once the voice had played). It never
-//           ends by itself. Several playbacks of one stream buffer share the
-//           read position (each frame is played once).
+//           ends by itself. One playback reads a stream buffer at a time (its
+//           read position is the buffer's): a second start while one plays is
+//           refused (SND_END_DETAIL_VOICE_LIMIT).
 //   Static  written once: frames [0, frames) are played from the start, looped
 //           when the buffer loops, then the voice ends.
 // The control block's generation is checked at every block: a buffer released

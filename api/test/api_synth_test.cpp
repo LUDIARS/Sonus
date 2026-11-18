@@ -1,4 +1,4 @@
-// Synth callbacks through the C API (5.2, CONTRACTS.md D-68, D-90, D-91):
+// Synth callbacks through the C API (5.2, CONTRACTS.md D-68, D-90, D-94):
 //  - snd_render_context.transport_beats counts QUARTER NOTES of the transport the
 //    synth follows (the transport of its start When): checked analytically against
 //    clock_sample for 4/4 and 6/8 at 120 BPM, after snd_set_tempo and after
@@ -249,7 +249,7 @@ SND_TEST(ApiSynth, BufferedRendersAheadOnTheSameTimeLine) {
   }
   SND_CHECK(value >= 2048u);
   // The rendered frames are the ones the callback produced for that clock: the frame heard
-  // at `first` was rendered by the call whose range holds `first` (lockstep, D-91).
+  // at `first` was rendered by the call whose range holds `first` (lockstep, D-94).
   bool covered = false;
   for (const Call& c : calls) covered = covered || (c.clock <= first && first < c.clock + c.frames);
   SND_CHECK(covered);

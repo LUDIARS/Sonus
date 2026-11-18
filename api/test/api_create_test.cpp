@@ -10,6 +10,9 @@
 //  - the order of the lifecycle steps, with and without the live link.
 #include <cmath>
 #include <cstdlib>
+#if defined(_WIN32)
+#include <malloc.h>
+#endif
 #include <cstring>
 #include <limits>
 #include <mutex>
@@ -34,14 +37,22 @@ struct Counting {
     c->live.fetch_add(1);
     c->calls.fetch_add(1);
     if (align < 16) align = 16;
+#if defined(_WIN32)
+    return _aligned_malloc(n == 0 ? 1 : n, align);
+#else
     void* p = nullptr;
     if (posix_memalign(&p, align, n == 0 ? 1 : n) != 0) return nullptr;
     return p;
+#endif
   }
   static void Free(void* u, void* p, snd_mem_tag) {
     if (p == nullptr) return;
     static_cast<Counting*>(u)->live.fetch_sub(1);
+#if defined(_WIN32)
+    _aligned_free(p);
+#else
     std::free(p);
+#endif
   }
   snd_allocator Table() { return snd_allocator{this, &Alloc, &Free}; }
 };
@@ -207,7 +218,7 @@ SND_TEST(ApiCreate, StructSizeOfEarlierLayoutsGetsTheDefaults) {
   for (const std::size_t size : {std::size_t{4}, kConfigSize10 - 8, kConfigSize10 + 4, kConfigSize11 + 4,
                                  sizeof(snd_config) - 4}) {
     c.struct_size = static_cast<std::uint32_t>(size);
-    SND_CHECK_MSG(snd::compose::NormalizeConfig(&c, &norm) == SND_ERR_VERSION_MISMATCH, "size %zu", size);
+    SND_CHECK_MSG(snd::compose::NormalizeConfig(&c, &norm) == SND_ERR_VERSION_MISMATCH, "size %llu", static_cast<unsigned long long>(size));
   }
   // A longer struct (a newer minor): its tail is ignored.
   std::memset(buf, 0xFF, sizeof(buf));
@@ -259,7 +270,7 @@ SND_TEST(ApiCreate, LifecycleOrderWithoutLiveLink) {
                               "destroy:audio-driver", "destroy:io-shutdown", "destroy:workers",     "destroy:core",
                               "destroy:source-kinds", "destroy:io",          "destroy:services",    "destroy:system"};
   SND_REQUIRE_EQ(steps.size(), sizeof(want) / sizeof(want[0]));
-  for (std::size_t i = 0; i < steps.size(); ++i) SND_CHECK_MSG(steps[i] == want[i], "%zu: %s", i, steps[i].c_str());
+  for (std::size_t i = 0; i < steps.size(); ++i) SND_CHECK_MSG(steps[i] == want[i], "%llu: %s", static_cast<unsigned long long>(i), steps[i].c_str());
 }
 
 SND_TEST(ApiCreate, LifecycleOrderWithLiveLink) {
@@ -308,7 +319,8 @@ SND_TEST(ApiCreate, LifecycleOrderWithLiveLink) {
   std::size_t last = 0;
   for (const char* s : order) {
     const std::size_t at = IndexOf(steps, s);
-    SND_CHECK_MSG(at != SIZE_MAX && at >= last, "%s at %zu (after %zu)", s, at, last);
+    SND_CHECK_MSG(at != SIZE_MAX && at >= last, "%s at %llu (after %llu)", s, static_cast<unsigned long long>(at),
+                  static_cast<unsigned long long>(last));
     if (at != SIZE_MAX) last = at;
   }
   // 63 game threads + the live link = 64 (core's limit); 64 game threads cannot fit.

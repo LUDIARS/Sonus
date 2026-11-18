@@ -53,7 +53,7 @@ void UserBufferKind::Start(const SourceStartRequest* requests, std::uint32_t cou
     const auto* p = static_cast<const UserBufferParams*>(rq.params);
     UserBufferControl* ub = p != nullptr && sv_.userBuffer != nullptr ? sv_.userBuffer(sv_.userBufferCtx, p->buffer) : nullptr;
     if (ub == nullptr || ub->channelCount == 0u || ub->frames == 0u) continue;
-    if (ub->mode == SND_USER_BUFFER_STREAM) {  // one reader per stream ring (D-91)
+    if (ub->mode == SND_USER_BUFFER_STREAM) {  // one reader per stream ring (D-94)
       bool busy = false;
       for (std::uint32_t i = 0; i < cap_ && !busy; ++i) busy = inst_[i].state == 1u && inst_[i].control == ub;
       if (busy) {

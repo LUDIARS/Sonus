@@ -106,7 +106,7 @@ namespace {
 // Core renders Config.outputChannels; the device may have another layout (D-62: the
 // conversion is the caller's). Common channels are copied; a mono device gets the mean
 // of the first two core channels; a mono core feeds the first two device channels;
-// further device channels are silent, further core channels are dropped (D-93).
+// further device channels are silent, further core channels are dropped (D-95).
 void MapChannels(const float* in, std::uint32_t inCh, float* out, std::uint32_t outCh, std::uint32_t frames) noexcept {
   for (std::uint32_t f = 0; f < frames; ++f) {
     const float* src = in + std::size_t{f} * inCh;
@@ -400,7 +400,7 @@ void ServiceDevice(snd_system& sys) noexcept {
   for (std::uint32_t i = 0; i < lost; ++i) {
     sys.callbacks.on_error(sys.callbacks.user, SND_ERR_NO_DEVICE, SND_DEVICE_EVENT_LOST, 0u);
   }
-  if (rate) {  // the device runs at another rate; the output is not converted (D-93)
+  if (rate) {  // the device runs at another rate; the output is not converted (D-95)
     sys.callbacks.on_error(sys.callbacks.user, SND_ERR_UNSUPPORTED, 0u,
                            sys.deviceEvents.deviceRate.load(std::memory_order_relaxed));
   }

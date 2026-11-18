@@ -1,4 +1,4 @@
-// Callback kind (design.md 5.2; source_if.hpp CallbackParams; CONTRACTS.md D-91).
+// Callback kind (design.md 5.2; source_if.hpp CallbackParams; CONTRACTS.md D-94).
 //
 // A synth voice (snd_play_synth) calls the game's callback. It renders at the
 // internal rate and ignores the voice pitch (the callback generates what it

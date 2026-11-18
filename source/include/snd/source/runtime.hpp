@@ -1,6 +1,6 @@
 // Sample, Stream, Callback and UserBuffer source kinds (design.md 5, 6; source_if.hpp).
 // Callback (callback_kind.hpp) and UserBuffer (user_buffer_kind.hpp) were added at the
-// api stage (contract 1.2, D-91).
+// api stage (contract 1.2, D-94).
 //
 // snd::source::Runtime owns the source module's ISourceKind objects and the
 // state they share (the decoder pool, D-14). The composition root
@@ -113,7 +113,7 @@ struct RuntimeDesc {
   std::uint32_t maxBanks = 64;
   bool enableSample = true;
   bool enableStream = true;
-  // 1.2 (api stage, D-91): synth callbacks (snd_play_synth) and game buffers
+  // 1.2 (api stage, D-94): synth callbacks (snd_play_synth) and game buffers
   // (snd_play_user_buffer). Both need no IO.
   bool enableCallback = true;
   bool enableUserBuffer = true;
@@ -145,7 +145,7 @@ struct RuntimeStats {
   std::uint64_t ioPosted = 0;
   std::uint64_t ioRejected = 0;          // IoScheduler::Post refused (retried next block)
   std::uint64_t inlinePrimes = 0;        // starts primed on the audio thread
-  // Callback / UserBuffer kinds (D-91).
+  // Callback / UserBuffer kinds (D-94).
   std::uint32_t callbackInstances = 0;
   std::uint64_t callbackCalls = 0;
   std::uint64_t callbackUnderruns = 0;   // Buffered: the ring ran dry after the voice played

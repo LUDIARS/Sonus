@@ -161,7 +161,7 @@ struct PatchParams {
   std::uint32_t reserved;
 };
 struct CallbackParams {
-  // 1.2 (D-91): the desc as the game gave it. When `callback` is NULL, `cpp_callback`
+  // 1.2 (D-94): the desc as the game gave it. When `callback` is NULL, `cpp_callback`
   // is the snd::SynthCallback of the C++ wrapper (snd/sonus.hpp) and the Callback kind
   // calls it with the same snd_render_context viewed as snd::RenderContext (an alias).
   snd_synth_desc desc;

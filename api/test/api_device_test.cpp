@@ -1,4 +1,4 @@
-// The output side of the composition root (2.2, 2.6, CONTRACTS.md D-66, D-93):
+// The output side of the composition root (2.2, 2.6, CONTRACTS.md D-66, D-95):
 //  - a device whose channel layout differs from Config.outputChannels (mono, 4ch);
 //  - a device at another rate: reported once through on_error (not converted);
 //  - LOST -> on_error(SND_ERR_NO_DEVICE); SND_FOCUS_SILENCE mutes while the focus is lost;
