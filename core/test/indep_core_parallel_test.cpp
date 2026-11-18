@@ -198,7 +198,8 @@ int HeldVoiceCase(std::uint32_t blockFrames, std::uint32_t rate) {
   cfg.max_real_voices = 8;
   cfg.jobs.realtime_workers = 1;
   cfg.jobs.voices_per_chunk = 1;
-  cfg.tuning.rt_spin_microseconds = 50;
+  // Only the gated chunk is late; others are not, even on a loaded machine.
+  cfg.tuning.rt_spin_microseconds = 20000;
   cfg.tuning.lod_down_blocks = 0;
   Bank b;
   float sum = 0.0f;  // all 8 voices: DC (i + 1) / 100
@@ -236,20 +237,23 @@ int HeldVoiceCase(std::uint32_t blockFrames, std::uint32_t rate) {
                std::fabs(fx.At(fx.Total() - B) - full) < 1e-6f && std::fabs(fx.At(fx.Total() - 1) - full) < 1e-6f;
     }
     if (!steady) continue;
-    fx.kind.callerSlowNs.store(blockFrames >= 256 ? 300000 : 150000);
-    fx.kind.slowNs.store(30000000);  // the worker spins 30 ms: its chunks are late, its voices held
+    // The gate (indep_fixture.hpp) keeps the worker's chunk running past the
+    // deadline and the pool busy until it is opened: late chunk, voices held.
+    fx.kind.CloseGate();
     const std::size_t lateStart = fx.Total();
     fx.Step();
     const bool late = fx.sys->LastBlock().lateChunks != 0u;
-    fx.kind.slowNs.store(0);
-    fx.kind.callerSlowNs.store(0);
-    if (!late) continue;
+    if (!late) {  // the block was not parallel (pool not quiescent at its start): try again
+      fx.kind.OpenGate();
+      continue;
+    }
     bool held = true;
     for (std::size_t k = 0; k < heldBlocks; ++k) {
       fx.Step();
       held = held && fx.sys->LastBlock().heldVoices != 0u;
     }
-    if (!held) continue;  // released too early (slow machine): try again
+    fx.kind.OpenGate();
+    if (!held) continue;
     // From lateStart + N on, the held voices are silent: the output is constant.
     const float during = fx.At(fx.Total() - 1);
     const float missing = full - during;
@@ -268,14 +272,21 @@ int HeldVoiceCase(std::uint32_t blockFrames, std::uint32_t rate) {
       if (fx.At(f) > fx.At(f - 1) + 1e-6f) tailMonotone = false;
     }
     SND_CHECK_MSG(tailMonotone, "[%u/%u] tail fade not monotone", blockFrames, rate);
-    // Release: let the straggler finish, then render.
-    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    // Release: render until the late chunk has returned and its voices are
+    // released (the pool is quiescent again), then over the fade-in.
     const std::size_t from = fx.Total();
     const std::size_t releaseBlocks = (N + 3 * B + B - 1) / B + 2;
-    bool calm = true;
+    bool calm = true, released = false;
+    for (int k = 0; k < 20000 && !released; ++k) {
+      fx.Step();
+      calm = calm && fx.sys->LastBlock().lateChunks == 0u;
+      released = fx.sys->LastBlock().heldVoices == 0u;
+      if (!released) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    if (!released) continue;
     for (std::size_t k = 0; k < releaseBlocks; ++k) {
       fx.Step();
-      calm = calm && fx.sys->LastBlock().lateChunks == 0u && (k < 2 || fx.sys->LastBlock().heldVoices == 0u);
+      calm = calm && fx.sys->LastBlock().lateChunks == 0u && fx.sys->LastBlock().heldVoices == 0u;
     }
     if (!calm) continue;
     std::size_t rise = 0;
@@ -308,6 +319,7 @@ int HeldVoiceCase(std::uint32_t blockFrames, std::uint32_t rate) {
     SND_CHECK_EQ(fx.kind.overlap.load(), 0u);
     SND_CHECK_EQ(fx.kind.discont.load(), 0u);
     SND_CHECK_EQ(fx.kind.doubleBlock.load(), 0u);
+    SND_CHECK_EQ(fx.kind.gateTimeouts.load(), 0u);  // the gate worked (no safety bound hit)
     SND_CHECK_MSG(fx.kind.timeLag.load() == 0u, "[%u/%u] %llu renders behind the clock", blockFrames, rate,
                   static_cast<unsigned long long>(fx.kind.timeLag.load()));
     (void)B;

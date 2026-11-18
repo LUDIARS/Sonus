@@ -6,15 +6,18 @@
 //     asset); reports `ended` past the last frame.
 //   TestOscKind (SourceKind::Oscillator, output rate): sine of
 //     OscillatorParams::frequencyHz x the item's pitch ramp, amplitude 1.
-// Both use the voice slot as their source slot. Optional per-render delay
-// (late-chunk tests): RenderBatch spins `slowNs` when it is set.
-// `holdOwnerForWorkerNs` (with slowNs) makes a late chunk certain: in a
-// parallel batch (chunkGeneration != 0) the owner (audio) thread stays in
-// its RenderBatch until an RT worker has entered a RenderBatch of the same
-// batch (bounded by that many ns), and that worker's chunk also stays until
-// the test has counted the block as rendered (`stepped` moved on, same bound),
-// i.e. until the block's deadline has certainly passed: the chunk is late
-// however long the audio thread was preempted.
+// Both use the voice slot as their source slot. Optional per-render delay:
+// RenderBatch spins `slowNs` when it is set (RT workers fully, the thread
+// that created the kind - the audio thread of the tests - a hundredth).
+// Late-chunk gate (makes a late chunk certain, no timing involved): while
+// `gateClosed` is set, an RT worker that enters RenderBatch of a parallel
+// batch (chunkGeneration != 0) announces the batch and then stays there until
+// the test calls OpenGate(); the owner (audio) thread, in a parallel batch,
+// stays in its RenderBatch until a worker has entered a RenderBatch of the
+// same batch. So every parallel block rendered while the gate is closed has a
+// chunk that is still running at its deadline, and the pool stays busy (no
+// block is quiescent) until the gate is opened. Both waits are bounded by
+// `gateLimitNs` only as a safety net (counted in gateTimeouts, never expected).
 #ifndef SND_CORE_TEST_TEST_SOURCES_HPP
 #define SND_CORE_TEST_TEST_SOURCES_HPP
 
@@ -75,37 +78,12 @@ class TestSampleKind final : public snd::source::ISourceKind {
   }
   void RenderBatch(const snd::source::RenderBatch& b, snd::VoiceRenderStatus* st) noexcept override {
     batches.fetch_add(1, std::memory_order_relaxed);
-    // Slow on RT workers; the thread that created the kind (the audio thread of the
-    // tests) only a little, so that the workers get chunks even on a loaded machine.
+    const bool owner = std::this_thread::get_id() == owner_;
+    if (b.chunkGeneration != 0u) Gate(owner, b.chunkGeneration);
     if (slowNs.load(std::memory_order_relaxed) != 0u) {
       const std::uint64_t ns = slowNs.load(std::memory_order_relaxed);
-      const bool owner = std::this_thread::get_id() == owner_;
-      const std::uint64_t hold = holdOwnerForWorkerNs.load(std::memory_order_relaxed);
-      std::uint32_t entryStep = 0;
-      if (!owner) {
-        entryStep = stepped.load(std::memory_order_acquire);
-        // Announce the batch this worker runs (max: a straggler of an older batch never lowers it).
-        std::uint32_t seen = workerGeneration.load(std::memory_order_relaxed);
-        while (seen < b.chunkGeneration &&
-               !workerGeneration.compare_exchange_weak(seen, b.chunkGeneration, std::memory_order_relaxed)) {
-        }
-      } else if (hold != 0u && b.chunkGeneration != 0u) {
-        const std::uint64_t limit = snd::platform::MonotonicNanoseconds() + hold;
-        while (workerGeneration.load(std::memory_order_relaxed) < b.chunkGeneration &&
-               snd::platform::MonotonicNanoseconds() < limit) {
-          std::this_thread::yield();
-        }
-        if (workerGeneration.load(std::memory_order_relaxed) < b.chunkGeneration) ownerHoldTimeouts.fetch_add(1);
-      }
-      const std::uint64_t start = snd::platform::MonotonicNanoseconds();
-      const std::uint64_t until = start + (owner ? ns / 100u : ns);
+      const std::uint64_t until = snd::platform::MonotonicNanoseconds() + (owner ? ns / 100u : ns);
       while (snd::platform::MonotonicNanoseconds() < until) {
-      }
-      if (!owner && hold != 0u) {
-        while (stepped.load(std::memory_order_acquire) == entryStep &&
-               snd::platform::MonotonicNanoseconds() < start + hold) {
-          std::this_thread::yield();
-        }
       }
     }
     for (std::uint32_t i = 0; i < b.count; ++i) {
@@ -159,14 +137,54 @@ class TestSampleKind final : public snd::source::ISourceKind {
   void ScheduleBackground(const snd::source::BlockInfo&) noexcept override {}
   std::uint32_t PrimeFrames(const snd::source::SourceAsset&, std::uint64_t) const noexcept override { return 0; }
 
+  // Test thread: closes / opens the gate (see the file comment).
+  void CloseGate() noexcept { gateClosed.store(1u, std::memory_order_seq_cst); }
+  void OpenGate() noexcept {
+    gateClosed.store(0u, std::memory_order_seq_cst);
+    gateEpoch.fetch_add(1u, std::memory_order_seq_cst);
+  }
+
   std::atomic<std::uint32_t> starts{0}, releases{0}, releaseCalls{0}, controls{0}, batches{0}, advances{0};
   std::atomic<std::uint64_t> slowNs{0};
-  std::atomic<std::uint64_t> holdOwnerForWorkerNs{0};
-  std::atomic<std::uint32_t> workerGeneration{0};   // newest batch a worker rendered in (slow mode)
-  std::atomic<std::uint32_t> ownerHoldTimeouts{0};  // parallel batches no worker joined in time
-  std::atomic<std::uint32_t> stepped{0};            // the test counts rendered blocks (hold mode)
+  std::atomic<std::uint32_t> gateClosed{0};
+  std::atomic<std::uint32_t> gateEpoch{0};          // moved on by OpenGate()
+  std::atomic<std::uint32_t> workerGeneration{0};   // newest parallel batch a worker entered while gated
+  std::atomic<std::uint32_t> gateTimeouts{0};       // safety bound hit (owner or worker): never expected
+  std::uint64_t gateLimitNs = 30000000000ull;       // 30 s
 
  private:
+  void Gate(bool owner, std::uint32_t generation) noexcept {
+    if (!owner) {
+      // Epoch first: if the gate is still seen closed below, OpenGate() has not
+      // run yet (seq_cst), so the epoch read here is the one it will move on.
+      const std::uint32_t epoch = gateEpoch.load(std::memory_order_seq_cst);
+      if (gateClosed.load(std::memory_order_seq_cst) == 0u) return;
+      // Announce the batch (max: a straggler of an older batch never lowers it).
+      std::uint32_t seen = workerGeneration.load(std::memory_order_relaxed);
+      while (seen < generation &&
+             !workerGeneration.compare_exchange_weak(seen, generation, std::memory_order_seq_cst)) {
+      }
+      const std::uint64_t limit = snd::platform::MonotonicNanoseconds() + gateLimitNs;
+      while (gateEpoch.load(std::memory_order_seq_cst) == epoch) {
+        if (snd::platform::MonotonicNanoseconds() > limit) {
+          gateTimeouts.fetch_add(1u);
+          break;
+        }
+        std::this_thread::yield();
+      }
+      return;
+    }
+    if (gateClosed.load(std::memory_order_seq_cst) == 0u) return;
+    const std::uint64_t limit = snd::platform::MonotonicNanoseconds() + gateLimitNs;
+    while (workerGeneration.load(std::memory_order_seq_cst) < generation) {
+      if (snd::platform::MonotonicNanoseconds() > limit) {
+        gateTimeouts.fetch_add(1u);
+        break;
+      }
+      std::this_thread::yield();
+    }
+  }
+
   std::thread::id owner_ = std::this_thread::get_id();
   SampleInstance* inst_ = nullptr;
   std::uint32_t cap_ = 0;
