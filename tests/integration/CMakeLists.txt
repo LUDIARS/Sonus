@@ -43,3 +43,50 @@ snd_add_test(integration_core_end_to_end_test
   SOURCES core_end_to_end_test.cpp
   LINK sonus_core sonus_buildtool sonus_bank sonus_codec sonus_dsp sonus_io sonus_jobs sonus_platform sonus_base sonus_mocks)
 target_include_directories(integration_core_end_to_end_test PRIVATE ${PROJECT_SOURCE_DIR}/buildtool/test ${PROJECT_SOURCE_DIR}/core/test)
+
+# Opus (D-56..D-60): buildtool -> bank (ParseBank) -> codec, analytic checks; with
+# SND_CODEC_OPUS=OFF it checks that the build rejects OPUS assets.
+snd_add_test(integration_opus_pipeline_test
+  SOURCES opus_pipeline_test.cpp
+  LINK sonus_buildtool sonus_bank sonus_codec sonus_dsp sonus_io sonus_jobs sonus_platform sonus_base sonus_mocks)
+target_include_directories(integration_opus_pipeline_test PRIVATE ${PROJECT_SOURCE_DIR}/buildtool/test)
+set_tests_properties(integration_opus_pipeline_test PROPERTIES TIMEOUT 600)
+
+# Stage 2, source: project -> buildtool -> bank + stream file -> IoScheduler -> core
+# with the Sample / Stream kinds of the composition root (compose::SourceKinds).
+snd_add_test(integration_source_end_to_end_test
+  SOURCES source_end_to_end_test.cpp
+  LINK sonus sonus_source sonus_core sonus_buildtool sonus_bank sonus_codec sonus_dsp sonus_io sonus_jobs sonus_platform sonus_base sonus_mocks)
+target_include_directories(integration_source_end_to_end_test PRIVATE ${PROJECT_SOURCE_DIR}/buildtool/test)
+set_tests_properties(integration_source_end_to_end_test PROPERTIES TIMEOUT 600)
+
+# Independent tests of the source module through core (indep_*), harness of source/test.
+snd_add_test(integration_indep_source_core_test
+  SOURCES indep_source_core_test.cpp
+  LINK sonus_source sonus_core sonus_buildtool sonus_bank sonus_dsp sonus_jobs sonus_io sonus_codec sonus_mocks)
+target_include_directories(integration_indep_source_core_test PRIVATE ${PROJECT_SOURCE_DIR}/buildtool/test ${PROJECT_SOURCE_DIR}/source/test)
+set_tests_properties(integration_indep_source_core_test PROPERTIES TIMEOUT 900)
+snd_add_test(integration_indep_source_reload_test
+  SOURCES indep_source_reload_test.cpp
+  LINK sonus_source sonus_core sonus_buildtool sonus_bank sonus_dsp sonus_jobs sonus_io sonus_codec sonus_mocks)
+target_include_directories(integration_indep_source_reload_test PRIVATE ${PROJECT_SOURCE_DIR}/buildtool/test ${PROJECT_SOURCE_DIR}/source/test)
+set_tests_properties(integration_indep_source_reload_test PROPERTIES TIMEOUT 1500)
+snd_add_test(integration_indep_source_reload2_test
+  SOURCES indep_source_reload2_test.cpp
+  LINK sonus_source sonus_core sonus_buildtool sonus_bank sonus_dsp sonus_jobs sonus_io sonus_codec sonus_mocks)
+target_include_directories(integration_indep_source_reload2_test PRIVATE ${PROJECT_SOURCE_DIR}/buildtool/test ${PROJECT_SOURCE_DIR}/source/test)
+set_tests_properties(integration_indep_source_reload2_test PROPERTIES TIMEOUT 900)
+snd_add_test(integration_indep_io_reopen_test
+  SOURCES indep_io_reopen_test.cpp
+  LINK sonus_io sonus_base sonus_mocks)
+set_tests_properties(integration_indep_io_reopen_test PROPERTIES TIMEOUT 600)
+snd_add_test(integration_indep_load_cpu_test
+  SOURCES indep_load_cpu_test.cpp
+  LINK sonus_source sonus_core sonus_buildtool sonus_bank sonus_dsp sonus_jobs sonus_io sonus_codec sonus_mocks)
+target_include_directories(integration_indep_load_cpu_test PRIVATE ${PROJECT_SOURCE_DIR}/buildtool/test ${PROJECT_SOURCE_DIR}/source/test)
+set_tests_properties(integration_indep_load_cpu_test PROPERTIES TIMEOUT 600)
+snd_add_test(integration_indep_source_reload3_test
+  SOURCES indep_source_reload3_test.cpp
+  LINK sonus_source sonus_core sonus_buildtool sonus_bank sonus_dsp sonus_jobs sonus_io sonus_codec sonus_mocks)
+target_include_directories(integration_indep_source_reload3_test PRIVATE ${PROJECT_SOURCE_DIR}/buildtool/test ${PROJECT_SOURCE_DIR}/source/test)
+set_tests_properties(integration_indep_source_reload3_test PROPERTIES TIMEOUT 900)

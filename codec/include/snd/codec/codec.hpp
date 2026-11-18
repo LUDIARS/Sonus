@@ -5,9 +5,14 @@
 //                      (corrupt data must not reach feedback DSP such as reverb)
 //   SND_CODEC_PCM_S16  little-endian int16, interleaved
 //   SND_CODEC_ADPCM    IMA ADPCM in WAV/IMA block layout, 1..SND_MAX_CHANNELS
-// SND_CODEC_OPUS is not built in (no third-party code, stage0 A0-3). Lookups of
-// it fail with LookupFailure::OpusUnavailable (registry.hpp) unless a plugin
-// codec registers that fourcc. See codec/README.md.
+//   SND_CODEC_OPUS     Opus (bundled libopus, CONTRACTS.md D-56..D-60) when the
+//                      build has SND_CODEC_OPUS=ON (OpusAvailable()). Packets
+//                      of 20 ms (960 frames at 48 kHz) with a 2-byte length
+//                      prefix; setup data (channel mapping) in header.extra.
+//                      Without it, lookups fail with LookupFailure::
+//                      OpusUnavailable (registry.hpp) and ValidateHeader with
+//                      CodecUnavailable, unless a plugin registers 'OPUS'.
+// See codec/README.md and bank-format.md §6.5.
 //
 // Decode semantics (D-23, snd/ext.h is normative), as implemented here:
 //   - Decode consumes ALL src bytes. Bytes that cannot be decoded in this call
@@ -33,6 +38,12 @@
 //     whose first PLAYABLE frame is f (decoded frame f + pre_skip). For ADPCM
 //     (f + pre_skip) must be a multiple of frames_per_packet, otherwise the
 //     next Decode fails.
+//   - Opus decodes a whole packet at once (libopus cannot resume inside a
+//     packet), so its state also keeps the decoded frames of at most one
+//     packet that did not fit into max_frames (as float, 960 x channels).
+//     Undecoded input is still held compressed, with the same bound
+//     (kHoldInputBytes + one packet). Seek(f > 0) requires f + pre_skip to be a
+//     multiple of 960 (a packet boundary).
 //   - An invalid header (ValidateHeader != None) is accepted by StateBytes and
 //     Init (StateBytes returns kMinStateBytes) and every Decode returns
 //     SND_DECODE_ERROR. A corrupt ADPCM block header (step index > 88) makes
@@ -76,6 +87,7 @@ enum class HeaderError : std::uint32_t {
   BadBlockAlign = 5,       // PCM: not 0 / the frame size; ADPCM: wrong layout or too large
   BadFramesPerPacket = 6,  // PCM: not 0 / 1; ADPCM: not 0 / the block's frame count
   FrameCountOverflow = 7,  // pre_skip + total_frames overflows
+  BadCodecSetup = 8,       // Opus: header.extra missing or invalid (version, streams, mapping)
 };
 const char* HeaderErrorName(HeaderError e) noexcept;
 
@@ -83,17 +95,47 @@ const char* HeaderErrorName(HeaderError e) noexcept;
 HeaderError ValidateHeader(const CodecHeader& header) noexcept;
 
 // Built-in codec objects (stateless, constant-initialised, valid for the whole
-// program). nullptr for SND_CODEC_OPUS and unknown fourccs.
+// program). nullptr for unknown fourccs, and for SND_CODEC_OPUS when the build
+// has no Opus (OpusAvailable() == false).
 ICodec* BuiltinCodec(std::uint32_t fourcc) noexcept;
 bool IsBuiltinCodec(std::uint32_t fourcc) noexcept;
 
 // Bytes of one packet: the frame size for PCM, block_align for ADPCM. 0 if the
-// header is invalid.
+// header is invalid, and 0 for Opus (variable-size packets).
 std::uint32_t PacketBytes(const CodecHeader& header) noexcept;
-// Frames of one packet: 1 for PCM, frames per block for ADPCM. 0 if invalid.
+// Frames of one packet: 1 for PCM, frames per block for ADPCM, 960 for Opus.
+// 0 if invalid.
 std::uint32_t PacketFrames(const CodecHeader& header) noexcept;
 // Undecoded bytes a built-in state can hold (>= kHoldInputBytes + one packet - 1).
+// Opus: kHoldInputBytes + the largest packet (length prefix included).
 std::uint32_t HoldCapacityBytes(const CodecHeader& header) noexcept;
+
+// --- Opus (bank-format.md §6.5, CONTRACTS.md D-56..D-60) ------------------------------
+// True when this build contains the Opus decoder (SND_CODEC_OPUS=ON).
+bool OpusAvailable() noexcept;
+inline constexpr std::uint32_t kOpusSampleRate = 48000;     // the only rate of an Opus asset
+inline constexpr std::uint32_t kOpusPacketFrames = 960;     // every packet is 20 ms
+inline constexpr std::uint32_t kOpusPreRollFrames = 3840;   // 80 ms (RFC 7845 4.6), written to pre_roll
+inline constexpr std::uint32_t kOpusLengthPrefixBytes = 2;  // u16 LE packet length before each packet
+// Largest packet per elementary stream (1275 bytes of one 20 ms frame + 2 bytes
+// of self-delimiting length). A packet longer than streams x this is corrupt.
+inline constexpr std::uint32_t kOpusMaxPacketBytesPerStream = 1277;
+inline constexpr std::uint32_t kOpusMaxStreams = SND_MAX_CHANNELS;
+// Setup data (header.extra, ASST.extraOffset/extraBytes), 4 + channels bytes:
+//   u8 version (kOpusSetupVersion), u8 channels, u8 streams, u8 coupledStreams,
+//   u8 mapping[channels] (output channel i = decoded stream channel mapping[i],
+//   255 = silence; RFC 7845 5.1.1 semantics).
+inline constexpr std::uint32_t kOpusSetupVersion = 1;
+inline constexpr std::uint32_t kOpusSetupHeaderBytes = 4;
+struct OpusSetup {
+  std::uint32_t streams;
+  std::uint32_t coupledStreams;
+  std::uint8_t mapping[SND_MAX_CHANNELS];
+};
+// Parses and checks header.extra for header.channels. BadChannels / BadCodecSetup on failure.
+HeaderError ParseOpusSetup(const CodecHeader& header, OpusSetup* out) noexcept;
+// streams x kOpusMaxPacketBytesPerStream (packet payload, prefix not included). 0 if invalid.
+std::uint32_t OpusMaxPacketBytes(const CodecHeader& header) noexcept;
 
 // IMA ADPCM block geometry: frames in a block of `blockAlign` bytes, 0 if the
 // layout is invalid (blockAlign must be 4*ch*(1+k), k >= 1).
@@ -104,8 +146,8 @@ std::uint32_t AdpcmFramesPerBlock(std::uint32_t channels, std::uint32_t blockAli
 // returned as {first playable frame of the packet, byte offset within the codec
 // data}. A packet that starts inside pre_skip maps to {0, 0} (Seek(0) restarts
 // the stream). False if the header is invalid, out is null, target >=
-// total_frames (past the playable range), or the byte offset does not fit in
-// 64 bits.
+// total_frames (past the playable range), the byte offset does not fit in
+// 64 bits, or the packets are variable-size (Opus: use the seek table).
 struct PacketPosition {
   std::uint64_t frame;
   std::uint64_t byteOffset;

@@ -49,6 +49,27 @@
 // the previous block (D-15 short fade). After the hold the render state is
 // what the late chunk wrote and the voice continues from the next block.
 // StragglersInFlight() is for statistics / diagnostics only.
+//
+// What a source kind keeps to itself because of late chunks (stage 2,
+// comment only): ScheduleBackground (Publish, audio thread) may run while a
+// late chunk still renders a voice of the previous block. It must therefore
+// not write the render state of a voice (whatever RenderBatch reads or writes
+// for it: ring read positions, playheads, fades, the per-voice decoder while
+// RenderBatch may use it). Publish changes reach the render side only through
+// an atomic hand-over (write the request, publish it with a release store) that
+// the voice's next RenderBatch takes in at its head. Jobs posted for a voice
+// must not race what RenderBatch writes either (single producer / single
+// consumer rings, the job's done counter checked by whoever touches the shared
+// decoder state).
+//
+// Control (RunEventLogic) may change a voice's decoder, ring write position
+// and loop in place (a SetLoop that keeps the buffered data): sources rely on
+// core sending no Control op to a held voice (D-43: no system touches a held
+// voice's render state), which core guarantees.
+//
+// Errors after the start (stream IO, decode) can only end a voice through
+// VoiceRenderStatus::ended: core reports such a playback as completed. An end
+// reason in VoiceRenderStatus is planned for contract 1.2 (api stage).
 #ifndef SND_INTERNAL_SOURCE_IF_HPP
 #define SND_INTERNAL_SOURCE_IF_HPP
 
@@ -112,7 +133,8 @@ struct SourceAsset {
   std::uint8_t virtualReturn;       // 0 continue, 1 restart, 2 never (4.4, 6.3)
   std::uint8_t ioPriority;          // 0 ambience, 1 voice, 2 music (6.1)
   std::uint16_t bankSlot;
-  std::uint16_t reserved;
+  std::uint16_t reserved;           // stage 2 (comment only): core writes the low 16 bits of the bank
+                                    // handle's generation (a new value per load); sources key caches with it
 };
 
 // ---------------------------------------------------------------------------

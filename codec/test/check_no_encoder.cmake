@@ -10,4 +10,9 @@ endif()
 if(syms MATCHES "snd::codec::encode::")
   message(FATAL_ERROR "encoder symbols are linked into a runtime-only executable")
 endif()
+# Opus (D-56): the libopus encoder stays out of the runtime as well; only the
+# decoder is linked (when the build has Opus).
+if(syms MATCHES "opus_encode|opus_multistream_encode|opus_multistream_surround_encoder|silk_Encode|celt_encode")
+  message(FATAL_ERROR "libopus encoder symbols are linked into a runtime-only executable")
+endif()
 message(STATUS "no encoder symbols in ${EXE}")

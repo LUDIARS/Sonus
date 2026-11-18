@@ -49,12 +49,13 @@ struct FileEntry {
   std::uint64_t lastUse = 0;
   bool used = false;
   bool failed = false;
+  bool stale = false;     // superseded by a fresh open: no new users, closed when the last one goes
+  bool playback = false;  // opened for a playback (StreamChannel::ReopenFile): closed when no one uses it
 };
 
 struct QueuedRead {
   source::IoReadRequest req;
   std::uint32_t epoch;
-  std::uint32_t pad;
 };
 
 std::uint32_t HashPath(const char* p, std::size_t* len) noexcept {
@@ -125,6 +126,12 @@ struct IoScheduler::Impl {
   std::uint32_t inflightCount = 0;
   std::uint32_t* chHead = nullptr;
   std::uint32_t* chTail = nullptr;
+  // Playback file binding per channel (StreamChannel::ReopenFile / CloseFile):
+  // the entry the channel's playback reads (one reference held while it plays),
+  // the fileGen_ value last seen and whether the next request opens anew.
+  std::uint32_t* chFile = nullptr;
+  std::uint32_t* chFileGen = nullptr;
+  std::uint8_t* chFresh = nullptr;
   FileEntry* files = nullptr;
   std::uint32_t fileCount = 0;
   std::uint64_t windowStart = 0;
@@ -203,7 +210,10 @@ struct IoScheduler::Impl {
   }
 
   // --- file table -------------------------------------------------------------------------
-  std::uint32_t ResolveFile(const char* path, std::uint64_t now) noexcept {
+  // fresh (FileRequest): an idle entry of the same path is closed and opened
+  // again (with a new size), so a file replaced or rewritten since is read as
+  // it is now. Stream reads keep using an open entry.
+  std::uint32_t ResolveFile(const char* path, std::uint64_t now, bool fresh = false, bool supersede = false) noexcept {
     if (path == nullptr) return kNil;
     std::size_t len = 0;
     const std::uint32_t h = HashPath(path, &len);
@@ -216,7 +226,22 @@ struct IoScheduler::Impl {
         if (freeEntry == kNil) freeEntry = i;
         continue;
       }
-      if (e.hash == h && std::strcmp(e.path, path) == 0 && !(e.failed && e.refs == 0u)) {
+      if (e.hash == h && !e.stale && std::strcmp(e.path, path) == 0 && !(e.failed && e.refs == 0u)) {
+        if (fresh && e.refs != 0u) {
+          if (!supersede) {  // a FileRequest shares an entry in use (it is opened now anyway)
+            ++e.refs;
+            e.lastUse = now;
+            return i;
+          }
+          e.stale = true;  // a new stream playback: the earlier user keeps the old file, we open anew
+          continue;
+        }
+        if (fresh && e.id != kInvalidFile) {
+          fs->Close(e.id);  // idle: no reads in flight
+          e.id = kInvalidFile;
+          e.size = UINT64_MAX;
+          e.failed = false;
+        }
         ++e.refs;
         e.lastUse = now;
         return i;
@@ -235,13 +260,21 @@ struct IoScheduler::Impl {
     e.lastUse = now;
     e.used = true;
     e.failed = false;
+    e.stale = false;
     return pick;
   }
-  void ReleaseFile(std::uint32_t& i) noexcept {
+  // close: a FileRequest's entry is closed once nothing uses it (bank loads
+  // open the file again next time and ask for its size again).
+  void ReleaseFile(std::uint32_t& i, bool close = false) noexcept {
     if (i == kNil) return;
     FileEntry& e = files[i];
     if (e.refs > 0u) --e.refs;
-    if (e.refs == 0u && e.failed) e.used = false;  // retry the open for later requests
+    if (e.refs == 0u && (close || e.stale || e.playback)) {
+      if (e.id != kInvalidFile) fs->Close(e.id);
+      e = FileEntry{};
+    } else if (e.refs == 0u && e.failed) {
+      e.used = false;  // retry the open for later requests
+    }
     i = kNil;
   }
   bool EnsureOpen(std::uint32_t i) noexcept {
@@ -258,7 +291,57 @@ struct IoScheduler::Impl {
     e.size = fs->Size(e.id);
     return true;
   }
+  // --- playback binding --------------------------------------------------------------
+  // Takes a ReopenFile / CloseFile of the channel into account: the earlier
+  // playback's binding is let go (its file closes once its last read is done)
+  // and, for ReopenFile, the channel's next request opens its file anew.
+  void SyncBinding(std::uint32_t slot) noexcept {
+    const std::uint32_t g = Ch(slot).fileGen_.value.load(std::memory_order_acquire);
+    if (g == chFileGen[slot]) return;
+    chFileGen[slot] = g;
+    ReleaseFile(chFile[slot]);
+    chFresh[slot] = static_cast<std::uint8_t>(g & 1u);
+  }
+  // File entry of a current stream request: the playback's bound entry (same
+  // path); the first request after ReopenFile opens the file anew and binds it
+  // (an entry of that path in use by an earlier playback or read is kept for
+  // its users and gets no new ones).
+  std::uint32_t ResolveStream(std::uint32_t slot, const char* path, std::uint64_t now) noexcept {
+    SyncBinding(slot);
+    const std::uint32_t b = chFile[slot];
+    if (b != kNil && path != nullptr && std::strcmp(files[b].path, path) == 0) {
+      ++files[b].refs;
+      files[b].lastUse = now;
+      return b;
+    }
+    if (chFresh[slot] == 0u) return ResolveFile(path, now);
+    const std::uint32_t i = ResolveFile(path, now, true, true);
+    if (i == kNil) return kNil;
+    chFresh[slot] = 0;
+    ReleaseFile(chFile[slot]);
+    files[i].playback = true;
+    ++files[i].refs;  // the binding's reference
+    chFile[slot] = i;
+    return i;
+  }
+  void ReleaseBindings() noexcept {
+    for (std::uint32_t s = 0; s < self->channelCount_; ++s) {
+      ReleaseFile(chFile[s]);
+      chFresh[s] = 0;
+    }
+  }
+
+  // IoScheduler::CloseIdleFiles(): files no request uses are closed (a bank was unloaded).
+  void CloseIdleFiles() noexcept {
+    for (std::uint32_t i = 0; i < fileCount; ++i) {
+      FileEntry& e = files[i];
+      if (!e.used || e.refs != 0u) continue;  // bound to a playback or read now: kept
+      if (e.id != kInvalidFile) fs->Close(e.id);
+      e = FileEntry{};
+    }
+  }
   void CloseAllFiles() noexcept {
+    ReleaseBindings();
     for (std::uint32_t i = 0; i < fileCount; ++i) {
       FileEntry& e = files[i];
       if (e.used && e.id != kInvalidFile) fs->Close(e.id);
@@ -298,7 +381,7 @@ struct IoScheduler::Impl {
     const std::uint64_t size = n.file != kNil ? files[n.file].size : UINT64_MAX;
     FileRequest* req = n.req;
     const std::uint64_t done = n.done;
-    ReleaseFile(n.file);
+    ReleaseFile(n.file, true);
     FreeNode(i);
     FinishFile(req, state, done, size);
   }
@@ -328,7 +411,7 @@ struct IoScheduler::Impl {
       n.chunk = chunk;
       n.bytes = q.req.bytes;
       n.offset = q.req.offset;
-      n.file = ResolveFile(q.req.path, now);
+      n.file = ResolveStream(n.slot, q.req.path, now);
       ChAppend(idx);
       if (n.file == kNil) {  // bad path or table full: fails in order
         n.state = NodeState::Completed;
@@ -348,11 +431,11 @@ struct IoScheduler::Impl {
         FinishFile(req, FileState::Cancelled, 0, UINT64_MAX);
         continue;
       }
-      const std::uint32_t file = ResolveFile(req->path, now);
+      const std::uint32_t file = ResolveFile(req->path, now, true);
       const std::uint32_t idx = file == kNil ? kNil : freeNodes.Pop();
       if (file == kNil || idx == base::kInvalidIndex) {
         std::uint32_t f = file;
-        ReleaseFile(f);
+        ReleaseFile(f, true);
         if (file == kNil) openFailures.Add();
         FinishFile(req, FileState::Error, 0, UINT64_MAX);
         continue;
@@ -367,6 +450,8 @@ struct IoScheduler::Impl {
       n.file = file;
       PushBack(idx);
     }
+    // Playbacks that ended (CloseFile) or restarted without a request yet.
+    for (std::uint32_t s = 0; s < self->channelCount_; ++s) SyncBinding(s);
     self->drainEpoch_.value.fetch_add(1u, std::memory_order_acq_rel);
   }
 
@@ -784,6 +869,7 @@ struct IoScheduler::Impl {
     // the producer saw the flag still 1 and did not post: a formal lost wakeup.)
     wakePending.value.exchange(0u, std::memory_order_acq_rel);
     const std::uint64_t now = Now();
+    if (self->closeIdle_.value.exchange(0u, std::memory_order_acq_rel) != 0u) CloseIdleFiles();
     DrainInputs(now, false);
     SweepCancelledFiles();
     PollInFlight();
@@ -949,9 +1035,13 @@ bool IoScheduler::Init(IAllocator& allocator, IFileSystem& fs, StreamPool& pool,
     im.inflight = base::AllocateArray<std::uint32_t>(allocator, im.cfg.maxInFlight, MemTag::Misc);
     im.chHead = base::AllocateArray<std::uint32_t>(allocator, channelCount_, MemTag::Misc);
     im.chTail = base::AllocateArray<std::uint32_t>(allocator, channelCount_, MemTag::Misc);
+    im.chFile = base::AllocateArray<std::uint32_t>(allocator, channelCount_, MemTag::Misc);
+    im.chFileGen = base::AllocateArray<std::uint32_t>(allocator, channelCount_, MemTag::Misc);
+    im.chFresh = base::AllocateArray<std::uint8_t>(allocator, channelCount_, MemTag::Misc);
     im.fileCount = im.cfg.maxOpenFiles;
     im.files = base::AllocateArray<FileEntry>(allocator, im.fileCount, MemTag::Misc);
-    ok = im.inflight != nullptr && im.chHead != nullptr && im.chTail != nullptr && im.files != nullptr;
+    ok = im.inflight != nullptr && im.chHead != nullptr && im.chTail != nullptr && im.chFile != nullptr &&
+         im.chFileGen != nullptr && im.chFresh != nullptr && im.files != nullptr;
   }
   if (ok) {
     im.heldCount = pool.ChunkCount();
@@ -964,7 +1054,12 @@ bool IoScheduler::Init(IAllocator& allocator, IFileSystem& fs, StreamPool& pool,
     Destroy();
     return false;
   }
-  for (std::uint32_t s = 0; s < channelCount_; ++s) im.chHead[s] = im.chTail[s] = kNil;
+  for (std::uint32_t s = 0; s < channelCount_; ++s) {
+    im.chHead[s] = im.chTail[s] = kNil;
+    im.chFile[s] = kNil;
+    im.chFileGen[s] = channels_[s].fileGen_.value.load(std::memory_order_relaxed);
+    im.chFresh[s] = 0;
+  }
   drainEpoch_.value.store(0u, std::memory_order_relaxed);
   im.ready = true;
   im.accepting.store(1u, std::memory_order_release);
@@ -1029,6 +1124,9 @@ void IoScheduler::Destroy() noexcept {
     base::FreeArray(a, im.inflight, im.cfg.maxInFlight, MemTag::Misc);
     base::FreeArray(a, im.chHead, channelCount_, MemTag::Misc);
     base::FreeArray(a, im.chTail, channelCount_, MemTag::Misc);
+    base::FreeArray(a, im.chFile, channelCount_, MemTag::Misc);
+    base::FreeArray(a, im.chFileGen, channelCount_, MemTag::Misc);
+    base::FreeArray(a, im.chFresh, channelCount_, MemTag::Misc);
     base::FreeArray(a, im.files, im.fileCount, MemTag::Misc);
     base::FreeArray(a, im.held, im.heldCount, MemTag::Misc);
     im.freeNodes.Destroy();
@@ -1093,7 +1191,7 @@ bool IoScheduler::Post(const source::IoReadRequest& req) noexcept {
     im->streamRejected.Add();
     return false;
   }
-  QueuedRead q{req, ch.Epoch(), 0u};
+  QueuedRead q{req, ch.Epoch()};
   if (!im->streamQueue.TryPush(q)) {
     ch.Unreserve();
     im->Unhold(chunk);
@@ -1113,6 +1211,11 @@ void IoScheduler::Wake() noexcept {
   Impl* im = impl_;
   if (im == nullptr) return;
   if (im->wakePending.value.exchange(1u, std::memory_order_acq_rel) == 0u) im->wake.Post();
+}
+
+void IoScheduler::CloseIdleFiles() noexcept {
+  closeIdle_.value.store(1u, std::memory_order_release);
+  Wake();
 }
 
 void IoScheduler::WakeThunk(void* ctx) noexcept {

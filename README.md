@@ -15,7 +15,8 @@
 
 ## ビルドとテスト
 
-必要なもの: CMake 3.24 以上、Ninja、C++20 / C11 コンパイラ（gcc 13、clang 18 で確認）。サードパーティ依存は無い。
+必要なもの: CMake 3.24 以上、Ninja、C++20 / C11 コンパイラ（gcc 13、clang 18 で確認）。サードパーティ依存は
+同梱の libopus だけ（`third_party/opus/`、ソースからビルドする。`SND_CODEC_OPUS=OFF` で外せる。下の「サードパーティのライセンス」）。
 
 ```sh
 cmake -S . -B build -G Ninja
@@ -38,6 +39,7 @@ cmake -S . -B build-tsan -G Ninja -DSND_SANITIZE=thread
 | `SND_RT_CHECKS` | テスト時 ON | RT 安全性の検出フック。OFF なら完全に消える |
 | `SND_LIVELINK` | ON | ライブリンクを含める（リリースでは OFF） |
 | `SND_BUILD_TOOL` | OFF | オーサリング GUI（未実装） |
+| `SND_CODEC_OPUS` | ON | Opus コーデック（同梱の libopus 1.5.2 をビルドする）。OFF なら Opus のデコーダ・エンコーダは無い（CONTRACTS.md D-56） |
 
 テストの便利な使い方:
 
@@ -64,6 +66,7 @@ tests/
   selftest/          枠組みとモックのテスト
   integration/       モジュールをまたぐテスト
 cmake/               共通のビルド設定（警告、サニタイザ、モジュール・テストの関数）
+third_party/         同梱のサードパーティ（libopus だけ。SONUS_README.md に版と除いたファイル）
 spec/                設計書と契約の仕様書
 ```
 
@@ -77,3 +80,16 @@ spec/                設計書と契約の仕様書
 - 版は 3 系統: 契約（`SND_CONTRACT_VERSION`）、バンク形式、ライブリンク。追加だけなら minor、それ以外は major。
 - 設計書で決まっていなかった点の決定（D-xx）と、設計書の矛盾・不足（G-xx）は `CONTRACTS.md` にある。
 - テーブル列の所有者はコンパイル時に検査される（`WriteColumn<System, Column>` / `ReadColumn<System, Column>`）。
+
+## サードパーティのライセンス
+
+`SND_CODEC_OPUS=ON`（既定）でビルドした Sonus（ランタイム・`sonus-build`）は libopus を静的にリンクしている。
+Sonus を組み込んだゲームやツールを配布するときは、ソース・バイナリのどちらでも、libopus の著作権表示・条件・免責
+（`third_party/opus/COPYING` の全文）を配布物の文書（クレジット、ライセンス一覧など）に含めること（BSD 3 条項の第 1・2 項）。
+libopus の貢献者の名前を、配布物の宣伝・推奨に許可なく使ってはならない（第 3 項）。
+
+| ライブラリ | 版 | ライセンス | 全文 | 備考 |
+| --- | --- | --- | --- | --- |
+| libopus | 1.5.2 | BSD 3 条項（"Copyright 2001-2023 Xiph.Org, Skype Limited, Octasic, Jean-Marc Valin, Timothy B. Terriberry, CSIRO, Gregory Maxwell, Mark Borgerding, Erik de Castro Lopo, Mozilla, Amazon"） | `third_party/opus/COPYING` | Opus の特許は IETF に宣言された条件で無償許諾（`third_party/opus/LICENSE_PLEASE_READ.txt`、https://opus-codec.org/license/ ） |
+
+`SND_CODEC_OPUS=OFF` のビルドには libopus のコードは入らない（表示も不要）。

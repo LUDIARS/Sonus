@@ -57,8 +57,11 @@ sonus-build --project game/audio --out build/banks [--platform LNX_] [--release]
 
 - `EncoderRegistry`: コーデックの fourcc → エンコーダ。エンコーダはすべて codec モジュールのもの（統合 A1-11）。
   既定構築（と `BuildOptions::encoders == nullptr`）は `PCMF`（float32）と `PC16`（int16）。`CodecEncoders()` /
-  `RegisterCodecEncoders()` は IMA ADPCM（`ADPC`、1 チャンネルあたり 512 バイトのブロック。bank-format.md §6.5 の上限は 1024）も持つ。
-  **`sonus-build` は既定で `CodecEncoders()` を使う。** Opus などは `Register()` する。登録の無いコーデックはビルドエラー。
+  `RegisterCodecEncoders()` は IMA ADPCM（`ADPC`、1 チャンネルあたり 512 バイトのブロック。bank-format.md §6.5 の上限は 1024）と、
+  `SND_CODEC_OPUS=ON`（既定）のビルドでは Opus（`OPUS`、CONTRACTS.md D-56〜D-60）も持つ。
+  **`sonus-build` は既定で `CodecEncoders()` を使う。** 独自のコーデックは `Register()` する。登録の無いコーデックはビルドエラー。
+  Opus の設定は `EncodeInput::opus`（プロジェクトの `"opus": {...}`、project-format.md）。Opus のエンコーダの `version` は
+  `codec::encode::kOpusEncoderVersion`（libopus の版を含む）で、Opus の設定も差分ビルドのキーに入る。
   エンコーダの `version` は差分ビルドのキーに入る（codec のエンコーダに替えたので 2）。シーク表は `codec::encode::BuildSeekTable`。
 - `DspSizer`: エフェクト 1 個の状態サイズ（`EFFX.stateBytes`、`DSPN` の合計）。既定（`stateBytes == nullptr`）は dsp の
   `EffectInstanceBytes`（ランタイムの `dsp::ComputeDspPoolNeed` と同じ関数）で、`BuildOptions::dspSampleRate` /
@@ -74,4 +77,8 @@ sonus-build --project game/audio --out build/banks [--platform LNX_] [--release]
 - 数値の読み取りはロケールに依存しない（`std::from_chars`）。
 - サンプルレート変換は線形補間（決定論的。音質は段階1相当で、帯域制限なし）。
 - チャンネル変換: 同数はそのまま、1 → N は複製、N → 1 は平均、N → M（M < N）は先頭 M、M > N は残りを無音。
-- コーデック: codec モジュールのエンコーダ（`PCMF`, `PC16`, `ADPC`）。バイト配置は bank-format.md §6.5。
+- コーデック: codec モジュールのエンコーダ（`PCMF`, `PC16`, `ADPC`, `OPUS`）。バイト配置は bank-format.md §6.5。
+- Opus は常に 48 kHz: `sampleRate` に別の値があれば警告して無視し、素材を 48 kHz に変換してから符号化する。
+  setup は `ASST.extraOffset/extraBytes`（WAVE の中、64 バイト境界）、シーク表は `codec::encode::BuildOpusSeekTable`、
+  ストリームのプリロードはシーク点で切る。デコーダの状態が既定の `decoderSlotBytes`（64 KiB）を超える Opus のアセット
+  （3ch 以上）には、必要なバイト数を警告に出す（D-58。ランタイムでは `DECODER_POOL_FULL` で拒否される）。

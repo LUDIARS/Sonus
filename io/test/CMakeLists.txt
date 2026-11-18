@@ -31,3 +31,8 @@ snd_add_test(io_adv_test
 snd_add_test(io_adv_stress_test
   SOURCES io_adv_stress_test.cpp
   LINK sonus_io sonus_jobs sonus_mocks)
+
+# Reading a file again after it was replaced / rewritten (bank reload under the same path).
+snd_add_test(io_reload_test
+  SOURCES io_reload_test.cpp
+  LINK sonus_io sonus_jobs sonus_mocks)

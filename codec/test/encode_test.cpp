@@ -141,8 +141,10 @@ SND_TEST(Encode, FindSeekPoint) {
 SND_TEST(Encode, StateBytesFitDefaultDecoderSlot) {
   snd_config cfg;
   snd_config_init(&cfg);
-  const std::uint32_t slot = cfg.memory.decoder_slot_bytes;
-  SND_CHECK_EQ(slot, 32768u);
+  // Contract 1.1 + D-58: the default slot is 64 KiB (for Opus). PCM and ADPCM
+  // with <= 1024 B/ch blocks still fit the former 32 KiB (bank-format.md 6.5).
+  SND_CHECK_EQ(cfg.memory.decoder_slot_bytes, 65536u);
+  const std::uint32_t slot = 32768u;
   snd::test::Note("StateBytes (bytes) vs decoderSlotBytes %u:", slot);
   snd::test::Note("  codec      ch  block_align  StateBytes  hold capacity");
   for (std::uint32_t ch : {1u, 2u, 6u, 8u}) {

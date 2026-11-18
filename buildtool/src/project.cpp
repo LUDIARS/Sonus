@@ -36,9 +36,13 @@ struct Schema {
 
 SND_FIELDS(kLoopF, {"start", nullptr}, {"end", nullptr})
 constexpr Schema kLoop{kLoopF, false, nullptr};
-SND_FIELDS(kConvertSetF, {"codec", nullptr}, {"sampleRate", nullptr}, {"channels", nullptr})
+SND_FIELDS(kOpusF, {"bitrate", nullptr}, {"complexity", nullptr}, {"vbr", nullptr}, {"signal", nullptr},
+           {"independentFrames", nullptr})
+constexpr Schema kOpus{kOpusF, false, nullptr};
+SND_FIELDS(kConvertSetF, {"codec", nullptr}, {"sampleRate", nullptr}, {"channels", nullptr}, {"opus", &kOpus})
 constexpr Schema kConvertSet{kConvertSetF, false, nullptr};
-SND_FIELDS(kPlatformSetF, {"codec", nullptr}, {"sampleRate", nullptr}, {"channels", nullptr}, {"sectorAlign", nullptr})
+SND_FIELDS(kPlatformSetF, {"codec", nullptr}, {"sampleRate", nullptr}, {"channels", nullptr}, {"sectorAlign", nullptr},
+           {"opus", &kOpus})
 constexpr Schema kPlatformSet{kPlatformSetF, false, nullptr};
 SND_FIELDS(kConvertF, {"default", &kConvertSet}, {"ANY_", &kConvertSet}, {"WIN_", &kConvertSet}, {"LNX_", &kConvertSet},
            {"MAC_", &kConvertSet}, {"IOS_", &kConvertSet}, {"AND_", &kConvertSet})

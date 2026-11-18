@@ -7,6 +7,12 @@ snd_add_test(codec_test
     registry_test.cpp
   LINK sonus_codec sonus_mocks)
 
+# Opus (D-56..D-60): built in every configuration; with SND_CODEC_OPUS=OFF it
+# only checks that Opus is unavailable. Analytic checks need an optimised
+# libopus to stay fast, hence the longer timeout for Debug / sanitizer builds.
+snd_add_test(codec_opus_test SOURCES opus_test.cpp LINK sonus_codec)
+set_tests_properties(codec_opus_test PROPERTIES TIMEOUT 900)
+
 # Runtime-only user of the module: must not pull in the encoder (snd/codec/encode.hpp).
 snd_add_test(codec_runtime_test SOURCES runtime_link_test.cpp LINK sonus_codec)
 if(CMAKE_NM)

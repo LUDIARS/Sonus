@@ -50,6 +50,7 @@ struct BankManager::Impl {
     bool cancel = false;
     std::uint64_t requestSeq = 0;    // RequestLoad acceptance order (duplicates, D-50)
     bool willCome = false;           // scratch of ComputeWillCome (Pump, mutex held)
+    Id doomed = 0;                   // scratch of Pump: unreachable dependency of this round
     // validation job (job writes prepared/jobResult/jobError; manager reads after jobCounter == 0)
     JobCtx ctx{};
     std::uint32_t jobCounter = 0;
@@ -364,27 +365,30 @@ struct BankManager::Impl {
     return SND_OK;
   }
 
-  // D-50: which Validated slots will still register once UNLOADING copies are
-  // released. Least fixed point (so a cycle or a really missing bank never
-  // qualifies): a Validated, not cancelled slot qualifies when it waits for the
-  // Release() of an UNLOADING copy of itself or for a dependency, and every
-  // dependency it lacks has a qualifying slot. Result in Slot::willCome.
-  bool HasUnloadingCopy(const Slot& p) const noexcept {
+  // D-50 / 10.3: which Validated slots can still get every dependency they
+  // lack, once nothing is reading or validating any more. Least fixed point
+  // (so a cycle never justifies itself and a really missing bank never
+  // qualifies): a Validated, not cancelled slot qualifies when every
+  // dependency it lacks (no Ready / Registered copy) has a qualifying slot of
+  // that bankId other than itself. A slot that lacks nothing qualifies, whatever
+  // it waits for (an UNLOADING copy's Release, an earlier copy's outcome):
+  // those waits end without failing anybody. Result in Slot::willCome.
+  // Slots that do not qualify can never register: their dependency will never
+  // be registered by any copy. Independent of slot order.
+  bool WillComeFlagged(Id bankId, const Slot* except) const noexcept {
     for (std::uint32_t i = 0; i < desc.maxBanks; ++i) {
-      const Slot& o = slots[i];
-      if (&o != &p && o.stage == Stage::Unloading && o.prepared != nullptr &&
-          o.prepared->bankId == p.prepared->bankId && o.prepared->languageId == p.prepared->languageId) {
-        return true;
-      }
+      const Slot& p = slots[i];
+      if (&p != except && p.willCome && p.prepared != nullptr && p.prepared->bankId == bankId) return true;
     }
     return false;
   }
-  bool WillComeFlagged(Id bankId) const noexcept {
-    for (std::uint32_t i = 0; i < desc.maxBanks; ++i) {
-      const Slot& p = slots[i];
-      if (p.willCome && p.prepared != nullptr && p.prepared->bankId == bankId) return true;
+  // First dependency (bank order) that is not loaded and has no qualifying copy, 0 if none.
+  Id UnreachableDependency(const Slot& p) noexcept {
+    for (std::uint32_t d = 0; d < p.prepared->dependencyCount; ++d) {
+      const Id dep = p.prepared->view.dependency(d).bankId;
+      if (FindLoaded(dep, 0) == nullptr && !WillComeFlagged(dep, &p)) return dep;
     }
-    return false;
+    return 0;
   }
   void ComputeWillCome() noexcept {
     for (std::uint32_t i = 0; i < desc.maxBanks; ++i) slots[i].willCome = false;
@@ -393,15 +397,7 @@ struct BankManager::Impl {
       for (std::uint32_t i = 0; i < desc.maxBanks; ++i) {
         Slot& p = slots[i];
         if (p.willCome || p.stage != Stage::Validated || p.cancel || p.prepared == nullptr) continue;
-        bool waits = HasUnloadingCopy(p);
-        bool ok = true;
-        for (std::uint32_t d = 0; d < p.prepared->dependencyCount && ok; ++d) {
-          const Id dep = p.prepared->view.dependency(d).bankId;
-          if (FindLoaded(dep, 0) != nullptr) continue;
-          waits = true;
-          ok = WillComeFlagged(dep);
-        }
-        if (waits && ok) {
+        if (UnreachableDependency(p) == 0) {
           p.willCome = true;
           changed = true;
         }
@@ -708,31 +704,28 @@ void BankManager::Pump() noexcept {
     }
   }
   if (loading) return;
-  // Fail one bank whose dependency is missing at a time, then let the others
-  // decide again (a second load of the same bank waits for the first one, so
-  // it gets its own reason once the first has failed).
+  // Fail every bank whose dependency can never be registered by any copy
+  // (ComputeWillCome), all in one round so that slot order does not matter,
+  // then let the others decide again (failures can make further dependencies
+  // unreachable, or let a waiting later copy register); repeat.
   for (;;) {
     impl_->ComputeWillCome();
-    Impl::Slot* victim = nullptr;
-    std::uint32_t missing = 0;
-    for (std::uint32_t i = 0; i < impl_->desc.maxBanks && victim == nullptr; ++i) {
+    bool any = false;
+    for (std::uint32_t i = 0; i < impl_->desc.maxBanks; ++i) {
       Impl::Slot& s = impl_->slots[i];
-      if (s.stage != Stage::Validated) continue;
-      for (std::uint32_t d = 0; d < s.prepared->dependencyCount; ++d) {
-        const bf::Dependency dep = s.prepared->view.dependency(d);
-        // A copy of the dependency that only waits for its old copy's Release()
-        // (D-50) still comes: not missing.
-        if (impl_->FindLoaded(dep.bankId, 0) == nullptr && !impl_->WillComeFlagged(dep.bankId)) {
-          victim = &s;
-          missing = dep.bankId;
-          break;
-        }
-      }
+      if (s.stage != Stage::Validated || s.cancel || s.prepared == nullptr || s.willCome) continue;
+      s.doomed = impl_->UnreachableDependency(s);
+      any = true;
     }
-    if (victim == nullptr) break;
-    char why[160];
-    std::snprintf(why, sizeof(why), "dependency bank %08x is not loaded", missing);
-    impl_->Fail(*victim, SND_ERR_BANK_DEPENDENCY, why);
+    if (!any) break;
+    for (std::uint32_t i = 0; i < impl_->desc.maxBanks; ++i) {
+      Impl::Slot& s = impl_->slots[i];
+      if (s.stage != Stage::Validated || s.doomed == 0) continue;
+      char why[160];
+      std::snprintf(why, sizeof(why), "dependency bank %08x is not loaded", s.doomed);
+      s.doomed = 0;
+      impl_->Fail(s, SND_ERR_BANK_DEPENDENCY, why);
+    }
     while (impl_->PumpLocked()) {
     }
   }

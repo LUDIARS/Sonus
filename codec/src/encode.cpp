@@ -116,6 +116,9 @@ const char* EncodeStatusName(EncodeStatus s) noexcept {
     case EncodeStatus::BadArguments: return "bad arguments";
     case EncodeStatus::NonFiniteInput: return "non-finite input sample";
     case EncodeStatus::BufferTooSmall: return "destination buffer too small";
+    case EncodeStatus::CodecUnavailable: return "codec not available in this build (Opus: SND_CODEC_OPUS=OFF)";
+    case EncodeStatus::BadSettings: return "encoder settings out of range";
+    case EncodeStatus::EncoderFailed: return "the encoder library reported an error";
   }
   return "?";
 }
@@ -157,6 +160,7 @@ std::uint64_t EncodedBytes(const CodecHeader& h) noexcept {
 EncodeStatus Encode(const CodecHeader& h, const float* const* src, std::uint64_t frames, std::uint8_t* dst,
                     std::uint64_t dstBytes, std::uint64_t* written) noexcept {
   if (written != nullptr) *written = 0;
+  if (h.codec == SND_CODEC_OPUS) return EncodeStatus::BadHeader;  // variable-size packets: EncodeOpus
   if (ValidateHeader(h) != HeaderError::None) return EncodeStatus::BadHeader;
   if (frames != static_cast<std::uint64_t>(h.pre_skip) + h.total_frames) return EncodeStatus::BadArguments;
   const std::uint64_t bytes = EncodedBytes(h);

@@ -610,6 +610,19 @@ fileBytes     終端
 ヘッダの後は `dataOffset` まで 0 で埋め、データの後もファイル長が `sectorAlign` の倍数になるまで 0 で埋める
 （`STRM.fileBytes` は埋めた後の長さ）。`SEEK.byteOffset` と `PREL` のプリロードはデータ先頭（`dataOffset`）から数える。
 
+ランタイムの検査（段階2、source）: ストリームを鳴らす前にヘッダ（64 バイト）を読み、次のどれかが成り立たなければ IO エラーとして
+そのボイスを終える（データは鳴らさない）。
+
+- 64 バイト読めること、`magic` = `'SNDS'`、`version` = 1
+- `codec`・`channels`・`sampleRate`・`totalFrames`・`assetId` がバンクの `ASST` 行と同じ
+- `dataOffset` が `STRM.dataOffset` と同じ
+- `dataBytes` がコーデックの期待する大きさ: PCM は `totalFrames × フレームの大きさ`、ADPCM は
+  `ceil((preSkip + totalFrames) / framesPerPacket) × blockAlign` に等しい。Opus は同じパケット数 P に対して
+  `3P ≤ dataBytes ≤ P × (2 + ストリーム数 × 1277)`。それ以外のコーデックは 1 以上
+
+データの途中（`dataOffset + dataBytes` より前）で読み出しが短く終わったとき（ファイルが切り詰められている）は、
+データの終端ではなく IO エラーとして扱う。
+
 ### 6.4 標準エフェクトの種別 ID（契約 1.1 で追記）
 
 `EFFX.effectType` は種別名の `snd_hash_id`（D-04）。標準エフェクトの種別は dsp が定める次の 14 種
@@ -639,7 +652,8 @@ fileBytes     終端
 
 `ASST.codec` が組み込みコーデックのとき、`WAVE`（常駐）・ストリームファイルのデータ（6.3）は次の配置。
 `ASST` の `codec, channels, sampleRate, totalFrames, preSkip, preRoll, framesPerPacket, blockAlign` は `snd_codec_header` の同名フィールドで、
-組み込みコーデックは `extra` を使わない（`extraBytes = 0`）。codec モジュールの実装（`codec/README.md`）と一致する。
+`extra` / `extra_bytes` は `ASST.extraOffset` / `extraBytes` が指す WAVE の範囲。PCM・ADPCM は `extra` を使わない（`extraBytes = 0`）。
+Opus は使う（下の「Opus」）。codec モジュールの実装（`codec/README.md`）と一致する。
 
 | fourcc | 1 パケット | 内容 |
 | --- | --- | --- |
@@ -649,10 +663,58 @@ fileBytes     終端
 
 - PCM: `framesPerPacket` は 1（0 は指定なし）、`blockAlign` はフレームの大きさ（0 は指定なし）。
 - ADPCM: `blockAlign` は `4ch × (1 + k)`（k ≥ 1）。**1 チャンネルあたり 1024 バイト以下**（`blockAlign ≤ 1024 × ch`）。
-  これを超えるとデコーダの状態が既定の `decoderSlotBytes`（32 KiB）を 8ch で超え、再生が `DECODER_POOL_FULL` で拒否されうる。
+  これを超えるとデコーダの状態が 32 KiB（段階1までの既定の `decoderSlotBytes`。今の既定は 64 KiB、D-58）を 8ch で超える。
   既定は 512 バイト／ch（1017 フレーム、48 kHz で 21 ms）。`framesPerPacket` は 0 か計算値。ブロックは独立なので `preRoll` は 0。
 - `SEEK`: `frame` は再生フレーム（プリスキップ後）、`byteOffset` はデータ先頭から。先頭は `{0, 0}`。PCM はフレーム、ADPCM はブロックの境界。
-- プリスキップ（`preSkip`）の後の最初のフレームが再生フレーム 0。組み込みコーデックのエンコーダは `preSkip = 0` を書く。
+- プリスキップ（`preSkip`）の後の最初のフレームが再生フレーム 0。PCM・ADPCM のエンコーダは `preSkip = 0` を書く。
+
+#### Opus（`OPUS`、CONTRACTS.md D-56〜D-60 で追記）
+
+ランタイムが `SND_CODEC_OPUS=ON`（既定）でビルドされていれば組み込み（同梱の libopus 1.5.2）。OFF のランタイムでは
+`OPUS` のアセットはプラグインが無い限り鳴らない（バンクの読み込みは失敗しない。再生要求がコーデック無しで終わる）。
+
+| 列 | 値 |
+| --- | --- |
+| `sampleRate` | **48000 だけ**（他の値は無効なヘッダ）。ビルドツールは他のレートの素材を 48 kHz に変換して符号化する |
+| `channels` | 1〜8。1〜2 は 1 ストリーム（RFC 7845 のマッピングファミリ 0）、3〜8 はサラウンドのマルチストリーム（ファミリ 1） |
+| `framesPerPacket` | 960（1 パケット = 20 ms）。0 も 960 とみなす。それ以外は無効 |
+| `blockAlign` | 0（可変長）。0 以外は無効 |
+| `preSkip` | エンコーダの先読み（libopus 1.5.2 は 312）。再生フレーム 0 はデコード位置 `preSkip` |
+| `preRoll` | 3840（80 ms、RFC 7845 §4.6）。シークはシーク表で `target − preRoll` 以前の点から始める（D-23） |
+| `totalFrames` | 元素材のフレーム数（48 kHz 換算）。符号化は `ceil((totalFrames + preSkip) / 960)` パケットで、末尾は無音で埋める |
+| `extraOffset` / `extraBytes` | **必須**。下の setup（`4 + channels` バイト）。WAVE の中、64 バイト境界 |
+
+データ（`WAVE` の常駐データ・ストリームファイルのデータ）はパケットを順に並べたもの:
+
+```
+packet := u16 length (LE, 1 <= length <= streams × 1277) , u8 payload[length]
+```
+
+- `payload` は libopus の `opus_multistream_encode` の出力（1 ストリームなら通常の Opus パケット、複数なら先頭 streams−1 個が
+  自己区切り形式。RFC 6716 Appendix B / RFC 7845 §5.1.1）。各パケットはちょうど 960 フレームにデコードされる。
+  長さ 0、上限超え、960 フレームでないパケットは壊れたデータ（`SND_DECODE_ERROR`）。
+- 1277 = 20 ms・1 フレームの最大 1275 バイト + 自己区切りの長さ 2 バイト。
+
+setup（`extra`）:
+
+| offset | 型 | 内容 |
+| --- | --- | --- |
+| 0 | u8 | 版 = 1（それ以外は無効） |
+| 1 | u8 | チャンネル数（`ASST.channels` と一致） |
+| 2 | u8 | ストリーム数 N（1〜8） |
+| 3 | u8 | 結合（ステレオ）ストリーム数 M（0〜N） |
+| 4 | u8[channels] | 出力チャンネル i ← デコードされたストリームのチャンネル `mapping[i]`（< N + M、255 = 無音）。RFC 7845 §5.1.1 のチャンネルマッピング表と同じ意味 |
+
+- **チャンネル順**: 出力（= `mapping` の並び）は WAV の順（L R C LFE BL BR SL SR、7ch は L R C LFE BC SL SR）。
+  ビルドツールはサラウンドの符号化のために Vorbis の順（RFC 7845 §5.1.1.2）へ並べ替えて符号化し、その逆を `mapping` に書く。
+  ランタイムは `mapping` に従うだけで並べ替えない。
+- `SEEK`: `frame` は再生フレーム、`byteOffset` はデータ先頭からの、そのパケットの**長さの前置**の位置。先頭は `{0, 0}`。
+  パケット k（デコード位置 960k）は `960k > preSkip` かつ `960k − preSkip < totalFrames` のとき候補になり、`frame = 960k − preSkip`。
+  よって `frame + preSkip` は 960 の倍数（ランタイムの `Seek(frame)` はそれ以外を拒む）。
+- プリロード（`PREL`）はシーク点で切った先頭の部分（ADPCM 以外の可変長コーデックと同じ扱い）。
+- ビルドツールは既定で「パケット間の予測なし」（libopus `OPUS_SET_PREDICTION_DISABLED`）で符号化する。CELT のパケット
+  （既定のビットレート）では、シーク点から 2 パケット後以降の出力が通しのデコードとビット単位で一致するので、`preRoll` = 80 ms で
+  シーク・ループの再開がサンプル単位で正確になる。SILK / ハイブリッド（低ビットレートの音声）は 80 ms 後も近似（12〜32 kbit/s の音声で最大誤差 1.5e-2〜3.4e-2 を観測）。
 
 ## 7. 版と互換性
 
@@ -670,6 +732,7 @@ fileBytes     終端
 | 1.0 | 段階0で凍結 |
 | 2.0 | headerChecksum をヘッダ全体（自身の欄は 0 とみなす）に拡大、予約バイト 0 の検証、`ALIS` チャンク追加、行の並びの規則（6.0: 入れ子 Event・カテゴリの親・シーク表）、`loopEnd`・`SEEK.byteOffset`・ストリームファイル（6.3）・エンディアン・`fileBytes` の明文化 |
 | 2.0（契約 1.1） | 文書の追記のみ（版は 2.0 のまま）: 6.4 標準エフェクトの種別 ID、6.5 組み込みコーデックのバイト配置 |
+| 2.0（Opus、D-57） | 文書の追記のみ（版は 2.0 のまま）: 6.5 に Opus のバイト配置と setup（`ASST.extra*`）。チャンク・列・列挙値は変えない（`OPUS` の fourcc は 1.0 から列挙にある）。setup に自前の版（1）を持つ |
 
 ## 8. 読み込み時の検証（bank モジュールの完了条件）
 

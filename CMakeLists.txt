@@ -13,6 +13,8 @@ option(SND_NO_EXCEPTIONS   "Compile C++ with -fno-exceptions -fno-rtti" ON)
 option(SND_WERROR          "Treat warnings as errors" ON)
 option(SND_LIVELINK        "Compile the live link (development builds only)" ON)
 option(SND_BUILD_TOOL      "Build the authoring GUI (not available yet)" OFF)
+# The only third-party dependency (CONTRACTS.md D-56): bundled libopus.
+option(SND_CODEC_OPUS      "Build the Opus codec from third_party/opus (libopus, BSD-3-Clause)" ON)
 set(SND_SANITIZE "" CACHE STRING "Sanitizers: empty, 'address,undefined' or 'thread'")
 # RT safety detection hooks (spec 14). ON by default when tests are built,
 # compiled out (zero cost) otherwise. See contract/internal/include/snd/internal/rt_check.hpp.
@@ -71,6 +73,7 @@ set(SND_MODULE_CONTRACT_physics "public")
 # Targets
 # ---------------------------------------------------------------------------
 add_subdirectory(contract)
+add_subdirectory(third_party)        # libopus when SND_CODEC_OPUS (D-56); used by codec
 if(SND_BUILD_TESTS)
   add_subdirectory(tests)            # framework + mocks first: module tests use them
 endif()

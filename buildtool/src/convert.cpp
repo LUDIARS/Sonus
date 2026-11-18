@@ -5,6 +5,7 @@
 #include <filesystem>
 #include "detail/file_io.hpp"
 #include "snd/base/hash.hpp"
+#include "snd/ext.h"
 
 namespace snd::buildtool::detail {
 namespace {
@@ -102,6 +103,10 @@ std::uint64_t CacheKey(const std::vector<std::uint8_t>& wav, const ConvertSettin
   base::Fnv1a64 h;
   h.U64(kCacheVersion).U64(s.codec).U64(encoderVersion).U64(s.sampleRate).U64(s.channels).U64(s.seekIntervalMs);
   h.U64(s.loop ? 1 : 0).U64(s.loopStart).U64(s.loopEnd);
+  if (s.codec == SND_CODEC_OPUS) {  // other codecs keep their earlier keys
+    h.U64(s.opus.bitrate).U64(s.opus.complexity).U64(s.opus.vbr).U64(s.opus.signal);
+    h.U64(s.opus.independentFrames ? 1 : 0);
+  }
   h.U64(wav.size()).Bytes(wav.data(), wav.size());
   return h.value();
 }
@@ -219,6 +224,7 @@ bool ConvertWav(const std::vector<std::uint8_t>& wavBytes, const ConvertSettings
   in.seekIntervalFrames = s.seekIntervalMs == 0 ? 0 : static_cast<std::uint32_t>(std::uint64_t{s.seekIntervalMs} * rate / 1000);
   in.loopStart = out->loopStart;
   in.loopEnd = out->loopEnd;
+  in.opus = s.opus;
   out->enc = EncodedAsset{};
   if (!encoder.encode(in, &out->enc, error)) return false;
   out->enc.codec = encoder.codec;
