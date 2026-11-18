@@ -98,3 +98,20 @@ snd_add_test(integration_indep_opus_bank_test
   LINK sonus_buildtool sonus_bank sonus_codec sonus_dsp sonus_io sonus_jobs sonus_platform sonus_base sonus_mocks)
 target_include_directories(integration_indep_opus_bank_test PRIVATE ${PROJECT_SOURCE_DIR}/buildtool/test ${PROJECT_SOURCE_DIR}/codec/test)
 set_tests_properties(integration_indep_opus_bank_test PROPERTIES TIMEOUT 600)
+
+# Stage 2: live link (server + client in one process, core underneath). The core
+# tests' analytic Sample kind and a dev bank written with the build tool's writer.
+set(_ll_link sonus_livelink sonus_core sonus_buildtool sonus_bank sonus_codec sonus_dsp sonus_io sonus_jobs
+    sonus_platform sonus_base sonus_mocks)
+foreach(_ll livelink_override_test livelink_profiler_test livelink_record_test livelink_tcp_test livelink_stress_test livelink_replay_extremes_test livelink_override_owner_test)
+  snd_add_test(integration_${_ll} SOURCES ${_ll}.cpp LINK ${_ll_link})
+  target_include_directories(integration_${_ll} PRIVATE ${PROJECT_SOURCE_DIR}/core/test)
+  set_tests_properties(integration_${_ll} PROPERTIES TIMEOUT 600)
+endforeach()
+
+# Independent live link tests (stage 2 livelink, written from the spec by a separate tester).
+foreach(_ll indep_livelink_override_test indep_livelink_protocol_test indep_livelink_profile_record_test indep_livelink_transport_test indep_livelink_replay_fuzz_test indep_livelink_recheck_test indep_livelink_command_check_test indep_livelink_recheck2_test indep_livelink_d87_test indep_livelink_d87b_test indep_livelink_d87c_test)
+  snd_add_test(integration_${_ll} SOURCES ${_ll}.cpp LINK ${_ll_link})
+  target_include_directories(integration_${_ll} PRIVATE ${PROJECT_SOURCE_DIR}/core/test)
+  set_tests_properties(integration_${_ll} PROPERTIES TIMEOUT 600)
+endforeach()

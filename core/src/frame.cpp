@@ -52,6 +52,7 @@ void System::RenderBlock(float* interleaved) noexcept {
     if (interleaved != nullptr) std::memset(interleaved, 0, sizeof(float) * frames * ch);
     im.endedCount = 0;
     Publish(im);
+    if (im.desc.liveTap.block != nullptr) im.desc.liveTap.block(im.desc.liveTap.user, *this);
     platform::RestoreFpControl(fp);
     return;
   }
@@ -89,6 +90,7 @@ void System::RenderBlock(float* interleaved) noexcept {
   UpdateLod(im, ns);
   im.clock += frames;
   ++im.block;
+  if (im.desc.liveTap.block != nullptr) im.desc.liveTap.block(im.desc.liveTap.user, *this);
   platform::RestoreFpControl(fp);
 }
 

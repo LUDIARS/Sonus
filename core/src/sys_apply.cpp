@@ -15,6 +15,20 @@ namespace {
 
 constexpr schema::SystemId kSys = schema::SystemId::ApplyCommands;
 
+// Defensive limits for values the game API accepts but nothing should use literally
+// (stage-2 livelink decision R2: an extreme value must not overflow or reach UB).
+// Fades and times: NaN = the default (< 0), at most a day. Volumes: NaN / negative = 0,
+// at most +60 dB. Snapshot weights: [0, 1].
+constexpr float kMaxFadeSeconds = 86400.0f;
+constexpr float kMaxVolume = 1000.0f;
+float SaneFade(float s) noexcept { return std::isnan(s) ? -1.0f : (s > kMaxFadeSeconds ? kMaxFadeSeconds : s); }
+float SaneVolume(float v) noexcept { return !(v >= 0.0f) ? 0.0f : (v > kMaxVolume ? kMaxVolume : v); }
+float SaneWeight(float w) noexcept { return !(w >= 0.0f) ? 0.0f : (w > 1.0f ? 1.0f : w); }
+std::uint32_t FadeFrames(float seconds, std::uint32_t rate) noexcept {
+  const float s = SaneFade(seconds);
+  return s > 0.0f ? static_cast<std::uint32_t>(static_cast<double>(s) * rate) : 0u;
+}
+
 bool IsMusicalWhen(std::uint8_t kind) noexcept { return kind >= SND_WHEN_NEXT_BEAT && kind <= SND_WHEN_SEGMENT_END; }
 
 ReservationWhen ToReservationWhen(const snd_when& w) noexcept {
@@ -466,7 +480,8 @@ void ApplyOne(Impl& im, const cmd::CommandHeader& h, const std::uint8_t* p) noex
       break;
     }
     case CT::Stop: {
-      const auto c = Load<cmd::Stop>(p);
+      auto c = Load<cmd::Stop>(p);
+      c.fadeSeconds = SaneFade(c.fadeSeconds);
       if (!base::rows::IsCurrent(t.Playback.rows, c.playback)) break;
       snd_when w = c.when;
       SlotIndex ts = kNoSlot;
@@ -480,7 +495,8 @@ void ApplyOne(Impl& im, const cmd::CommandHeader& h, const std::uint8_t* p) noex
       break;
     }
     case CT::PauseResume: {
-      const auto c = Load<cmd::PauseResume>(p);
+      auto c = Load<cmd::PauseResume>(p);
+      c.fadeSeconds = SaneFade(c.fadeSeconds);
       PlaybackRequest* r = RequestOf(im, c.playback);
       if (r == nullptr) break;
       if (c.pause != 0u) {
@@ -493,7 +509,8 @@ void ApplyOne(Impl& im, const cmd::CommandHeader& h, const std::uint8_t* p) noex
       break;
     }
     case CT::SetScheduledStop: {
-      const auto c = Load<cmd::SetScheduledStop>(p);
+      auto c = Load<cmd::SetScheduledStop>(p);
+      c.fadeSeconds = SaneFade(c.fadeSeconds);
       PlaybackRequest* r = RequestOf(im, c.playback);
       if (r == nullptr) break;
       snd_when w = c.when;
@@ -567,7 +584,7 @@ void ApplyOne(Impl& im, const cmd::CommandHeader& h, const std::uint8_t* p) noex
       }
       TimedRamp& r = SND_W(Bus_volume)[d];
       const float from = RampValue(r, im.clock);
-      r = TimedRamp{from, c.volume, im.clock, static_cast<std::uint32_t>(c.fadeSeconds * im.cfg.sampleRate), 0u};
+      r = TimedRamp{from, SaneVolume(c.volume), im.clock, FadeFrames(c.fadeSeconds, im.cfg.sampleRate), 0u};
       break;
     }
     case CT::ApplySnapshot: {
@@ -580,7 +597,7 @@ void ApplyOne(Impl& im, const cmd::CommandHeader& h, const std::uint8_t* p) noex
       }
       TimedRamp& r = SND_W(Snapshot_request)[d].weight;
       const float from = RampValue(r, im.clock);
-      r = TimedRamp{from, c.weight, im.clock, static_cast<std::uint32_t>(c.timeSeconds * im.cfg.sampleRate), 0u};
+      r = TimedRamp{from, SaneWeight(c.weight), im.clock, FadeFrames(c.timeSeconds, im.cfg.sampleRate), 0u};
       break;
     }
     case CT::SetCategoryVolume:
@@ -599,8 +616,8 @@ void ApplyOne(Impl& im, const cmd::CommandHeader& h, const std::uint8_t* p) noex
       CategoryRequest& r = SND_W(Category_request)[d];
       if (static_cast<CT>(h.type) == CT::SetCategoryVolume) {
         const auto c = Load<cmd::SetCategoryVolume>(p);
-        r.volume = TimedRamp{RampValue(r.volume, im.clock), c.volume, im.clock,
-                             static_cast<std::uint32_t>(c.fadeSeconds * im.cfg.sampleRate), 0u};
+        r.volume = TimedRamp{RampValue(r.volume, im.clock), SaneVolume(c.volume), im.clock,
+                             FadeFrames(c.fadeSeconds, im.cfg.sampleRate), 0u};
       } else if (static_cast<CT>(h.type) == CT::PauseCategory) {
         r.paused = Load<cmd::PauseCategory>(p).paused;
       } else {
@@ -676,6 +693,7 @@ void ApplyOne(Impl& im, const cmd::CommandHeader& h, const std::uint8_t* p) noex
       if (im.desc.liveCommand != nullptr) im.desc.liveCommand(im.desc.liveUser, static_cast<CT>(h.type), p);
       break;
     case CT::LiveOverride: {
+      if (im.desc.liveTap.admit != nullptr && !im.desc.liveTap.admit(im.desc.liveTap.user, CT::LiveOverride, p)) break;
       const auto c = Load<cmd::LiveOverride>(p);
       ApplyPriv& ap = im.ap;
       std::uint32_t at = kNoSlot;
@@ -703,6 +721,7 @@ void ApplyOne(Impl& im, const cmd::CommandHeader& h, const std::uint8_t* p) noex
       break;
     }
     case CT::LiveClearOverrides:
+      if (im.desc.liveTap.admit != nullptr && !im.desc.liveTap.admit(im.desc.liveTap.user, CT::LiveClearOverrides, p)) break;
       for (std::uint32_t i = 0; i < im.ap.overrideCount; ++i) im.ap.overrides[i].used = 0u;
       im.ap.overrideCount = 0;
       break;
@@ -877,6 +896,17 @@ void ApplyCommands(Impl& im) noexcept {
   im.ev.musicInputCount = 0;
   ReleaseOwnedRows(im);
   ApplyDeferred(im);
+  auto apply = [&](const cmd::CommandHeader& ch, const std::uint8_t* payload) { ApplyOne(im, ch, payload); };
+  const LiveTap& tap = im.desc.liveTap;
+  if (tap.replay != nullptr) {  // 11.3: a replay's arenas of this block first
+    LiveArenaView rv{};
+    while (tap.replay(tap.user, im.block, &rv)) {
+      cmd::ForEachCommand(rv.normal, rv.normal + rv.normalBytes, apply);
+      cmd::ForEachCommand(rv.reserve, rv.reserve + rv.reserveBytes, apply);
+      if ((rv.flags & cmd::kArenaHasFallback) != 0u && rv.fallback != nullptr) ApplyFallback(im, *rv.fallback);
+      rv = LiveArenaView{};
+    }
+  }
   for (std::uint32_t pi = 0; pi < im.cfg.maxThreads; ++pi) {
     Producer& pr = im.producers[pi];
     std::uint32_t idx = 0;
@@ -884,7 +914,11 @@ void ApplyCommands(Impl& im) noexcept {
       ArenaView& av = pr.arenas[idx];
       cmd::ArenaHeader& h = *av.header;
       h.appliedBlock = im.block;  // D-12
-      auto apply = [&](const cmd::CommandHeader& ch, const std::uint8_t* payload) { ApplyOne(im, ch, payload); };
+      if (tap.arena != nullptr) {  // 11.3 recording
+        const bool fb = (h.flags & cmd::kArenaHasFallback) != 0u;
+        tap.arena(tap.user, LiveArenaView{pi, h.flags, im.block, av.normal, h.normalBytes, h.reserveBytes, av.reserve,
+                                          fb ? &av.fallback : nullptr});
+      }
       cmd::ForEachCommand(av.normal, av.normal + h.normalBytes, apply);
       cmd::ForEachCommand(av.reserve, av.reserve + h.reserveBytes, apply);
       if ((h.flags & cmd::kArenaHasFallback) != 0u) ApplyFallback(im, av.fallback);
