@@ -278,6 +278,13 @@ Id LiveStreamEventOf(const Impl& im, std::uint32_t slot) noexcept {
   return 0u;
 }
 
+void System::LiveRemoveOverride(std::uint32_t kind, Id id) noexcept {
+  ApplyPriv& ap = impl_->ap;
+  for (std::uint32_t i = 0; i < ap.overrideCount; ++i) {
+    if (ap.overrides[i].used != 0u && ap.overrides[i].kind == kind && ap.overrides[i].id == id) ap.overrides[i].used = 0u;
+  }
+}
+
 Id System::LiveStreamEvent(std::uint32_t slot) const noexcept { return LiveStreamEventOf(*impl_, slot); }
 
 std::uint32_t System::LiveMeters(livelink::MeterEntry* out, std::uint32_t capacity) const noexcept {

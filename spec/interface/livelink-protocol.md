@@ -68,7 +68,7 @@ GUID は開発ビルドのバンクの `GUID` チャンクとの照合用（ID �
 - `SetValue` / `ReplaceChunk` の Ack は、ゲームのオーディオスレッドが適用した結果で答える。適用された結果の Ack は seq の順に届く。受け付けの時点で拒否したもの（検査の失敗、`SND_ERR_COMMAND_BUFFER_FULL` など）の Ack は、それより前に送った適用待ちの Ack より先に届くことがある。
 - 背圧: ゲームは、適用待ちの結果と応答の送信待ちに空きがある分だけ受信する。空きが無い間は読まず、ツールのメッセージは転送路（TCP）に溜まる。読む量の上限はコマンドバッファの空きを見ない。`SND_ERR_COMMAND_BUFFER_FULL` で拒否された `SetValue` などを送り直すのはツールの責任。
 - ゲームがツールを切断するのは、心拍のタイムアウトの間ツールから何も届かないとき、またはツールが送信をまったく読まないときだけ。
-- セッション（D-83, D-87）: ゲームのライブリンク（Server）を作り直すと新しいセッションになる。Server を作り直したあと、前の Server が受け付けて未適用だった編集（`SetValue`、`ReplaceChunk`、`OverrideParam` / `OverrideState`、`ClearOverrides`、切断時の戻し）は適用されない（捨てて数える）。その結果に対する Ack は誰にも送られない（前のツールの接続は既に無い）。新しいセッションは Server の開始（`Server::Start`）で始まる。例外として、前の Server の切断時の戻し（revertOnDisconnect）は適用する。ただし戻すのは、前のセッションが最後に書いた値だけで、新しい Server が書いた値は戻さない。
+- セッション（D-83, D-87）: ゲームのライブリンク（Server）を作り直すと新しいセッションになる。Server を作り直したあと、前の Server が受け付けて未適用だった編集（`SetValue`、`ReplaceChunk`、`OverrideParam` / `OverrideState`、`ClearOverrides`、切断時の戻し）は適用されない（捨てて数える）。その結果に対する Ack は誰にも送られない（前のツールの接続は既に無い）。新しいセッションは Server の開始（`Server::Start`）で始まる。例外として、前の Server の切断時の戻し（revertOnDisconnect）は適用する。ただし戻すのは、前のセッションが最後に書いた値と最後に設定したオーバーライドだけで、新しい Server が書いた値・設定したオーバーライドは戻さない（最新のセッションの戻しと ClearOverrides は全部を消す）。
 
 ## 6. ゲーム → ツール
 

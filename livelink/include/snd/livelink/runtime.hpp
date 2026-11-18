@@ -197,7 +197,16 @@ class LiveRuntime {
   std::atomic<std::uint32_t> latestSession_{0};
   std::atomic<std::uint32_t> dropStale_{0};
   bool StaleProducer() const noexcept;  // audio thread: the arena being applied is of an older session
-  bool Admit(cmd::CommandType type) noexcept;  // LiveTap::admit
+  bool Admit(cmd::CommandType type, const void* payload) noexcept;  // LiveTap::admit
+  // Who set each live override last (D-87: an older session's revert removes only its own).
+  struct OverrideOwner {
+    std::uint32_t kind;
+    Id id;
+    std::uint32_t session;
+    std::uint32_t used;
+  };
+  static constexpr std::uint32_t kMaxOverrideOwners = 256;
+  OverrideOwner overrideOwners_[kMaxOverrideOwners] = {};
   std::uint8_t* revertOpen_ = nullptr;  // [producerCount_] audio thread: kFieldRevertBegin seen, revert not done
   std::uint32_t* producerSession_ = nullptr;  // [max_registered_threads] audio thread: last marker per producer
   std::uint32_t producerCount_ = 0;

@@ -120,7 +120,7 @@ struct LiveTap {
   // ApplyCommands, before core applies a live link command it interprets itself
   // (LiveOverride, LiveClearOverrides): false skips it (the live link drops the edits
   // of an earlier session, D-87). Null: always applied.
-  bool (*admit)(void* user, cmd::CommandType type) noexcept = nullptr;
+  bool (*admit)(void* user, cmd::CommandType type, const void* payload) noexcept = nullptr;
   // End of every RenderBlock (suspended blocks too). The Live* queries below may be
   // called from here.
   void (*block)(void* user, System& sys) noexcept = nullptr;
@@ -275,6 +275,9 @@ class System {
   std::uint32_t LiveMeters(livelink::MeterEntry* out, std::uint32_t capacity) const noexcept;
   std::uint32_t LiveBanks(LiveBankInfo* out, std::uint32_t capacity) const noexcept;
   void LiveStats(snd_stats* out) const noexcept;
+  // Removes one live override (kind = cmd::LiveOverrideKind, id); nothing if absent. Only
+  // from a LiveTap hook (an older session's revert removes its own overrides, D-87).
+  void LiveRemoveOverride(std::uint32_t kind, Id id) noexcept;
   // Event id of the playback whose voice reads stream slot `slot` (0 if none).
   Id LiveStreamEvent(std::uint32_t slot) const noexcept;
   // Override layer (11.2). Cells of the object `objectId` in table `fourcc`: tables with

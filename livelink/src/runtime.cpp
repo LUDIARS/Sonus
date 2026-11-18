@@ -121,7 +121,7 @@ void LiveRuntime::Install(core::CoreDesc* d) noexcept {
     Self(u)->OnStall(s, ev, n, b);
   };
   d->liveTap.block = [](void* u, core::System& sys) noexcept { Self(u)->OnBlock(sys); };
-  d->liveTap.admit = [](void* u, cmd::CommandType t) noexcept { return Self(u)->Admit(t); };
+  d->liveTap.admit = [](void* u, cmd::CommandType t, const void* p) noexcept { return Self(u)->Admit(t, p); };
 }
 
 void LiveRuntime::SetProfiler(std::uint32_t mask, std::uint32_t meterHz) noexcept {
@@ -192,10 +192,43 @@ bool LiveRuntime::StaleProducer() const noexcept {
 }
 
 // D-87: an older session's LiveOverride / LiveClearOverrides is dropped, except the
-// LiveClearOverrides of a disconnect revert (after kFieldRevertBegin of the same producer).
-bool LiveRuntime::Admit(cmd::CommandType type) noexcept {
-  if (!StaleProducer()) return true;
-  if (type == cmd::CommandType::LiveClearOverrides && revertOpen_[currentProducer_] != 0u) return true;
+// LiveClearOverrides of a disconnect revert (the first one after kFieldRevertBegin of the
+// same producer): that one removes only the overrides its session (or an older one) set
+// last; the newest session's ClearOverrides clears everything (core).
+bool LiveRuntime::Admit(cmd::CommandType type, const void* payload) noexcept {
+  const bool known = currentProducer_ < producerCount_;
+  const std::uint32_t session = known ? producerSession_[currentProducer_] : 0u;
+  const bool revert = type == cmd::CommandType::LiveClearOverrides && known && revertOpen_[currentProducer_] != 0u;
+  if (revert) revertOpen_[currentProducer_] = 0u;  // one ClearOverrides per revert
+  if (!StaleProducer()) {
+    if (type == cmd::CommandType::LiveClearOverrides) {
+      for (OverrideOwner& o : overrideOwners_) o = OverrideOwner{};
+    } else if (type == cmd::CommandType::LiveOverride) {
+      const auto c = Load<cmd::LiveOverride>(payload);
+      OverrideOwner* slot = nullptr;
+      for (OverrideOwner& o : overrideOwners_) {
+        if (o.used != 0u && o.kind == c.kind && o.id == c.id) slot = &o;
+      }
+      if (c.enable == 0u) {
+        if (slot != nullptr) *slot = OverrideOwner{};
+      } else {
+        for (std::uint32_t i = 0; i < kMaxOverrideOwners && slot == nullptr; ++i) {
+          if (overrideOwners_[i].used == 0u) slot = &overrideOwners_[i];
+        }
+        if (slot != nullptr) *slot = OverrideOwner{c.kind, c.id, session, 1u};
+      }
+    }
+    return true;
+  }
+  if (revert) {  // an older session's revert: its own overrides only
+    core::System* sys = system();
+    for (OverrideOwner& o : overrideOwners_) {
+      if (o.used == 0u || o.session > session) continue;
+      if (sys != nullptr) sys->LiveRemoveOverride(o.kind, o.id);
+      o = OverrideOwner{};
+    }
+    return false;  // not core's clear-all
+  }
   Bump(dropStale_);
   return false;
 }
@@ -206,7 +239,10 @@ void LiveRuntime::OnCommand(core::System& sys, cmd::CommandType type, const void
   if (type == cmd::CommandType::LiveSetValue) {
     const auto c = Load<cmd::LiveSetValue>(payload);
     if (c.field == kFieldSession && c.objectId == 0u) {  // the commands that follow belong to this session
-      if (known) producerSession_[currentProducer_] = static_cast<std::uint32_t>(c.value);
+      if (known) {
+        producerSession_[currentProducer_] = static_cast<std::uint32_t>(c.value);
+        revertOpen_[currentProducer_] = 0u;  // a revert left unfinished never carries over
+      }
       return;
     }
     if (c.field == kFieldRevertBegin && c.objectId == 0u) {
