@@ -514,6 +514,12 @@ void ApplyOne(Impl& im, const cmd::CommandHeader& h, const std::uint8_t* p) noex
       if (c.buffer.slot < im.cfg.maxUserBuffers) ++im.ap.userBufferRefs[c.buffer.slot];
       CreatePlayback(im, c.playback, c.emitter, 0u, EventRef{kNoBank, kEventRefDynamic, 0u}, c.when, nullptr, 0u,
                      DynamicSourceRef{SourceKind::UserBuffer, {0, 0, 0}, c.playback.slot});
+      // D-97: a buffer whose destroy was applied before (same block, or still waiting for
+      // its playbacks) gets no new playback: it ends without starting (on_end once).
+      if (c.buffer.slot < im.cfg.maxUserBuffers && c.buffer.generation != 0u &&
+          im.ap.userBufferDestroy[c.buffer.slot] == c.buffer.generation) {
+        if (PlaybackRequest* rq = RequestOf(im, c.playback); rq != nullptr) rq->flags |= kRequestBufferDestroyed;
+      }
       break;
     }
     case CT::PlayInput: {

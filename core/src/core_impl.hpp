@@ -308,6 +308,7 @@ struct ApplyPriv {
 // ---------------------------------------------------------------------------
 // Core-internal PlaybackRequest flag bits (above the contract's, D-17 request column).
 inline constexpr std::uint32_t kRequestRejectReservationFull = 1u << 16;  // no reservation slot: end REJECTED
+inline constexpr std::uint32_t kRequestBufferDestroyed = 1u << 17;  // D-97: its user buffer is being destroyed
 
 enum PlaybackPrivFlags : std::uint32_t {
   kPbStarted = 1u << 0,

@@ -1210,11 +1210,18 @@ void RunEventLogic(Impl& im) noexcept {
     // Requests (latest wins per flag; handled once per sequence number).
     const PlaybackRequest req = SND_R(Playback_request)[d];
     PlaybackStateId state = SND_W(Playback_state)[d];
+    // D-97: a play of a user buffer being destroyed never starts (Pending ones neither).
+    if ((req.flags & kRequestBufferDestroyed) != 0u &&
+        (state == PlaybackStateId::None || state == PlaybackStateId::Pending)) {
+      if (!EndPlayback(c, d, SND_END_DISCARDED, SND_END_DETAIL_NONE)) ++d;
+      continue;
+    }
     if (state == PlaybackStateId::None) {
       if ((req.flags & kRequestRejectReservationFull) != 0u) {
         EndPlayback(c, d, SND_END_REJECTED, SND_END_DETAIL_RESERVATION_FULL);
         continue;
       }
+
       const EventRef ref = SND_R(Playback_eventRef)[d];
       if (ref.bankSlot == kNoBank && (ref.flags & kEventRefDynamic) == 0u) {
         EndPlayback(c, d, SND_END_NOT_LOADED, SND_END_DETAIL_NONE);
