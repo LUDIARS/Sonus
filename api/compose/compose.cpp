@@ -1,17 +1,20 @@
-// Composition root of the full runtime library `sonus` (CONTRACTS.md D-03).
+// Composition root of the full runtime library `sonus` (CONTRACTS.md D-03, D-93).
 //
-// snd_create() (api) needs objects from modules that api may not depend on
-// at compile time (12.1): the source kinds (snd::source::SourceKindSet), the
-// music system (snd::music::IMusicSystem), the default file system (io), the
-// platform output device and the live link. This translation unit is the only
-// place that sees all of them; it hands them to api/core through the
-// contract interfaces. Stage 0 only references every module so the umbrella
-// library links completely.
+// snd_create() needs objects from modules that api may not depend on at
+// compile time (12.1): the source kinds, the music system, the IO scheduler
+// and default file system, the platform output device and audio driver, and
+// the live link. This library (api/compose) is the only place that sees all of
+// them; it hands them to core through the contract interfaces. The order of
+// creation and destruction is in snd/api/compose.hpp.
+#include <atomic>
+#include <cstring>
 #include <new>
 
+#include "config_check.hpp"
 #include "snd/api/api_module.hpp"
 #include "snd/api/compose.hpp"
 #include "snd/bank/bank_module.hpp"
+#include "snd/base/allocator.hpp"
 #include "snd/base/base_module.hpp"
 #include "snd/codec/codec_module.hpp"
 #include "snd/core/core_module.hpp"
@@ -23,6 +26,7 @@
 #include "snd/platform/platform_module.hpp"
 #include "snd/source/runtime.hpp"
 #include "snd/source/source_module.hpp"
+#include "system.hpp"
 
 namespace snd::compose {
 
@@ -74,6 +78,346 @@ void SourceKinds::BankUnregistered(void* user, std::uint16_t bankSlot) noexcept 
 
 const source::SourceKindSet* SourceKinds::Kinds() const noexcept {
   return runtime_ != nullptr ? &static_cast<const source::Runtime*>(runtime_)->Kinds() : nullptr;
+}
+
+// ---------------------------------------------------------------------------------------
+// Lifecycle observer (tests)
+// ---------------------------------------------------------------------------------------
+namespace {
+std::atomic<LifecycleObserver> gObserver{nullptr};
+std::atomic<void*> gObserverUser{nullptr};
+}  // namespace
+
+void SetLifecycleObserver(LifecycleObserver observer, void* user) noexcept {
+  gObserverUser.store(user, std::memory_order_relaxed);
+  gObserver.store(observer, std::memory_order_release);
+}
+
+void Note(const char* step) noexcept {
+  const LifecycleObserver o = gObserver.load(std::memory_order_acquire);
+  if (o != nullptr) o(gObserverUser.load(std::memory_order_relaxed), step);
+}
+
+// ---------------------------------------------------------------------------------------
+// Audio driver bridge (audio thread)
+// ---------------------------------------------------------------------------------------
+namespace {
+
+// Core renders Config.outputChannels; the device may have another layout (D-62: the
+// conversion is the caller's). Common channels are copied; a mono device gets the mean
+// of the first two core channels; a mono core feeds the first two device channels;
+// further device channels are silent, further core channels are dropped (D-93).
+void MapChannels(const float* in, std::uint32_t inCh, float* out, std::uint32_t outCh, std::uint32_t frames) noexcept {
+  for (std::uint32_t f = 0; f < frames; ++f) {
+    const float* src = in + std::size_t{f} * inCh;
+    float* dst = out + std::size_t{f} * outCh;
+    if (outCh == 1u && inCh >= 2u) {
+      dst[0] = 0.5f * (src[0] + src[1]);
+      continue;
+    }
+    for (std::uint32_t c = 0; c < outCh; ++c) {
+      if (c < inCh) {
+        dst[c] = src[c];
+      } else if (inCh == 1u && c == 1u) {
+        dst[c] = src[0];
+      } else {
+        dst[c] = 0.0f;
+      }
+    }
+  }
+}
+
+void RenderBridge(void* user, float* interleaved, std::uint32_t frames, std::uint32_t channels,
+                  const platform::RenderInfo* info) noexcept {
+  snd_system& s = *static_cast<snd_system*>(user);
+  // 2.2: the common clock keeps running through an underrun. Frames the device played
+  // as silence are rendered (and discarded) here, at most underrun_catchup_blocks per
+  // block, so playbacks, transports and reservations stay on the device's time line.
+  if (info != nullptr) s.lostPending += info->lostFrames;
+  for (std::uint32_t k = 0; k < s.config.tuning.underrun_catchup_blocks && s.lostPending >= s.blockFrames; ++k) {
+    s.core->RenderBlock(nullptr);
+    s.lostPending -= s.blockFrames;
+  }
+  if (channels == s.coreChannels && frames == s.blockFrames) {
+    s.core->RenderBlock(interleaved);
+  } else {
+    std::uint32_t done = 0;
+    while (done < frames) {
+      std::uint32_t n = frames - done;
+      if (n > s.blockFrames) n = s.blockFrames;
+      s.core->Render(s.mix, n);
+      MapChannels(s.mix, s.coreChannels, interleaved + std::size_t{done} * channels, channels, n);
+      done += n;
+    }
+  }
+  // 2.6 SND_FOCUS_SILENCE: the output fades to silence while the focus is lost (one
+  // block ramp each way). PER_CATEGORY needs category flags core does not have yet.
+  if (s.config.focus_mode == SND_FOCUS_SILENCE) {
+    const float target = s.deviceEvents.focusLost.load(std::memory_order_relaxed) != 0u ? 0.0f : 1.0f;
+    if (target != s.focusGain || target != 1.0f) {
+      const float step = (target - s.focusGain) / static_cast<float>(frames == 0u ? 1u : frames);
+      float g = s.focusGain;
+      for (std::uint32_t f = 0; f < frames; ++f) {
+        g += step;
+        for (std::uint32_t c = 0; c < channels; ++c) interleaved[std::size_t{f} * channels + c] *= g;
+      }
+      s.focusGain = target;
+    }
+  }
+}
+
+void FormatChanged(void* user, std::uint32_t sampleRate, std::uint32_t channels) noexcept {
+  snd_system& s = *static_cast<snd_system*>(user);
+  s.deviceEvents.deviceRate.store(sampleRate, std::memory_order_relaxed);
+  s.deviceEvents.deviceChannels.store(channels, std::memory_order_relaxed);
+  if (sampleRate != 0u && sampleRate != s.config.sample_rate) {
+    std::uint32_t expected = 0u;
+    s.deviceEvents.rateMismatch.compare_exchange_strong(expected, 1u, std::memory_order_relaxed);
+  }
+}
+
+void SND_CALL DeviceEvent(void* user, const snd_device_event* e) {
+  if (e == nullptr) return;
+  snd_system& s = *static_cast<snd_system*>(user);
+  DeviceEventFlags& f = s.deviceEvents;
+  switch (e->kind) {
+    case SND_DEVICE_EVENT_SUSPENDED: f.suspended.store(1u, std::memory_order_release); break;
+    case SND_DEVICE_EVENT_RESUMED: f.suspended.store(0u, std::memory_order_release); break;
+    case SND_DEVICE_EVENT_LOST: f.lost.fetch_add(1u, std::memory_order_acq_rel); break;
+    case SND_DEVICE_EVENT_FOCUS_LOST: f.focusLost.store(1u, std::memory_order_relaxed); break;
+    case SND_DEVICE_EVENT_FOCUS_GAINED: f.focusLost.store(0u, std::memory_order_relaxed); break;
+    default: break;  // CHANGED: the driver re-reads the format (FormatChanged)
+  }
+}
+
+}  // namespace
+
+// ---------------------------------------------------------------------------------------
+// Compose / Decompose
+// ---------------------------------------------------------------------------------------
+snd_result Compose(snd_system& sys, const snd_allocator*, const snd_file_system* fileSystem) noexcept {
+  IAllocator& a = *sys.alloc;
+  const snd_config& cfg = sys.config;
+  const bool live = LiveLinkWanted(cfg);
+  sys.coreConfig = cfg;
+  if (live) sys.coreConfig.max_registered_threads = cfg.max_registered_threads + 1u;  // the live link thread
+  sys.limits = livelink::LimitsOf(sys.coreConfig);
+  sys.coreChannels = cfg.output_channels == 0u ? 2u : cfg.output_channels;
+  sys.blockFrames = cfg.block_size;
+
+  // File system (6.5): the game's, else the OS file system relative to the working directory.
+  if (fileSystem != nullptr) {
+    sys.fs = sys.cFileSystem.Emplace(*fileSystem);
+  } else {
+    io::DefaultFileSystemConfig fc;
+    if (!sys.defaultFs.Init(a, fc)) return SND_ERR_OUT_OF_BUDGET;
+    sys.ownFs = true;
+    sys.fs = &sys.defaultFs;
+    sys.defaultFs.SetCompletionNotify(&io::IoScheduler::WakeThunk, &sys.io);
+  }
+  Note("create:file-system");
+  // Normal workers (2.3): the host's job system, else our own pool.
+  if (cfg.jobs.external != nullptr) {
+    sys.jobs = sys.cJobs.Emplace(*cfg.jobs.external);
+  } else {
+    jobs::WorkerPoolConfig wc;
+    wc.workers = cfg.jobs.normal_workers == 0u ? 1u : cfg.jobs.normal_workers;
+    if (!sys.workers.Init(a, wc)) return SND_ERR_OUT_OF_BUDGET;
+    sys.ownWorkers = true;
+    sys.jobs = &sys.workers;
+  }
+  Note("create:workers");
+  // Codecs (D-31): plugins override the built-ins with the same fourcc.
+  if (sys.codecs.Init(cfg.plugins.codecs, cfg.plugins.codec_count) != codec::RegistryStatus::Ok) {
+    return SND_ERR_INVALID_ARGUMENT;
+  }
+  Note("create:codecs");
+  // Stream pool and IO scheduler: one channel per stream slot (channels >= maxStreams).
+  if (!sys.streamPool.Init(a, cfg.memory.stream_pool_bytes, cfg.memory.stream_chunk_bytes, cfg.max_streams)) {
+    return SND_ERR_OUT_OF_BUDGET;
+  }
+  if (!sys.io.Init(a, *sys.fs, sys.streamPool, io::MakeIoSchedulerConfig(sys.coreConfig))) return SND_ERR_OUT_OF_BUDGET;
+  if (!sys.io.Start()) return SND_ERR_OUT_OF_BUDGET;
+  sys.ioStarted = true;
+  Note("create:io");
+  if (!sys.kinds.Init(a, &sys.io, &sys.streamPool, cfg.max_voice_channels, cfg.max_banks)) return SND_ERR_OUT_OF_BUDGET;
+  Note("create:source-kinds");
+
+  // Output device: its latency feeds core's notification timing (8.1). The value is the
+  // device's estimate before Open (D-93).
+  if (cfg.output.device != nullptr) {
+    sys.device = sys.cDevice.Emplace(*cfg.output.device);
+  } else {
+    sys.ownDevice = platform::CreateOutputDevice(platform::OutputBackend::Default, a, nullptr);
+    if (sys.ownDevice == nullptr) return SND_ERR_NO_DEVICE;
+    sys.device = sys.ownDevice;
+  }
+
+  core::CoreDesc d;
+  d.config = &sys.coreConfig;
+  d.allocator = &a;
+  d.sources = sys.kinds.Kinds();
+  d.music = &sys.music;
+  d.jobs = sys.jobs;
+  d.bankScheduler = &sys.io;
+  d.bankUnregistered = &SourceKinds::BankUnregistered;
+  d.bankUser = sys.kinds.BankUser();
+  d.findCodec = &codec::CodecRegistry::FindForSource;
+  d.codecUser = &sys.codecs;
+  d.outputLatencySeconds = sys.device->OutputLatencySeconds();
+  d.limits.maxBuses = cfg.max_buses;
+  d.limits.maxCategories = cfg.max_categories;
+  d.limits.maxSnapshots = cfg.max_snapshots;
+  d.limits.maxLimitGroups = cfg.max_limit_groups;
+  d.limits.maxParamDefs = cfg.max_param_defs;
+  d.limits.maxDuckRules = cfg.max_duck_rules;
+  if (live) {
+    livelink::RuntimeDesc rd;
+    rd.config = &sys.coreConfig;
+    rd.allocator = &a;
+    const int r = livelink::LiveRuntime::Create(rd, &sys.live);
+    if (r != SND_OK) return r;
+    Note("create:live-runtime");
+    sys.live->Install(&d);
+    Note("create:live-install");
+  }
+  {
+    const snd_result r = core::System::Create(d, &sys.core);
+    if (r != SND_OK) return r;
+  }
+  Note("create:core");
+  if (sys.live != nullptr) sys.live->Bind(sys.core);
+
+  // Audio thread (2.2): blocks of Config.blockSize rendered by core.
+  sys.mix = static_cast<float*>(a.Allocate(sizeof(float) * kMaxChannels * sys.blockFrames, 64, MemTag::Misc));
+  if (sys.mix == nullptr) return SND_ERR_OUT_OF_BUDGET;
+  platform::AudioDriverDesc ad;
+  ad.core.blockFrames = sys.blockFrames;
+  ad.core.renderAheadBlocks = cfg.render_ahead_blocks;
+  ad.core.catchupBlocks = cfg.tuning.underrun_catchup_blocks;
+  ad.core.loadTargetPercent = static_cast<double>(cfg.tuning.load_target_percent);
+  ad.core.lod.downBlocks = cfg.tuning.lod_down_blocks;
+  ad.core.lod.upBlocks = cfg.tuning.lod_up_blocks;
+  ad.core.render = &RenderBridge;
+  ad.core.formatChanged = &FormatChanged;
+  ad.core.user = &sys;
+  ad.listener = &DeviceEvent;
+  ad.listenerUser = &sys;
+  ad.workgroupSource = sys.ownDevice;  // a game device is opaque (no RTTI): no workgroup
+  const DeviceDesc dd{cfg.sample_rate, sys.coreChannels, 0u, cfg.output.device_index};
+  if (!sys.driver.Start(*sys.device, dd, ad, a)) return SND_ERR_NO_DEVICE;
+  sys.driverStarted = true;
+  Note("create:audio-driver");
+
+  if (sys.live != nullptr) {
+    livelink::ServerDesc sd;
+    sd.system = sys.core;
+    sd.runtime = sys.live;
+    sd.allocator = &a;
+    int r = livelink::Server::Create(sd, &sys.server);
+    if (r != SND_OK) return r;
+    Note("create:live-server");
+    r = sys.server->Start();
+    if (r != SND_OK) return r;
+    Note("create:live-start");
+  }
+  return SND_OK;
+}
+
+void Decompose(snd_system& sys) noexcept {
+  IAllocator* a = sys.alloc;
+  if (sys.server != nullptr) {
+    livelink::Server::Destroy(sys.server);  // stops its thread (unregisters it) first
+    sys.server = nullptr;
+    Note("destroy:live-server");
+  }
+  if (sys.driverStarted) {
+    sys.driver.Stop();  // no render call after this
+    sys.driverStarted = false;
+    Note("destroy:audio-driver");
+  }
+  if (sys.ioStarted) {
+    sys.io.Shutdown();
+    sys.ioStarted = false;
+    Note("destroy:io-shutdown");
+  }
+  if (sys.ownWorkers) {
+    sys.workers.Shutdown();  // later submissions run inline (core's Destroy pumps its queue)
+    sys.ownWorkers = false;
+    Note("destroy:workers");
+  }
+  if (sys.core != nullptr) {
+    core::System::Destroy(sys.core);
+    sys.core = nullptr;
+    Note("destroy:core");
+  }
+  if (sys.live != nullptr) {
+    livelink::LiveRuntime::Destroy(sys.live);
+    sys.live = nullptr;
+    Note("destroy:live-runtime");
+  }
+  if (sys.kinds.Kinds() != nullptr) {
+    sys.kinds.Destroy();
+    Note("destroy:source-kinds");
+  }
+  sys.io.Destroy();
+  sys.streamPool.Destroy();
+  Note("destroy:io");
+  if (sys.ownDevice != nullptr && a != nullptr) {
+    platform::DestroyOutputDevice(sys.ownDevice, *a);
+    sys.ownDevice = nullptr;
+  }
+  sys.cDevice.Reset();
+  sys.device = nullptr;
+  if (sys.ownFs) {
+    sys.defaultFs.Shutdown();
+    sys.ownFs = false;
+  }
+  sys.cFileSystem.Reset();
+  sys.fs = nullptr;
+  sys.cJobs.Reset();
+  sys.jobs = nullptr;
+  if (sys.mix != nullptr && a != nullptr) {
+    a->Free(sys.mix, MemTag::Misc);
+    sys.mix = nullptr;
+  }
+  Note("destroy:services");
+}
+
+bool ResumeDevice(snd_system& sys) noexcept {
+  if (!sys.driverStarted || sys.deviceEvents.suspended.load(std::memory_order_acquire) == 0u) return false;
+  if (!sys.driver.Resume()) return false;
+  sys.deviceEvents.suspended.store(0u, std::memory_order_release);
+  return true;
+}
+
+void ServiceDevice(snd_system& sys) noexcept {
+  if (sys.resumeRequested.exchange(0u, std::memory_order_acq_rel) != 0u) ResumeDevice(sys);
+  const std::uint32_t lost = sys.deviceEvents.lost.exchange(0u, std::memory_order_acq_rel);
+  std::uint32_t mismatch = 1u;
+  const bool rate = sys.deviceEvents.rateMismatch.compare_exchange_strong(mismatch, 2u, std::memory_order_acq_rel);
+  if (!sys.hasCallbacks || sys.callbacks.on_error == nullptr) return;
+  for (std::uint32_t i = 0; i < lost; ++i) {
+    sys.callbacks.on_error(sys.callbacks.user, SND_ERR_NO_DEVICE, SND_DEVICE_EVENT_LOST, 0u);
+  }
+  if (rate) {  // the device runs at another rate; the output is not converted (D-93)
+    sys.callbacks.on_error(sys.callbacks.user, SND_ERR_UNSUPPORTED, 0u,
+                           sys.deviceEvents.deviceRate.load(std::memory_order_relaxed));
+  }
+}
+
+Parts PartsOf(snd_system* sys) noexcept {
+  Parts p;
+  if (sys == nullptr) return p;
+  p.core = sys->core;
+  p.music = &sys->music;
+  p.sources = sys->kinds.SourceRuntime();
+  p.io = &sys->io;
+  p.driver = sys->driverStarted ? &sys->driver : nullptr;
+  p.live = sys->live;
+  p.server = sys->server;
+  p.coreRegisteredThreads = sys->coreConfig.max_registered_threads;
+  return p;
 }
 
 }  // namespace snd::compose
