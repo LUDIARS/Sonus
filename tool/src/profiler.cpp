@@ -77,7 +77,10 @@ void Profiler::Poll(livelink::Client* client, std::uint64_t nowNs) {
   meters_.resize(nm);
   for (std::uint32_t i = 0; i < nm; ++i) {
     BusMeter& m = meters_[i];
-    m.busId = me[i].busId;
+    // The first entry is the output (System::LiveMeters). Since the live link's
+    // independent-test fixes it carries the master bus's own id; the tool's model
+    // keeps 0 for the output (FindMeter(0), the master strip).
+    m.busId = i == 0u ? 0u : me[i].busId;
     m.channels = std::min<std::uint32_t>(me[i].channels, SND_MAX_CHANNELS);
     m.receivedNs = meterNs;
     m.stale = staleFallDb > 0.0f;

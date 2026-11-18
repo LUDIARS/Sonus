@@ -51,7 +51,7 @@ struct TimingSummary {
 };
 
 struct BusMeter {
-  std::uint32_t busId = 0;
+  std::uint32_t busId = 0;  // 0 = the output (the master); other buses by id
   std::uint32_t channels = 0;
   float peak[SND_MAX_CHANNELS] = {};
   float rms[SND_MAX_CHANNELS] = {};
