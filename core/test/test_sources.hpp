@@ -7,7 +7,14 @@
 //   TestOscKind (SourceKind::Oscillator, output rate): sine of
 //     OscillatorParams::frequencyHz x the item's pitch ramp, amplitude 1.
 // Both use the voice slot as their source slot. Optional per-render delay
-// (late-chunk tests): RenderBatch spins `slowNs` when `slowItems` is set.
+// (late-chunk tests): RenderBatch spins `slowNs` when it is set.
+// `holdOwnerForWorkerNs` (with slowNs) makes a late chunk certain: in a
+// parallel batch (chunkGeneration != 0) the owner (audio) thread stays in
+// its RenderBatch until an RT worker has entered a RenderBatch of the same
+// batch (bounded by that many ns), and that worker's chunk also stays until
+// the test has counted the block as rendered (`stepped` moved on, same bound),
+// i.e. until the block's deadline has certainly passed: the chunk is late
+// however long the audio thread was preempted.
 #ifndef SND_CORE_TEST_TEST_SOURCES_HPP
 #define SND_CORE_TEST_TEST_SOURCES_HPP
 
@@ -72,9 +79,33 @@ class TestSampleKind final : public snd::source::ISourceKind {
     // tests) only a little, so that the workers get chunks even on a loaded machine.
     if (slowNs.load(std::memory_order_relaxed) != 0u) {
       const std::uint64_t ns = slowNs.load(std::memory_order_relaxed);
-      const std::uint64_t until =
-          snd::platform::MonotonicNanoseconds() + (std::this_thread::get_id() != owner_ ? ns : ns / 100u);
+      const bool owner = std::this_thread::get_id() == owner_;
+      const std::uint64_t hold = holdOwnerForWorkerNs.load(std::memory_order_relaxed);
+      std::uint32_t entryStep = 0;
+      if (!owner) {
+        entryStep = stepped.load(std::memory_order_acquire);
+        // Announce the batch this worker runs (max: a straggler of an older batch never lowers it).
+        std::uint32_t seen = workerGeneration.load(std::memory_order_relaxed);
+        while (seen < b.chunkGeneration &&
+               !workerGeneration.compare_exchange_weak(seen, b.chunkGeneration, std::memory_order_relaxed)) {
+        }
+      } else if (hold != 0u && b.chunkGeneration != 0u) {
+        const std::uint64_t limit = snd::platform::MonotonicNanoseconds() + hold;
+        while (workerGeneration.load(std::memory_order_relaxed) < b.chunkGeneration &&
+               snd::platform::MonotonicNanoseconds() < limit) {
+          std::this_thread::yield();
+        }
+        if (workerGeneration.load(std::memory_order_relaxed) < b.chunkGeneration) ownerHoldTimeouts.fetch_add(1);
+      }
+      const std::uint64_t start = snd::platform::MonotonicNanoseconds();
+      const std::uint64_t until = start + (owner ? ns / 100u : ns);
       while (snd::platform::MonotonicNanoseconds() < until) {
+      }
+      if (!owner && hold != 0u) {
+        while (stepped.load(std::memory_order_acquire) == entryStep &&
+               snd::platform::MonotonicNanoseconds() < start + hold) {
+          std::this_thread::yield();
+        }
       }
     }
     for (std::uint32_t i = 0; i < b.count; ++i) {
@@ -130,6 +161,10 @@ class TestSampleKind final : public snd::source::ISourceKind {
 
   std::atomic<std::uint32_t> starts{0}, releases{0}, releaseCalls{0}, controls{0}, batches{0}, advances{0};
   std::atomic<std::uint64_t> slowNs{0};
+  std::atomic<std::uint64_t> holdOwnerForWorkerNs{0};
+  std::atomic<std::uint32_t> workerGeneration{0};   // newest batch a worker rendered in (slow mode)
+  std::atomic<std::uint32_t> ownerHoldTimeouts{0};  // parallel batches no worker joined in time
+  std::atomic<std::uint32_t> stepped{0};            // the test counts rendered blocks (hold mode)
 
  private:
   std::thread::id owner_ = std::this_thread::get_id();

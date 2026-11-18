@@ -1,5 +1,9 @@
 // core: parallel rendering and late chunks (2.3, D-43). A source made slow on
-// purpose makes chunks miss the deadline; checks:
+// purpose makes chunks miss the deadline: in every parallel block the audio
+// thread waits in its own chunk until an RT worker has started a chunk of the
+// same block, and the worker's chunk runs until the block has been rendered
+// (Step returned, so its deadline is past), so each parallel block of the slow
+// phase has a late chunk whatever the load. Checks:
 //   - a block renders in parallel only when the pool was quiescent at its start;
 //   - a block that is not quiescent uses the other render set than the late
 //     parallel block (at most one set is in use by a late chunk);
@@ -51,25 +55,36 @@ SND_TEST(CoreParallel, LateChunksHoldVoicesAndAlternateSets) {
   if (WaitCalm(h) == 2) SND_CHECK_NEAR(h.out[100 * 2], steady, 1e-4f);
   std::uint32_t lateBlocks = 0, heldBlocks = 0, serialBlocks = 0;
   std::uint32_t lateSet = 2;  // set of the last parallel block that had late chunks
+  h.sample.holdOwnerForWorkerNs.store(10000000000ull);  // up to 10 s for a worker to join a block
   h.sample.slowNs.store(200000000);  // 200 ms per batch: far past the 20 ms spin
-  for (int i = 0; i < 80 && lateBlocks < 3u; ++i) {
+  std::uint32_t parallelBlocks = 0, parallelLate = 0;
+  for (int i = 0; i < 400 && lateBlocks < 3u; ++i) {  // ~20 blocks per late one
     h.Step();
+    h.sample.stepped.fetch_add(1, std::memory_order_release);  // releases this block's late chunk
     const snd::core::BlockProfile& p = h.sys->LastBlock();
     for (float v : h.out) SND_CHECK(std::isfinite(v) && std::fabs(v) <= steady + 1e-3f);
     if (p.parallel == 0u && lateSet != 2u) {
       ++serialBlocks;
       SND_CHECK(p.renderSet != lateSet);  // D-43: never the set a late chunk may still write
     }
-    if (p.parallel != 0u) lateSet = p.lateChunks != 0u ? p.renderSet : 2u;
+    if (p.parallel != 0u) {
+      ++parallelBlocks;
+      if (p.lateChunks != 0u) ++parallelLate;
+      lateSet = p.lateChunks != 0u ? p.renderSet : 2u;
+    }
     if (p.lateChunks != 0u) ++lateBlocks;
     if (p.heldVoices != 0u) ++heldBlocks;
   }
   h.sample.slowNs.store(0);
+  h.sample.holdOwnerForWorkerNs.store(0);
   // Wait for the last late chunk to finish: every hold is released.
   const int calm = WaitCalm(h);
   snd::test::Note("late blocks %u, blocks with held voices %u, serial blocks while busy %u", lateBlocks, heldBlocks,
                   serialBlocks);
-  SND_CHECK(lateBlocks > 0u);
+  SND_CHECK_EQ(h.sample.ownerHoldTimeouts.load(), 0u);  // a worker joined every slowed parallel block
+  SND_CHECK_EQ(parallelLate, parallelBlocks);           // ... so each of them had a late chunk
+  SND_CHECK_EQ(lateBlocks, 3u);
+  SND_CHECK(serialBlocks > 0u);                        // the blocks after a late one used the other set
   SND_CHECK(heldBlocks > 0u);
   SND_CHECK(calm >= 1);
   if (calm < 2) {
