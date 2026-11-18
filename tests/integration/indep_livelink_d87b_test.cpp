@@ -9,8 +9,8 @@
 //      ClearOverrides count as a revert;
 //   Q5 cells written alternately by an older and a newer session: the older revert leaves
 //      the newer values, the newer revert restores the bank values;
-//   Q6 (decided, reported as a spec gap) the older revert's ClearOverrides removes the
-//      newer session's parameter overrides too (core's override table has no session).
+//   Q6 the older revert removes only the overrides its session set last (decided after
+//      the review): the newer session's parameter overrides stay.
 // Most checks record the live link's commands directly (owner thread or helper threads
 // registered with core) to control sessions and producer order exactly; the session
 // numbers come from LiveRuntime::NewSession like a Server's.
@@ -213,7 +213,7 @@ SND_TEST(IndepLivelinkD87b, OldNonRevertClearOverridesIsDropped) {
 // the Server gave up, ServerStats::revertsLost). A later session s2 on the same producer
 // (a new Server's thread taking the producer back) sets an override; when s2 is old, its
 // tool's plain ClearOverrides must be dropped like any old edit.
-SND_TEST(IndepLivelinkD87b, Defect_livelink_revert_begin_leaks_into_a_later_session) {
+SND_TEST(IndepLivelinkD87b, RevertBeginDoesNotLeakIntoALaterSession) {
   Fixture f;
   BankOpts o;
   o.withKnobCurve = true;
@@ -268,9 +268,9 @@ SND_TEST(IndepLivelinkD87b, AlternatingWritersAndTwoReverts) {
   SND_CHECK_EQ(f.rt->applier().Remembered(), 0u);
 }
 
-// Q6: the decided behaviour: the older revert's ClearOverrides clears every parameter
-// override, the newer session's included (reported as a spec gap).
-SND_TEST(IndepLivelinkD87b, OldRevertClearsTheNewerSessionsOverrides) {
+// Q6 (decided after the stage-2 review): the older revert removes only the overrides its
+// session (or an older one) set last: the newer session's override stays.
+SND_TEST(IndepLivelinkD87b, OldRevertKeepsTheNewerSessionsOverrides) {
   Fixture f;
   BankOpts o;
   o.withKnobCurve = true;
@@ -284,8 +284,8 @@ SND_TEST(IndepLivelinkD87b, OldRevertClearsTheNewerSessionsOverrides) {
   SND_REQUIRE(std::fabs(Level(f) / base - DbRatio(-20.0)) < 1e-3);
   Session(f, s1);
   Revert(f);
-  const double lvl = Level(f) / base;
-  std::printf("note: after the older revert the newer override %s (level %.4f)\n",
-              std::fabs(lvl - 1.0) < 1e-3 ? "is gone" : "stays", lvl);
-  SND_CHECK_NEAR(lvl, 1.0, 1e-3);  // gone: D-87 as decided (spec gap in the report)
+  SND_CHECK_NEAR(Level(f) / base, DbRatio(-20.0), 1e-3);
+  Session(f, s2);
+  Revert(f);  // the newest session's revert clears every override
+  SND_CHECK_NEAR(Level(f) / base, 1.0, 1e-3);
 }

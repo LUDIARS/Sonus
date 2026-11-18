@@ -439,14 +439,19 @@ SND_TEST(IndepLivelinkAck, CommandBufferFullIsAnsweredPerSeqAndLaterEditsWork) {
                                                             static_cast<std::uint32_t>(kN)) {
     std::this_thread::sleep_for(std::chrono::milliseconds(5));
   }
-  std::this_thread::sleep_for(std::chrono::milliseconds(50));
-  for (int i = 0; i < kN; ++i) {
-    std::int32_t r = 0;
-    if (c.TakeAck(seqs[i], &r)) {
-      ++got[i];
-      res[i] = r;
-      full += r == SND_ERR_COMMAND_BUFFER_FULL ? 1u : 0u;
+  // Every refusal is answered at once; wait (with a deadline) until all of them arrived.
+  const std::uint32_t refused = s.f.server->Stats().commandsRefused;
+  const auto answersBy = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+  while (full < refused && std::chrono::steady_clock::now() < answersBy) {
+    for (int i = 0; i < kN; ++i) {
+      std::int32_t r = 0;
+      if (got[i] == 0 && c.TakeAck(seqs[i], &r)) {
+        ++got[i];
+        res[i] = r;
+        full += r == SND_ERR_COMMAND_BUFFER_FULL ? 1u : 0u;
+      }
     }
+    if (full < refused) std::this_thread::sleep_for(std::chrono::milliseconds(2));
   }
   SND_CHECK(full > 0u);
   SND_CHECK_EQ(full, s.f.server->Stats().commandsRefused);
