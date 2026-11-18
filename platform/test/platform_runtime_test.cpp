@@ -262,7 +262,7 @@ SND_TEST(TimerDevice, DefaultsRejectsAndFactoryThroughCTable) {
     SND_CHECK(!bad.Open(tooMany, &DeviceProbe::Callback, &probe));
     SND_CHECK(!bad.Open(snd::DeviceDesc{}, nullptr, &probe));
   }
-  snd::IOutputDevice* dev = CreateOutputDevice(OutputBackend::Default, acc);
+  snd::IOutputDevice* dev = CreateOutputDevice(OutputBackend::SilentTimer, acc);
   SND_REQUIRE(dev != nullptr);
   snd_output_device c = snd::ToC(*dev);  // as passed through Config.output.device
   snd_device_desc desc{0, 0, 0, 0};

@@ -8,12 +8,25 @@
 #include "snd/platform/thread.hpp"
 
 #if defined(_WIN32)
+#include <atomic>
 #include <chrono>
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
 #else
 #include <pthread.h>
 #include <sched.h>
 #include <time.h>
 #include <unistd.h>
+#if defined(__APPLE__)
+#include <mach/mach.h>
+#include <mach/mach_time.h>
+#include <mach/thread_policy.h>
+#endif
 #endif
 
 namespace snd::platform {
@@ -78,7 +91,8 @@ std::uint32_t HardwareConcurrency() noexcept {
 }
 
 #if defined(_WIN32)
-// Stub (stage 1 targets Linux): std::thread, no priorities.
+// std::thread with Win32 priorities (stage 2). The audio thread and the RT
+// workers additionally join the WASAPI device's MMCSS task (workgroup.hpp).
 struct Thread::Native {
   std::thread t;
 };
@@ -87,9 +101,18 @@ bool Thread::Start(const ThreadDesc& desc, ThreadFn fn, void* user) noexcept {
   static_assert(sizeof(Native) <= sizeof(native_) && alignof(Native) <= 8, "Thread::native_ too small");
   if (started_ || fn == nullptr) return false;
   auto* n = ::new (native_) Native();
-  n->t = std::thread([fn, user] { fn(user); });
+  // The priority is applied by the new thread itself; Start waits for the
+  // result so Priority() is valid when Start returns. (std::thread keeps the
+  // OS default stack, 1 MiB, above kRtThreadMinStackBytes.)
+  std::atomic<int> result{-1};
+  const ThreadPriority prio = desc.priority;
+  n->t = std::thread([fn, user, prio, &result] {
+    result.store(static_cast<int>(SetCurrentThreadPriority(prio, 0)), std::memory_order_release);
+    fn(user);
+  });
+  while (result.load(std::memory_order_acquire) < 0) std::this_thread::yield();
   started_ = true;
-  priority_ = desc.priority == ThreadPriority::Normal ? PriorityResult::Applied : PriorityResult::Unsupported;
+  priority_ = static_cast<PriorityResult>(result.load(std::memory_order_acquire));
   return true;
 }
 void Thread::Join() noexcept {
@@ -100,8 +123,10 @@ void Thread::Join() noexcept {
   started_ = false;
 }
 PriorityResult SetCurrentThreadPriority(ThreadPriority priority, int) noexcept {
-  return priority == ThreadPriority::Normal ? PriorityResult::Applied : PriorityResult::Unsupported;
+  const int p = priority == ThreadPriority::Realtime ? THREAD_PRIORITY_TIME_CRITICAL : THREAD_PRIORITY_NORMAL;
+  return SetThreadPriority(GetCurrentThread(), p) ? PriorityResult::Applied : PriorityResult::Failed;
 }
+PriorityResult SetCurrentThreadRealtimePeriod(std::uint64_t) noexcept { return PriorityResult::Unsupported; }
 void SetCurrentThreadName(const char*) noexcept {}
 #else
 struct Thread::Native {
@@ -131,6 +156,27 @@ void* Trampoline(void* p) {
   return nullptr;
 }
 
+#if defined(__APPLE__)
+// Nominal period until the caller knows the real one: one 256-frame block at 48 kHz.
+constexpr std::uint64_t kNominalRtPeriodNs = 5333333u;
+
+// Mach time-constraint policy: period, computation = 50 % of it, constraint = period.
+PriorityResult ApplyTimeConstraint(pthread_t t, std::uint64_t periodNs) noexcept {
+  mach_timebase_info_data_t tb{};
+  if (mach_timebase_info(&tb) != KERN_SUCCESS || tb.numer == 0u) return PriorityResult::Failed;
+  const auto toAbs = [&tb](std::uint64_t ns) { return static_cast<std::uint32_t>(ns * tb.denom / tb.numer); };
+  thread_time_constraint_policy_data_t policy{};
+  policy.period = toAbs(periodNs);
+  policy.computation = toAbs(periodNs / 2u);
+  policy.constraint = toAbs(periodNs);
+  policy.preemptible = 1;
+  const kern_return_t kr = thread_policy_set(pthread_mach_thread_np(t), THREAD_TIME_CONSTRAINT_POLICY,
+                                             reinterpret_cast<thread_policy_t>(&policy),
+                                             THREAD_TIME_CONSTRAINT_POLICY_COUNT);
+  return kr == KERN_SUCCESS ? PriorityResult::Applied : PriorityResult::Failed;
+}
+#endif
+
 PriorityResult ApplyPriority(pthread_t t, ThreadPriority priority, int rtPriority) noexcept {
 #if defined(__linux__)
   sched_param sp{};
@@ -145,6 +191,13 @@ PriorityResult ApplyPriority(pthread_t t, ThreadPriority priority, int rtPriorit
   if (rc == 0) return PriorityResult::Applied;
   if (rc == EPERM) return PriorityResult::FellBack;
   return PriorityResult::Failed;
+#elif defined(__APPLE__)
+  // Time-constraint policy (the class Core Audio's IO thread uses). The
+  // nominal period is one 256-frame block at 48 kHz; joining the device's
+  // os_workgroup (workgroup.hpp) tells the scheduler the real deadline.
+  (void)rtPriority;
+  if (priority == ThreadPriority::Normal) return PriorityResult::Applied;
+  return ApplyTimeConstraint(t, kNominalRtPeriodNs);
 #else
   (void)t;
   (void)rtPriority;
@@ -208,7 +261,9 @@ bool Thread::Start(const ThreadDesc& desc, ThreadFn fn, void* user) noexcept {
     n->~Native();
     return false;
   }
-#if !defined(__linux__)
+#if defined(__APPLE__)
+  if (desc.priority == ThreadPriority::Realtime) priority_ = ApplyPriority(n->handle, desc.priority, desc.realtimePriority);
+#elif !defined(__linux__)
   if (desc.priority == ThreadPriority::Realtime) priority_ = PriorityResult::Unsupported;
 #endif
   started_ = true;
@@ -227,12 +282,27 @@ PriorityResult SetCurrentThreadPriority(ThreadPriority priority, int realtimePri
   return ApplyPriority(pthread_self(), priority, realtimePriority);
 }
 
+PriorityResult SetCurrentThreadRealtimePeriod(std::uint64_t periodNs) noexcept {
+#if defined(__APPLE__)
+  if (periodNs == 0u) return PriorityResult::Failed;
+  return ApplyTimeConstraint(pthread_self(), periodNs);
+#else
+  (void)periodNs;
+  return PriorityResult::Unsupported;
+#endif
+}
+
 void SetCurrentThreadName(const char* name) noexcept {
 #if defined(__linux__)
   if (name == nullptr || name[0] == '\0') return;
   char buf[16] = {};
   CopyName(buf, name);
   pthread_setname_np(pthread_self(), buf);
+#elif defined(__APPLE__)
+  if (name == nullptr || name[0] == '\0') return;
+  char buf[16] = {};
+  CopyName(buf, name);
+  pthread_setname_np(buf);  // Apple: names the calling thread only
 #else
   (void)name;
 #endif

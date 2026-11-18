@@ -6,9 +6,12 @@
 // ThreadDesc::realtimePriority. If the process lacks the permission
 // (EPERM: no CAP_SYS_NICE / RLIMIT_RTPRIO), the thread keeps running at
 // normal priority and the result says PriorityResult::FellBack — it is never
-// an error. Other OSes: same interface, the request is not applied and the
-// result is PriorityResult::Unsupported (stub until stage 2 picks targets;
-// OS audio workgroups, 2.3, are also stage 2).
+// an error.
+// Windows: THREAD_PRIORITY_TIME_CRITICAL (the audio thread and RT workers
+// also join the WASAPI device's MMCSS task, workgroup.hpp). Apple: the Mach
+// time-constraint policy (nominal 5.3 ms period; joining the device's
+// os_workgroup, workgroup.hpp, gives the real deadline). Other OSes: not
+// applied, the result is PriorityResult::Unsupported.
 #ifndef SND_PLATFORM_THREAD_HPP
 #define SND_PLATFORM_THREAD_HPP
 
@@ -65,17 +68,22 @@ class Thread {
   void Join() noexcept;
   bool Joinable() const noexcept { return started_; }
   // Result of the priority request made by Start.
-  PriorityResult Priority() const noexcept { return priority_; }
+  PriorityResult Priority() const noexcept { return priority_.load(std::memory_order_relaxed); }  // any thread
 
  private:
   struct Native;
   alignas(8) unsigned char native_[16] = {};
   bool started_ = false;
-  PriorityResult priority_ = PriorityResult::Applied;
+  std::atomic<PriorityResult> priority_{PriorityResult::Applied};  // read by statistics on any thread
 };
 
 // Non-RT. Applies `priority` to the calling thread (same policy as above).
 PriorityResult SetCurrentThreadPriority(ThreadPriority priority, int realtimePriority = 80) noexcept;
+// Non-RT. Tells the OS the real period of the calling realtime thread. Apple:
+// re-applies the Mach time-constraint policy with period = `periodNs`,
+// computation = 50 % of it, constraint = the period (D-65). Other OSes:
+// Unsupported (nothing to do; SCHED_FIFO / MMCSS have no period).
+PriorityResult SetCurrentThreadRealtimePeriod(std::uint64_t periodNs) noexcept;
 // Non-RT. Names the calling thread (best effort).
 void SetCurrentThreadName(const char* name) noexcept;
 // Logical CPU count (>= 1).

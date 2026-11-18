@@ -40,6 +40,7 @@ cmake -S . -B build-tsan -G Ninja -DSND_SANITIZE=thread
 | `SND_LIVELINK` | ON | ライブリンクを含める（リリースでは OFF） |
 | `SND_BUILD_TOOL` | OFF | オーサリング GUI（未実装） |
 | `SND_CODEC_OPUS` | ON | Opus コーデック（同梱の libopus 1.5.2 をビルドする）。OFF なら Opus のデコーダ・エンコーダは無い（CONTRACTS.md D-56） |
+| `SND_OUTPUT_ALSA` | AUTO | Linux の ALSA 出力。AUTO = 見つかれば使う、ON = 必須、OFF = 外す（無音タイマーだけになる） |
 
 テストの便利な使い方:
 
@@ -49,6 +50,63 @@ cmake -S . -B build-tsan -G Ninja -DSND_SANITIZE=thread
 SND_UPDATE_GOLDEN=1 ctest --test-dir build -R dsp          # ゴールデン音声の基準を更新
 SND_RT_ABORT=1 ./build/core/test/core_test                 # 最初の RT 違反で abort（デバッガ用）
 ```
+
+### プラットフォーム別の手順（出力デバイス）
+
+出力バックエンドは OS ごとにビルド時に選ばれる（`CONTRACTS.md` D-61〜D-66）。どの OS でも、実デバイスで音を出すテスト
+`platform_device_play_test` は `SND_DEVICE_TEST=1` のときだけ動く（それ以外は CTest で SKIP）。
+
+| 変数 | 内容 |
+| --- | --- |
+| `SND_DEVICE_TEST=1` | 既定デバイスで 1 秒ずつ正弦波（440 Hz、-12 dBFS）を 3 形式で鳴らし、駆動部品経由でも 1 秒鳴らす。列挙とワークグループも確かめる |
+| `SND_DEVICE_TEST_CHANGE=<秒>` | その秒数だけ鳴らし続ける。その間に既定の出力デバイスを切り替える・ヘッドホンを抜き差しする（iOS は電話・Siri などの割り込み）。イベントが届き、音が戻ることを確かめる |
+| `SND_DEVICE_TEST_INDEX=<k>` | 列挙の k 番目（`device_index` = k）と、その id（`deviceName`）でも鳴らす |
+| `SND_DEVICE_TEST_EXCLUSIVE=1` | Windows: WASAPI の排他モードでも鳴らす |
+
+**Linux（ALSA）**: `libasound2-dev`（Debian / Ubuntu）か `alsa-lib-devel`（Fedora）を入れると ALSA が有効になる。
+ALSA のテスト `platform_alsa_test` はサウンドカード無しで動く（テスト内で定義した `null` / `file` PCM を使う）。
+
+```sh
+cmake -S . -B build -G Ninja && cmake --build build && ctest --test-dir build --output-on-failure
+SND_DEVICE_TEST=1 ./build/platform/test/platform_device_play_test        # "default" PCM で鳴らす
+```
+
+**Windows（WASAPI）**: clang（LLVM の `clang++`、GNU 形式のドライバ）か MinGW-w64 の gcc でビルドする。警告の設定
+（`cmake/SonusOptions.cmake`）が GNU 形式なので、MSVC の `cl` / `clang-cl` は使えない。リンクするシステムライブラリは
+`ole32` と `avrt`。テスト枠組みの `rt_hooks_new.cpp` が `std::aligned_alloc` を使うため、Windows では今のところ
+全テストはビルドできない。出力の確認はテストを 1 つだけビルドする:
+
+```sh
+cmake -S . -B build -G Ninja -DCMAKE_CXX_COMPILER=clang++ -DCMAKE_C_COMPILER=clang
+cmake --build build --target platform_device_play_test
+set SND_DEVICE_TEST=1 && build\platform\test\platform_device_play_test.exe
+set SND_DEVICE_TEST_CHANGE=20 && build\platform\test\platform_device_play_test.exe --filter Change
+set SND_DEVICE_TEST_EXCLUSIVE=1 && build\platform\test\platform_device_play_test.exe --filter Exclusive
+```
+
+**macOS（Core Audio）**: Xcode のコマンドラインツールの clang で。フレームワーク `AudioToolbox`、`CoreAudio`、`CoreFoundation`
+をリンクする。ワークグループは macOS 11 以降。
+
+```sh
+cmake -S . -B build -G Ninja && cmake --build build && ctest --test-dir build --output-on-failure
+SND_DEVICE_TEST=1 ./build/platform/test/platform_device_play_test
+SND_DEVICE_TEST=1 SND_DEVICE_TEST_CHANGE=20 ./build/platform/test/platform_device_play_test --filter Change
+```
+
+**iOS（Core Audio + AVAudioSession）**: `AVFoundation` もリンクし、`platform/src/apple/ios_audio_session.mm` を
+Objective-C++（ARC）でコンパイルする（ルートで `OBJCXX` を有効にする）。ワークグループは iOS 14 以降。テストは
+アプリのバンドルとしてビルドされるので、シミュレータで動かす:
+
+```sh
+cmake -S . -B build-ios -G Ninja -DCMAKE_SYSTEM_NAME=iOS -DCMAKE_OSX_SYSROOT=iphonesimulator \
+  -DCMAKE_OSX_ARCHITECTURES=arm64 -DCMAKE_OSX_DEPLOYMENT_TARGET=14.0
+cmake --build build-ios --target platform_device_play_test
+xcrun simctl boot "iPhone 15"     # 任意のシミュレータ
+SIMCTL_CHILD_SND_DEVICE_TEST=1 xcrun simctl spawn booted \
+  build-ios/platform/test/platform_device_play_test.app/platform_device_play_test
+```
+
+実機で動かすときは `-G Xcode` で生成し、Xcode で署名して実行する（環境変数はスキームの Arguments で渡す）。
 
 ## ディレクトリ構成
 

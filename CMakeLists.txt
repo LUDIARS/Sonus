@@ -4,6 +4,11 @@ project(sonus
   VERSION 0.1.0
   DESCRIPTION "Sonus: data-oriented sound runtime for games"
   LANGUAGES C CXX)
+# iOS: the AVAudioSession part of the Core Audio backend is Objective-C++
+# (platform/src/apple/ios_audio_session.mm, CONTRACTS.md D-63).
+if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
+  enable_language(OBJCXX)
+endif()
 
 # ---------------------------------------------------------------------------
 # Options

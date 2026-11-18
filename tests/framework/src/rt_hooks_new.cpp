@@ -18,6 +18,14 @@ extern "C" void* __libc_memalign(std::size_t, std::size_t) noexcept;
 #define SND_RAW_MALLOC(n) __libc_malloc(n)
 #define SND_RAW_FREE(p) __libc_free(p)
 #define SND_RAW_MEMALIGN(a, n) __libc_memalign((a), (n))
+#elif defined(_WIN32)
+// The Windows CRT has no std::aligned_alloc, and _aligned_malloc memory must
+// be released with _aligned_free: every allocation goes through the aligned
+// pair so operator delete can use one release function for all of them.
+#include <malloc.h>
+#define SND_RAW_MALLOC(n) _aligned_malloc((n), alignof(std::max_align_t))
+#define SND_RAW_FREE(p) _aligned_free(p)
+#define SND_RAW_MEMALIGN(a, n) _aligned_malloc((n), (a))
 #else
 #define SND_RAW_MALLOC(n) std::malloc(n)
 #define SND_RAW_FREE(p) std::free(p)
