@@ -23,7 +23,14 @@
 //   deadRender   RenderBatch of a released (or never started) source slot
 //   controlBusy  Control (pause, virtualise, ...) of a source slot that a chunk is rendering
 // A test can slow down RenderBatch on RT workers (not on the audio thread)
-// to produce late chunks.
+// to produce late chunks, or close the gate for a late chunk without timing:
+// while the gate is closed, an RT worker that enters RenderBatch of a
+// parallel batch stays there until OpenGate(), and the audio thread, in a
+// parallel batch, stays in its RenderBatch until a worker has entered one of
+// the same batch. A parallel block rendered with the gate closed therefore has
+// a chunk that is still running at its deadline, and no block is quiescent
+// until the gate is opened. The waits are bounded (gateTimeouts) only as a
+// safety net.
 #ifndef SND_CORE_TEST_INDEP_FIXTURE_HPP
 #define SND_CORE_TEST_INDEP_FIXTURE_HPP
 
@@ -32,6 +39,7 @@
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "snd/base/allocator.hpp"
@@ -157,6 +165,7 @@ class IndepKind final : public snd::source::ISourceKind {
       if (it.sourceSlot < n_ && inUseSrc_[it.sourceSlot].exchange(1u, std::memory_order_acq_rel) != 0u) overlap.fetch_add(1);
       if (it.realSlot < cap_ && inUseReal_[it.realSlot].exchange(1u, std::memory_order_acq_rel) != 0u) overlap.fetch_add(1);
     }
+    if (b.chunkGeneration != 0u) Gate(b.chunkGeneration);
     const std::uint64_t callerSlow = callerSlowNs.load();
     if (callerSlow != 0u && tAudioThread) {  // lets the workers claim chunks at all
       const std::uint64_t until = snd::platform::MonotonicNanoseconds() + callerSlow;
@@ -241,6 +250,13 @@ class IndepKind final : public snd::source::ISourceKind {
 
   static void SND_CALL JobFn(void* p) { static_cast<IndepKind*>(p)->jobsRun.fetch_add(1); }
 
+  // Test thread: closes / opens the gate (see the file comment).
+  void CloseGate() { gateClosed.store(1u); }
+  void OpenGate() {
+    gateClosed.store(0u);
+    gateEpoch.fetch_add(1u);
+  }
+
   std::uint64_t FramesRendered(SlotIndex s) const { return framesRendered_[s].load(); }
   std::uint64_t ViolationSum() const {
     return overlap.load() + discont.load() + doubleBlock.load() + releasedBusy.load() + deadRender.load() +
@@ -258,8 +274,40 @@ class IndepKind final : public snd::source::ISourceKind {
   std::atomic<std::uint64_t> slowBlockMask{0};  // 0: every block, else blocks with index % mask == 0
   std::atomic<std::uint32_t> postJobs{0};
   std::atomic<std::uint64_t> posted{0}, jobsRun{0}, startedSinceLastPost{0};
+  std::atomic<std::uint32_t> gateClosed{0}, gateEpoch{0};
+  std::atomic<std::uint32_t> gateWorkerGeneration{0};  // newest parallel batch a worker entered while gated
+  std::atomic<std::uint32_t> gateTimeouts{0};          // safety bound hit: never expected
 
  private:
+  static constexpr std::uint64_t kGateLimitNs = 30000000000ull;  // 30 s
+  void Gate(std::uint32_t generation) noexcept {
+    if (!tAudioThread) {
+      // Epoch first (seq_cst): if the gate is still seen closed, OpenGate() moves this epoch on later.
+      const std::uint32_t epoch = gateEpoch.load();
+      if (gateClosed.load() == 0u) return;
+      std::uint32_t seen = gateWorkerGeneration.load();
+      while (seen < generation && !gateWorkerGeneration.compare_exchange_weak(seen, generation)) {
+      }
+      const std::uint64_t limit = snd::platform::MonotonicNanoseconds() + kGateLimitNs;
+      while (gateEpoch.load() == epoch) {
+        if (snd::platform::MonotonicNanoseconds() > limit) {
+          gateTimeouts.fetch_add(1u);
+          break;
+        }
+        std::this_thread::yield();
+      }
+      return;
+    }
+    if (gateClosed.load() == 0u) return;
+    const std::uint64_t limit = snd::platform::MonotonicNanoseconds() + kGateLimitNs;
+    while (gateWorkerGeneration.load() < generation) {
+      if (snd::platform::MonotonicNanoseconds() > limit) {
+        gateTimeouts.fetch_add(1u);
+        break;
+      }
+      std::this_thread::yield();
+    }
+  }
   Inst* inst_ = nullptr;
   std::uint32_t n_ = 0;
   std::uint32_t cap_;
