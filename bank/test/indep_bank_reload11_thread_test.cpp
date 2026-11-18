@@ -66,6 +66,12 @@ struct Rig {
       fs.AddFile(kFiles[i].path, b.Build());
       fs.SetLatency(kFiles[i].path, i % 3);
     }
+    // Phase 2 sentinel: an earlier request whose read is held while the test
+    // thread issues a round's requests, so the manager never sees "nothing is
+    // loading" between two of them (it cannot know requests not made yet).
+    fixture::Bank sentinel = fixture::RichBank();
+    sentinel.bankId = HashId("Sentinel");
+    fs.AddFile("sentinel.sndb", sentinel.Build());
     snd::jobs::WorkerPoolConfig wc;
     wc.workers = 3;
     snd::io::IoSchedulerConfig ic;
@@ -209,18 +215,28 @@ SND_TEST(IndepReload11Threads, UnloadReloadWithDependantsUnderContention) {
   testsupport::Rng rng(0x77ull);
   std::uint32_t rounds = 0, depFailures = 0, otherFailures = 0, stuck = 0;
   for (int round = 0; round < 40; ++round) {
+    // All of this round's requests are issued while the sentinel's read is held
+    // (property unchanged: once they are all known, a dependency that comes must
+    // never make its dependant fail).
+    auto holdSentinel = [&] {
+      rig.fs.Hold("sentinel.sndb");
+      (void)rig.m->RequestLoad("sentinel.sndb");
+    };
+    auto releaseSentinel = [&] { rig.fs.Release("sentinel.sndb"); };
     const HandleRef a = rig.m->RequestLoad("a.sndb");
     if (!WaitFinal(rig.m, a, std::chrono::seconds(10)) || rig.m->State(a) != SND_BANK_STATE_LOADED) {
       ++otherFailures;
       UnloadEverything(rig.m);
       continue;
     }
+    holdSentinel();  // before the unload: the old A cannot be released earlier either
     SND_CHECK_EQ(rig.m->BeginUnload(a, SND_UNLOAD_STOP_AND_UNLOAD, false), SND_OK);
     const HandleRef a2 = rig.m->RequestLoad(rng.Below(2) ? "a.sndb" : "mods/a.sndb");
     std::vector<HandleRef> deps;
     const char* order[3] = {"b.sndb", "c.sndb", "d.sndb"};
     const std::uint32_t rot = rng.Below(3);
     for (std::uint32_t k = 0; k < 3; ++k) deps.push_back(rig.m->RequestLoad(order[(k + rot) % 3]));
+    releaseSentinel();
     for (const HandleRef& h : deps) {
       if (!WaitFinal(rig.m, h, std::chrono::seconds(10))) {
         ++stuck;
