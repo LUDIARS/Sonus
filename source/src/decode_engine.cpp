@@ -62,9 +62,11 @@ std::uint64_t Decoder::Run(InputSource& in, OutputSink& out, std::uint32_t maxIt
       }
     }
     if (ended || error != 0u) return produced;
-    if (const std::uint32_t f = in.Failure(); f != 0u) {
-      error = f;
-      return produced;
+    if (!awaitWrap) {  // a wrap may still be served by input in memory (SkipToWrap)
+      if (const std::uint32_t f = in.Failure(); f != 0u) {
+        error = f;
+        return produced;
+      }
     }
     // 2. Loop wrap: seek to the loop start (6.3, sample accurate).
     if (awaitWrap) {
@@ -74,7 +76,10 @@ std::uint64_t Decoder::Run(InputSource& in, OutputSink& out, std::uint32_t maxIt
         ended = true;
         return produced;
       }
-      if (!in.SkipToWrap(sp.byte)) return produced;
+      if (!in.SkipToWrap(sp.byte)) {
+        if (const std::uint32_t f = in.Failure(); f != 0u) error = f;
+        return produced;
+      }
       codec->Seek(state, sp.frame);
       decPos = loop.lb;
       ++decLoops;

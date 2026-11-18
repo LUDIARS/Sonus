@@ -69,11 +69,18 @@ class StreamInput final : public InputSource {
     s_.eof = 0;
     return true;
   }
-  std::uint32_t Failure() const noexcept override { return s_.error.load(std::memory_order_relaxed); }
+  // An IO error is reported once the input is used up to the cut (what is in
+  // memory before it, the preload included, is decoded first).
+  std::uint32_t Failure() const noexcept override {
+    const std::uint32_t e = s_.error.load(std::memory_order_relaxed);
+    if (e != SND_END_DETAIL_STREAM_IO) return e;
+    return s_.ioCut != 0u && s_.preActive == 0u && s_.curValid == 0u ? e : 0u;
+  }
 
  private:
   // Pops the next current data record into cur (header records are parsed here).
   bool Next() noexcept {
+    if (s_.ioCut != 0u) return false;  // IO error: nothing after the cut is used
     io::ChunkRecord rec{};
     while (ch_.Pop(rec)) {
       if (rec.epoch != ch_.Epoch()) {  // stale (handoff: compare after Pop)
@@ -81,11 +88,13 @@ class StreamInput final : public InputSource {
         continue;
       }
       if ((rec.tag & kTagHeader) != 0u) {
-        k_.ParseHeader(s_, rec);
+        const bool ok = k_.ParseHeader(s_, rec);
         ch_.Release(rec);
+        if (!ok) return false;
         continue;
       }
       if (rec.status != io::ChunkStatus::Ok) {
+        s_.ioCut = 1;
         s_.error.store(SND_END_DETAIL_STREAM_IO, std::memory_order_release);
         ch_.Release(rec);
         return false;
@@ -118,7 +127,10 @@ class StreamInput final : public InputSource {
     const std::uint64_t dataEnd = s_.a.streamDataOffset + s_.dataBytes;
     if (rec.bytes < rec.requested) {
       // A short read inside the data: the file is shorter than its header says.
-      if (end < dataEnd) s_.error.store(SND_END_DETAIL_STREAM_IO, std::memory_order_release);
+      if (end < dataEnd) {
+        s_.ioCut = 1;  // what the short read gave was used; nothing after it
+        s_.error.store(SND_END_DETAIL_STREAM_IO, std::memory_order_release);
+      }
       s_.eof = 1;
     }
     if (!s_.loop.WrapsAfter(s_.dec.decLoops) && s_.headerDone.load(std::memory_order_relaxed) != 0u &&
@@ -254,6 +266,7 @@ bool StreamKind::ParseHeader(StreamInst& s, const io::ChunkRecord& rec) noexcept
        h.totalFrames == s.a.h.total_frames && (s.a.streamDataOffset == 0u || h.dataOffset == s.a.streamDataOffset) &&
        DataBytesFit(s.a, h.dataBytes);
   if (!ok) {
+    s.ioCut = 1;  // no read of this file is used (the preload still plays)
     s.error.store(SND_END_DETAIL_STREAM_IO, std::memory_order_release);
     return false;
   }
@@ -366,7 +379,9 @@ void StreamKind::Shutdown() noexcept {
 // Decode (job, or audio thread while no job runs)
 // ---------------------------------------------------------------------------
 void StreamKind::Decode(StreamInst& s, std::uint64_t limit) noexcept {
-  if (s.error.load(std::memory_order_relaxed) != 0u) return;
+  // A decode error stops at once; an IO error lets what is in memory play out.
+  const std::uint32_t failed = s.error.load(std::memory_order_relaxed);
+  if (failed != 0u && failed != SND_END_DETAIL_STREAM_IO) return;
   StreamInput in(*this, s);
   const auto& r = schema::ReadColumn<SystemId::Render, ColumnId::Stream_ringRead>(*sv_.tables)[s.slot];
   StreamSink sink(s, rings_.frames, RingWrite(s), r, limit);
@@ -411,6 +426,7 @@ void StreamKind::Decode(StreamInst& s, std::uint64_t limit) noexcept {
   }
   SetRingWrite(s, sink.W());
   if (s.dec.error != 0u && s.error.load(std::memory_order_relaxed) == 0u) s.error.store(s.dec.error, std::memory_order_release);
+  if (s.dec.error == SND_END_DETAIL_STREAM_IO) s.ended.store(1u, std::memory_order_release);  // played out to the cut
   if (s.dec.ended) s.ended.store(1u, std::memory_order_release);
 }
 
@@ -711,6 +727,7 @@ bool StreamKind::StartOne(const SourceStartRequest& r, SourceStartResult& res, s
   s.curValid = 0;
   s.curOff = 0;
   s.skipToWrap = 0;
+  s.ioCut = 0;
   s.dataBytes = 0;
   s.eof = 0;
   s.headerDone.store(0u, std::memory_order_relaxed);
@@ -930,7 +947,8 @@ void StreamKind::Control(const SourceControlOp* ops, std::uint32_t count) noexce
 bool StreamKind::Ready(const StreamInst& s) const noexcept {
   const std::uint32_t want = s.reqGen.load(std::memory_order_acquire);
   if (s.execGen.load(std::memory_order_acquire) != want) return false;  // not executed yet
-  if (s.ended.load(std::memory_order_acquire) != 0u || s.error.load(std::memory_order_acquire) != 0u) return true;
+  const std::uint32_t err = s.error.load(std::memory_order_acquire);
+  if (s.ended.load(std::memory_order_acquire) != 0u || (err != 0u && err != SND_END_DETAIL_STREAM_IO)) return true;
   const std::uint64_t from = s.adoptGen.load(std::memory_order_acquire) == want ? RingRead(s) : s.execBase;
   return RingWrite(s) - from >= readyFrames_;
 }
@@ -984,6 +1002,9 @@ void StreamKind::RenderOne(StreamInst& s, const RenderItem& it, VoiceRenderStatu
   }
   const std::uint32_t err = s.error.load(std::memory_order_acquire);
   const std::uint32_t ended = s.ended.load(std::memory_order_acquire);
+  // Nothing more comes: the end, or a decode error. After an IO error the
+  // decoder still plays out what is in memory and then sets `ended`.
+  const bool final = ended != 0u || (err != 0u && err != SND_END_DETAIL_STREAM_IO);
   const std::uint64_t w = RingWrite(s);
   std::uint64_t r = RingRead(s);
   std::uint64_t avail = w - r;
@@ -1001,14 +1022,14 @@ void StreamKind::RenderOne(StreamInst& s, const RenderItem& it, VoiceRenderStatu
     it.playhead->loopCount = s.vloops;
   };
   if (s.primed == 0u) {
-    if (avail < readyFrames_ && ended == 0u && err == 0u) return;  // Priming: silence, position kept
+    if (avail < readyFrames_ && !final) return;  // Priming: silence, position kept
     s.primed = 1;
   }
   if (s.stalled != 0u) {
     // Resume once the ready amount (plus the frames to skip) is buffered.
     const std::uint64_t skip = s.lag > 0 ? static_cast<std::uint64_t>(s.lag) : 0u;
     const bool waitAhead = s.lag < 0;  // re-seeked ahead: the voice has not reached the ring yet
-    if (!waitAhead && (avail >= readyFrames_ + skip || ended != 0u || err != 0u)) {
+    if (!waitAhead && (avail >= readyFrames_ + skip || final)) {
       drop(skip < avail ? skip : avail);
       s.lag = 0;
       s.stalled = 0;
@@ -1018,7 +1039,7 @@ void StreamKind::RenderOne(StreamInst& s, const RenderItem& it, VoiceRenderStatu
     } else {
       st.starved = 1;
       Count(sh_, kStreamStallBlocks);
-      if (timePriority) {
+      if (timePriority && err == 0u) {  // no re-seek after an IO error (no new reads)
         s.lag += static_cast<std::int64_t>(req);
         AdvancePos(s.rloop, s.vpos, s.vloops, req);  // the playhead follows the clock
         const std::uint64_t room = rings_.frames > readyFrames_ + req ? rings_.frames - readyFrames_ - req : 0u;
@@ -1055,9 +1076,11 @@ void StreamKind::RenderOne(StreamInst& s, const RenderItem& it, VoiceRenderStatu
   s.vloops = s.ringLoops;
   st.framesRendered = n;
   if (n < req) {
-    if (err != 0u || ended != 0u) {
+    if (final) {
       if (err != 0u && n != 0u) FadeOutTail(it.out, it.channels, it.frameOffset, n, fadeFrames_);
       if (n == 0u) st.ended = 1;
+    } else if (err != 0u) {
+      st.starved = 1;  // IO error: the decode job of what is still in memory has not caught up
     } else {
       // Underrun (6.3): fade out what we have, count the stall.
       FadeOutTail(it.out, it.channels, it.frameOffset, n, fadeFrames_);
@@ -1127,7 +1150,7 @@ void StreamKind::ScheduleBackground(const BlockInfo&) noexcept {
         s.errorCounted = 1;
         Count(sh_, s.error.load(std::memory_order_relaxed) == SND_END_DETAIL_DECODE ? kDecodeErrors : kStreamIoErrors);
       }
-      continue;
+      if (s.error.load(std::memory_order_relaxed) != SND_END_DETAIL_STREAM_IO) continue;
     }
     const std::uint32_t want = s.reqGen.load(std::memory_order_relaxed);
     if (s.reseek.load(std::memory_order_acquire) != 0u && s.execGen.load(std::memory_order_relaxed) == want &&
@@ -1161,12 +1184,12 @@ void StreamKind::ScheduleBackground(const BlockInfo&) noexcept {
       }
     }
     if (s.headerDone.load(std::memory_order_acquire) != 0u && s.plannerSet == 0u && s.reqGen.load(std::memory_order_relaxed) == s.execGen.load(std::memory_order_relaxed)) SetupPlanner(s);
-    if (s.error.load(std::memory_order_relaxed) != 0u) continue;
-    PostReads(s);
+    if (s.error.load(std::memory_order_relaxed) == 0u) PostReads(s);  // after an IO error: no new reads
     // Decode job when the PCM ring has room and there is input.
     const std::uint64_t used = RingWrite(s) - RingRead(s);
     if (s.ended.load(std::memory_order_relaxed) != 0u || rings_.frames - used < rings_.frames / 4u) continue;
-    const bool input = s.replay != 0u || s.preActive != 0u || s.curValid != 0u || Channel(i).Ready() != 0u || s.dec.drain || s.dec.awaitWrap ||
+    // After an IO error the decoder runs until it reaches the cut (then the voice ends).
+    const bool input = s.replay != 0u || s.error.load(std::memory_order_relaxed) != 0u || s.preActive != 0u || s.curValid != 0u || Channel(i).Ready() != 0u || s.dec.drain || s.dec.awaitWrap ||
                        s.dec.carryHead < s.dec.carryCount || (s.eof != 0u && !s.dec.ended);
     if (!input) continue;
     if (!PostJob(sv_, sh_, &StreamKind::DecodeJob, &s, &s.jobCounter, &s.cancel, 2u) && sv_.postJob == nullptr) {

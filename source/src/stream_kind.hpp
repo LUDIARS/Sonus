@@ -36,8 +36,11 @@
 // playhead moving and drops the frames that elapsed, re-seeking ahead when the
 // gap no longer fits the ring.
 //
-// IO failure (open failed, read error, bad header) and decode errors end the
-// voice (status `ended` after what was buffered).
+// IO failure (open failed, read error, bad header, short read): no new read is
+// posted; everything already in memory (preload, records delivered before the
+// failed one, decoded PCM, loop passes it serves) still plays out in order,
+// then the voice ends (STREAM_IO, faded). A decode error ends the voice after
+// what is decoded.
 #ifndef SND_SOURCE_STREAM_KIND_HPP
 #define SND_SOURCE_STREAM_KIND_HPP
 
@@ -77,6 +80,7 @@ struct StreamInst {
   std::uint64_t preOff;
   std::uint64_t dataBytes;     // from the header
   std::uint32_t eof;           // the data end (or a short read) was consumed
+  std::uint32_t ioCut;         // IO error: no record from here on is used (what came before plays out)
   std::atomic<std::uint32_t> headerDone{0};
   std::atomic<std::uint32_t> ended{0};
   std::atomic<std::uint32_t> error{0};  // snd_end_detail
