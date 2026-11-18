@@ -185,7 +185,7 @@ SND_TEST(SourceStreamIoError, MemoryPlaysOutThenTheVoiceEnds) {
                     static_cast<unsigned long long>(failFrame), got, lo, hi);
       if (endsByError) {
         SND_CHECK_MSG(er.ended == 1u, "%s fail %llu: not ended", l.name, static_cast<unsigned long long>(failFrame));
-        SND_CHECK(er.ioErrors >= 1u);
+        SND_CHECK_EQ(er.ioErrors, 1u);  // counted once
       }
       SND_CHECK_EQ(er.openFiles, 0u);
       SND_CHECK_EQ(er.poolUsed, 0u);
@@ -201,9 +201,10 @@ SND_TEST(SourceStreamIoError, MemoryPlaysOutThenTheVoiceEnds) {
       if (want < cap) {
         SND_CHECK_MSG(got == want && e <= tol, "%s open fails: %zu frames (model %zu), err %g", l.name, got, want, e);
         SND_CHECK_EQ(er.ended, 1u);
-        SND_CHECK(er.ioErrors >= 1u);
+        SND_CHECK_EQ(er.ioErrors, 1u);  // counted once
       } else {  // an infinite loop inside the preload needs no read: it plays on
         SND_CHECK(got >= cap && e <= tol);
+        SND_CHECK_EQ(er.ioErrors, 1u);  // counted when the open fails, not when (never) consumed
       }
       SND_CHECK_EQ(er.openFiles, 0u);
       SND_CHECK_EQ(er.poolUsed, 0u);

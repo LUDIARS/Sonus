@@ -741,6 +741,8 @@ bool StreamKind::StartOne(const SourceStartRequest& r, SourceStartResult& res, s
   s.hasPendingLoop = 0;
   s.virt = (r.flags & kStartVirtual) != 0u ? 1u : 0u;
   s.errorCounted = 0;
+  s.ioErrorCounted = 0;
+  s.ioErrorBase = Channel(slot).Errors();  // failed reads delivered on this channel before this playback
   s.primed = 0;
   s.stalled = 0;
   s.kill = 0;
@@ -1140,17 +1142,30 @@ void StreamKind::ScheduleBackground(const BlockInfo&) noexcept {
   std::uint32_t inlineBudget = 4;
   for (std::uint32_t i = 0; i < cap_; ++i) {
     StreamInst& s = inst_[i];
+    if (s.state == 1u && s.ioErrorCounted == 0u && Channel(i).Errors() != s.ioErrorBase) {
+      // An IO error is counted once, when the IO side delivers the failed read
+      // (whether or not the decoder ever takes it: e.g. a loop played from memory).
+      s.ioErrorCounted = 1;
+      Count(sh_, kStreamIoErrors);
+    }
     if (s.state == 0u || JobBusy(s.jobCounter)) continue;
     if (s.state == 2u) {
       TryFree(s);
       continue;
     }
-    if (s.error.load(std::memory_order_acquire) != 0u) {
-      if (s.errorCounted == 0u) {
-        s.errorCounted = 1;
-        Count(sh_, s.error.load(std::memory_order_relaxed) == SND_END_DETAIL_DECODE ? kDecodeErrors : kStreamIoErrors);
+    if (const std::uint32_t err = s.error.load(std::memory_order_acquire); err != 0u) {
+      if (err == SND_END_DETAIL_STREAM_IO) {
+        if (s.ioErrorCounted == 0u) {  // a bad header (the read itself succeeded)
+          s.ioErrorCounted = 1;
+          Count(sh_, kStreamIoErrors);
+        }
+      } else {
+        if (s.errorCounted == 0u) {
+          s.errorCounted = 1;
+          Count(sh_, kDecodeErrors);
+        }
+        continue;
       }
-      if (s.error.load(std::memory_order_relaxed) != SND_END_DETAIL_STREAM_IO) continue;
     }
     const std::uint32_t want = s.reqGen.load(std::memory_order_relaxed);
     if (s.reseek.load(std::memory_order_acquire) != 0u && s.execGen.load(std::memory_order_relaxed) == want &&
