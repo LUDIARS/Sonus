@@ -138,3 +138,20 @@
 | D-81 | 40 件の shuffle: 各パスで全件 1 回、境界で同じものが続かない、パスごとに違う並び、再現する | `D81_ShuffleOfFortyEntriesPlaysEachOncePerPass` |
 
 D-76（Stinger の予約を 1 ブロック早く発火）は、`ReservationAction::Stinger` を作る経路が公開 API に無いため外から検証できない（実装者のテストは IMusicSystem を包んで入力を注入している）。
+
+---
+
+## 再確認 2（4c70a64）
+
+`Defect_music_long_stall_beat_early` は直ったので `music_indep_fixed_long_stall_beat_early` に改名した。`music_indep_recheck2_test.cpp`:
+
+| 決定 | 性質 | テスト |
+| --- | --- | --- |
+| D-78 | 4 ブロックのストールの後、遷移（次の小節）・Stinger（次の拍）・マーカー・拍がすべて遅れた時間軸に従い、各 1 回。拍 1 の誤差は 1 ブロック以内。別の音楽 Playback の拍は影響を受けない | `LongStallDelaysTransitionStingerMarkerAndBeatsOfThatPlaybackOnly` |
+| D-78 | ストールの途中で Playback を止めると、保留分が 1 回だけ配送され、終了後には何も来ず、次の Playback は正確な拍で始まる | `PlaybackEndingDuringAStallDeliversItsHeldNoticesOnce` |
+| D-71 | 4 秒に約 150 点（Segment に 256 点）のテンポ変化でも拍と予約がサンプル単位で正確 | `MoreThan64TempoChangesWithinFourSeconds` |
+| D-71, D-75 | 64 点を超えて古い点が捨てられた後の後方・前方シーク（剰余）、素材の位置、拍の番号、直後の予約 | `SeeksAfterThePassedPointsWereDroppedAndReservationsAfterThem` |
+| D-71, D-75 | 拍子が変わる小節への前方シーク、Segment 終端をまたぐ剰余、直後の NEXT_BAR | `SeekForwardIntoAnotherSignatureAndAcrossTheSegmentEnd` |
+| D-71 | ブロックの途中（CLOCK_SAMPLE）のシーク: 同じブロックのシーク前の拍は旧番号、シーク時刻の拍は新番号 | `SeekInsideABlockKeepsTheEarlierBeatOfThatBlock` |
+
+`transport_beats`（D-68）は、`snd_render_context` を合成コールバックに渡す実装がまだ無い（バスエフェクトでは常に -1）。そのため検証できない。

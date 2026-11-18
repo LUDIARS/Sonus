@@ -1,4 +1,4 @@
-// Defect (independent music re-check of D-78): during a sound-priority stall that
+// Fixed defect (independent music re-check of D-78; was Defect_music_long_stall_beat_early, fixed in 4c70a64): during a sound-priority stall that
 // lasts several blocks, a beat is announced much earlier than the transport
 // reaches it.
 //
@@ -16,7 +16,7 @@
 
 using namespace mi;
 
-SND_TEST(MusicIndepDefect, LongStallAnnouncesABeatAtMostOneBlockEarly) {
+SND_TEST(MusicIndepFixed, LongStallAnnouncesABeatAtMostOneBlockEarly) {
   MusicProject p("defect-long-stall");
   p.Asset("s", Material(kBar, 0.3f), "\"stallPolicy\": \"sound\"");
   p.Segment("S1", "s", 1);
