@@ -120,13 +120,13 @@ void CallbackKind::Shutdown() noexcept {
   live_.store(0, std::memory_order_relaxed);
 }
 
-std::uint32_t CallbackKind::AcquireRing(std::uint32_t inst) noexcept {
+std::uint32_t CallbackKind::AcquireRing(std::uint32_t inst, std::uint64_t pos) noexcept {
   for (std::uint32_t r = 0; r < ringCap_; ++r) {
     CallbackRing& ring = rings_[r];
     if (ring.inst != kInvalidSlot || Busy(ring) != 0u) continue;
     ring.inst = inst;
-    ring.written.store(0, std::memory_order_relaxed);
-    ring.consumed.store(0, std::memory_order_relaxed);
+    ring.written.store(pos, std::memory_order_relaxed);
+    ring.consumed.store(pos, std::memory_order_relaxed);
     return r;
   }
   return kInvalidSlot;
@@ -134,8 +134,9 @@ std::uint32_t CallbackKind::AcquireRing(std::uint32_t inst) noexcept {
 
 void CallbackKind::FreeInst(std::uint32_t i) noexcept {
   CallbackInst& in = inst_[i];
-  if (in.ring != kInvalidSlot) rings_[in.ring].inst = kInvalidSlot;
-  in.ring = kInvalidSlot;
+  const std::uint32_t r = in.ring.load(std::memory_order_relaxed);
+  if (r != kInvalidSlot) rings_[r].inst = kInvalidSlot;
+  in.ring.store(kInvalidSlot, std::memory_order_release);
   std::atomic_ref<std::uint32_t>(in.state).store(0u, std::memory_order_release);
   freeInst_[freeCount_++] = i;
   live_.fetch_sub(1u, std::memory_order_relaxed);
@@ -172,17 +173,15 @@ void CallbackKind::Start(const SourceStartRequest* requests, std::uint32_t count
     in.called.store(0, std::memory_order_relaxed);
     in.waiting = 1;
     in.played = 0;
-    in.ring = kInvalidSlot;
+    in.pos.store(0, std::memory_order_relaxed);
+    in.virt = (rq.flags & kStartVirtual) != 0u ? 1u : 0u;
+    in.ring.store(kInvalidSlot, std::memory_order_relaxed);
     const bool low = p->desc.mode == SND_SYNTH_LOW_LATENCY || (rq.flags & kStartLowLatency) != 0u;
     in.lowLatency.store(low ? 1u : 0u, std::memory_order_relaxed);
-    if (!low) {
-      in.ring = AcquireRing(i);
-      if (in.ring == kInvalidSlot) {
-        freeInst_[freeCount_++] = i;
-        rejected_.fetch_add(1u, std::memory_order_relaxed);
-        res.endDetail = SND_END_DETAIL_VOICE_LIMIT;
-        continue;
-      }
+    if (!low && in.virt == 0u) {
+      const std::uint32_t r = AcquireRing(i, 0u);
+      if (r == kInvalidSlot) rejected_.fetch_add(1u, std::memory_order_relaxed);  // waits (D-97)
+      in.ring.store(r, std::memory_order_relaxed);
     }
     // Publishes the instance to the RT workers of this block (they read `state` first).
     std::atomic_ref<std::uint32_t>(in.state).store(1u, std::memory_order_release);
@@ -199,9 +198,17 @@ void CallbackKind::Release(const SlotIndex* sourceSlots, std::uint32_t count) no
   }
 }
 
-// Seek / loop do not apply to generated sound; pause and virtualisation need nothing
-// (core does not render a paused or virtual voice; the playhead stands or advances).
-void CallbackKind::Control(const SourceControlOp*, std::uint32_t) noexcept {}
+// Seek / loop do not apply to generated sound; pause needs nothing (core does not render
+// a paused voice). A virtual voice gives its ring back, a real one wants one (D-97);
+// ScheduleBackground does both once no job of the ring runs.
+void CallbackKind::Control(const SourceControlOp* ops, std::uint32_t count) noexcept {
+  for (std::uint32_t k = 0; k < count; ++k) {
+    const SourceControlOp& op = ops[k];
+    if (op.sourceSlot >= instCap_ || inst_[op.sourceSlot].state != 1u) continue;
+    if (op.op == ControlOp::Virtualize) inst_[op.sourceSlot].virt = 1u;
+    if (op.op == ControlOp::Devirtualize) inst_[op.sourceSlot].virt = 0u;
+  }
+}
 
 void CallbackKind::QueryReady(const SlotIndex*, std::uint32_t count, std::uint8_t* ready) const noexcept {
   for (std::uint32_t k = 0; k < count; ++k) ready[k] = 1u;
@@ -256,6 +263,7 @@ void CallbackKind::RenderBatch(const source::RenderBatch& batch, VoiceRenderStat
     in.refBps.store(bps, std::memory_order_release);
     in.seq.store(s0 + 2u, std::memory_order_release);
     it.playhead->frame = pos + n;
+    in.pos.store(pos + n, std::memory_order_relaxed);
     st.framesRendered = n;
     if (in.muted.load(std::memory_order_acquire) != 0u) continue;  // demoted, no ring yet: silence
     float* outs[kMaxChannels];
@@ -270,8 +278,12 @@ void CallbackKind::RenderBatch(const source::RenderBatch& batch, VoiceRenderStat
       }
       continue;
     }
-    if (in.ring == kInvalidSlot) continue;
-    CallbackRing& ring = rings_[in.ring];
+    const std::uint32_t ri = in.ring.load(std::memory_order_acquire);
+    if (ri == kInvalidSlot) {  // waiting for a ring (D-97): silence, then a full ring again
+      in.waiting = 1;
+      continue;
+    }
+    CallbackRing& ring = rings_[ri];
     const std::uint64_t w = ring.written.load(std::memory_order_acquire);
     const std::uint64_t avail = w > pos ? w - pos : 0u;
     if (in.waiting != 0u && avail >= in.aheadFrames) in.waiting = 0;
@@ -304,9 +316,12 @@ void CallbackKind::AdvanceVirtual(const AdvanceItem* items, std::uint32_t count,
     status[k] = VoiceRenderStatus{};
     const AdvanceItem& a = items[k];
     a.playhead->frame += a.outputFrames;
-    if (a.sourceSlot < instCap_ && inst_[a.sourceSlot].state == 1u && inst_[a.sourceSlot].ring != kInvalidSlot) {
-      rings_[inst_[a.sourceSlot].ring].consumed.store(a.playhead->frame, std::memory_order_release);
-      inst_[a.sourceSlot].waiting = 1;  // back from virtual: wait for a full ring again
+    if (a.sourceSlot < instCap_ && inst_[a.sourceSlot].state == 1u) {
+      CallbackInst& in = inst_[a.sourceSlot];
+      in.pos.store(a.playhead->frame, std::memory_order_relaxed);
+      const std::uint32_t ri = in.ring.load(std::memory_order_relaxed);
+      if (ri != kInvalidSlot) rings_[ri].consumed.store(a.playhead->frame, std::memory_order_release);
+      in.waiting = 1;  // back from virtual: wait for a full ring again
     }
   }
 }
@@ -316,27 +331,42 @@ void CallbackKind::ScheduleBackground(const BlockInfo&) noexcept {
   for (std::uint32_t i = 0; i < instCap_; ++i) {
     CallbackInst& in = inst_[i];
     if (in.state == 0u) continue;
+    std::uint32_t ri = in.ring.load(std::memory_order_relaxed);
     if (in.state == 2u) {
-      if (in.ring == kInvalidSlot || Busy(rings_[in.ring]) == 0u) FreeInst(i);
+      if (ri == kInvalidSlot || Busy(rings_[ri]) == 0u) FreeInst(i);
       continue;
     }
     if (in.demote.load(std::memory_order_acquire) != 0u) {
-      if (in.ring == kInvalidSlot) in.ring = AcquireRing(i);
-      if (in.ring != kInvalidSlot) {
+      if (ri == kInvalidSlot) ri = AcquireRing(i, in.pos.load(std::memory_order_relaxed));
+      if (ri != kInvalidSlot) {
+        in.ring.store(ri, std::memory_order_release);
         in.demote.store(0u, std::memory_order_relaxed);
         demotions_.fetch_add(1u, std::memory_order_relaxed);
-        rings_[in.ring].written.store(rings_[in.ring].consumed.load(std::memory_order_acquire), std::memory_order_relaxed);
         in.lowLatency.store(0u, std::memory_order_release);
         in.muted.store(0u, std::memory_order_release);  // RenderBatch waits for a full ring (waiting)
       }
       continue;
     }
-    if (in.lowLatency.load(std::memory_order_relaxed) != 0u || in.ring == kInvalidSlot) continue;
-    CallbackRing& ring = rings_[in.ring];
+    if (in.lowLatency.load(std::memory_order_relaxed) != 0u) continue;
+    // D-97: only a real voice holds a ring.
+    if (in.virt != 0u) {
+      if (ri != kInvalidSlot && Busy(rings_[ri]) == 0u) {
+        rings_[ri].inst = kInvalidSlot;
+        in.ring.store(kInvalidSlot, std::memory_order_release);
+      }
+      continue;
+    }
+    if (ri == kInvalidSlot) {
+      ri = AcquireRing(i, in.pos.load(std::memory_order_relaxed));
+      if (ri == kInvalidSlot) continue;  // still waiting
+      in.ring.store(ri, std::memory_order_release);
+    }
+    CallbackRing& ring = rings_[ri];
     if (Busy(ring) != 0u || in.seq.load(std::memory_order_acquire) == 0u) continue;  // no rendered block yet
     const std::uint64_t r = ring.consumed.load(std::memory_order_acquire);
     const std::uint64_t w = ring.written.load(std::memory_order_relaxed);
     if (w >= r + in.aheadFrames + blockFrames_) continue;  // full enough
+    ring.owner.store(in.playback.Value(), std::memory_order_relaxed);
     std::atomic_ref<std::uint32_t>(ring.done).store(1u, std::memory_order_release);
     std::atomic_ref<std::uint32_t>(ring.cancel).store(0u, std::memory_order_relaxed);
     JobDesc job{};
@@ -399,6 +429,15 @@ void CallbackKind::RunJob(CallbackRing& ring) noexcept {
     w += len;
     ring.written.store(w, std::memory_order_release);
   }
+}
+
+bool CallbackKind::PlaybackBusy(std::uint64_t handle) const noexcept {
+  if (rings_ == nullptr || handle == 0u) return false;
+  for (std::uint32_t r = 0; r < ringCap_; ++r) {
+    // owner is stored before done (release): a busy ring reads its job's owner.
+    if (Busy(rings_[r]) != 0u && rings_[r].owner.load(std::memory_order_relaxed) == handle) return true;
+  }
+  return false;
 }
 
 CallbackStats CallbackKind::Stats() const noexcept {

@@ -61,7 +61,7 @@ void UpdateTransport(Impl& im) noexcept {
   im.fire.count = 0;
   im.musicFrame.block = source::BlockInfo{im.block, im.clock, im.cfg.blockFrames, im.cfg.sampleRate};
   im.musicFrame.lookaheadFrames = im.cfg.blockFrames;
-  im.musicFrame.outputLatencySeconds = im.desc.outputLatencySeconds;
+  im.musicFrame.outputLatencySeconds = im.outputLatency.load(std::memory_order_relaxed);
   if (im.music != nullptr) {
     im.music->UpdateTransport(im.musicFrame, im.tables, im.fire);
     return;

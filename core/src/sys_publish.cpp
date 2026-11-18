@@ -75,6 +75,8 @@ void Publish(Impl& im) noexcept {
   st.virtual_voices = t.Voice.rows.count - (t.RealVoice.rows.count < t.Voice.rows.count ? t.RealVoice.rows.count : t.Voice.rows.count);
   st.streams = t.Stream.rows.count;
   st.lod_level = im.rd.lod;
+  st.output_latency_s = static_cast<float>(im.outputLatency.load(std::memory_order_relaxed) +
+                                           double(im.config.render_ahead_blocks) * im.cfg.blockFrames / im.cfg.sampleRate);
   // Stream stalls (6.3): the growth of Stream.stallCount (written by the Stream source in Render).
   {
     const schema::TableRows& sr = t.Stream.rows;

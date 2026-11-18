@@ -120,7 +120,9 @@ snd_result snd_update(snd_system* sys) {
   if (sys == nullptr) return SND_ERR_INVALID_ARGUMENT;
   if (std::this_thread::get_id() != sys->owner) return SND_ERR_WRONG_THREAD;
   snd::compose::ServiceDevice(*sys);
-  return sys->core->Update();
+  const snd_result r = sys->core->Update();
+  snd::compose::DeliverHeldEnds(*sys);
+  return r;
 }
 snd_result snd_register_thread(snd_system* sys) { return sys ? sys->core->RegisterThread() : SND_ERR_INVALID_ARGUMENT; }
 snd_result snd_unregister_thread(snd_system* sys) { return sys ? sys->core->UnregisterThread() : SND_ERR_INVALID_ARGUMENT; }
@@ -146,11 +148,7 @@ snd_result snd_resume(snd_system* sys) {
 
 snd_result snd_set_callbacks(snd_system* sys, const snd_callbacks* callbacks) {
   if (sys == nullptr) return SND_ERR_INVALID_ARGUMENT;
-  const snd_result r = sys->core->SetCallbacks(callbacks);
-  if (r != SND_OK) return r;
-  sys->hasCallbacks = callbacks != nullptr;
-  sys->callbacks = callbacks != nullptr ? *callbacks : snd_callbacks{};
-  return SND_OK;
+  return snd::compose::SetCallbacks(*sys, callbacks);
 }
 
 // ---------------------------------------------------------------------------------------

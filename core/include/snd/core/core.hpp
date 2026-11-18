@@ -288,6 +288,9 @@ class System {
   void RenderBlock(float* interleaved) noexcept;
   void Render(float* interleaved, std::uint32_t frames) noexcept;
   std::uint32_t OutputChannels() const noexcept;
+  // Any thread: the device's latency once it is open (CoreDesc::outputLatencySeconds is an
+  // estimate taken before). Used from the next block (8.1 notification times, stats).
+  void SetOutputLatency(double seconds) noexcept;
   std::uint32_t BlockFrames() const noexcept;
   std::uint32_t SampleRate() const noexcept;
   // Last block's timing (read on the audio thread or after it stopped).

@@ -22,8 +22,9 @@
 //                       from the next block and demotes it to Buffered (when a
 //                       ring is free; otherwise it stays muted).
 // Rings: min(maxRealVoices, kMaxRings) of NextPow2((ahead + 2) x blockFrames)
-// frames x SND_MAX_CHANNELS. A Buffered start without a free ring fails
-// (SND_END_DETAIL_VOICE_LIMIT).
+// frames x SND_MAX_CHANNELS. Only a real Buffered voice holds a ring (D-97): a
+// virtual one gives it back, and a voice that finds no free ring (start,
+// devirtualisation) stays silent and waits for one (as if still virtual).
 //
 // snd_render_context: clock_sample = the common-clock sample of the first frame
 // (LowLatency: exact; Buffered: start clock + frames, extrapolated from the
@@ -59,6 +60,7 @@ struct CallbackRing {
   std::uint32_t done = 0;                   // JobDesc done counter
   std::uint32_t cancel = 0;                 // JobDesc cancel flag (Shutdown)
   std::uint32_t inst = 0;                   // owning instance (kInvalidSlot: free)
+  std::atomic<std::uint64_t> owner{0};      // playback handle of the posted job (PlaybackBusy, D-97)
   CallbackKind* kind = nullptr;
 };
 
@@ -68,7 +70,11 @@ struct CallbackInst {
   HandleRef playback{};
   std::uint32_t channels = 0;
   std::uint32_t aheadFrames = 0;
-  std::uint32_t ring = kInvalidSlot;
+  // The ring (kInvalidSlot: none). Written by Start / ScheduleBackground (audio thread),
+  // read by RenderBatch (RT workers: a late chunk may run during Publish).
+  std::atomic<std::uint32_t> ring{kInvalidSlot};
+  std::uint32_t virt = 0;                    // audio thread: virtual (no ring, D-97)
+  std::atomic<std::uint64_t> pos{0};         // voice frame after the last render / advance
   // RenderBatch -> job / ScheduleBackground (relaxed fields behind `seq`, a seqlock).
   std::atomic<std::uint32_t> seq{0};
   std::atomic<std::uint64_t> refPos{0};     // voice frame of the last rendered block's first frame
@@ -88,7 +94,7 @@ struct CallbackStats {
   std::uint32_t instances = 0;
   std::uint64_t underruns = 0;  // Buffered blocks with missing frames after the voice played
   std::uint64_t demotions = 0;  // LowLatency calls over the deadline
-  std::uint64_t rejected = 0;   // Buffered starts without a free ring
+  std::uint64_t rejected = 0;   // Buffered voices that found no free ring (they wait, D-97)
   std::uint64_t calls = 0;      // callback invocations
 };
 
@@ -113,13 +119,16 @@ class CallbackKind final : public ISourceKind {
   std::uint32_t PrimeFrames(const SourceAsset&, std::uint64_t) const noexcept override { return 0; }
 
   CallbackStats Stats() const noexcept;
+  // Any thread (D-97): a render-ahead job of the playback `handle` is posted or running,
+  // so its callback may still be called.
+  bool PlaybackBusy(std::uint64_t handle) const noexcept;
 
  private:
   static void JobThunk(void* data) noexcept;
   void RunJob(CallbackRing& ring) noexcept;
   void Call(CallbackInst& in, float* const* out, std::uint32_t channels, std::uint32_t frames, std::uint64_t clock,
             double beats, std::uint32_t flags) noexcept;
-  std::uint32_t AcquireRing(std::uint32_t inst) noexcept;
+  std::uint32_t AcquireRing(std::uint32_t inst, std::uint64_t pos) noexcept;
   void FreeInst(std::uint32_t inst) noexcept;
   float* RingChannel(const CallbackRing& r, std::uint32_t c) const noexcept {
     return r.data + std::size_t{c} * ringFrames_;

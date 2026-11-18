@@ -242,14 +242,19 @@ snd_result Compose(snd_system& sys, const snd_allocator*, const snd_file_system*
   Note("create:io");
   if (!sys.kinds.Init(a, &sys.io, &sys.streamPool, cfg.max_voice_channels, cfg.max_banks)) return SND_ERR_OUT_OF_BUDGET;
   Note("create:source-kinds");
+  sys.heldEnds = static_cast<snd_system::HeldEnd*>(
+      a.Allocate(sizeof(snd_system::HeldEnd) * cfg.max_playbacks, 16, MemTag::Misc));
+  if (sys.heldEnds == nullptr) return SND_ERR_OUT_OF_BUDGET;
 
   // Output device: its latency feeds core's notification timing (8.1). The value is the
   // device's estimate before Open (D-93).
   if (cfg.output.device != nullptr) {
     sys.device = sys.cDevice.Emplace(*cfg.output.device);
   } else {
-    sys.ownDevice = platform::CreateOutputDevice(platform::OutputBackend::Default, a, nullptr);
-    if (sys.ownDevice == nullptr) return SND_ERR_NO_DEVICE;
+    sys.outputAlloc.Bind(&a);
+    sys.outputAlloc.Clear();
+    sys.ownDevice = platform::CreateOutputDevice(platform::OutputBackend::Default, sys.outputAlloc, nullptr);
+    if (sys.ownDevice == nullptr) return sys.outputAlloc.Failed() ? SND_ERR_OUT_OF_BUDGET : SND_ERR_NO_DEVICE;
     sys.device = sys.ownDevice;
   }
 
@@ -305,8 +310,13 @@ snd_result Compose(snd_system& sys, const snd_allocator*, const snd_file_system*
   ad.listenerUser = &sys;
   ad.workgroupSource = sys.ownDevice;  // a game device is opaque (no RTTI): no workgroup
   const DeviceDesc dd{cfg.sample_rate, sys.coreChannels, 0u, cfg.output.device_index};
-  if (!sys.driver.Start(*sys.device, dd, ad, a)) return SND_ERR_NO_DEVICE;
+  sys.outputAlloc.Bind(&a);
+  sys.outputAlloc.Clear();
+  if (!sys.driver.Start(*sys.device, dd, ad, sys.outputAlloc)) {
+    return sys.outputAlloc.Failed() ? SND_ERR_OUT_OF_BUDGET : SND_ERR_NO_DEVICE;
+  }
   sys.driverStarted = true;
+  sys.core->SetOutputLatency(sys.device->OutputLatencySeconds());  // the opened device's value (8.1)
   Note("create:audio-driver");
 
   if (sys.live != nullptr) {
@@ -364,7 +374,7 @@ void Decompose(snd_system& sys) noexcept {
   sys.streamPool.Destroy();
   Note("destroy:io");
   if (sys.ownDevice != nullptr && a != nullptr) {
-    platform::DestroyOutputDevice(sys.ownDevice, *a);
+    platform::DestroyOutputDevice(sys.ownDevice, sys.outputAlloc);
     sys.ownDevice = nullptr;
   }
   sys.cDevice.Reset();
@@ -381,7 +391,92 @@ void Decompose(snd_system& sys) noexcept {
     a->Free(sys.mix, MemTag::Misc);
     sys.mix = nullptr;
   }
+  if (sys.heldEnds != nullptr && a != nullptr) {
+    a->Free(sys.heldEnds, MemTag::Misc);
+    sys.heldEnds = nullptr;
+    sys.heldCount = 0;
+  }
   Note("destroy:services");
+}
+
+// ---------------------------------------------------------------------------------------
+// Callbacks (owner thread, inside core's Update)
+// ---------------------------------------------------------------------------------------
+namespace {
+
+bool CallbackBusy(const snd_system& s, std::uint64_t handle) noexcept {
+  const source::Runtime* rt = s.kinds.SourceRuntime();
+  return rt != nullptr && rt->CallbackBusy(handle);
+}
+
+void SND_CALL OnEnd(void* u, snd_playback_handle p, snd_end_reason r, snd_end_detail d) {
+  snd_system& s = *static_cast<snd_system*>(u);
+  if (s.callbacks.on_end == nullptr) return;
+  // D-97: the game may free a synth's `user` in on_end; a render-ahead job that is still
+  // posted or running would call it afterwards. Hold the record until it is done.
+  if (CallbackBusy(s, p.value) && s.heldEnds != nullptr && s.heldCount < s.config.max_playbacks) {
+    s.heldEnds[s.heldCount++] = snd_system::HeldEnd{p.value, r, d};
+    return;
+  }
+  s.callbacks.on_end(s.callbacks.user, p, r, d);
+}
+void SND_CALL OnMarker(void* u, snd_playback_handle p, snd_id m, const snd_timing* t) {
+  const snd_system& s = *static_cast<const snd_system*>(u);
+  if (s.callbacks.on_marker != nullptr) s.callbacks.on_marker(s.callbacks.user, p, m, t);
+}
+void SND_CALL OnBeat(void* u, snd_transport_handle tr, const snd_musical_time* pos, const snd_timing* t) {
+  const snd_system& s = *static_cast<const snd_system*>(u);
+  if (s.callbacks.on_beat != nullptr) s.callbacks.on_beat(s.callbacks.user, tr, pos, t);
+}
+void SND_CALL OnError(void* u, snd_result code, std::uint32_t detail, std::uint64_t object) {
+  const snd_system& s = *static_cast<const snd_system*>(u);
+  if (s.callbacks.on_error != nullptr) s.callbacks.on_error(s.callbacks.user, code, detail, object);
+}
+void SND_CALL OnBank(void* u, snd_bank_handle b, snd_result r) {
+  const snd_system& s = *static_cast<const snd_system*>(u);
+  if (s.callbacks.on_bank_loaded != nullptr) s.callbacks.on_bank_loaded(s.callbacks.user, b, r);
+}
+void SND_CALL OnLog(void* u, snd_log_level l, const char* f, std::uint64_t a0, std::uint64_t a1) {
+  const snd_system& s = *static_cast<const snd_system*>(u);
+  if (s.callbacks.on_log != nullptr) s.callbacks.on_log(s.callbacks.user, l, f, a0, a1);
+}
+
+}  // namespace
+
+snd_result SetCallbacks(snd_system& sys, const snd_callbacks* callbacks) noexcept {
+  if (callbacks == nullptr) {
+    const snd_result r = sys.core->SetCallbacks(nullptr);
+    if (r != SND_OK) return r;
+    sys.callbacks = snd_callbacks{};
+    sys.hasCallbacks = false;
+    return SND_OK;
+  }
+  snd_callbacks t{};
+  t.user = &sys;
+  t.on_end = callbacks->on_end != nullptr ? &OnEnd : nullptr;
+  t.on_marker = callbacks->on_marker != nullptr ? &OnMarker : nullptr;
+  t.on_beat = callbacks->on_beat != nullptr ? &OnBeat : nullptr;
+  t.on_error = callbacks->on_error != nullptr ? &OnError : nullptr;
+  t.on_bank_loaded = callbacks->on_bank_loaded != nullptr ? &OnBank : nullptr;
+  t.on_log = callbacks->on_log != nullptr ? &OnLog : nullptr;
+  const snd_result r = sys.core->SetCallbacks(&t);
+  if (r != SND_OK) return r;
+  sys.callbacks = *callbacks;
+  sys.hasCallbacks = true;
+  return SND_OK;
+}
+
+void DeliverHeldEnds(snd_system& sys) noexcept {
+  std::uint32_t kept = 0;
+  for (std::uint32_t i = 0; i < sys.heldCount; ++i) {
+    const snd_system::HeldEnd e = sys.heldEnds[i];
+    if (CallbackBusy(sys, e.handle)) {
+      sys.heldEnds[kept++] = e;
+    } else if (sys.callbacks.on_end != nullptr) {
+      sys.callbacks.on_end(sys.callbacks.user, snd_playback_handle{e.handle}, e.reason, e.detail);
+    }
+  }
+  sys.heldCount = kept;
 }
 
 bool ResumeDevice(snd_system& sys) noexcept {
@@ -393,10 +488,12 @@ bool ResumeDevice(snd_system& sys) noexcept {
 
 void ServiceDevice(snd_system& sys) noexcept {
   if (sys.resumeRequested.exchange(0u, std::memory_order_acq_rel) != 0u) ResumeDevice(sys);
+  // Notices that came before the game installed on_error stay marked and are delivered
+  // once, at the first snd_update after it did (D-95).
+  if (!sys.hasCallbacks || sys.callbacks.on_error == nullptr) return;
   const std::uint32_t lost = sys.deviceEvents.lost.exchange(0u, std::memory_order_acq_rel);
   std::uint32_t mismatch = 1u;
   const bool rate = sys.deviceEvents.rateMismatch.compare_exchange_strong(mismatch, 2u, std::memory_order_acq_rel);
-  if (!sys.hasCallbacks || sys.callbacks.on_error == nullptr) return;
   for (std::uint32_t i = 0; i < lost; ++i) {
     sys.callbacks.on_error(sys.callbacks.user, SND_ERR_NO_DEVICE, SND_DEVICE_EVENT_LOST, 0u);
   }

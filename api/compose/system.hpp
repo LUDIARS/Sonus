@@ -69,6 +69,26 @@ class Late {
   bool live_ = false;
 };
 
+// Forwards to the system's allocator and remembers a refusal: the output device and the
+// audio driver report only "did not start", and snd_create must tell an allocation
+// failure (SND_ERR_OUT_OF_BUDGET) from a device that does not open (SND_ERR_NO_DEVICE).
+class WatchedAllocator final : public IAllocator {
+ public:
+  void Bind(IAllocator* inner) noexcept { inner_ = inner; }
+  void* Allocate(std::size_t bytes, std::size_t align, MemTag tag) override {
+    void* p = inner_->Allocate(bytes, align, tag);
+    if (p == nullptr) failed_.store(true, std::memory_order_relaxed);
+    return p;
+  }
+  void Free(void* p, MemTag tag) override { inner_->Free(p, tag); }
+  bool Failed() const noexcept { return failed_.load(std::memory_order_relaxed); }
+  void Clear() noexcept { failed_.store(false, std::memory_order_relaxed); }
+
+ private:
+  IAllocator* inner_ = nullptr;
+  std::atomic<bool> failed_{false};
+};
+
 // Device events (any thread: device / OS notification) -> owner thread (snd_update).
 struct DeviceEventFlags {
   std::atomic<std::uint32_t> suspended{0};    // SUSPENDED seen, RESUMED not yet
@@ -124,6 +144,7 @@ struct snd_system {
   snd::IOutputDevice* device = nullptr;
   snd::compose::Late<snd::COutputDevice> cDevice;
   snd::platform::PlatformOutputDevice* ownDevice = nullptr;
+  snd::compose::WatchedAllocator outputAlloc;  // device + driver memory (OUT_OF_BUDGET vs NO_DEVICE)
   snd::platform::AudioDriver driver;
   bool driverStarted = false;
   std::uint32_t coreChannels = 2;
@@ -135,8 +156,17 @@ struct snd_system {
   std::atomic<std::uint32_t> resumeRequested{0};  // snd_resume from a non-owner thread
 
   // --- callbacks (owner thread) ----------------------------------------------------------
+  // The game's callbacks. Core gets trampolines (user = this system): on_end of a synth
+  // playback waits in `heldEnds` while a render-ahead job may still call it (D-97).
   snd_callbacks callbacks{};
   bool hasCallbacks = false;
+  struct HeldEnd {
+    std::uint64_t handle;
+    snd_end_reason reason;
+    snd_end_detail detail;
+  };
+  HeldEnd* heldEnds = nullptr;  // [config.max_playbacks]
+  std::uint32_t heldCount = 0;
 };
 
 namespace snd::compose {
@@ -152,6 +182,11 @@ void ServiceDevice(snd_system& sys) noexcept;
 // Owner thread: AudioDriver::Resume for a device the OS left SUSPENDED (D-66). false if
 // there was nothing to resume or the device refused.
 bool ResumeDevice(snd_system& sys) noexcept;
+
+// Owner thread. Installs the game's callbacks (nullptr clears them) through core.
+snd_result SetCallbacks(snd_system& sys, const snd_callbacks* callbacks) noexcept;
+// Owner thread, after core's Update: on_end records whose callback has finished since.
+void DeliverHeldEnds(snd_system& sys) noexcept;
 
 // Lifecycle steps reported to the observer (tests).
 void Note(const char* step) noexcept;

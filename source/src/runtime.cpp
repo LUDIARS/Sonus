@@ -73,6 +73,10 @@ void Runtime::BankUnregistered(void* runtime, std::uint16_t bankSlot) noexcept {
   // other banks keep theirs (never opened again while they play).
 }
 
+bool Runtime::CallbackBusy(std::uint64_t handle) const noexcept {
+  return impl_ != nullptr && impl_->callback.PlaybackBusy(handle);
+}
+
 RuntimeStats Runtime::Stats() const noexcept {
   RuntimeStats s;
   if (impl_ == nullptr) return s;

@@ -402,6 +402,23 @@ void ApplyStinger(Impl& im, const cmd::SetMusicState& c) noexcept {
   }
 }
 
+// snd_destroy_user_buffer (5.1, D-94): the playbacks reading the buffer stop now (a stream
+// never ends by itself); the buffer is released once none references it (ReleaseOwnedRows).
+void DestroyUserBuffer(Impl& im, SlotIndex slot, std::uint32_t generation) noexcept {
+  schema::Tables& t = im.tables;
+  im.ap.userBufferDestroy[slot] = generation;
+  const schema::TableRows& pr = t.Playback.rows;
+  for (std::uint32_t d = 0; d < pr.count; ++d) {
+    const SlotIndex ps = base::rows::SlotAt(pr, d);
+    const DynamicDesc& dd = im.ap.dynamic[ps];
+    if (dd.kind != static_cast<std::uint32_t>(SourceKind::UserBuffer) || dd.userBuffer.slot != slot ||
+        dd.userBuffer.generation != generation) {
+      continue;
+    }
+    RequestStop(im, HandleRef{ps, pr.generation[ps]}, 0.0f);
+  }
+}
+
 void SetBankUnloading(Impl& im, HandleRef bank, std::uint32_t mode) noexcept {
   if (bank.slot >= im.cfg.maxBanks) return;
   BankAudio& b = im.ap.banks[bank.slot];
@@ -730,7 +747,7 @@ void ApplyOne(Impl& im, const cmd::CommandHeader& h, const std::uint8_t* p) noex
       const auto c = Load<cmd::DestroyUserBuffer>(p);
       if (c.buffer.slot < im.cfg.maxUserBuffers &&
           im.userBuffers[c.buffer.slot].generation.load(std::memory_order_acquire) == c.buffer.generation) {
-        im.ap.userBufferDestroy[c.buffer.slot] = c.buffer.generation;
+        DestroyUserBuffer(im, c.buffer.slot, c.buffer.generation);
       }
       break;
     }
@@ -800,7 +817,7 @@ void ApplyFallback(Impl& im, const cmd::OverflowFallback& fb) noexcept {
   });
   forBits(fb.destroyUserBuffer, im.cfg.maxUserBuffers, [&](std::uint32_t s) {
     const std::uint32_t g = im.userBuffers[s].generation.load(std::memory_order_acquire);
-    if (g != 0u) im.ap.userBufferDestroy[s] = g;
+    if (g != 0u) DestroyUserBuffer(im, s, g);
   });
   forBits(fb.unloadBank, im.cfg.maxBanks, [&](std::uint32_t s) {
     if (im.ap.banks[s].state == BankAudioState::Registered) {

@@ -2,6 +2,7 @@
 // messages -> core commands, profiler / recording streams, heartbeat).
 #include "snd/livelink/server.hpp"
 
+#include <atomic>
 #include <cstring>
 #include <new>
 
@@ -78,6 +79,9 @@ struct Server::Impl final : FrameReader::Handler {
   std::atomic<std::uint16_t> port{0};
   bool started = false;
   bool registered = false;
+  // 0 while the thread has not tried to register, 1 registered, 2 refused (api D-93: Start
+  // returns only after the thread holds its registered place, so no game thread takes it).
+  std::atomic<std::uint32_t> registration{0};
 
   // connection
   Phase phase = Phase::AwaitHello;
@@ -759,6 +763,7 @@ struct Server::Impl final : FrameReader::Handler {
   void Run() noexcept {
     platform::SetCurrentThreadName("snd-livelink");
     registered = sys->RegisterThread() == SND_OK;
+    registration.store(registered ? 1u : 2u, std::memory_order_release);
 
     if (rt->config().livelink.record_commands != 0u && d.recordSink != nullptr) {
       recMode = RecMode::Sink;
@@ -942,11 +947,20 @@ int Server::Start() noexcept {
   platform::ThreadDesc td;
   td.name = "snd-livelink";
   td.priority = platform::ThreadPriority::Normal;
+  im.registration.store(0, std::memory_order_relaxed);
   if (!im.thread.Start(td, &Impl::Main, &im)) {
     im.tcp.Close();
     return SND_ERR_LIMIT_REACHED;
   }
   im.started = true;
+  // The thread registers itself first thing: wait for it, so that its registered place
+  // is taken before Start returns (the api reserves one place for it, D-93).
+  std::uint32_t reg = 0;
+  while ((reg = im.registration.load(std::memory_order_acquire)) == 0u) platform::YieldThread();
+  if (reg != 1u) {
+    Stop();
+    return SND_ERR_LIMIT_REACHED;
+  }
   return SND_OK;
 }
 

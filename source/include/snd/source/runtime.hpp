@@ -172,6 +172,9 @@ class Runtime {
   // (one atomic increment): the PCM cache frees the bank's entries once unpinned.
   static void BankUnregistered(void* runtime, std::uint16_t bankSlot) noexcept;
   RuntimeStats Stats() const noexcept;
+  // Any thread (D-97): a synth callback of the playback `handle` may still be called (a
+  // render-ahead job is posted or running). The api holds on_end back meanwhile.
+  bool CallbackBusy(std::uint64_t handle) const noexcept;
 
   struct Impl;  // source/src
 

@@ -620,6 +620,7 @@ struct System::Impl {
   // --- services ------------------------------------------------------------------
   base::MpmcRing<PostedJob> jobQueue;
   base::MpmcRing<source::IoReadRequest> ioQueue;
+  bool servicesReady = false;  // the queues above are initialised (a failed Create may stop before)
   JobWrap* jobWraps = nullptr;
   base::ConcurrentIndexFreeList jobWrapFree;
   std::atomic<std::uint32_t> jobEpoch{0};
@@ -679,6 +680,8 @@ struct System::Impl {
 
   // Statistics (audio thread).
   snd_stats stats{};
+  // IOutputDevice::OutputLatencySeconds; CoreDesc's value until System::SetOutputLatency.
+  std::atomic<double> outputLatency{0.0};
   BlockProfile profile{};
   std::uint64_t timeSumNs = 0;
   std::uint32_t timeSamples = 0;

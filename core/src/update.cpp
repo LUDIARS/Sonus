@@ -195,7 +195,8 @@ snd_result System::Update() noexcept {
   base::notify::DrainEvents(*im.eventRing, [&](const notify::EventRecord& r) {
     const snd_callbacks& cb = im.callbacks;
     snd_timing timing{r.clock, (static_cast<double>(r.clock) - static_cast<double>(fh.clock)) / rate +
-                                   static_cast<double>(im.stats.output_latency_s)};
+                                   im.outputLatency.load(std::memory_order_relaxed) +
+                                   double(im.config.render_ahead_blocks) * im.cfg.blockFrames / rate};
     switch (static_cast<notify::EventType>(r.type)) {
       case notify::EventType::Beat:
         if (cb.on_beat != nullptr) {
