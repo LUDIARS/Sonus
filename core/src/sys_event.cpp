@@ -297,14 +297,17 @@ void StopVoice(Ctx& c, SlotIndex v, float fadeSeconds, ClockSample at = 0, bool 
   if (lc.state == static_cast<std::uint8_t>(VoiceStateId::Releasing)) {
     // Already releasing: only a shorter end (the unload discard) changes it, and the
     // envelope continues from its current level down to 0 within fadeSeconds.
+    // The envelope continues from its level now and reaches 0 at max(at, now) + fadeSeconds
+    // (music: an interrupting transition ends an outgoing fade sooner).
     const float sr = static_cast<float>(im.cfg.sampleRate);
-    const ClockSample newStop = c.clock + static_cast<ClockSample>(fadeSeconds * sr + 0.5f);
+    const ClockSample from = at > c.clock ? at : c.clock;
+    const ClockSample newStop = from + static_cast<ClockSample>(fadeSeconds * sr + 0.5f);
     if (!shorten || !(fadeSeconds > 0.0f) || newStop >= lc.stopClock) return;
     const float relFrames = lc.releaseSeconds * sr;
     float level = relFrames > 0.0f ? static_cast<float>(lc.stopClock - c.clock) / relFrames : 0.0f;
     level = level > 1.0f ? 1.0f : level;
     if (level <= 0.0f) return;
-    lc.releaseSeconds = fadeSeconds / level;
+    lc.releaseSeconds = static_cast<float>(newStop - c.clock) / sr / level;
     lc.stopClock = newStop;
     return;
   }
@@ -391,6 +394,7 @@ bool CreateVoice(Ctx& c, StartContext& sc, SourceKind kind, const void* params, 
   vs.sourceRate = asset != nullptr && asset->codec.sample_rate != 0u ? static_cast<float>(asset->codec.sample_rate)
                                                                    : static_cast<float>(im.cfg.sampleRate);
   vs.musicGain = 1.0f;
+  vs.musicGainTarget = 1.0f;
   vs.fadeInSeconds = fadeInSeconds;
   vs.musicTag = musicTag;
   vs.firstClock = c.clock;
@@ -889,9 +893,16 @@ void ApplyFireEntry(Ctx& c, const music::FireEntry& f) noexcept {
 void RunMusic(Ctx& c) noexcept {
   Impl& im = c.im;
   schema::Tables& t = c.t;
-  if (im.music == nullptr) return;
+  if (im.music == nullptr) {
+    im.ev.musicInputCount = 0;
+    return;
+  }
   music::MusicVoiceRequestList list{im.ev.musicRequests, 0u, im.ev.musicRequestCap};
   im.music->RunMusicLogic(im.musicFrame, t, im.ev.musicInputs, im.ev.musicInputCount, list);
+  // Inputs are consumed here (not at the next ApplyCommands): VoiceEnded inputs that
+  // FlushSourceCalls posts below (a source refused a music voice) reach the music system
+  // in the next block instead of being dropped.
+  im.ev.musicInputCount = 0;
   std::uint32_t nres = 0;
   for (std::uint32_t i = 0; i < list.count && i < list.capacity; ++i) {
     const music::MusicVoiceRequest& rq = list.requests[i];
@@ -901,13 +912,17 @@ void RunMusic(Ctx& c) noexcept {
     switch (rq.op) {
       case music::MusicVoiceOp::StartClip: {
         const BankRecord* br = RegisteredBank(im, rq.clip.bankSlot);
-        if (pd == kNoSlot || br == nullptr || rq.clip.clipIndex >= br->view->Rows(bf::chunk::CLIP)) {
+        // kClipRefAssetTrack: clipIndex names an ASST row (segments / stems), else a CLIP row.
+        const bool assetRow = rq.clip.trackIndex == kClipRefAssetTrack;
+        if (pd == kNoSlot || br == nullptr ||
+            (!assetRow && rq.clip.clipIndex >= br->view->Rows(bf::chunk::CLIP))) {
           res.endDetail = SND_END_DETAIL_BANK_UNLOADED;
           break;
         }
         const bk::BankView& v = *br->view;
-        const std::uint32_t ck = v.Column<bk::col::CLIP_kind>()[rq.clip.clipIndex];
-        const std::uint32_t target = v.Column<bk::col::CLIP_target>()[rq.clip.clipIndex];
+        const std::uint32_t ck =
+            assetRow ? static_cast<std::uint32_t>(bf::ClipKind::Asset) : v.Column<bk::col::CLIP_kind>()[rq.clip.clipIndex];
+        const std::uint32_t target = assetRow ? rq.clip.clipIndex : v.Column<bk::col::CLIP_target>()[rq.clip.clipIndex];
         if (ck != static_cast<std::uint32_t>(bf::ClipKind::Asset) || target >= br->assetCount) {
           res.endDetail = SND_END_DETAIL_WRONG_EVENT_KIND;
           break;
@@ -928,10 +943,12 @@ void RunMusic(Ctx& c) noexcept {
         if (er != nullptr) sc.priority = er->view->Column<bk::col::EVNT_priority>()[sc.ref.eventIndex];
         const SourceKind kind = a.form == source::LoadForm::Stream ? SourceKind::Stream : SourceKind::Sample;
         if (CreateVoice(c, sc, kind, nullptr, &a, a.codec.channels, rq.clip, sc.ref.eventIndex, rq.clip.trackIndex,
-                        rq.startClock, rq.startFrame, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f,
+                        rq.startClock, rq.startFrame, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f,
+                        rq.fadeSeconds > 0.0f ? rq.fadeSeconds : 0.0f,  // StartClip: fade-in
                         a.loopEnd != 0u ? source::kStartLoop : 0u, sc.busSlot, rq.tag, true, rq.syncGroup)) {
           res.voiceSlot = Priv(im, rq.playbackSlot).voiceListHead;
           im.ev.vs[res.voiceSlot].musicGain = rq.gain;
+          im.ev.vs[res.voiceSlot].musicGainTarget = rq.gain;
         } else {
           res.endDetail = sc.failDetail;
         }
@@ -939,7 +956,9 @@ void RunMusic(Ctx& c) noexcept {
       }
       case music::MusicVoiceOp::StopVoice:
         if (rq.voiceSlot < im.cfg.maxVirtual) {
-          StopVoice(c, rq.voiceSlot, rq.fadeSeconds);
+          // Release from startClock (0 = now); a voice already releasing ends sooner if asked.
+          StopVoice(c, rq.voiceSlot, rq.fadeSeconds > 0.0f ? rq.fadeSeconds : im.cfg.shortFadeSeconds, rq.startClock,
+                    true);
           res.voiceSlot = rq.voiceSlot;
         }
         break;
@@ -947,7 +966,10 @@ void RunMusic(Ctx& c) noexcept {
         if (rq.voiceSlot < im.cfg.maxVirtual && base::rows::IsLive(t.Voice.rows, rq.voiceSlot)) {
           VoiceStatic& vs = im.ev.vs[rq.voiceSlot];
           const float blocks = rq.fadeSeconds * static_cast<float>(im.cfg.sampleRate) / static_cast<float>(im.cfg.blockFrames);
-          vs.musicGainStep = blocks <= 1.0f ? (rq.gain - vs.musicGain) : (rq.gain - vs.musicGain) / blocks;
+          // Linear per-block ramp to the target over fadeSeconds (EvaluateDspParams turns the
+          // per-block values into per-sample ramps); within one block: the target at once.
+          vs.musicGainTarget = rq.gain;
+          vs.musicGainStep = blocks <= 1.0f ? 0.0f : (rq.gain - vs.musicGain) / blocks;
           if (blocks <= 1.0f) vs.musicGain = rq.gain;
           vs.lowpassHz = vs.lowpassHz;  // unchanged
           res.voiceSlot = rq.voiceSlot;
@@ -964,6 +986,7 @@ void RunMusic(Ctx& c) noexcept {
         df.kind = DeferredKind::Play;
         df.handle = h;
         df.ref = rq.event;
+        df.startClock = rq.startClock;  // the child playback is created next block; it starts here
         df.emitter = pd != kNoSlot ? SND_R(Playback_emitterSlot)[pd] : kNoSlot;
         df.emitterGen = df.emitter != kNoSlot ? t.Emitter.rows.generation[df.emitter] : 0u;
         Defer(im, df);
@@ -1113,8 +1136,13 @@ void RunEventLogic(Impl& im) noexcept {
       if (lc.state == static_cast<std::uint8_t>(VoiceStateId::Starting) && lc.startClock < blockEnd) {
         lc.state = static_cast<std::uint8_t>(VoiceStateId::Playing);
       }
-      if (vs.musicGainStep != 0.0f) {
+      if (vs.musicGainStep != 0.0f) {  // music SetGain ramp: one step per block, ends on the target
         vs.musicGain += vs.musicGainStep;
+        if ((vs.musicGainStep > 0.0f && vs.musicGain >= vs.musicGainTarget) ||
+            (vs.musicGainStep < 0.0f && vs.musicGain <= vs.musicGainTarget)) {
+          vs.musicGain = vs.musicGainTarget;
+          vs.musicGainStep = 0.0f;
+        }
         if (vs.musicGain < 0.0f) vs.musicGain = 0.0f;
       }
       // Pause / resume asked while the voice was held (D-43: no Control then): send the

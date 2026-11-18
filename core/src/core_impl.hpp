@@ -363,7 +363,8 @@ struct VoiceStatic {
   float linearGain;          // synth / user buffer volume
   float sourceRate;          // source-rate kinds: frames per second of the source
   float musicGain;           // music SetGain target (1 default)
-  float musicGainStep;       // per block
+  float musicGainStep;       // per block, until musicGainTarget
+  float musicGainTarget;
   float fadeInSeconds;       // clip fade-in
   std::uint32_t nextInPlayback;  // voice list of a playback
   std::uint32_t musicTag;
@@ -391,6 +392,7 @@ struct Deferred {
   std::uint32_t emitterGen;
   float value;
   std::uint32_t reserved;
+  ClockSample startClock;  // Play: start at this sample (CLOCK_SAMPLE) when still ahead; 0 = now
 };
 inline constexpr std::uint32_t kVoicePausedFlag = 1u << 4;  // core-internal VoiceLifecycle.flags bit (paused)
 
@@ -527,7 +529,7 @@ struct TransportPriv {  // core's UpdateTransport when no music system is presen
   std::uint64_t* seenSeq = nullptr;  // [maxReservations] Reservation.sequence initialised
   std::uint32_t* transportGen = nullptr;  // [maxTransports] row generation initialised
 };
-inline constexpr std::uint8_t kFireTransportGone = 0xFEu;  // core-internal FireEntry::lateRuleApplied
+// kFireTransportGone (FireEntry::lateRuleApplied for a destroyed transport): snd/core/core.hpp
 
 struct PublishPriv {
   std::uint32_t* streamStall = nullptr;   // [maxStreams] Stream.stallCount seen

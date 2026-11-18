@@ -860,6 +860,10 @@ void ApplyDeferred(Impl& im) noexcept {
           em = HandleRef{df.emitter, df.emitterGen};
         }
         snd_when now{};
+        if (df.startClock > im.clock) {  // music PlayEvent (stinger): sample accurate start
+          now.kind = static_cast<std::uint8_t>(SND_WHEN_CLOCK_SAMPLE);
+          now.value = df.startClock;
+        }
         CreatePlayback(im, df.handle, em, df.id, df.ref, now, nullptr, cmd::kPlayOneShot,
                        DynamicSourceRef{SourceKind::Count, {0, 0, 0}, 0u});
         break;
@@ -893,7 +897,7 @@ void ApplyDeferred(Impl& im) noexcept {
 void ApplyCommands(Impl& im) noexcept {
   im.releasedEmitterCount = 0;
   im.releasedUserBufferCount = 0;
-  im.ev.musicInputCount = 0;
+  // Music inputs are reset after RunMusicLogic consumed them (sys_event.cpp RunMusic).
   ReleaseOwnedRows(im);
   ApplyDeferred(im);
   auto apply = [&](const cmd::CommandHeader& ch, const std::uint8_t* payload) { ApplyOne(im, ch, payload); };

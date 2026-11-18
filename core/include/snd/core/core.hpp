@@ -66,6 +66,20 @@ class IoScheduler;  // io module (bank's Scheduler mode); opaque to core's users
 
 namespace snd::core {
 
+// Conventions between core and the music system (music_if.hpp) that the
+// frozen contract does not spell out (stage-4 proposals, see the music report):
+//  - FireEntry::lateRuleApplied == kFireTransportGone: the reservation's
+//    transport was destroyed (Play ends REJECTED / TRANSPORT_GONE, stops are
+//    dropped). Written by whichever UpdateTransport runs (core's minimal one or
+//    the music system's).
+//  - ClipRef::trackIndex == kClipRefAssetTrack: clipIndex is an ASST row (music
+//    segments and stems are assets, not CLIP rows), for StartClip and
+//    MusicServices::primeFrames.
+//  - MusicVoiceRequest::fadeSeconds of StartClip is the clip's fade-in;
+//    startClock of StopVoice is the sample the release starts at (0 = now).
+inline constexpr std::uint8_t kFireTransportGone = 0xFEu;
+inline constexpr std::uint16_t kClipRefAssetTrack = 0xFFFFu;
+
 // Capacities that Config does not have (proposed as Config fields, see the
 // stage-2 report). Shared objects are unified by id across banks (A1-16), so
 // these count distinct ids of the whole project that are loaded at once.
