@@ -17,7 +17,9 @@
 //  F4 UserBuffer Stream: one playback per stream buffer at a time (second: VOICE_LIMIT);
 //     what is heard is exactly what was written, in order, then silence (never ends);
 //     destroying the buffer ends a playing voice within a block and releases it.
+#include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cmath>
 #include <vector>
 
@@ -398,16 +400,16 @@ SND_TEST(IndepSynth, StreamUserBufferWrittenFromAnotherThread) {
   indep::Rig r;
   SND_REQUIRE_EQ(r.created, SND_OK);
   r.settle = false;
-  std::vector<float> mem(777, 0.0f);  // not a power of two
+  std::vector<float> mem(2047, 0.0f);  // not a power of two
   float* chans[1] = {mem.data()};
-  const snd_user_buffer_desc bd{chans, 1, 777, 0, SND_USER_BUFFER_STREAM, 0, 0};
+  const snd_user_buffer_desc bd{chans, 1, 2047, 0, SND_USER_BUFFER_STREAM, 0, 0};
   const snd_user_buffer_handle b = snd_create_user_buffer(r.sys, &bd);
   SND_REQUIRE(b.value != 0u);
   const std::uint64_t total = 20000;
   auto value = [](std::uint64_t k) { return 0.05f + 0.00004f * static_cast<float>(k % 20000u); };  // increasing
   std::atomic<bool> stop{false};
   std::atomic<std::uint64_t> done{0};
-  std::thread writer([&] {
+  std::thread writer([&] {  // an unregistered thread: snd_write_user_buffer is "any"
     std::uint64_t w = 0;
     float tmp[97];
     while (w < total && !stop.load()) {
@@ -419,30 +421,33 @@ SND_TEST(IndepSynth, StreamUserBufferWrittenFromAnotherThread) {
       std::this_thread::yield();
     }
   });
-  while (done.load() < 700u) std::this_thread::yield();
+  // The reader never starves while frames remain: before every device period, the writer
+  // is at least 1536 frames (the render-ahead and one period, with room) past what has been
+  // heard. Waiting by quantity: no assumption on how fast either thread runs.
+  auto waitAhead = [&](std::uint64_t heard) {
+    const std::uint64_t want = std::min<std::uint64_t>(total, heard + 1536u);
+    const auto until = std::chrono::steady_clock::now() + std::chrono::seconds(60);
+    while (done.load() < want && std::chrono::steady_clock::now() < until) std::this_thread::yield();
+    return done.load() >= want;
+  };
+  SND_REQUIRE(waitAhead(0));
   const snd_playback_handle p = snd_play_user_buffer(r.sys, b, 0u, snd_emitter_handle{0}, nullptr);
   SND_REQUIRE(p.value != 0u);
-  // Wait by quantity, not by a step budget: until the writer is done and every written
-  // frame has been heard (non-silent), give or take the resampler's edge frames.
-  auto heardFrames = [&] {
-    std::uint64_t n = 0;
-    for (std::uint64_t c = 0; c < r.Frames(); ++c) n += std::fabs(r.Raw(c)) >= 1e-4f ? 1u : 0u;
-    return n;
-  };
   std::uint64_t scanned = 0, heardSoFar = 0;
-  for (int i = 0; i < 100000; ++i) {
+  bool ahead = true;
+  while (heardSoFar + 16u < total) {
+    ahead = ahead && waitAhead(heardSoFar);
+    if (!ahead) break;
     r.Step(1);
     for (; scanned < r.Frames(); ++scanned) heardSoFar += std::fabs(r.Raw(scanned)) >= 1e-4f ? 1u : 0u;
-    if (done.load() >= total && heardSoFar + 16u >= total) break;
   }
+  SND_CHECK(ahead);
   r.Step(10);
-  SND_CHECK(heardFrames() + 16u >= total);
   stop.store(true);
   writer.join();
-  // Heard non-silent runs (an underrun leaves a gap: nothing is consumed then): inside each
-  // run, away from its edges (resampler transients), the ramp only goes up, so no frame
-  // repeats or goes back; the run lengths add up to the frames written.
-  std::uint64_t sum = 0, runs = 0, back = 0;
+  // One run of non-silent frames (no starvation before the end: it would leave a gap). Away from its edges (resampler transients) the ramp only
+  // goes up, so no frame repeats or goes back, and the run has the frames written.
+  std::uint64_t runs = 0, back = 0, sum = 0;
   std::uint64_t c = 0;
   while (c < r.Frames()) {
     while (c < r.Frames() && std::fabs(r.Raw(c)) < 1e-4f) ++c;
@@ -453,9 +458,9 @@ SND_TEST(IndepSynth, StreamUserBufferWrittenFromAnotherThread) {
     sum += c - a;
     for (std::uint64_t i = a + 33; i + 32 < c; ++i) back += r.Raw(i) + 1e-5f < r.Raw(i - 1) ? 1u : 0u;
   }
+  SND_CHECK_EQ(runs, 1u);
   SND_CHECK_EQ(back, 0u);
-  SND_CHECK_MSG(sum + 16u * runs + 16u >= total && sum <= total + 32u * runs, "heard %llu frames in %llu runs",
-                static_cast<unsigned long long>(sum), static_cast<unsigned long long>(runs));
+  SND_CHECK_MSG(sum + 16u >= total && sum <= total + 32u, "heard %llu frames", static_cast<unsigned long long>(sum));
   snd_stop(r.sys, p, 0.0f, nullptr);
   r.Step(3);
 }
