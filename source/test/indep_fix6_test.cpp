@@ -275,7 +275,7 @@ SND_TEST(IndepFix6, InfiniteLoopInMemoryPlaysOnAfterTheError) { InfiniteLoopInMe
 // Supplement, the count: the IO error is counted when it happens (here: the
 // open fails, within the first blocks). Today it is never counted while the
 // loop plays from memory (streamIoErrors stays 0 for 300 blocks).
-SND_TEST(IndepFix6, Defect_source_IoErrorNotCountedWhileAnInfiniteLoopPlaysFromMemory) { InfiniteLoopInMemory(true); }
+SND_TEST(IndepFix6, IoErrorCountedWhileAnInfiniteLoopPlaysFromMemory) { InfiniteLoopInMemory(true); }
 
 // Decision (after 548cda5): after an IO error only the resident preload counts
 // as "in memory"; the decoded PCM ring is not a source for loops or seeks.
