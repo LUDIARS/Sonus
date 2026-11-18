@@ -69,17 +69,34 @@ SND_TEST(IndepLivelinkProfiler, MetersAndVoicesMatchTheOutput) {
   SND_REQUIRE_EQ(f.StartServer(), SND_OK);
   Tool t(f);
   SND_REQUIRE(t.Ready());
-  t.c->SetProfilerMask(ll::kProfMeters | ll::kProfVoices, 60);
+  constexpr std::uint32_t kMask = ll::kProfMeters | ll::kProfVoices;
+  t.c->SetProfilerMask(kMask, 60);
   f.Steps(400);  // > 6 RMS time constants (0.3 s)
   const double level = f.LastLeft();
-  auto meters = [&](ll::MeterEntry* out, std::uint32_t cap) {
-    std::uint64_t before = 0;
-    t.c->CopyMeters(out, cap, &before);
-    std::uint64_t now = before;
-    f.StepUntil([&] {
-      t.c->CopyMeters(out, cap, &now);
-      return now != before;
-    });
+  // Profiler messages the tool has received (every type the server counts as sent).
+  auto profilerIn = [&] {
+    std::uint64_t n = 0;
+    for (ll::MessageType m : {ll::MessageType::VoiceList, ll::MessageType::BlockTiming, ll::MessageType::MemoryUsage,
+                              ll::MessageType::StreamStall, ll::MessageType::LodChange, ll::MessageType::EventLog,
+                              ll::MessageType::BusMeters}) {
+      n += t.c->Received(m);
+    }
+    return n;
+  };
+  // Meters of a snapshot taken after every block rendered so far. The server takes
+  // snapshots at its own pace and the tool receives them later, so the next meters
+  // to arrive may have been taken while the gain was still settling (seen under
+  // load: a snapshot from early in the 400 blocks). An acknowledged command orders
+  // that: the server reads it after every snapshot it took before it was sent, and
+  // those were queued (profilerSent) before its Ack. Profiler messages keep their
+  // order (one bulk queue), so once the tool has received that many, the next
+  // BusMeters it receives was taken after the command was read.
+  auto meters = [&](ll::MeterEntry* out, std::uint32_t cap) -> std::uint32_t {
+    SND_CHECK_EQ(t.Ack(t.c->SetProfilerMask(kMask, 60, true)), SND_OK);
+    const std::uint64_t sent = f.server->Stats().profilerSent;
+    SND_CHECK(f.StepUntil([&] { return profilerIn() >= sent; }));
+    const std::uint64_t before = t.c->Received(ll::MessageType::BusMeters);
+    SND_CHECK(f.StepUntil([&] { return t.c->Received(ll::MessageType::BusMeters) > before; }));
     return t.c->CopyMeters(out, cap);
   };
   ll::MeterEntry m[16];
@@ -103,6 +120,7 @@ SND_TEST(IndepLivelinkProfiler, MetersAndVoicesMatchTheOutput) {
   // Master -6 dB: the master meter follows, the Sfx meter does not.
   SND_CHECK_EQ(t.Ack(t.c->SetValue(lltest::BusVolume("Master", -6.0f), true)), SND_OK);
   f.Steps(400);
+  SND_CHECK_NEAR(f.LastLeft(), level * DbRatio(-6.0), 1e-4);  // the gain ramp is over
   n = meters(m, 16);
   master = sfx = nullptr;
   for (std::uint32_t i = 0; i < n; ++i) {
