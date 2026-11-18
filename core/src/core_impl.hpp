@@ -266,6 +266,7 @@ struct DynamicDesc {  // what a dynamic playback plays (Playback.dynamicSource.d
   HandleRef userBuffer;
   Id bus;
   std::uint32_t kind;  // SourceKind
+  HandleRef followTransport;  // 1.2 (D-90): Transport row (slot, generation) of the start When, or none
 };
 struct LiveOverride {
   std::uint32_t kind;
@@ -372,6 +373,11 @@ struct VoiceStatic {
   std::uint64_t startFrame;  // first source frame (Render initialises Voice.playhead with it)
   SlotIndex sourceSlot;      // copy of Voice.sourceSlot for SelectVoices (not a declared read)
   std::uint32_t sourceKind;
+  // 1.2 (D-90): transport a synth voice follows (generation 0 = none), and its position
+  // at the block start in quarter notes (RunEventLogic, read by Render for RenderItem).
+  HandleRef followTransport;
+  double transportBeats;
+  double transportBeatsPerSample;
 };
 
 struct StartBatch {  // RunEventLogic: Start() requests per kind, issued once per block

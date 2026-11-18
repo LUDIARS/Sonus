@@ -222,6 +222,11 @@ void Timeline::SetTempoAt(ClockSample clock, double bpm) noexcept {
   overrideBpm = bpm > 0.0 ? bpm : 0.0;
 }
 
+void Timeline::SetPitchAt(ClockSample clock, double ratio) noexcept {
+  AnchorAt(clock);
+  if (ratio > 0.0) pitch = ratio;
+}
+
 void Timeline::AdvanceTo(ClockSample clock) noexcept {
   if (Playing()) {
     AnchorAt(clock);

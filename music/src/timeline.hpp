@@ -82,6 +82,8 @@ struct Timeline {
   void StopAt(ClockSample clock) noexcept;  // position back to 0 (8.1 Stopped)
   void SeekAt(ClockSample clock, double tick) noexcept;
   void SetTempoAt(ClockSample clock, double bpm) noexcept;
+  // 1.2 (D-88): playback speed of the transport (tempo x pitch), already clamped by core.
+  void SetPitchAt(ClockSample clock, double ratio) noexcept;
   // Sound-priority stall (8.4): everything after now happens `samples` later.
   void Delay(ClockSample samples) noexcept { anchorClock += samples; }
   // Block start: re-anchor (the points are kept, see AddPoint for a full table).

@@ -3,7 +3,8 @@
 // minimal transport here so that every When kind still works:
 //   - IMMEDIATE / CLOCK_SAMPLE / DELAY_US reservations fire at their clock;
 //   - NEXT_BEAT / NEXT_BAR / BARS_AFTER / GRID quantise on the transport's
-//     constant tempo (SetTempo / Seek / SetTransportState apply at their time);
+//     constant tempo (SetTempo / SetPitch / Seek / SetTransportState apply at
+//     their time);
 //   - NEXT_MARKER / SEGMENT_END need segments (music module): they fire at
 //     once with a warning.
 // Transports owned by a playback are destroyed when the playback is gone.
@@ -179,6 +180,15 @@ void UpdateTransport(Impl& im) noexcept {
           std::memcpy(&bpm, payload.bytes, 4);
           SND_W(Transport_tempoMap)[td].baseBpm = bpm;
           SND_W(Transport_position)[td].ticksPerSample = TicksPerSample(bpm, SND_W(Transport_pitch)[td], im.cfg.sampleRate);
+        }
+        break;
+      case ReservationAction::SetPitch:  // 1.2 (D-88): tempo x pitch from now on
+        if (td != kNoSlot) {
+          float pitch = 1.0f;
+          std::memcpy(&pitch, payload.bytes, 4);
+          SND_W(Transport_pitch)[td] = pitch;
+          SND_W(Transport_position)[td].ticksPerSample =
+              TicksPerSample(SND_W(Transport_tempoMap)[td].baseBpm, pitch, im.cfg.sampleRate);
         }
         break;
       case ReservationAction::Seek:

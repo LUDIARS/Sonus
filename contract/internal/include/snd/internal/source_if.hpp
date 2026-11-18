@@ -161,7 +161,10 @@ struct PatchParams {
   std::uint32_t reserved;
 };
 struct CallbackParams {
-  snd_synth_desc desc;  // cpp_callback already resolved by api if set (see api docs)
+  // 1.2 (D-91): the desc as the game gave it. When `callback` is NULL, `cpp_callback`
+  // is the snd::SynthCallback of the C++ wrapper (snd/sonus.hpp) and the Callback kind
+  // calls it with the same snd_render_context viewed as snd::RenderContext (an alias).
+  snd_synth_desc desc;
 };
 struct UserBufferParams {
   HandleRef buffer;
@@ -247,6 +250,14 @@ struct RenderItem {
                                   // already clamped to Config.maxPitchRatio (D-44)
   Playhead* playhead;             // RealVoice.playhead[realSlot] (Render owns, 1.1): read and advance
   float* const* out;              // non-interleaved, 64-byte aligned, zeroed; frameOffset+frames fit
+  // 1.2 (D-90), appended: the transport the voice's playback follows (a synth started
+  // with a `when` naming a transport), copied in the serial part like every other input.
+  // transportBeats: quarter notes since the transport origin at the block's first frame
+  // (BlockInfo::clock), -1 if none. transportBeatsPerSample: quarter notes per sample at
+  // the block's tempo (0 while the transport does not play). snd_render_context's
+  // transport_beats at frame f of the block = transportBeats + f * transportBeatsPerSample.
+  double transportBeats;
+  double transportBeatsPerSample;
 };
 
 struct RenderBatch {

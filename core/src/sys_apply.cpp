@@ -374,6 +374,34 @@ void AddMusicInput(Impl& im, music::MusicInputKind kind, HandleRef playback, Id 
   in.whenOverride = whenOverride;
 }
 
+// snd_play_stinger (1.2, D-89): a ReservationAction::Stinger reservation on the music
+// playback's transport (or the When's). Payload: MSTG id, rule-timing flag (music_if.hpp).
+// Without a transport (not a music playback) the stinger fires at once and the music
+// system ignores it (no music state for the playback).
+void ApplyStinger(Impl& im, const cmd::SetMusicState& c) noexcept {
+  schema::Tables& t = im.tables;
+  const std::uint32_t d = base::rows::DenseOf(t.Playback.rows, c.playback);
+  if (d == kNoSlot) return;
+  std::uint8_t bytes[8];
+  std::uint32_t flags = 0u;
+  snd_when w = c.when;
+  SlotIndex ts = kNoSlot;
+  if (w.kind == SND_WHEN_IMMEDIATE) {
+    flags = music::kStingerPayloadRuleTiming;
+    ts = SND_W(Playback_transportSlot)[d];
+  } else if (!ScheduledWhen(im, w, &ts, c.playback.Value())) {
+    flags = 0u;  // a musical kind on a dead transport: now (+ warning, snd_when doc)
+  }
+  if (ts == kNoSlot && (w.kind < SND_WHEN_NEXT_BEAT || w.kind > SND_WHEN_SEGMENT_END)) {
+    ts = SND_W(Playback_transportSlot)[d];  // clock kinds: the playback's own transport, if any
+  }
+  std::memcpy(bytes, &c.state, 4);
+  std::memcpy(bytes + 4, &flags, 4);
+  if (NewReservation(im, ts, w, ReservationAction::Stinger, c.playback, PayloadOf(bytes, 8)) == kNoSlot) {
+    PostWarning(im, SND_ERR_LIMIT_REACHED, SND_END_DETAIL_RESERVATION_FULL, c.playback.Value());
+  }
+}
+
 void SetBankUnloading(Impl& im, HandleRef bank, std::uint32_t mode) noexcept {
   if (bank.slot >= im.cfg.maxBanks) return;
   BankAudio& b = im.ap.banks[bank.slot];
@@ -450,6 +478,10 @@ void ApplyOne(Impl& im, const cmd::CommandHeader& h, const std::uint8_t* p) noex
       dd.synth = c.desc;
       dd.bus = c.desc.bus;
       dd.kind = static_cast<std::uint32_t>(SourceKind::Callback);
+      {  // D-90: the synth follows the transport its When names (transport_beats).
+        const SlotIndex fts = TransportSlotOf(im, HandleRef::FromValue(c.when.transport.value));
+        if (fts != kNoSlot) dd.followTransport = HandleRef{fts, t.Transport.rows.generation[fts]};
+      }
       CreatePlayback(im, c.playback, c.emitter, c.desc.event_template, EventRef{kNoBank, kEventRefDynamic, 0u}, c.when,
                      nullptr, 0u, DynamicSourceRef{SourceKind::Callback, {0, 0, 0}, c.playback.slot});
       break;
@@ -628,6 +660,11 @@ void ApplyOne(Impl& im, const cmd::CommandHeader& h, const std::uint8_t* p) noex
     case CT::SetMusicState: {
       const auto c = Load<cmd::SetMusicState>(p);
       if (!base::rows::IsCurrent(t.Playback.rows, c.playback)) break;
+      if (c.variant == cmd::kMusicStateVariantStinger) {
+        ApplyStinger(im, c);
+        break;
+      }
+      if (c.variant != cmd::kMusicStateVariantState) break;  // unknown variant: ignored (commands.hpp)
       snd_when w = c.when;
       SlotIndex ts = kNoSlot;
       if (ScheduledWhen(im, w, &ts, c.playback.Value())) {
@@ -667,7 +704,15 @@ void ApplyOne(Impl& im, const cmd::CommandHeader& h, const std::uint8_t* p) noex
     }
     case CT::SetTempo: {
       const auto c = Load<cmd::SetTempo>(p);
-      ApplyTimed(im, c.transport, c.when, ReservationAction::SetTempo, PayloadOf(&c.bpm, 4));
+      if (c.variant == cmd::kTempoVariantBpm) {
+        ApplyTimed(im, c.transport, c.when, ReservationAction::SetTempo, PayloadOf(&c.bpm, 4));
+      } else if (c.variant == cmd::kTempoVariantPitch && c.bpm > 0.0f && std::isfinite(c.bpm)) {
+        // D-88: clamped here, so every UpdateTransport sees an in-range ratio.
+        const float pitch = c.bpm < music::kMinTransportPitch
+                                ? music::kMinTransportPitch
+                                : (c.bpm > music::kMaxTransportPitch ? music::kMaxTransportPitch : c.bpm);
+        ApplyTimed(im, c.transport, c.when, ReservationAction::SetPitch, PayloadOf(&pitch, 4));
+      }
       break;
     }
     case CT::SeekTransport: {

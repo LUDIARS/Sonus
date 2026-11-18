@@ -660,6 +660,12 @@ bool StartPlayback(Ctx& c, std::uint32_t d, ClockSample startClock) noexcept {
     }
     CreateVoice(c, sc, dyn.kind, params, nullptr, ch, ClipRef{kNoBank, 0, 0}, 0u, 0u, startClock, 0u, 0.0f, 0.0f, 0.0f,
                 0.0f, lin, 0.0f, flags, sc.busSlot, 0u, false, 0u);
+    if (dyn.kind == SourceKind::Callback && sc.created != 0u) {
+      VoiceStatic& fv = im.ev.vs[Priv(im, s).voiceListHead];
+      fv.followTransport = dd.followTransport;
+      fv.transportBeats = -1.0;
+      fv.transportBeatsPerSample = 0.0;
+    }
     if (dyn.kind == SourceKind::UserBuffer && sc.created != 0u) {
       // Static user buffers play at their own rate (core resamples): VoiceStatic.sourceRate.
       const source::UserBufferControl& ub = im.userBuffers[dd.userBuffer.slot];
@@ -1332,6 +1338,32 @@ void RunEventLogic(Impl& im) noexcept {
   // 5. Batched source calls.
   FlushSourceCalls(c);
   QueryPriming(c);
+
+  // 6. Followed transports (1.2, D-90): position at this block's start, for Render.
+  //    Transport.position is the block END (UpdateTransport ran before this system).
+  {
+    const schema::TableRows& vrows = t.Voice.rows;
+    for (std::uint32_t d = 0; d < vrows.count; ++d) {
+      VoiceStatic& vs = im.ev.vs[base::rows::SlotAt(vrows, d)];
+      if (vs.followTransport.generation == 0u) continue;
+      const std::uint32_t td = base::rows::DenseOf(t.Transport.rows, vs.followTransport);
+      if (td == kNoSlot) {  // the transport is gone: no position any more
+        vs.followTransport = HandleRef{};
+        vs.transportBeats = -1.0;
+        vs.transportBeatsPerSample = 0.0;
+        continue;
+      }
+      const TransportPosition pos = SND_R(Transport_position)[td];
+      const bool playing = SND_R(Transport_state)[td] == SND_TRANSPORT_PLAYING;
+      const double tps = playing ? pos.ticksPerSample : 0.0;
+      const double endTicks = static_cast<double>(pos.tick) + pos.tickFraction;
+      const double back = pos.anchorClock > im.clock ? static_cast<double>(pos.anchorClock - im.clock) : 0.0;
+      double ticks = endTicks - back * tps;
+      if (ticks < 0.0) ticks = 0.0;
+      vs.transportBeats = ticks / static_cast<double>(SND_TICKS_PER_BEAT);
+      vs.transportBeatsPerSample = tps / static_cast<double>(SND_TICKS_PER_BEAT);
+    }
+  }
 }
 
 }  // namespace snd::core

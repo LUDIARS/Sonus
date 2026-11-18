@@ -187,7 +187,16 @@ void EvaluateDspParams(Impl& im) noexcept {
     }
     // Voice releases (stops, steals) are applied per sample by Render (sample accurate).
     const float gEnd = DbToGain(gainDb) * linear * cat * fadeEnd * env;
-    const float pEnd = std::exp2(cents / 1200.0f);
+    float pEnd = std::exp2(cents / 1200.0f);
+    // 1.2 (D-88): the voices of a music playback follow its transport's pitch (8.1).
+    if (pd != kNoSlot) {
+      const SlotIndex ts = SND_R(Playback_transportSlot)[pd];
+      const std::uint32_t td = ts == kNoSlot ? kNoSlot : base::rows::DenseOf(t.Transport.rows, ts);
+      if (td != kNoSlot) {
+        const float tp = SND_R(Transport_pitch)[td];
+        if (tp > 0.0f && std::isfinite(tp)) pEnd *= tp;
+      }
+    }
     const bool fresh = vlc[d].state == static_cast<std::uint8_t>(VoiceStateId::Starting);
     vgain[d] = Ramp{fresh ? gEnd : vgain[d].end, gEnd};
     vpitch[d] = Ramp{fresh ? pEnd : vpitch[d].end, pEnd};

@@ -57,7 +57,8 @@ void RemoveReservationRow(schema::Tables& t, SlotIndex slot) noexcept {
 
 bool IsMusicalKind(std::uint32_t k) noexcept { return k >= SND_WHEN_NEXT_BEAT && k <= SND_WHEN_SEGMENT_END; }
 bool IsTransportAction(ReservationAction a) noexcept {
-  return a == ReservationAction::SetTempo || a == ReservationAction::Seek || a == ReservationAction::SetTransportState;
+  return a == ReservationAction::SetTempo || a == ReservationAction::Seek || a == ReservationAction::SetTransportState ||
+         a == ReservationAction::SetPitch;  // 1.2 (D-88)
 }
 
 void PushFire(FireList& fire, SlotIndex r, ReservationAction action, HandleRef target, const ReservationPayload& payload,
@@ -208,12 +209,37 @@ void ApplyLateRule(State& s, Timeline& tl, ResState& rs, std::uint32_t kind, std
   }
 }
 
+// snd_play_stinger without a When (1.2, D-89): the stinger's own MSTG.timing / timingCount.
+// false: no rule timing (the reservation's When stands).
+bool StingerRuleTiming(State& s, const schema::Tables& t, HandleRef target, const ReservationPayload& payload,
+                       ReservationWhen* w) noexcept {
+  Id stinger = 0;
+  std::uint32_t flags = 0;
+  std::memcpy(&stinger, payload.bytes, 4);
+  std::memcpy(&flags, payload.bytes + 4, 4);
+  if ((flags & kStingerPayloadRuleTiming) == 0u) return false;
+  std::uint32_t ev = 0;
+  if (!TargetEvent(s, t, target, &ev, nullptr)) return false;
+  const std::uint32_t row = FindStinger(s.tb2, stinger);
+  if (row == bf::kNone) return false;  // not a stinger of this event: IssueStingers plays nothing
+  const std::uint32_t kind = s.tb2.mstg.U32(bf::col::MSTG_timing, row);
+  const std::uint32_t count = s.tb2.mstg.U32(bf::col::MSTG_timingCount, row);
+  if (kind > SND_WHEN_SEGMENT_END) return false;  // clock kinds have no meaning in a bank
+  w->kind = static_cast<std::uint8_t>(kind);
+  w->count = kind == SND_WHEN_NEXT_MARKER ? 0u : count;
+  w->value = kind == SND_WHEN_NEXT_MARKER ? count : 0u;  // D-73: timingCount = marker id
+  return true;
+}
+
 void Resolve(State& s, schema::Tables& t, std::uint32_t d, SlotIndex r) noexcept {
   ResState& rs = s.res[r];
   rs = ResState{};
   rs.seq = SND_MR(Reservation_sequence)[d];
   rs.late = kNoLate;
-  const ReservationWhen w = SND_MR(Reservation_when)[d];
+  ReservationWhen w = SND_MR(Reservation_when)[d];
+  if (SND_MR(Reservation_action)[d] == ReservationAction::Stinger) {
+    StingerRuleTiming(s, t, SND_MR(Reservation_target)[d], SND_MR(Reservation_payload)[d], &w);
+  }
   const ReservationAction action = SND_MR(Reservation_action)[d];
   const HandleRef target = SND_MR(Reservation_target)[d];
   const ReservationPayload payload = SND_MR(Reservation_payload)[d];
@@ -298,7 +324,37 @@ void Resolve(State& s, schema::Tables& t, std::uint32_t d, SlotIndex r) noexcept
 
 // Stingers with overlap "replace" (8.6): a newer reservation of the same
 // stinger event on the same transport cancels the older pending ones.
+// snd_play_stinger reservations (1.2, D-89): a newer one of the same MSTG id on the same
+// music playback cancels the older pending ones when that stinger's overlap is "replace".
+void ReplaceStingerActions(State& s, schema::Tables& t, std::uint32_t dNew) noexcept {
+  const HandleRef target = SND_MR(Reservation_target)[dNew];
+  Id id = 0;
+  std::memcpy(&id, SND_MR(Reservation_payload)[dNew].bytes, 4);
+  std::uint32_t ev = 0;
+  if (!TargetEvent(s, t, target, &ev, nullptr)) return;
+  const std::uint32_t row = FindStinger(s.tb2, id);
+  if (row == bf::kNone || s.tb2.mstg.U32(bf::col::MSTG_overlap, row) != 0u) return;
+  const std::uint64_t seqNew = SND_MR(Reservation_sequence)[dNew];
+  const schema::TableRows& rr = t.Reservation.rows;
+  for (std::uint32_t d = 0; d < rr.count; ++d) {
+    if (d == dNew || SND_MR(Reservation_action)[d] != ReservationAction::Stinger) continue;
+    if (SND_MR(Reservation_sequence)[d] >= seqNew) continue;
+    const HandleRef other = SND_MR(Reservation_target)[d];
+    if (other.slot != target.slot || other.generation != target.generation) continue;
+    Id otherId = 0;
+    std::memcpy(&otherId, SND_MR(Reservation_payload)[d].bytes, 4);
+    if (otherId != id) continue;
+    ResState& o = s.res[base::rows::SlotAt(rr, d)];
+    o.cancel = 1;
+    o.late = static_cast<std::uint8_t>(ReservationLateRule::Cancel);
+  }
+}
+
 void ReplaceStingers(State& s, schema::Tables& t, std::uint32_t dNew) noexcept {
+  if (SND_MR(Reservation_action)[dNew] == ReservationAction::Stinger) {
+    ReplaceStingerActions(s, t, dNew);
+    return;
+  }
   if (SND_MR(Reservation_action)[dNew] != ReservationAction::Play) return;
   const HandleRef target = SND_MR(Reservation_target)[dNew];
   std::uint32_t ev = 0;
@@ -355,6 +411,12 @@ void ApplyTransportAction(State& s, schema::Tables& t, std::uint32_t d, ClockSam
       float bpm = 0.0f;
       std::memcpy(&bpm, p.bytes, 4);
       if (bpm > 0.0f && bpm < 10000.0f) tl->SetTempoAt(at, bpm);
+      break;
+    }
+    case ReservationAction::SetPitch: {  // 1.2 (D-88): core clamped it to [1/16, 16]
+      float pitch = 0.0f;
+      std::memcpy(&pitch, p.bytes, 4);
+      if (pitch >= kMinTransportPitch && pitch <= kMaxTransportPitch) tl->SetPitchAt(at, pitch);
       break;
     }
     case ReservationAction::Seek: {
@@ -523,7 +585,8 @@ void MusicSystem::UpdateTransport(const MusicFrame& frame, schema::Tables& t, Fi
       // The target passed without firing (seek forward, a clock in the past): late rule.
       if (rs.isClock == 0u) {
         Timeline* tl = TimelineOf(s, SND_MR(Reservation_transportSlot)[d]);
-        const ReservationWhen w = SND_MR(Reservation_when)[d];
+        ReservationWhen w = SND_MR(Reservation_when)[d];
+        if (action == ReservationAction::Stinger) StingerRuleTiming(s, t, target, SND_MR(Reservation_payload)[d], &w);
         MusicPb* owner = tl != nullptr ? PbOfTransport(s, SND_MR(Reservation_transportSlot)[d]) : nullptr;
         if (owner != nullptr) s.tb.Bind(s.services, owner->bank);
         if (tl != nullptr) {

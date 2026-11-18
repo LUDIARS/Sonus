@@ -77,8 +77,9 @@ namespace snd::core {
 //    MusicServices::primeFrames.
 //  - MusicVoiceRequest::fadeSeconds of StartClip is the clip's fade-in;
 //    startClock of StopVoice is the sample the release starts at (0 = now).
-inline constexpr std::uint8_t kFireTransportGone = 0xFEu;
-inline constexpr std::uint16_t kClipRefAssetTrack = 0xFFFFu;
+// Contract 1.2 moved the definitions to music_if.hpp (D-82); the names stay here.
+inline constexpr std::uint8_t kFireTransportGone = music::kFireTransportGone;
+inline constexpr std::uint16_t kClipRefAssetTrack = music::kClipRefAssetTrack;
 
 // Capacities that Config does not have (proposed as Config fields, see the
 // stage-2 report). Shared objects are unified by id across banks (A1-16), so
@@ -254,6 +255,10 @@ class System {
   snd_result SetTempo(snd_transport_handle transport, float bpm, const snd_when* when) noexcept;
   snd_result SeekTransport(snd_transport_handle transport, const snd_musical_time* position,
                            const snd_when* when) noexcept;
+  // 1.2 (D-88, D-89): cmd::SetTempo with kTempoVariantPitch, cmd::SetMusicState with
+  // kMusicStateVariantStinger (commands.hpp).
+  snd_result SetTransportPitch(snd_transport_handle transport, float pitch, const snd_when* when) noexcept;
+  snd_result PlayStinger(snd_playback_handle music, Id stinger, const snd_when* when) noexcept;
   snd_playback_handle PlaySynth(const snd_synth_desc* desc, snd_emitter_handle emitter,
                                 const snd_when* when) noexcept;
   snd_user_buffer_handle CreateUserBuffer(const snd_user_buffer_desc* desc) noexcept;

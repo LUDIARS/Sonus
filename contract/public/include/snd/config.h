@@ -76,6 +76,22 @@ SND_EXTERN_C_BEGIN
   /* Sizes core's resampler pool (D-44); ratios above 4 use ~32 KiB of stack (D-47).           */ \
   X(max_pitch_ratio, maxPitchRatio, float, float, 4.0f)
 
+/* Top level, added in contract 1.2 (D-92). Stored at the END of snd_config (after the
+ * 1.1 fields): a config whose struct_size ends before them (a 1.0 / 1.1 caller) gets the
+ * defaults. Capacities of the objects core unifies by id across loaded banks (A1-16):
+ * distinct ids of the whole project loaded at once. 1..65535 each (0 or above 65535:
+ * snd_create SND_ERR_INVALID_ARGUMENT). max_buses does not count dev_reserve.buses. */
+#define SND_CONFIG_TOP_1_2(X)                                                                     \
+  X(max_buses, maxBuses, uint32_t, uint32_t, 128u)                                                \
+  /* + 1 row for "all categories" (D-30) */                                                       \
+  X(max_categories, maxCategories, uint32_t, uint32_t, 64u)                                       \
+  X(max_snapshots, maxSnapshots, uint32_t, uint32_t, 64u)                                         \
+  /* voice limit groups (VLGR ids) */                                                             \
+  X(max_limit_groups, maxLimitGroups, uint32_t, uint32_t, 64u)                                    \
+  /* parameter definitions (PARM ids) */                                                          \
+  X(max_param_defs, maxParamDefs, uint32_t, uint32_t, 512u)                                       \
+  X(max_duck_rules, maxDuckRules, uint32_t, uint32_t, 64u)
+
 /* Memory budgets (3.3) ----------------------------------------------------- */
 #define SND_CONFIG_MEMORY(X)                                                                      \
   X(stream_pool_bytes, streamPoolBytes, uint64_t, uint64_t, (8ull << 20))                         \
@@ -203,6 +219,8 @@ typedef struct snd_config {
   snd_plugin_config plugins;
   /* --- contract 1.1 --- */
   SND_CONFIG_TOP_1_1(SND_CONFIG_C_FIELD)
+  /* --- contract 1.2 --- */
+  SND_CONFIG_TOP_1_2(SND_CONFIG_C_FIELD)
 } snd_config;
 
 /* Upper bound of max_pitch_ratio (= dsp kResamplerMaxRatio). */
@@ -222,6 +240,7 @@ static inline void snd_config_init(snd_config* cfg) {
   cfg->contract_version = (uint32_t)SND_CONTRACT_VERSION;
   SND_CONFIG_TOP(SND_CONFIG_INIT_TOP)
   SND_CONFIG_TOP_1_1(SND_CONFIG_INIT_TOP)
+  SND_CONFIG_TOP_1_2(SND_CONFIG_INIT_TOP)
   SND_CONFIG_MEMORY(SND_CONFIG_INIT_MEMORY)
   SND_CONFIG_COMMANDS(SND_CONFIG_INIT_COMMANDS)
   SND_CONFIG_JOBS(SND_CONFIG_INIT_JOBS)

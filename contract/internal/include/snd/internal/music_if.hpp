@@ -21,8 +21,27 @@
 //                       reports the outcome via OnVoiceResults in the same block.
 //  10 Publish           core: IMusicSystem::CollectNotifications into the event ring.
 //
-// Transport time base: absolute ticks (960 per beat) since the transport
-// origin; bars/beats are derived through the tempo map and time signatures.
+// Transport time base: absolute ticks (960 per QUARTER NOTE, D-68) since the
+// transport origin; bars/beats are derived through the tempo map and time
+// signatures (a beat is a note of the signature's beat unit).
+//
+// Conventions between core and the music system (D-82, written here in 1.2; core.hpp
+// re-exports the constants):
+//  - FireEntry::lateRuleApplied == kFireTransportGone: the reservation's transport
+//    was destroyed (Play ends REJECTED / TRANSPORT_GONE, stops are dropped).
+//  - ClipRef::trackIndex == kClipRefAssetTrack: clipIndex is an ASST row (segments
+//    and stems), for StartClip and MusicServices::primeFrames.
+//  - StartClip: fadeSeconds is the fade-in. StopVoice: startClock is the sample the
+//    release starts at (0 = now). SetGain: a block-wise ramp that stops at its target.
+//  - 1.2 (D-89): ReservationAction::Stinger reservations come from snd_play_stinger
+//    (cmd::SetMusicState with variant kMusicStateVariantStinger). Payload: bytes 0..3
+//    the MSTG id, bytes 4..7 kStingerPayloadRuleTiming when the caller gave no When
+//    (or IMMEDIATE): the music system then resolves the reservation with the stinger's
+//    MSTG.timing / timingCount on its transport (NEXT_MARKER: timingCount = marker id).
+//  - 1.2 (D-88): ReservationAction::SetPitch (snd_set_transport_pitch). Payload: bytes
+//    0..3 the pitch ratio (f32 > 0, clamped to [kMinTransportPitch, kMaxTransportPitch]).
+//    Transport.pitch scales the tick rate; voices of the music playback that owns the
+//    transport play at that pitch too (tempo and pitch change together, 8.1).
 #ifndef SND_INTERNAL_MUSIC_IF_HPP
 #define SND_INTERNAL_MUSIC_IF_HPP
 
@@ -36,6 +55,12 @@
 #include "snd/internal/source_if.hpp"
 
 namespace snd::music {
+
+inline constexpr std::uint8_t kFireTransportGone = 0xFEu;     // D-82
+inline constexpr std::uint16_t kClipRefAssetTrack = 0xFFFFu;  // D-82
+inline constexpr std::uint32_t kStingerPayloadRuleTiming = 1u;  // 1.2, D-89
+inline constexpr float kMinTransportPitch = 1.0f / 16.0f;       // 1.2, D-88
+inline constexpr float kMaxTransportPitch = 16.0f;              // 1.2, D-88
 
 struct MusicFrame {
   source::BlockInfo block;

@@ -443,6 +443,9 @@ void Render(Impl& im) noexcept {
     in.ratio1 = clampRatio(pitch.end * srcRatio);
     if (sourceRate) in.flags |= kItemSourceRate;
     it.pitch = Ramp{in.ratio0, in.ratio1};
+    // 1.2 (D-90): followed transport (synth voices), as of this block's first frame.
+    it.transportBeats = vs.followTransport.generation != 0u ? vs.transportBeats : -1.0;
+    it.transportBeatsPerSample = vs.followTransport.generation != 0u ? vs.transportBeatsPerSample : 0.0;
     // Gain, with the steal fade (out) / devirtualise fade (in).
     const Ramp gain = SND_R(Voice_gain)[d];
     // D-15: the fade lasts shortFadeFrames exactly (it may span blocks), per sample.
