@@ -114,7 +114,9 @@ struct StreamInst {
   LoopRange pendingLoop;
   std::uint32_t virt;
   std::uint32_t seq;
-  std::uint32_t errorCounted;
+  std::uint32_t errorCounted;   // decode error counted
+  std::uint32_t ioErrorCounted; // IO error counted (once per playback)
+  std::uint32_t ioErrorBase;    // StreamChannel::Errors() at the start
 
   // --- requests audio thread -> Render (source_if.hpp: Publish never writes the
   // render state; Render adopts a re-positioned ring at the head of RenderBatch) ---
