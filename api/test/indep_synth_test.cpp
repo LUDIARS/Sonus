@@ -258,36 +258,54 @@ SND_TEST(IndepSynth, LowLatencyOutputIsExact) {
   }
 }
 
-// F2: rings = min(max_real_voices, 32): with 40 real voices the 33rd buffered synth has no
-// ring. (With fewer real voices than rings, the extra synths are virtual, not refused.)
+// F2 (D-97, accepted decision): rings = min(max_real_voices, 32). With 40 real voices, 35
+// buffered synths: 32 get a ring and sound, 3 are not refused but wait in silence; when
+// rings come free (3 synths stopped), the waiting ones get them and sound. Each synth
+// writes 0.01, so the output counts the sounding synths: n x 0.01 x centre pan.
 SND_TEST(IndepSynth, BufferedRingLimit) {
-  for (const std::uint32_t realVoices : {40u}) {
-    snd_config cfg = SmallConfig();
-    cfg.max_real_voices = realVoices;
-    cfg.max_virtual_voices = 128;
-    cfg.max_playbacks = 128;
-    indep::Rig r(cfg);
-    SND_REQUIRE_EQ(r.created, SND_OK);
-    const std::uint32_t rings = realVoices < 32u ? realVoices : 32u;
-    static float zero = 0.0f;
-    std::vector<snd_playback_handle> ps;
-    const snd_synth_desc d = indep::DcDesc(&zero, SND_SYNTH_BUFFERED);
-    for (std::uint32_t i = 0; i < rings + 3u; ++i) ps.push_back(snd_play_synth(r.sys, &d, snd_emitter_handle{0}, nullptr));
-    r.Step(6);
-    std::uint32_t limit = 0, other = 0;
-    for (const apitest::End& e : r.ev.ends) {
-      if (e.detail == SND_END_DETAIL_VOICE_LIMIT) {
-        ++limit;
-      } else {
-        ++other;
-      }
-    }
-    SND_CHECK_MSG(limit == 3u, "real voices %u: %u ended VOICE_LIMIT, %u otherwise", realVoices, limit, other);
-    SND_CHECK_EQ(other, 0u);
-    for (const snd_playback_handle& p : ps) snd_stop(r.sys, p, 0.0f, nullptr);
-    r.Step(6);
-    for (const snd_playback_handle& p : ps) SND_CHECK_EQ(r.EndsOf(p.value), 1u);
+  snd_config cfg = SmallConfig();
+  cfg.max_real_voices = 40;
+  cfg.max_virtual_voices = 128;
+  cfg.max_playbacks = 128;
+  indep::Rig r(cfg);
+  SND_REQUIRE_EQ(r.created, SND_OK);
+  static const float kOne = 0.01f;
+  std::vector<snd_playback_handle> ps;
+  const snd_synth_desc d = indep::DcDesc(&kOne, SND_SYNTH_BUFFERED);
+  for (std::uint32_t i = 0; i < 35u; ++i) ps.push_back(snd_play_synth(r.sys, &d, snd_emitter_handle{0}, nullptr));
+  for (const snd_playback_handle& p : ps) SND_REQUIRE(p.value != 0u);
+  // Sounding synths, from the last captured frame (all synths write a constant).
+  auto sounding = [&] { return static_cast<int>(std::lround(r.Raw(r.Frames() - 1) / kCenter / kOne)); };
+  // Wait by quantity: until 32 sound (the render-ahead jobs have filled their rings).
+  int n = 0;
+  for (int i = 0; i < 2000 && (n = sounding()) != 32; ++i) r.Step(1);
+  SND_CHECK_EQ(n, 32);
+  r.Step(20);
+  SND_CHECK_EQ(sounding(), 32);  // not more: 3 still wait
+  SND_CHECK(r.ev.ends.empty());  // none refused (D-97)
+  // Stop 3 synths: rings come free, the 3 waiting ones take them: 32 again.
+  for (int k = 0; k < 3; ++k) SND_CHECK_EQ(snd_stop(r.sys, ps[static_cast<std::size_t>(k)], 0.0f, nullptr), SND_OK);
+  bool dipped = false, back = false;
+  for (int i = 0; i < 2000 && !back; ++i) {
+    r.Step(1);
+    const int m = sounding();
+    dipped = dipped || m < 32;
+    back = dipped && m == 32;
   }
+  SND_CHECK(back);
+  for (int k = 0; k < 3; ++k) SND_CHECK_EQ(r.EndsOf(ps[static_cast<std::size_t>(k)].value), 1u);
+  // Stop 10 more: 22 sound (no one is waiting any more).
+  for (int k = 3; k < 13; ++k) snd_stop(r.sys, ps[static_cast<std::size_t>(k)], 0.0f, nullptr);
+  for (int i = 0; i < 2000 && (n = sounding()) != 22; ++i) r.Step(1);
+  SND_CHECK_EQ(n, 22);
+  r.Step(10);
+  SND_CHECK_EQ(sounding(), 22);
+  for (const snd_playback_handle& p : ps) snd_stop(r.sys, p, 0.0f, nullptr);
+  for (int i = 0; i < 200 && r.ev.ends.size() < ps.size(); ++i) r.Step(1);
+  for (const snd_playback_handle& p : ps) SND_CHECK_EQ(r.EndsOf(p.value), 1u);
+  snd::compose::Parts parts = snd::compose::PartsOf(r.sys);
+  SND_REQUIRE(parts.sources != nullptr);
+  SND_CHECK_EQ(parts.sources->Stats().callbackRejected, 3u);  // the 3 that had to wait at their start
 }
 
 // F4: stream user buffer.
@@ -404,8 +422,21 @@ SND_TEST(IndepSynth, StreamUserBufferWrittenFromAnotherThread) {
   while (done.load() < 700u) std::this_thread::yield();
   const snd_playback_handle p = snd_play_user_buffer(r.sys, b, 0u, snd_emitter_handle{0}, nullptr);
   SND_REQUIRE(p.value != 0u);
-  for (int i = 0; i < 120 && done.load() < total; ++i) r.Step(1);
+  // Wait by quantity, not by a step budget: until the writer is done and every written
+  // frame has been heard (non-silent), give or take the resampler's edge frames.
+  auto heardFrames = [&] {
+    std::uint64_t n = 0;
+    for (std::uint64_t c = 0; c < r.Frames(); ++c) n += std::fabs(r.Raw(c)) >= 1e-4f ? 1u : 0u;
+    return n;
+  };
+  std::uint64_t scanned = 0, heardSoFar = 0;
+  for (int i = 0; i < 100000; ++i) {
+    r.Step(1);
+    for (; scanned < r.Frames(); ++scanned) heardSoFar += std::fabs(r.Raw(scanned)) >= 1e-4f ? 1u : 0u;
+    if (done.load() >= total && heardSoFar + 16u >= total) break;
+  }
   r.Step(10);
+  SND_CHECK(heardFrames() + 16u >= total);
   stop.store(true);
   writer.join();
   // Heard non-silent runs (an underrun leaves a gap: nothing is consumed then): inside each

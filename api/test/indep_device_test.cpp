@@ -120,9 +120,8 @@ SND_TEST(IndepDevice, OtherRateReportedOnceAcrossChanges) {
   SND_CHECK_EQ(r.refillTimeouts, 0u);
 }
 
-// D2 with the callbacks installed after the first update (a game that sets them late):
-// the report is not lost before there is anyone to tell? The spec says "最初に気づいたとき
-// に 1 回"; see the report (spec gap). This test documents what happens.
+// D2 with the callbacks installed after the first updates (accepted decision, D-95 note):
+// a notice that came before is delivered once, at the first update after they were set.
 SND_TEST(IndepDevice, OtherRateWithLateCallbacks) {
   snd::mock::NullDeviceConfig dc;
   dc.sampleRate = 44100;
@@ -134,8 +133,7 @@ SND_TEST(IndepDevice, OtherRateWithLateCallbacks) {
   r.Step(4);
   std::uint32_t n = 0;
   for (const apitest::Error& x : r.ev.errors) n += x.code == SND_ERR_UNSUPPORTED ? 1u : 0u;
-  snd::test::Note("rate mismatch reports after late callbacks: %u", n);
-  SND_CHECK(n <= 1u);
+  SND_CHECK_EQ(n, 1u);
 }
 
 // D4: one report per LOST event, at the next update.
@@ -225,31 +223,83 @@ SND_TEST(IndepDevice, FocusContinueAndPerCategoryChangeNothing) {
   }
 }
 
-// D3: catch-up accounting after underruns (the device pulls faster than the audio thread refills).
+// D3: catch-up accounting after underruns. The underrun is made deterministically: a
+// LowLatency synth callback holds the audio thread (spinning, no system call) while the
+// test pulls periods from the device, so the ring runs dry for a known number of periods.
+namespace {
+struct Gate {
+  std::atomic<int> hold{0};
+  std::atomic<int> inside{0};
+};
+void SND_CALL GateSynth(void* user, float* const* out, std::uint32_t channels, std::uint32_t frames,
+                        const snd_render_context*) {
+  auto* g = static_cast<Gate*>(user);
+  if (g->hold.load(std::memory_order_acquire) != 0) {
+    g->inside.store(1, std::memory_order_release);
+    while (g->hold.load(std::memory_order_acquire) != 0) {
+    }
+    g->inside.store(0, std::memory_order_release);
+  }
+  for (std::uint32_t c = 0; c < channels; ++c) {
+    for (std::uint32_t f = 0; f < frames; ++f) out[c][f] = 0.0f;
+  }
+}
+}  // namespace
+
 SND_TEST(IndepDevice, UnderrunsAreCaughtUpOnTheCommonClock) {
   snd_config c = SmallConfig();
   c.tuning.underrun_catchup_blocks = 2;
   indep::Rig r(c);
   SND_REQUIRE_EQ(r.created, SND_OK);
+  Gate gate;
+  snd_synth_desc d{};
+  d.callback = &GateSynth;
+  d.user = &gate;
+  d.channels = 1;
+  d.mode = SND_SYNTH_LOW_LATENCY;
+  d.volume = 1.0f;
+  SND_REQUIRE(snd_play_synth(r.sys, &d, snd_emitter_handle{0}, nullptr).value != 0u);
   r.Step(8);
   snd::platform::AudioDriver* drv = r.Driver();
   SND_REQUIRE(drv != nullptr);
-  std::uint64_t lost = 0;
-  for (int attempt = 0; attempt < 20 && lost < 4096; ++attempt) {
-    r.device.Pump(64);  // 64 periods at once: the ring runs dry
-    lost = drv->Stats().core.lostFrames;
-  }
-  SND_REQUIRE(lost >= 256u);
-  // Let it catch up: normal periods with refills.
+  const std::uint64_t lost0 = drv->Stats().core.lostFrames;
+  SND_REQUIRE_EQ(lost0, 0u);
+  // Hold the audio thread inside the next block it renders.
+  gate.hold.store(1, std::memory_order_release);
+  r.device.Pump(1);  // wakes it: it renders, enters the callback and stays there
+  while (gate.inside.load(std::memory_order_acquire) == 0) r.device.Pump(1);
+  // The ring holds at most the render-ahead target: 40 more periods surely run it dry.
+  r.device.Pump(40);
+  const std::uint64_t drvAtRelease = drv->Stats().core.blocksRendered;  // the held block not yet counted
+  gate.hold.store(0, std::memory_order_release);
+  // Wait until the lost frames are known (the driver counts them when the callback finds
+  // the ring short; that happened during the pumps above).
+  const std::uint64_t lost = drv->Stats().core.lostFrames;
+  SND_REQUIRE(lost >= 20u * 256u);
+  // Catch up: normal periods with refills, until core is ahead of the driver by
+  // floor(lost / 256) blocks (bounded wait by quantity, not time).
   snd_stats st{};
-  r.Step(200);
-  r.WaitRefill();
-  std::this_thread::sleep_for(std::chrono::milliseconds(30));  // the audio thread is idle
+  const std::uint64_t want = lost / 256u;
+  std::uint64_t steps = 0;
+  for (; steps < 4000; ++steps) {
+    r.Step(1);
+    r.WaitRefill();
+    snd_update(r.sys);
+    if (snd_get_stats(r.sys, &st) != SND_OK) continue;
+    const std::uint64_t drvBlocks = drv->Stats().core.blocksRendered;
+    if (st.block_index >= drvBlocks + want) break;
+  }
+  SND_CHECK(steps < 4000u);
   const snd::platform::AudioDriverStats ds = drv->Stats();
-  SND_REQUIRE_EQ(ds.core.lostFrames, lost);  // no further underrun while catching up
-  snd_update(r.sys);
-  SND_REQUIRE_EQ(snd_get_stats(r.sys, &st), SND_OK);
-  // Core rendered one block per driver block plus floor(lost / 256) discarded ones.
-  SND_CHECK_EQ(st.block_index, ds.core.blocksRendered + lost / 256u);
+  SND_CHECK_EQ(ds.core.lostFrames, lost);  // no further underrun while catching up
+  // Exactly floor(lost / 256) discarded blocks: never more (the core is not running ahead).
+  // The published stats may lag the driver's counter by the block being rendered.
+  SND_CHECK(st.block_index <= ds.core.blocksRendered + want);
+  SND_CHECK(st.block_index + 1u >= ds.core.blocksRendered + want);
   SND_CHECK_EQ(st.clock_sample, st.block_index * 256u);
+  // At most underrun_catchup_blocks (2) extra blocks per driver block: with `want` extra
+  // blocks the catch-up took at least ceil(want / 2) driver blocks after the release.
+  SND_CHECK_MSG(2u * (ds.core.blocksRendered - drvAtRelease) >= want, "%llu extra blocks in %llu driver blocks",
+                static_cast<unsigned long long>(want),
+                static_cast<unsigned long long>(ds.core.blocksRendered - drvAtRelease));
 }
