@@ -277,12 +277,13 @@ SND_TEST(IndepFix6, InfiniteLoopInMemoryPlaysOnAfterTheError) { InfiniteLoopInMe
 // loop plays from memory (streamIoErrors stays 0 for 300 blocks).
 SND_TEST(IndepFix6, Defect_source_IoErrorNotCountedWhileAnInfiniteLoopPlaysFromMemory) { InfiniteLoopInMemory(true); }
 
-// SetLoop after the IO error to a loop whose frames are all decoded in the PCM
-// ring at that moment (9000..9500, the playhead at 7680, the ring decoded to
-// the cut at ~20000): an infinite loop entirely in memory goes on (decision,
-// supplement). Today the voice plays to the loop end once and ends: the pass
-// would have to be decoded again from the file (no reads after the error).
-SND_TEST(IndepFix6, Defect_source_LoopSetInMemoryAfterTheErrorEnds) {
+// Decision (after 548cda5): after an IO error only the resident preload counts
+// as "in memory"; the decoded PCM ring is not a source for loops or seeks.
+// SetLoop after the error to a loop outside the preload (9000..9500; the
+// playhead at 7680, the ring decoded up to the cut at ~20000): the voice plays
+// what the ring holds up to the loop end exactly (9500 - 7680 frames, the end
+// faded) and ends; everything is returned.
+SND_TEST(IndepFix6, LoopSetAfterTheErrorPlaysTheRingToTheLoopEndThenEnds) {
   Built b = Build("f6loop", {Spec("p", 96000, "PC16")});
   SND_REQUIRE_MSG(b.ok, "%s", b.diag.c_str());
   const Decoded ref = Reference(b, "p");
@@ -298,18 +299,94 @@ SND_TEST(IndepFix6, Defect_source_LoopSetInMemoryAfterTheErrorEnds) {
   for (int i = 0; i < 30; ++i) d.Block(d.Stream(), {&v}, 256);
   SND_REQUIRE(d.runtime.Stats().streamIoErrors >= 1u);
   const std::uint64_t p0 = v.ph.frame;
+  SND_REQUIRE(p0 < 9000u);
   const std::size_t before = v.out[0].size();
   d.Control(d.Stream(), v.slot, src::ControlOp::SetLoop, 9000, 9500);
   for (int i = 0; i < 100 && v.ended == 0u; ++i) d.Block(d.Stream(), {&v}, 256);
-  std::vector<float> want;
-  for (std::uint64_t p = p0; want.size() < v.out[0].size() - before;) {
-    want.push_back(ref.ch[0][static_cast<std::size_t>(p)]);
-    if (++p == 9500) p = 9000;
-  }
-  const double e = MaxDiff(v.out[0], before, want, want.size() > kFade ? want.size() - kFade : 0u);  // the end may be faded
-  std::printf("  loop (9000, 9500) set after the error: %zu frames, %s, err %.3g\n", v.out[0].size() - before,
-              v.ended != 0u ? "ended" : "still playing", e);
+  const std::size_t got = v.out[0].size() - before;
+  const std::size_t want = static_cast<std::size_t>(9500u - p0);
+  const double e = MaxDiff(v.out[0], before, std::vector<float>(ref.ch[0].begin() + static_cast<std::ptrdiff_t>(p0), ref.ch[0].end()),
+                           got > kFade ? got - kFade : 0u);  // the end is faded
+  std::printf("  loop (9000, 9500) set after the error at %llu: %zu frames (want %zu), %s, err %.3g\n",
+              static_cast<unsigned long long>(p0), got, want, v.ended != 0u ? "ended" : "still playing", e);
+  SND_CHECK(v.ended != 0u);
+  SND_CHECK_EQ(got, want);
   SND_CHECK(e < 1e-6);
-  SND_CHECK_MSG(v.ended == 0u && v.out[0].size() - before >= 100u * 256u, "the loop in memory does not go on (%zu frames)",
-                v.out[0].size() - before);
+  d.Release(d.Stream(), v.slot);
+  for (int i = 0; i < 4; ++i) d.Block(d.Stream(), {}, 256);
+  SND_CHECK_EQ(d.fs.OpenFiles(), 0u);
+  SND_CHECK_EQ(d.pool.Used(), 0u);
+  SND_CHECK_EQ(d.runtime.Stats().streamInstances, 0u);
+  SND_CHECK_EQ(d.runtime.Stats().decodersInUse, 0u);
+}
+
+// Decision on seeks after the IO error: a Seek into the preload plays from
+// the target to the preload end exactly and ends; a Seek anywhere else (into
+// data read before the cut, or past it) and a Devirtualize end at once (no
+// frame). Everything is returned.
+SND_TEST(IndepFix6, SeekAfterTheErrorPlaysOnlyThePreload) {
+  Built b = Build("f6seek", {Spec("p", 96000, "PC16"), Spec("a", 96000, "ADPC")});
+  SND_REQUIRE_MSG(b.ok, "%s", b.diag.c_str());
+  for (const char* name : {"p", "a"}) {
+    const Decoded ref = Reference(b, name);
+    SND_REQUIRE(ref.ok);
+    const std::string path = PathOf(b, name);
+    snd::bank_format::StreamFileHeader hd{};
+    std::memcpy(&hd, FileOf(b, path)->data(), sizeof(hd));
+    struct Case {
+      const char* what;
+      int op;  // 0 seek, 1 virtualise + devirtualise
+      std::uint64_t target;
+    };
+    const Case cases[] = {{"seek into the preload", 0, 1000},
+                          {"seek to the preload start", 0, 0},
+                          {"seek into the data read before the cut", 0, 15000},
+                          {"seek past the cut", 0, 60000},
+                          {"devirtualise", 1, 0}};
+    for (const Case& c : cases) {
+      IndepDriver d(b, IndepDriver::Opt{});
+      SND_REQUIRE(d.Ok());
+      const std::uint64_t preFrames = d.Asset(name)->preloadFrames;
+      SND_REQUIRE(preFrames > 1000u);
+      // The cut past the preload, past the frames rendered before the control.
+      const std::uint64_t cutFrame = 20000;
+      const std::uint64_t cutByte = std::string(name) == "p" ? 2u * cutFrame : cutFrame / 1017u * 512u;
+      d.fs.FailReads(path, hd.dataOffset + cutByte, UINT64_MAX);
+      IndepDriver::Voice v;
+      v.slot = d.Start(d.Stream(), d.Asset(name), 0, 0);
+      for (int i = 0; i < 30; ++i) d.Block(d.Stream(), {&v}, 256);
+      SND_REQUIRE(d.runtime.Stats().streamIoErrors >= 1u);
+      SND_REQUIRE(v.ended == 0u);
+      const std::size_t before = v.out[0].size();
+      if (c.op == 0) {
+        d.Control(d.Stream(), v.slot, src::ControlOp::Seek, c.target);
+      } else {
+        d.Control(d.Stream(), v.slot, src::ControlOp::Virtualize);
+        for (int i = 0; i < 4; ++i) {
+          src::AdvanceItem it{0, v.slot, 256, 1.0f, &v.ph};
+          snd::VoiceRenderStatus st{};
+          d.Stream().AdvanceVirtual(&it, 1, &st);
+          d.Block(d.Stream(), {}, 256);
+        }
+        d.Control(d.Stream(), v.slot, src::ControlOp::Devirtualize, v.ph.frame);
+      }
+      int blocks = 0;
+      for (; blocks < 200 && v.ended == 0u; ++blocks) d.Block(d.Stream(), {&v}, 256);
+      const std::size_t got = v.out[0].size() - before;
+      const bool inPreload = c.op == 0 && c.target < preFrames;
+      const std::size_t want = inPreload ? static_cast<std::size_t>(preFrames - c.target) : 0u;
+      const double e = inPreload ? MaxDiff(v.out[0], before,
+                                           std::vector<float>(ref.ch[0].begin() + static_cast<std::ptrdiff_t>(c.target), ref.ch[0].end()),
+                                           got > kFade ? got - kFade : 0u)
+                                 : 0.0;
+      SND_CHECK_MSG(v.ended != 0u && got == want && e < 1e-6, "%s %s: ended %u after %d blocks, %zu frames (want %zu), err %g", name,
+                    c.what, v.ended, blocks, got, want, e);
+      if (!inPreload) SND_CHECK_MSG(blocks <= 2, "%s %s: ended only after %d blocks", name, c.what, blocks);
+      d.Release(d.Stream(), v.slot);
+      for (int i = 0; i < 4; ++i) d.Block(d.Stream(), {}, 256);
+      SND_CHECK_EQ(d.fs.OpenFiles(), 0u);
+      SND_CHECK_EQ(d.pool.Used(), 0u);
+      SND_CHECK_EQ(d.runtime.Stats().streamInstances, 0u);
+    }
+  }
 }
