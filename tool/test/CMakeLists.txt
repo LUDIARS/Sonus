@@ -1,14 +1,29 @@
 # Tool tests (stage 2): models without a game, models against a real core System
 # and live link server over the in-memory transport, the Tela UI (declarations,
 # gestures, CPU-rendered pixels) and the UI / network thread interplay (TSan).
-set(_tool_test_link sonus_tool sonus_tool_ui sonus_livelink sonus_core sonus_buildtool sonus_bank sonus_codec
+# The model tests need only the core (SND_BUILD_TOOL_CORE, no Tela, D-101); the UI
+# tests and the executable's tests only exist with SND_BUILD_TOOL.
+set(_tool_core_test_link sonus_tool sonus_livelink sonus_core sonus_buildtool sonus_bank sonus_codec
     sonus_dsp sonus_io sonus_jobs sonus_platform sonus_base sonus_mocks)
-foreach(_t model_test live_mixer_test live_profiler_test ui_declaration_test ui_gesture_test ui_raster_test
-           ui_concurrency_test ui_snapshot_test)
-  snd_add_test(tool_${_t} SOURCES ${_t}.cpp LINK ${_tool_test_link})
-  target_include_directories(tool_${_t} PRIVATE ${PROJECT_SOURCE_DIR}/core/test ${PROJECT_SOURCE_DIR}/tests/integration
+set(_tool_test_link sonus_tool_ui ${_tool_core_test_link})
+function(_snd_tool_test name link)
+  snd_add_test(tool_${name} SOURCES ${name}.cpp LINK ${link})
+  target_include_directories(tool_${name} PRIVATE ${PROJECT_SOURCE_DIR}/core/test ${PROJECT_SOURCE_DIR}/tests/integration
                              ${CMAKE_CURRENT_SOURCE_DIR})
-  set_tests_properties(tool_${_t} PROPERTIES TIMEOUT 600)
+  set_tests_properties(tool_${name} PROPERTIES TIMEOUT 600)
+endfunction()
+
+# Core only (no Tela). core_host_test uses the core the way an outside host does (D-101).
+foreach(_t model_test live_mixer_test live_profiler_test indep_sync_test core_host_test)
+  _snd_tool_test(${_t} "${_tool_core_test_link}")
+endforeach()
+
+if(NOT SND_BUILD_TOOL)
+  return()
+endif()
+
+foreach(_t ui_declaration_test ui_gesture_test ui_raster_test ui_concurrency_test ui_snapshot_test)
+  _snd_tool_test(${_t} "${_tool_test_link}")
 endforeach()
 
 # The executable itself, headless, on the build tool's sample project (its WAV files are
@@ -23,11 +38,9 @@ set_tests_properties(tool_app_bad_option PROPERTIES WILL_FAIL TRUE)
 
 # Independent tests (tool/test/indep_properties.md, written from the specs before reading
 # the code). Tests named Defect_* fail on purpose: each documents an implementation defect.
-foreach(_t indep_model_test indep_sync_test indep_ui_test indep_concurrency_test)
-  snd_add_test(tool_${_t} SOURCES ${_t}.cpp LINK ${_tool_test_link})
-  target_include_directories(tool_${_t} PRIVATE ${PROJECT_SOURCE_DIR}/core/test ${PROJECT_SOURCE_DIR}/tests/integration
-                             ${CMAKE_CURRENT_SOURCE_DIR})
-  set_tests_properties(tool_${_t} PROPERTIES TIMEOUT 600)
+# (indep_sync_test needs only the core and is registered above.)
+foreach(_t indep_model_test indep_ui_test indep_concurrency_test)
+  _snd_tool_test(${_t} "${_tool_test_link}")
 endforeach()
 # --dpi accepts 0.25 .. 4 (D-67a): both ends run, just outside is refused.
 add_test(NAME tool_indep_app_dpi_min

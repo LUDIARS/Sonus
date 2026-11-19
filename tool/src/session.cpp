@@ -2,6 +2,7 @@
 #include "snd/tool/session.hpp"
 
 #include "snd/livelink/client.hpp"
+#include "snd/platform/clock.hpp"
 #include "snd/tool/names.hpp"
 #include "snd/version.h"
 
@@ -50,6 +51,12 @@ void Session::Tick(std::uint64_t nowNs) {
   }
   profiler_.Poll(c, nowNs);
 }
+
+std::uint64_t Session::NowNs() { return platform::MonotonicNanoseconds(); }
+
+bool Session::StartRecording() { return profiler_.StartRecording(connection_.client()); }
+
+bool Session::StopRecording() { return profiler_.StopRecording(connection_.client()); }
 
 RecordingInfo Session::CurrentRecordingInfo() const {
   RecordingInfo i;

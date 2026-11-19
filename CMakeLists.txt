@@ -13,11 +13,19 @@ endif()
 # ---------------------------------------------------------------------------
 # Options
 # ---------------------------------------------------------------------------
-option(SND_BUILD_TESTS     "Build unit tests, mocks and the test framework" ON)
+# Sonus may be the top-level project or a subproject (add_subdirectory from a game
+# engine, CONTRACTS.md D-100). As a subproject the tests are OFF by default and
+# nothing below changes the parent's settings: compiler flags go on Sonus' targets
+# only (snd_apply_options), CMAKE_CXX_STANDARD and the module path are directory
+# variables, and the build type is left to the parent.
+option(SND_BUILD_TESTS     "Build unit tests, mocks and the test framework" ${PROJECT_IS_TOP_LEVEL})
 option(SND_NO_EXCEPTIONS   "Compile C++ with -fno-exceptions -fno-rtti" ON)
 option(SND_WERROR          "Treat warnings as errors" ON)
 option(SND_LIVELINK        "Compile the live link (development builds only)" ON)
-option(SND_BUILD_TOOL      "Build the authoring GUI (not available yet)" OFF)
+option(SND_BUILD_TOOL      "Build the authoring tool (models + Tela UI + sonus-tool; needs Tela)" OFF)
+# The tool's UI-independent core alone (sonus_tool = Sonus::tool_core), without Tela,
+# for hosts with their own UI (D-101). SND_BUILD_TOOL implies it.
+option(SND_BUILD_TOOL_CORE "Build the tool's UI-independent core (no Tela)" OFF)
 # The only third-party dependency (CONTRACTS.md D-56): bundled libopus.
 option(SND_CODEC_OPUS      "Build the Opus codec from third_party/opus (libopus, BSD-3-Clause)" ON)
 set(SND_SANITIZE "" CACHE STRING "Sanitizers: empty, 'address,undefined' or 'thread'")
@@ -38,13 +46,13 @@ set(CMAKE_C_STANDARD_REQUIRED ON)
 set(CMAKE_C_EXTENSIONS OFF)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
-if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
+if(PROJECT_IS_TOP_LEVEL AND NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
   set(CMAKE_BUILD_TYPE Debug CACHE STRING "Build type" FORCE)
 endif()
 
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
-include(SonusOptions)
-include(SonusModule)
+include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/SonusOptions.cmake)
+include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/SonusModule.cmake)
 
 if(SND_BUILD_TESTS)
   enable_testing()
@@ -87,8 +95,8 @@ foreach(_m base platform jobs io codec dsp bank core source music api physics li
   add_subdirectory(${_m})
 endforeach()
 
-if(SND_BUILD_TOOL)
-  add_subdirectory(tool)
+if(SND_BUILD_TOOL OR SND_BUILD_TOOL_CORE)
+  add_subdirectory(tool)             # the UI (Tela) only with SND_BUILD_TOOL
 endif()
 
 if(SND_BUILD_TESTS)

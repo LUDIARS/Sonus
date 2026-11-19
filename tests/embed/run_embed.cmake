@@ -1,0 +1,45 @@
+# Configures, builds and runs tests/embed/host (see CMakeLists.txt next to this file).
+# Fails on any error, and on any warning in the configure or build output.
+if(NOT BUILD_TYPE)
+  set(BUILD_TYPE Debug)
+endif()
+foreach(_v SONUS_DIR HOST_DIR BIN_DIR GENERATOR C_COMPILER CXX_COMPILER)
+  if(NOT DEFINED ${_v} OR "${${_v}}" STREQUAL "")
+    message(FATAL_ERROR "run_embed.cmake: ${_v} is not set")
+  endif()
+endforeach()
+
+file(REMOVE_RECURSE "${BIN_DIR}")
+set(_args -S "${HOST_DIR}" -B "${BIN_DIR}" -G "${GENERATOR}"
+          "-DSONUS_DIR=${SONUS_DIR}"
+          "-DCMAKE_C_COMPILER=${C_COMPILER}" "-DCMAKE_CXX_COMPILER=${CXX_COMPILER}"
+          "-DCMAKE_BUILD_TYPE=${BUILD_TYPE}")
+if(MAKE_PROGRAM)
+  list(APPEND _args "-DCMAKE_MAKE_PROGRAM=${MAKE_PROGRAM}")
+endif()
+if(DEFINED CODEC_OPUS AND NOT CODEC_OPUS STREQUAL "")
+  list(APPEND _args "-DSND_CODEC_OPUS=${CODEC_OPUS}")
+endif()
+if(DEFINED LIVELINK AND NOT LIVELINK STREQUAL "")
+  list(APPEND _args "-DSND_LIVELINK=${LIVELINK}")
+endif()
+
+function(_embed_run what)
+  execute_process(COMMAND ${ARGN} RESULT_VARIABLE _r OUTPUT_VARIABLE _out ERROR_VARIABLE _err)
+  message("--- ${what}\n${_out}${_err}")
+  if(NOT _r EQUAL 0)
+    message(FATAL_ERROR "${what} failed (${_r})")
+  endif()
+  if("${_out}${_err}" MATCHES "[Ww]arning")
+    message(FATAL_ERROR "${what} printed a warning")
+  endif()
+endfunction()
+
+_embed_run("configure" ${CMAKE_COMMAND} ${_args})
+_embed_run("build" ${CMAKE_COMMAND} --build "${BIN_DIR}" --parallel 2)
+_embed_run("embed_c_host" "${BIN_DIR}/embed_c_host")
+if(LIVELINK)
+  _embed_run("embed_tool_host" "${BIN_DIR}/embed_tool_host")
+else()
+  message("--- embed_tool_host skipped (SND_LIVELINK=OFF: the game has no live link)")
+endif()

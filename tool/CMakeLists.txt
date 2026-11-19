@@ -1,10 +1,14 @@
-# Authoring tool (design.md 11; stage 2: mixer and profiler). Built only with
-# -DSND_BUILD_TOOL=ON. The UI uses LUDIARS Tela (CONTRACTS.md D-67), found with
-# find_package (Tela_DIR or CMAKE_PREFIX_PATH); it is never bundled or fetched.
-find_package(Tela CONFIG REQUIRED)
+# Authoring tool (design.md 11; stage 2: mixer and profiler).
+#   -DSND_BUILD_TOOL_CORE=ON: the UI-independent core only (sonus_tool), no Tela (D-101).
+#   -DSND_BUILD_TOOL=ON:      the core, the UI and the sonus-tool executable. The UI uses
+#                             LUDIARS Tela (CONTRACTS.md D-67), found with find_package
+#                             (Tela_DIR or CMAKE_PREFIX_PATH); it is never bundled or fetched.
+# The tests in test/ follow the same split (core tests without Tela, UI tests with it).
 
-# --- sonus_tool: the UI-independent core (models). Dependencies from the root table
-# (SND_MODULE_DEPS_tool = buildtool;dsp;core;livelink).
+# --- sonus_tool: the UI-independent core (models: connection, session, mixer, value sync,
+# profiler, edit history, recording files). Dependencies from the root table
+# (SND_MODULE_DEPS_tool = buildtool;dsp;core;livelink). Hosts with their own UI (a game
+# engine's editor) link Sonus::tool_core.
 snd_add_module(tool
   SOURCES
     src/project.cpp
@@ -17,6 +21,16 @@ snd_add_module(tool
     src/recording_file.cpp
     src/names.cpp
     src/session.cpp)
+# The public headers use C++20 (defaulted operator== in edit_history / project /
+# recording_file.hpp): a C++17 host gets cxx_std_20 for the files that include them.
+target_compile_features(sonus_tool INTERFACE cxx_std_20)
+add_library(sonus::tool_core ALIAS sonus_tool)
+add_library(Sonus::tool_core ALIAS sonus_tool)
+
+if(NOT SND_BUILD_TOOL)
+  return()
+endif()
+find_package(Tela CONFIG REQUIRED)
 
 # --- sonus_tool_ui: Tela declarations, controls and the CPU compositor (OS independent).
 add_library(sonus_tool_ui STATIC
