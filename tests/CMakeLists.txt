@@ -6,6 +6,7 @@
 #   sonus_mocks           null output device, memory file system, deterministic jobs
 #   selftest/             tests of all of the above
 #   integration/          cross-module tests (stage 2+), added from the root
+#   embed/                Sonus as a subproject of a C++17 parent (D-100)
 
 add_library(sonus_testkit STATIC
   framework/src/runner.cpp
@@ -37,3 +38,4 @@ target_link_libraries(sonus_mocks PUBLIC sonus_contract)
 snd_apply_options(sonus_mocks)
 
 add_subdirectory(selftest)
+add_subdirectory(embed)

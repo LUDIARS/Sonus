@@ -4,8 +4,25 @@
 接続し、バスの音量・ミュート・ソロ・エフェクトのパラメータを変え（11.2 上書き層）、ゲームが送るボイス・処理時間・メモリ・
 メータ・イベントログを表示し、記録（11.3）を保存・読み込みする。UI は LUDIARS **Tela**（CONTRACTS.md D-67）。
 
-- 依存（凍結、ルート `CMakeLists.txt` の `SND_MODULE_DEPS_tool`）: buildtool, dsp, core, livelink。加えて Tela（`find_package`）。
-- `-DSND_BUILD_TOOL=ON` のときだけビルドする。既定（OFF）では Tela は要らない。
+- 依存（凍結、ルート `CMakeLists.txt` の `SND_MODULE_DEPS_tool`）: buildtool, dsp, core, livelink。UI だけが加えて Tela（`find_package`）。
+- `-DSND_BUILD_TOOL=ON` で中核・UI・`sonus-tool` をビルドする（Tela が要る）。
+- `-DSND_BUILD_TOOL_CORE=ON` は UI に依存しない中核 `sonus_tool`（別名 `Sonus::tool_core`）だけをビルドする。Tela は要らない
+  （CONTRACTS.md D-101）。ゲームエンジンのエディタなど、自前の UI を持つホストが使う。既定（両方 OFF）ではどちらも作らない。
+
+## 外のホストから使う（D-101）
+
+ホストは `snd/tool/session.hpp` と `Sonus::tool_core` だけで使える（ライブリンクのクライアントのヘッダは要らない）。
+公開ヘッダは C++20（`Sonus::tool_core` が `cxx_std_20` を伝える）。
+
+- ポーリング型: ホストは自分のループから `Session::Tick()` を呼び、その間にモデルを読む。ネットワークはライブリンクの
+  クライアントのスレッドで動いて受信をためるだけで、ホストへのコールバックは無い。
+- スレッド: 1 つの `Session` への呼び出しは同時に 1 つのスレッドから（作ったスレッドと同じでなくてよい）。
+- 時刻: `Tick(nowNs)` の `nowNs` は `Session::NowNs()` と同じ時計（クライアントの受信時刻と比べる）。引数なしの `Tick()` が使う。
+- 接続: `Connect(ConnectionDesc{address, port, ...})`、状態は `connection().state()` / `hello()` / `roundTripUs()`。
+- ミキサー: `mixer().Set(Target{Control::BusFader / BusMute / BusSolo, bus}, value)`、`Undo` / `Redo`、
+  上書きの一覧 `Overrides()` と戻し `Revert` / `RevertAll`。バスの番号はプロジェクト（`LoadProject` / `UseProject`）の並び。
+- プロファイラ: `profiler().FindMeter(busId)`（0 = 出力）、`voices()`、`Summary()`（処理時間）、`memory()`、`log()`。
+- 録画: `StartRecording()` / `StopRecording()`、`profiler().recordingState()` が Ready になったら `SaveRecording(path)`。
 
 ## ビルド
 
@@ -19,6 +36,9 @@ cmake --build /tmp/tela-build && cmake --install /tmp/tela-build
 # Sonus + ツール
 cmake -S . -B build-tool -G Ninja -DSND_BUILD_TOOL=ON -DCMAKE_PREFIX_PATH=/tmp/tela-prefix
 cmake --build build-tool && ctest --test-dir build-tool --output-on-failure -R tool_
+
+# 中核だけ（Tela なし）。モデルのテスト（model / live_mixer / live_profiler / indep_sync / core_host）だけが入る
+cmake -S . -B build-core -G Ninja -DSND_BUILD_TOOL_CORE=ON
 ```
 
 - **Windows**: Tela を `-DTELA_BUILD_WINDOWS=ON -DTELA_PICTOR_INCLUDE_DIR=... -DTELA_PICTOR_LIBRARY=...` でビルドする

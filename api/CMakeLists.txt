@@ -21,3 +21,16 @@ target_link_libraries(sonus
   PRIVATE sonus_core sonus_source sonus_music sonus_io sonus_codec sonus_dsp sonus_bank
           sonus_jobs sonus_platform sonus_base sonus_livelink)
 snd_apply_options(sonus)
+
+# Sonus::sonus -- the window for a game engine that takes Sonus in (add_subdirectory,
+# CONTRACTS.md D-100): the C API (snd/sonus.h and the other public headers) and the
+# composition root with every runtime module. Unlike `sonus` it carries no compile
+# feature: sonus_contract_public asks for cxx_std_20 (the C++ wrapper snd/sonus.hpp needs
+# it), which would turn a C++17 engine's files into C++20. The C headers are C11 / C++17
+# clean; snd/sonus.hpp still needs C++20 where it is included. $<LINK_ONLY:> links the
+# library and its static dependencies without their usage requirements.
+add_library(sonus_c_api INTERFACE)
+target_include_directories(sonus_c_api INTERFACE
+  $<TARGET_PROPERTY:sonus_contract_public,INTERFACE_INCLUDE_DIRECTORIES>)
+target_link_libraries(sonus_c_api INTERFACE $<LINK_ONLY:sonus>)
+add_library(Sonus::sonus ALIAS sonus_c_api)
