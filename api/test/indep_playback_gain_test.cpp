@@ -333,8 +333,9 @@ SND_TEST(IndepPlaybackGain, OverflowKeepsTheLastVolume) {
   SND_REQUIRE_EQ(snd_get_stats(r.sys, &st), SND_OK);
   // 6000 commands of a few dozen bytes into 2.5 KiB of arena: most went to the coalescing
   // fallback. (stats.reserve_overflows counts only values lost without a compact form, so
-  // it stays 0 here although the fallback was used; see the report.)
-  snd::test::Note("reserve_overflows %u, rejected_commands %u", st.reserve_overflows, st.rejected_commands);
+  // it stays 0 here; the coalesced ones are stats.fallback_commands.)
+  snd::test::Note("reserve_overflows %u, fallback_commands %u", st.reserve_overflows, st.fallback_commands);
+  SND_CHECK(st.fallback_commands > 0u);  // fc38dea: the coalesced commands are counted
   SND_CHECK_NEAR(Last(r), 0.07f, 1e-5f);
 }
 
