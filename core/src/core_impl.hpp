@@ -266,6 +266,7 @@ struct DynamicDesc {  // what a dynamic playback plays (Playback.dynamicSource.d
   HandleRef userBuffer;
   Id bus;
   std::uint32_t kind;  // SourceKind
+  HandleRef followTransport;  // 1.2 (D-90): Transport row (slot, generation) of the start When, or none
 };
 struct LiveOverride {
   std::uint32_t kind;
@@ -286,7 +287,13 @@ struct ApplyPriv {
   std::uint32_t* implicitEmitter = nullptr;  // [maxPlaybacks] PlayAt emitter slot
   std::uint32_t* implicitOwnerGen = nullptr; // [maxEmitters] playback generation owning an implicit emitter, 0 none
   std::uint32_t* userBufferRefs = nullptr;   // [maxUserBuffers]
-  std::uint32_t* userBufferDestroy = nullptr;// [maxUserBuffers] 1 = destroy requested
+  // [maxUserBuffers] generation whose destroy was applied (0 = none). It stays set after the
+  // release, until a new buffer takes the slot, so a play applied later is refused (D-97).
+  std::uint32_t* userBufferDestroy = nullptr;
+  std::uint32_t* userBufferReleased = nullptr;  // [maxUserBuffers] generation whose release was published
+  // [maxTransports] generation of a standalone transport row created this block (0 = none):
+  // Publish returns the slot even when the row was destroyed again before it (same block).
+  std::uint32_t* transportCreated = nullptr;
   std::uint32_t reservationCursor = 0;
   std::uint64_t reservationSeq = 0;
   std::uint32_t playCounter = 0;
@@ -304,6 +311,7 @@ struct ApplyPriv {
 // ---------------------------------------------------------------------------
 // Core-internal PlaybackRequest flag bits (above the contract's, D-17 request column).
 inline constexpr std::uint32_t kRequestRejectReservationFull = 1u << 16;  // no reservation slot: end REJECTED
+inline constexpr std::uint32_t kRequestBufferDestroyed = 1u << 17;  // D-97: its user buffer is being destroyed
 
 enum PlaybackPrivFlags : std::uint32_t {
   kPbStarted = 1u << 0,
@@ -372,6 +380,11 @@ struct VoiceStatic {
   std::uint64_t startFrame;  // first source frame (Render initialises Voice.playhead with it)
   SlotIndex sourceSlot;      // copy of Voice.sourceSlot for SelectVoices (not a declared read)
   std::uint32_t sourceKind;
+  // 1.2 (D-90): transport a synth voice follows (generation 0 = none), and its position
+  // at the block start in quarter notes (RunEventLogic, read by Render for RenderItem).
+  HandleRef followTransport;
+  double transportBeats;
+  double transportBeatsPerSample;
 };
 
 struct StartBatch {  // RunEventLogic: Start() requests per kind, issued once per block
@@ -611,6 +624,7 @@ struct System::Impl {
   // --- services ------------------------------------------------------------------
   base::MpmcRing<PostedJob> jobQueue;
   base::MpmcRing<source::IoReadRequest> ioQueue;
+  bool servicesReady = false;  // the queues above are initialised (a failed Create may stop before)
   JobWrap* jobWraps = nullptr;
   base::ConcurrentIndexFreeList jobWrapFree;
   std::atomic<std::uint32_t> jobEpoch{0};
@@ -670,6 +684,8 @@ struct System::Impl {
 
   // Statistics (audio thread).
   snd_stats stats{};
+  // IOutputDevice::OutputLatencySeconds; CoreDesc's value until System::SetOutputLatency.
+  std::atomic<double> outputLatency{0.0};
   BlockProfile profile{};
   std::uint64_t timeSumNs = 0;
   std::uint32_t timeSamples = 0;

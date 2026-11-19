@@ -106,6 +106,7 @@ void SND_CALL JobTrampoline(void* data) {
 
 void System::PumpServices() noexcept {
   Impl& im = *impl_;
+  if (!im.servicesReady) return;  // Destroy after a Create that failed before the queues existed
   base::LockGuard lock(im.serviceMutex);
   PostedJob pj;
   while (im.jobQueue.TryPop(pj)) {

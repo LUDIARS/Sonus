@@ -292,6 +292,7 @@ snd_result CreateImpl(Impl& im) noexcept {
       !im.jobWrapFree.Init(a, q * 4u, MemTag::Misc)) {
     return SND_ERR_OUT_OF_BUDGET;
   }
+  im.servicesReady = true;
   im.jobsInFlight[0].store(0, std::memory_order_relaxed);
   im.jobsInFlight[1].store(0, std::memory_order_relaxed);
   im.services.allocator = im.alloc;
@@ -352,6 +353,10 @@ snd_result CreateImpl(Impl& im) noexcept {
   ap.implicitOwnerGen = Arr<std::uint32_t>(im, g.maxEmitters, MemTag::Tables);
   ap.userBufferRefs = Arr<std::uint32_t>(im, g.maxUserBuffers, MemTag::Tables);
   ap.userBufferDestroy = Arr<std::uint32_t>(im, g.maxUserBuffers, MemTag::Tables);
+  ap.transportCreated = Arr<std::uint32_t>(im, g.maxTransports, MemTag::Tables);
+  ap.userBufferReleased = Arr<std::uint32_t>(im, g.maxUserBuffers, MemTag::Tables);
+  if (ap.userBufferReleased == nullptr) return SND_ERR_OUT_OF_BUDGET;
+  if (ap.transportCreated == nullptr) return SND_ERR_OUT_OF_BUDGET;
   ap.banks = Arr<BankAudio>(im, g.maxBanks, MemTag::Tables);
   ap.overrides = Arr<LiveOverride>(im, lim.maxLiveOverrides, MemTag::Tables);
   if (ap.emitterChain == nullptr || ap.playbackChain == nullptr || ap.emitterBlockNext == nullptr ||
@@ -560,6 +565,7 @@ snd_result CreateImpl(Impl& im) noexcept {
   im.producers[0].active.store(1u, std::memory_order_release);
   if (!TlsRegister(im, 0u)) return SND_ERR_LIMIT_REACHED;
   im.stats.block_budget_us = static_cast<float>(1e6 * g.blockFrames / g.sampleRate * g.loadTargetPercent / 100.0);
+  im.outputLatency.store(im.desc.outputLatencySeconds, std::memory_order_relaxed);
   im.stats.output_latency_s = static_cast<float>(im.desc.outputLatencySeconds +
                                                  double(im.config.render_ahead_blocks) * g.blockFrames / g.sampleRate);
   return SND_OK;
@@ -654,6 +660,9 @@ void System::Destroy(System* sys) noexcept {
 }
 
 std::uint32_t System::OutputChannels() const noexcept { return impl_->cfg.outChannels; }
+void System::SetOutputLatency(double seconds) noexcept {
+  if (seconds >= 0.0 && seconds < 60.0) impl_->outputLatency.store(seconds, std::memory_order_relaxed);
+}
 std::uint32_t System::BlockFrames() const noexcept { return impl_->cfg.blockFrames; }
 std::uint32_t System::SampleRate() const noexcept { return impl_->cfg.sampleRate; }
 const BlockProfile& System::LastBlock() const noexcept { return impl_->profile; }

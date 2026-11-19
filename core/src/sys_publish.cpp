@@ -46,6 +46,13 @@ void Publish(Impl& im) noexcept {
     if (im.pub.transportGen[s] != 0u && im.pub.transportGen[s] != live) {
       base::notify::PublishRelease(im.transportRelease, s, im.pub.transportGen[s]);
     }
+    // Created and destroyed in the same block (snd_create_transport then
+    // snd_destroy_transport in one arena): no Publish saw the row, the slot goes back too.
+    const std::uint32_t created = im.ap.transportCreated[s];
+    im.ap.transportCreated[s] = 0u;
+    if (created != 0u && created != live && created != im.pub.transportGen[s]) {
+      base::notify::PublishRelease(im.transportRelease, s, created);
+    }
     im.pub.transportGen[s] = live;
   }
   // 2. Event ring: music notifications, then core's records of this block.
@@ -68,6 +75,8 @@ void Publish(Impl& im) noexcept {
   st.virtual_voices = t.Voice.rows.count - (t.RealVoice.rows.count < t.Voice.rows.count ? t.RealVoice.rows.count : t.Voice.rows.count);
   st.streams = t.Stream.rows.count;
   st.lod_level = im.rd.lod;
+  st.output_latency_s = static_cast<float>(im.outputLatency.load(std::memory_order_relaxed) +
+                                           double(im.config.render_ahead_blocks) * im.cfg.blockFrames / im.cfg.sampleRate);
   // Stream stalls (6.3): the growth of Stream.stallCount (written by the Stream source in Render).
   {
     const schema::TableRows& sr = t.Stream.rows;

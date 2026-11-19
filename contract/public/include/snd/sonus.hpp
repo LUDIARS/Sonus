@@ -274,6 +274,7 @@ inline constexpr std::uint32_t kMaxPluginsPerKind = 32;  // C++ wrapper limit pe
 struct Config {
   SND_CONFIG_TOP(SND_CONFIG_CPP_FIELD)
   SND_CONFIG_TOP_1_1(SND_CONFIG_CPP_FIELD)  // contract 1.1 (maxVoiceChannels, maxPitchRatio)
+  SND_CONFIG_TOP_1_2(SND_CONFIG_CPP_FIELD)  // contract 1.2 (maxBuses .. maxDuckRules, D-92)
   MemoryConfig memory;
   CommandsConfig commands;
   JobsConfig jobs;
@@ -298,6 +299,7 @@ inline void ToC(const Config& in, snd_config* out) noexcept {
 #define SND_TO_C_LL(c, cpp, ct, cppt, d) out->livelink.c = static_cast<ct>(in.liveLink.cpp);
   SND_CONFIG_TOP(SND_TO_C_TOP)
   SND_CONFIG_TOP_1_1(SND_TO_C_TOP)
+  SND_CONFIG_TOP_1_2(SND_TO_C_TOP)
   SND_CONFIG_MEMORY(SND_TO_C_MEMORY)
   SND_CONFIG_COMMANDS(SND_TO_C_COMMANDS)
   SND_CONFIG_JOBS(SND_TO_C_JOBS)
@@ -516,6 +518,15 @@ inline Result SetTempo(System* sys, TransportHandle t, float bpm,
 inline Result SeekTransport(System* sys, TransportHandle t, const MusicalTime& position,
                             const When& when = When::Immediate()) noexcept {
   return detail::R(snd_seek_transport(sys, t.ToC(), &position, detail::W(when)));
+}
+// 1.2 (D-88, D-89).
+inline Result SetTransportPitch(System* sys, TransportHandle t, float pitch,
+                                const When& when = When::Immediate()) noexcept {
+  return detail::R(snd_set_transport_pitch(sys, t.ToC(), pitch, detail::W(when)));
+}
+inline Result PlayStinger(System* sys, PlaybackHandle music, Id stinger,
+                          const When& when = When::Immediate()) noexcept {
+  return detail::R(snd_play_stinger(sys, music.ToC(), stinger, detail::W(when)));
 }
 
 // ---------------------------------------------------------------------------

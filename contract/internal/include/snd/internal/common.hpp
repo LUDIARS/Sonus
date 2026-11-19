@@ -338,6 +338,7 @@ enum class ReservationAction : std::uint8_t {
   Seek = 5,
   SetTransportState = 6,
   Stinger = 7,
+  SetPitch = 8,  // 1.2 (D-88): snd_set_transport_pitch, a transport change like SetTempo
 };
 
 enum class ReservationLateRule : std::uint8_t {

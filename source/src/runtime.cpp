@@ -5,8 +5,10 @@
 
 #include "detail.hpp"
 #include "snd/io/io_scheduler.hpp"
+#include "callback_kind.hpp"
 #include "sample_kind.hpp"
 #include "stream_kind.hpp"
+#include "user_buffer_kind.hpp"
 
 namespace snd::source {
 
@@ -14,6 +16,8 @@ struct Runtime::Impl {
   detail::Shared shared;
   detail::SampleKind sample{shared};
   detail::StreamKind stream{shared};
+  detail::CallbackKind callback;
+  detail::UserBufferKind userBuffer;
 };
 
 bool Runtime::Init(const RuntimeDesc& desc) noexcept {
@@ -44,6 +48,8 @@ bool Runtime::Init(const RuntimeDesc& desc) noexcept {
   if (desc.enableStream && desc.io != nullptr && desc.streamPool != nullptr) {
     kinds_.kinds[static_cast<std::size_t>(SourceKind::Stream)] = &impl_->stream;
   }
+  if (desc.enableCallback) kinds_.kinds[static_cast<std::size_t>(SourceKind::Callback)] = &impl_->callback;
+  if (desc.enableUserBuffer) kinds_.kinds[static_cast<std::size_t>(SourceKind::UserBuffer)] = &impl_->userBuffer;
   return true;
 }
 
@@ -65,6 +71,10 @@ void Runtime::BankUnregistered(void* runtime, std::uint16_t bankSlot) noexcept {
   // and closes it at its end (StreamChannel::ReopenFile / CloseFile), so no file
   // of the unregistered bank stays open after its playbacks, and playbacks of
   // other banks keep theirs (never opened again while they play).
+}
+
+bool Runtime::CallbackBusy(std::uint64_t handle) const noexcept {
+  return impl_ != nullptr && impl_->callback.PlaybackBusy(handle);
 }
 
 RuntimeStats Runtime::Stats() const noexcept {
@@ -99,6 +109,14 @@ RuntimeStats Runtime::Stats() const noexcept {
   s.ioPosted = c(detail::kIoPosted);
   s.ioRejected = c(detail::kIoRejected);
   s.inlinePrimes = c(detail::kInlinePrimes);
+  const detail::CallbackStats cb = impl_->callback.Stats();
+  s.callbackInstances = cb.instances;
+  s.callbackCalls = cb.calls;
+  s.callbackUnderruns = cb.underruns;
+  s.callbackDemotions = cb.demotions;
+  s.callbackRejected = cb.rejected;
+  s.userBufferInstances = impl_->userBuffer.LiveInstances();
+  s.userBufferUnderruns = impl_->userBuffer.Underruns();
   return s;
 }
 

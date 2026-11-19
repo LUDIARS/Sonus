@@ -253,6 +253,28 @@ SND_API snd_result SND_CALL snd_set_tempo(snd_system* sys, snd_transport_handle 
 SND_API snd_result SND_CALL snd_seek_transport(snd_system* sys, snd_transport_handle transport,
                                                const snd_musical_time* position,
                                                const snd_when* when);
+/* 1.2 (D-88): playback speed of a transport (8.1 "トランスポートのピッチ"). pitch is a rate
+ * ratio (1 = normal): the transport's ticks advance pitch times faster (tempo x pitch),
+ * and the voices of the music playback that owns the transport play at that pitch too
+ * (tempo and pitch change together; time-stretching is stage 6). Standalone transports
+ * only change their tick rate. Takes effect at `when` like snd_set_tempo; reservations
+ * follow the new time line. Values are clamped to [1/16, 16]; the voice pitch is also
+ * limited by Config.max_pitch_ratio. Thread: registered. Must-deliver.
+ * Errors: SND_ERR_INVALID_HANDLE, SND_ERR_INVALID_ARGUMENT (pitch not finite or <= 0,
+ * bad when). */
+SND_API snd_result SND_CALL snd_set_transport_pitch(snd_system* sys, snd_transport_handle transport,
+                                                    float pitch, const snd_when* when);
+/* 1.2 (D-89): play a stinger (8.3, 8.6) of a music playback: `stinger` is the id of an entry
+ * of the music event's "stingers" (bank MSTG). `when` NULL / IMMEDIATE = the stinger's own
+ * timing (MSTG.timing / timingCount) on the playback's transport; any other kind overrides
+ * it (like snd_set_music_state). The stinger event starts as a child of the music playback
+ * at the sample of the timing point (D-76). With overlap "replace", a newer request of the
+ * same stinger on the same playback cancels the older pending one. A stinger the music
+ * event does not have plays nothing. No handle: it ends with the music playback.
+ * Thread: registered. Must-deliver.
+ * Errors: SND_ERR_INVALID_HANDLE (music), SND_ERR_INVALID_ARGUMENT (stinger 0, bad when). */
+SND_API snd_result SND_CALL snd_play_stinger(snd_system* sys, snd_playback_handle music,
+                                             snd_id stinger, const snd_when* when);
 
 /* ========================================================================= */
 /* Dynamic generation (5)                                                    */

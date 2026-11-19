@@ -659,6 +659,20 @@ snd_result System::SeekTransport(snd_transport_handle transport, const snd_music
   if (position == nullptr || !ValidWhen(when)) return SND_ERR_INVALID_ARGUMENT;
   return ResultOf(Record(im, *pr, cmd::SeekTransport{h, *position, 0u, WhenOf(when)}));
 }
+snd_result System::SetTransportPitch(snd_transport_handle transport, float pitch, const snd_when* when) noexcept {
+  SND_PRODUCER_OR(SND_ERR_THREAD_NOT_REGISTERED)
+  const HandleRef h = Ref(transport.value);
+  if (!TransportLive(im, h)) return SND_ERR_INVALID_HANDLE;
+  if (!(pitch > 0.0f) || !std::isfinite(pitch) || !ValidWhen(when)) return SND_ERR_INVALID_ARGUMENT;
+  return ResultOf(Record(im, *pr, cmd::SetTempo{h, pitch, cmd::kTempoVariantPitch, WhenOf(when)}));
+}
+snd_result System::PlayStinger(snd_playback_handle music, Id stinger, const snd_when* when) noexcept {
+  SND_PRODUCER_OR(SND_ERR_THREAD_NOT_REGISTERED)
+  const HandleRef h = Ref(music.value);
+  if (!im.playbackSlots.IsCurrent(h)) return SND_ERR_INVALID_HANDLE;
+  if (stinger == 0u || !ValidWhen(when)) return SND_ERR_INVALID_ARGUMENT;
+  return ResultOf(Record(im, *pr, cmd::SetMusicState{h, stinger, cmd::kMusicStateVariantStinger, WhenOf(when)}));
+}
 
 snd_playback_handle System::PlaySynth(const snd_synth_desc* desc, snd_emitter_handle emitter,
                                       const snd_when* when) noexcept {

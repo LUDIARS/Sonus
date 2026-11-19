@@ -364,6 +364,8 @@ using F32 = float;
   R(EvaluateDspParams, Playback_state, Current)                                \
   R(EvaluateDspParams, Playback_logic, Current)                                \
   R(EvaluateDspParams, Playback_eventRef, Current)                             \
+  R(EvaluateDspParams, Playback_transportSlot, Current) /* 1.2 D-88 */         \
+  R(EvaluateDspParams, Transport_pitch, Current)        /* 1.2 D-88 */         \
   R(EvaluateDspParams, Bus_parentSlot, Current)                                \
   R(EvaluateDspParams, Bus_graphOrder, Current)                                \
   R(EvaluateDspParams, Bus_volume, Current)                                    \

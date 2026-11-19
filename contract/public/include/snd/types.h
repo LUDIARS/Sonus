@@ -26,7 +26,10 @@ SND_EXTERN_C_BEGIN
 /* ------------------------------------------------------------------------- */
 #define SND_MAX_CHANNELS 8u        /* max channels of a voice, bus or device */
 #define SND_MAX_LISTENERS 4u       /* 3.1: Listener table max 4 */
-#define SND_TICKS_PER_BEAT 960u    /* 8.1 */
+/* 8.1. Ticks per QUARTER NOTE (PPQ), whatever the time signature: a beat is a note of
+ * the signature's beat unit (6/8: an eighth = 480 ticks) and BPM counts quarter notes
+ * (CONTRACTS.md D-68; the name is kept for compatibility, 1.2 note). */
+#define SND_TICKS_PER_BEAT 960u
 #define SND_MAX_LANGUAGE_NAME_BYTES 32u /* 1.1: snd_declare_language, incl. the NUL */
 #define SND_MAX_LANGUAGES 32u           /* 1.1: declared language names per system */
 
@@ -310,7 +313,13 @@ typedef struct snd_render_context {
   uint32_t sample_rate;         /* internal rate */
   uint32_t block_frames;        /* configured block size */
   uint32_t flags;               /* SND_RENDER_FLAG_* */
-  double transport_beats;       /* beats since transport start, or -1 if none */
+  /* 1.2 note (D-68, D-90): position of the followed transport at clock_sample in QUARTER
+   * NOTES since its origin (PPQ position = ticks / SND_TICKS_PER_BEAT), not beats of the
+   * signature's beat unit; -1 if the playback follows no transport. A synth follows the
+   * transport named by the `when` it was started with (any kind with a valid transport);
+   * bus effects get -1. Buffered callbacks get the value extrapolated at the tempo of the
+   * last rendered block (tempo changes inside the render-ahead are not foreseen). */
+  double transport_beats;
 } snd_render_context;
 
 typedef void (SND_CALL *snd_synth_callback)(void* user, float* const* out, uint32_t channels,

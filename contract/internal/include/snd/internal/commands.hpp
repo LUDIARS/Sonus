@@ -218,10 +218,21 @@ struct MuteCategory {
   std::uint32_t muted;
 };
 
+// 1.2 (D-89): `variant` selects what the command asks for. 1.1 recorders wrote 0 there.
+//   kMusicStateVariantState   SetMusicState: `state` is the MSTA id (snd_set_music_state)
+//   kMusicStateVariantStinger snd_play_stinger: `state` is the MSTG id of the music event
+//                             of `playback`; IMMEDIATE = MSTG.timing on the playback's
+//                             transport, another kind overrides it. Core makes a
+//                             ReservationAction::Stinger reservation (music_if.hpp).
+// Other values are ignored by core (and refused by the replay's shape rule).
+enum MusicStateVariant : std::uint32_t {
+  kMusicStateVariantState = 0,
+  kMusicStateVariantStinger = 1,
+};
 struct SetMusicState {
   HandleRef playback;
   Id state;
-  std::uint32_t reserved;
+  std::uint32_t variant;  // MusicStateVariant (1.1: reserved, 0)
   snd_when when;  // IMMEDIATE = rule timing (8.5)
 };
 struct PrepareMusicState {
@@ -242,10 +253,20 @@ struct SetTransportState {
   std::uint32_t reserved;
   snd_when when;
 };
+// 1.2 (D-88): `variant` selects the transport rate that changes. 1.1 recorders wrote 0.
+//   kTempoVariantBpm    snd_set_tempo: `bpm` is the tempo (quarter notes per minute)
+//   kTempoVariantPitch  snd_set_transport_pitch: `bpm` holds the pitch ratio (> 0, the
+//                       same entry rule as a tempo; core clamps it to [1/16, 16]).
+//                       Core makes a ReservationAction::SetPitch reservation.
+// Other values are ignored by core (and refused by the replay's shape rule).
+enum TempoVariant : std::uint32_t {
+  kTempoVariantBpm = 0,
+  kTempoVariantPitch = 1,
+};
 struct SetTempo {
   HandleRef transport;
-  float bpm;
-  std::uint32_t reserved;
+  float bpm;              // or the pitch ratio (kTempoVariantPitch)
+  std::uint32_t variant;  // TempoVariant (1.1: reserved, 0)
   snd_when when;
 };
 struct SeekTransport {

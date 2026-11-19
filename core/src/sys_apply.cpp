@@ -374,6 +374,51 @@ void AddMusicInput(Impl& im, music::MusicInputKind kind, HandleRef playback, Id 
   in.whenOverride = whenOverride;
 }
 
+// snd_play_stinger (1.2, D-89): a ReservationAction::Stinger reservation on the music
+// playback's transport (or the When's). Payload: MSTG id, rule-timing flag (music_if.hpp).
+// Without a transport (not a music playback) the stinger fires at once and the music
+// system ignores it (no music state for the playback).
+void ApplyStinger(Impl& im, const cmd::SetMusicState& c) noexcept {
+  schema::Tables& t = im.tables;
+  const std::uint32_t d = base::rows::DenseOf(t.Playback.rows, c.playback);
+  if (d == kNoSlot) return;
+  std::uint8_t bytes[8];
+  std::uint32_t flags = 0u;
+  snd_when w = c.when;
+  SlotIndex ts = kNoSlot;
+  if (w.kind == SND_WHEN_IMMEDIATE) {
+    flags = music::kStingerPayloadRuleTiming;
+    ts = SND_W(Playback_transportSlot)[d];
+  } else if (!ScheduledWhen(im, w, &ts, c.playback.Value())) {
+    flags = 0u;  // a musical kind on a dead transport: now (+ warning, snd_when doc)
+  }
+  if (ts == kNoSlot && (w.kind < SND_WHEN_NEXT_BEAT || w.kind > SND_WHEN_SEGMENT_END)) {
+    ts = SND_W(Playback_transportSlot)[d];  // clock kinds: the playback's own transport, if any
+  }
+  std::memcpy(bytes, &c.state, 4);
+  std::memcpy(bytes + 4, &flags, 4);
+  if (NewReservation(im, ts, w, ReservationAction::Stinger, c.playback, PayloadOf(bytes, 8)) == kNoSlot) {
+    PostWarning(im, SND_ERR_LIMIT_REACHED, SND_END_DETAIL_RESERVATION_FULL, c.playback.Value());
+  }
+}
+
+// snd_destroy_user_buffer (5.1, D-94): the playbacks reading the buffer stop now (a stream
+// never ends by itself); the buffer is released once none references it (ReleaseOwnedRows).
+void DestroyUserBuffer(Impl& im, SlotIndex slot, std::uint32_t generation) noexcept {
+  schema::Tables& t = im.tables;
+  im.ap.userBufferDestroy[slot] = generation;
+  const schema::TableRows& pr = t.Playback.rows;
+  for (std::uint32_t d = 0; d < pr.count; ++d) {
+    const SlotIndex ps = base::rows::SlotAt(pr, d);
+    const DynamicDesc& dd = im.ap.dynamic[ps];
+    if (dd.kind != static_cast<std::uint32_t>(SourceKind::UserBuffer) || dd.userBuffer.slot != slot ||
+        dd.userBuffer.generation != generation) {
+      continue;
+    }
+    RequestStop(im, HandleRef{ps, pr.generation[ps]}, 0.0f);
+  }
+}
+
 void SetBankUnloading(Impl& im, HandleRef bank, std::uint32_t mode) noexcept {
   if (bank.slot >= im.cfg.maxBanks) return;
   BankAudio& b = im.ap.banks[bank.slot];
@@ -450,6 +495,10 @@ void ApplyOne(Impl& im, const cmd::CommandHeader& h, const std::uint8_t* p) noex
       dd.synth = c.desc;
       dd.bus = c.desc.bus;
       dd.kind = static_cast<std::uint32_t>(SourceKind::Callback);
+      {  // D-90: the synth follows the transport its When names (transport_beats).
+        const SlotIndex fts = TransportSlotOf(im, HandleRef::FromValue(c.when.transport.value));
+        if (fts != kNoSlot) dd.followTransport = HandleRef{fts, t.Transport.rows.generation[fts]};
+      }
       CreatePlayback(im, c.playback, c.emitter, c.desc.event_template, EventRef{kNoBank, kEventRefDynamic, 0u}, c.when,
                      nullptr, 0u, DynamicSourceRef{SourceKind::Callback, {0, 0, 0}, c.playback.slot});
       break;
@@ -462,9 +511,23 @@ void ApplyOne(Impl& im, const cmd::CommandHeader& h, const std::uint8_t* p) noex
       dd.userBuffer = c.buffer;
       dd.bus = c.bus;
       dd.kind = static_cast<std::uint32_t>(SourceKind::UserBuffer);
-      if (c.buffer.slot < im.cfg.maxUserBuffers) ++im.ap.userBufferRefs[c.buffer.slot];
+      // D-97: the playback references the buffer only if it is the current one (its
+      // generation) and its destroy was not applied yet. Otherwise (destroyed earlier, or
+      // already released while the game had not seen it) no reference is taken and the
+      // playback ends without starting (DISCARDED, on_end once), whatever its When.
+      const bool live = c.buffer.slot < im.cfg.maxUserBuffers && c.buffer.generation != 0u &&
+                        im.userBuffers[c.buffer.slot].generation.load(std::memory_order_acquire) == c.buffer.generation &&
+                        im.ap.userBufferDestroy[c.buffer.slot] != c.buffer.generation;
+      if (live) {
+        ++im.ap.userBufferRefs[c.buffer.slot];
+      } else {
+        dd.kind = static_cast<std::uint32_t>(SourceKind::Count);  // nothing to give back at its end
+      }
       CreatePlayback(im, c.playback, c.emitter, 0u, EventRef{kNoBank, kEventRefDynamic, 0u}, c.when, nullptr, 0u,
                      DynamicSourceRef{SourceKind::UserBuffer, {0, 0, 0}, c.playback.slot});
+      if (!live) {
+        if (PlaybackRequest* rq = RequestOf(im, c.playback); rq != nullptr) rq->flags |= kRequestBufferDestroyed;
+      }
       break;
     }
     case CT::PlayInput: {
@@ -628,6 +691,11 @@ void ApplyOne(Impl& im, const cmd::CommandHeader& h, const std::uint8_t* p) noex
     case CT::SetMusicState: {
       const auto c = Load<cmd::SetMusicState>(p);
       if (!base::rows::IsCurrent(t.Playback.rows, c.playback)) break;
+      if (c.variant == cmd::kMusicStateVariantStinger) {
+        ApplyStinger(im, c);
+        break;
+      }
+      if (c.variant != cmd::kMusicStateVariantState) break;  // unknown variant: ignored (commands.hpp)
       snd_when w = c.when;
       SlotIndex ts = kNoSlot;
       if (ScheduledWhen(im, w, &ts, c.playback.Value())) {
@@ -652,6 +720,7 @@ void ApplyOne(Impl& im, const cmd::CommandHeader& h, const std::uint8_t* p) noex
       SND_W(Transport_lifetime)[d] = TransportLifetime{0u, 0u};
       SND_W(Transport_initial)[d] =
           TransportInit{c.desc.bpm, TimeSignature{c.desc.beats_per_bar, c.desc.beat_unit}, c.desc.start_playing, 0u};
+      if (c.transport.slot < im.cfg.maxTransports) im.ap.transportCreated[c.transport.slot] = c.transport.generation;
       break;
     }
     case CT::DestroyTransport: {
@@ -667,7 +736,15 @@ void ApplyOne(Impl& im, const cmd::CommandHeader& h, const std::uint8_t* p) noex
     }
     case CT::SetTempo: {
       const auto c = Load<cmd::SetTempo>(p);
-      ApplyTimed(im, c.transport, c.when, ReservationAction::SetTempo, PayloadOf(&c.bpm, 4));
+      if (c.variant == cmd::kTempoVariantBpm) {
+        ApplyTimed(im, c.transport, c.when, ReservationAction::SetTempo, PayloadOf(&c.bpm, 4));
+      } else if (c.variant == cmd::kTempoVariantPitch && c.bpm > 0.0f && std::isfinite(c.bpm)) {
+        // D-88: clamped here, so every UpdateTransport sees an in-range ratio.
+        const float pitch = c.bpm < music::kMinTransportPitch
+                                ? music::kMinTransportPitch
+                                : (c.bpm > music::kMaxTransportPitch ? music::kMaxTransportPitch : c.bpm);
+        ApplyTimed(im, c.transport, c.when, ReservationAction::SetPitch, PayloadOf(&pitch, 4));
+      }
       break;
     }
     case CT::SeekTransport: {
@@ -684,7 +761,7 @@ void ApplyOne(Impl& im, const cmd::CommandHeader& h, const std::uint8_t* p) noex
       const auto c = Load<cmd::DestroyUserBuffer>(p);
       if (c.buffer.slot < im.cfg.maxUserBuffers &&
           im.userBuffers[c.buffer.slot].generation.load(std::memory_order_acquire) == c.buffer.generation) {
-        im.ap.userBufferDestroy[c.buffer.slot] = c.buffer.generation;
+        DestroyUserBuffer(im, c.buffer.slot, c.buffer.generation);
       }
       break;
     }
@@ -754,7 +831,7 @@ void ApplyFallback(Impl& im, const cmd::OverflowFallback& fb) noexcept {
   });
   forBits(fb.destroyUserBuffer, im.cfg.maxUserBuffers, [&](std::uint32_t s) {
     const std::uint32_t g = im.userBuffers[s].generation.load(std::memory_order_acquire);
-    if (g != 0u) im.ap.userBufferDestroy[s] = g;
+    if (g != 0u) DestroyUserBuffer(im, s, g);
   });
   forBits(fb.unloadBank, im.cfg.maxBanks, [&](std::uint32_t s) {
     if (im.ap.banks[s].state == BankAudioState::Registered) {
@@ -839,8 +916,8 @@ void ReleaseOwnedRows(Impl& im) noexcept {
   // User buffers whose destroy was requested and that no playback uses (5.1).
   for (std::uint32_t s = 0; s < im.cfg.maxUserBuffers; ++s) {
     const std::uint32_t g = im.ap.userBufferDestroy[s];
-    if (g == 0u || im.ap.userBufferRefs[s] != 0u) continue;
-    im.ap.userBufferDestroy[s] = 0u;
+    if (g == 0u || im.ap.userBufferRefs[s] != 0u || im.ap.userBufferReleased[s] == g) continue;
+    im.ap.userBufferReleased[s] = g;  // userBufferDestroy stays: later plays of g are refused (D-97)
     if (im.releasedUserBufferCount < im.cfg.maxUserBuffers) {
       im.releasedUserBuffers[im.releasedUserBufferCount++] = Released{s, g};
     }

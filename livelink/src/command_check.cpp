@@ -156,9 +156,15 @@ constexpr CommandRule kCommandRules[] = {
     {CT::MuteCategory, true, &True,
      [](const std::uint8_t* p, const L&) noexcept { return Bool(Load<cmd::MuteCategory>(p).muted); }, "shape: 0/1"},
     {CT::SetMusicState, true,
-     [](const std::uint8_t* p, const L&) noexcept { return When(Load<cmd::SetMusicState>(p).when); },
-     [](const std::uint8_t* p, const L& k) noexcept { return Handle(Load<cmd::SetMusicState>(p).playback, k.playbacks); },
-     "api: When kind/flags; shape: playback"},
+     [](const std::uint8_t* p, const L&) noexcept {
+       const auto c = Load<cmd::SetMusicState>(p);  // 1.2: snd_play_stinger refuses stinger id 0
+       return When(c.when) && (c.variant != cmd::kMusicStateVariantStinger || c.state != 0u);
+     },
+     [](const std::uint8_t* p, const L& k) noexcept {
+       const auto c = Load<cmd::SetMusicState>(p);
+       return Handle(c.playback, k.playbacks) && c.variant <= cmd::kMusicStateVariantStinger;
+     },
+     "api: When kind/flags, stinger id != 0 (1.2 variant Stinger); shape: playback, variant State / Stinger"},
     {CT::PrepareMusicState, true, &True,
      [](const std::uint8_t* p, const L& k) noexcept {
        return Handle(Load<cmd::PrepareMusicState>(p).playback, k.playbacks);
@@ -187,11 +193,14 @@ constexpr CommandRule kCommandRules[] = {
      "api: state STOPPED/PLAYING/PAUSED, When kind/flags; shape: transport handle"},
     {CT::SetTempo, true,
      [](const std::uint8_t* p, const L&) noexcept {
-       const auto c = Load<cmd::SetTempo>(p);
+       const auto c = Load<cmd::SetTempo>(p);  // the same rule for a pitch ratio (1.2 variant Pitch)
        return Bpm(c.bpm) && When(c.when);
      },
-     [](const std::uint8_t* p, const L& k) noexcept { return Transport(Load<cmd::SetTempo>(p).transport, k, true); },
-     "api: bpm > 0 finite, When kind/flags; shape: transport handle"},
+     [](const std::uint8_t* p, const L& k) noexcept {
+       const auto c = Load<cmd::SetTempo>(p);
+       return Transport(c.transport, k, true) && c.variant <= cmd::kTempoVariantPitch;
+     },
+     "api: bpm (or pitch ratio) > 0 finite, When kind/flags; shape: transport handle, variant Bpm / Pitch"},
     {CT::SeekTransport, true,
      [](const std::uint8_t* p, const L&) noexcept { return When(Load<cmd::SeekTransport>(p).when); },
      [](const std::uint8_t* p, const L& k) noexcept { return Transport(Load<cmd::SeekTransport>(p).transport, k, true); },
