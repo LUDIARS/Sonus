@@ -286,8 +286,13 @@ typedef struct snd_stats {
   uint32_t late_chunks;      /* cumulative chunks dropped at the deadline (2.3) */
   uint32_t dropped_events;   /* event ring overflow (2.1) */
   uint32_t rejected_commands;/* recording rejected (2.1) */
-  uint32_t reserve_overflows;/* reserve region exhausted; coalesced fallbacks used (CONTRACTS.md D-11) */
-  uint32_t reserved0;
+  /* must-deliver values lost because the reserve region and the coalescing fallback's
+   * parameter table were both full (CONTRACTS.md D-11); coalesced commands are delivered
+   * and counted in fallback_commands instead */
+  uint32_t reserve_overflows;
+  /* 1.2 (D-104 note, was reserved0): must-deliver commands that did not fit the reserve
+   * region and were coalesced into the fallback section (delivered), cumulative */
+  uint32_t fallback_commands;
   float block_time_avg_us;
   float block_time_max_us;
   float block_budget_us;     /* block duration * target utilisation */

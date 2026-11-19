@@ -90,6 +90,8 @@ void EvaluateDspParams(Impl& im) noexcept {
     float lowpass = vs.lowpassHz > 0.0f ? vs.lowpassHz : 1.0e9f;
     float highpass = 0.0f;
     float linear = vs.linearGain * vs.musicGain;
+    const bool ownPb = pb < im.cfg.maxPlaybacks;  // 1.2 (D-104): the playback's own volume / pitch
+    if (ownPb) linear *= im.ap.playbackVolume[pb];
     float fadeEnd = 1.0f;
     if (pd != kNoSlot) fadeEnd = SND_R(Playback_logic)[pd].fadeGain;
     const BankRecord* br = RegisteredBank(im, vclip[d].bankSlot);
@@ -188,6 +190,7 @@ void EvaluateDspParams(Impl& im) noexcept {
     // Voice releases (stops, steals) are applied per sample by Render (sample accurate).
     const float gEnd = DbToGain(gainDb) * linear * cat * fadeEnd * env;
     float pEnd = std::exp2(cents / 1200.0f);
+    if (ownPb) pEnd *= im.ap.playbackPitch[pb];
     // 1.2 (D-88): the voices of a music playback follow its transport's pitch (8.1).
     if (pd != kNoSlot) {
       const SlotIndex ts = SND_R(Playback_transportSlot)[pd];

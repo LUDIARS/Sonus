@@ -10,6 +10,7 @@ bool OutputBackendAvailable(OutputBackend backend) noexcept {
   switch (backend) {
     case OutputBackend::Default:
     case OutputBackend::SilentTimer:
+    case OutputBackend::Manual:
       return true;
     case OutputBackend::Alsa:
 #if defined(SND_PLATFORM_HAVE_ALSA)
@@ -57,6 +58,8 @@ PlatformOutputDevice* CreateOutputDevice(OutputBackend backend, IAllocator& allo
       tc.realtimeThread = o.realtimeThread;
       return detail::NewDevice<TimerOutputDevice>(allocator, allocator, tc);
     }
+    case OutputBackend::Manual:
+      return detail::NewDevice<ManualOutputDevice>(allocator, allocator, ManualDeviceConfig{});
     case OutputBackend::Alsa:
 #if defined(SND_PLATFORM_HAVE_ALSA)
       return detail::CreateAlsaOutputDevice(allocator, o);
@@ -97,6 +100,14 @@ std::uint32_t EnumerateOutputDevices(OutputBackend backend, OutputDeviceInfo* ou
         out[0] = OutputDeviceInfo{};
         detail::CopyTruncatedUtf8(out[0].id, sizeof(out[0].id), "silent");
         detail::CopyTruncatedUtf8(out[0].name, sizeof(out[0].name), "Silent timer device");
+        out[0].isDefault = true;
+      }
+      return 1u;
+    case OutputBackend::Manual:
+      if (capacity > 0u) {
+        out[0] = OutputDeviceInfo{};
+        detail::CopyTruncatedUtf8(out[0].id, sizeof(out[0].id), "manual");
+        detail::CopyTruncatedUtf8(out[0].name, sizeof(out[0].name), "Manual silent device");
         out[0].isDefault = true;
       }
       return 1u;

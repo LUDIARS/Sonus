@@ -19,9 +19,13 @@
 //     closed when the last of those reads is retired by Poll (never under a
 //     running read).
 // Paths: UTF-8, '/'-separated, relative to the root. Rejected (Open returns
-// kInvalidFile): empty paths, absolute paths ('/...'), backslashes, NUL-free
-// paths longer than the internal limit, and any path whose ".." components
-// would leave the root. "." and empty components ("a//b") are ignored.
+// kInvalidFile): empty paths, absolute paths ('/...'), backslashes, colons
+// (drive letters "C:", Windows streams "a:b"; D-103, on every OS so that a
+// path behaves the same everywhere), NUL-free paths longer than the internal
+// limit, and any path whose ".." components would leave the root. "." and
+// empty components ("a//b") are ignored.
+// Root (D-103): absolute, or relative to the working directory at Init (it is
+// resolved once there; a later chdir does not move it).
 // Symbolic links: a path whose RESOLVED file lies outside the root is refused
 // (links to files or directories outside, absolute or relative); links that
 // stay inside the root are followed. Linux uses openat2(RESOLVE_BENEATH) and,
@@ -35,8 +39,12 @@
 // on a special file, inside the root or behind a link (it opens, sees with
 // fstat that it is not a regular file, and closes).
 //
-// Platforms: POSIX (Linux, macOS, ...) is implemented. Other platforms build a
-// stub whose Open always fails.
+// Platforms (io/src/native_file*.cpp): POSIX (Linux, macOS, iOS, ...) and
+// Windows (Win32: UTF-16 paths, the root's final path, links and junctions
+// resolved by GetFinalPathNameByHandleW and refused when they leave the root,
+// only disk files that are not directories). Other systems build a stub whose
+// Open always fails. Note for app bundles (macOS / iOS): the working
+// directory of a launched app is not its bundle; pass an absolute root.
 //
 // Init / Shutdown / SetCompletionNotify are non-RT owner-thread calls, made
 // while the IO thread is not using the file system.
@@ -79,6 +87,9 @@ class DefaultFileSystem final : public IFileSystem {
   // is not reported Done/Error by Poll until its notify call has returned, so
   // once the caller has retired all its reads, `user` may be destroyed.
   void SetCompletionNotify(CompletionNotifyFn fn, void* user) noexcept;
+
+  // After Init: true if the root exists and is a directory (otherwise every Open fails).
+  bool RootAvailable() const noexcept;
 
   // Pure. True if `path` is acceptable (see header comment).
   static bool ValidatePath(const char* path) noexcept;

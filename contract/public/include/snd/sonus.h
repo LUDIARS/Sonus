@@ -76,8 +76,12 @@ SND_API uint32_t SND_CALL snd_contract_version(void);
  * cfg: required, initialised with snd_config_init(). allocator/file_system:
  * NULL selects the built-in defaults (malloc-based allocator, OS file system).
  * All memory is allocated here (3.3).
+ * 1.2 (D-102, D-103): with cfg->output.device NULL, cfg->output_kind picks the platform
+ * device or a built-in silent one; with file_system NULL, cfg->file_system_root is the
+ * root of the OS file system (NULL = the working directory).
  * Errors: SND_ERR_INVALID_ARGUMENT (null out, bad cfg/version/struct_size),
- * SND_ERR_OUT_OF_BUDGET, SND_ERR_NO_DEVICE. On error *out is set to NULL.
+ * SND_ERR_OUT_OF_BUDGET, SND_ERR_NO_DEVICE, SND_ERR_NOT_FOUND (1.2: file_system_root is
+ * not an existing directory). On error *out is set to NULL.
  */
 SND_API snd_result SND_CALL snd_create(const snd_config* cfg, const snd_allocator* allocator,
                                        const snd_file_system* file_system, snd_system** out);
@@ -107,6 +111,22 @@ SND_API snd_result SND_CALL snd_flush(snd_system* sys);
  * render-ahead before restarting. Thread: registered. Recorded like other commands. */
 SND_API snd_result SND_CALL snd_suspend(snd_system* sys);
 SND_API snd_result SND_CALL snd_resume(snd_system* sys);
+
+/* 1.2 (D-102): advance the built-in manual device (Config.output_kind = SND_OUTPUT_MANUAL)
+ * by `periods` device periods of Config.block_size frames, on the calling thread. Before
+ * each period it waits until the audio thread has rendered its render-ahead target (at most
+ * about 2 s, then the period plays what there is and the common clock catches up as after
+ * an underrun, 2.2), so a test that advances slowly hears every rendered frame in order:
+ * the first frame ever delivered is common-clock sample 0. Commands reach the audio thread
+ * as usual (snd_update); a command recorded before the call is applied at a block that is
+ * already in the render-ahead, Config.render_ahead_blocks + 1 periods later at most.
+ * out: NULL, or room for periods * block_size interleaved frames of Config.output_channels
+ * (0 = 2) channels, receiving what the device delivered; out_frames is its capacity in
+ * frames. Thread: owner (one call at a time).
+ * Errors: SND_ERR_INVALID_ARGUMENT (sys NULL, out_frames too small for a non-NULL out),
+ * SND_ERR_WRONG_THREAD, SND_ERR_UNSUPPORTED (the system does not run the manual device). */
+SND_API snd_result SND_CALL snd_advance_output(snd_system* sys, uint32_t periods, float* out,
+                                               uint32_t out_frames);
 
 /* Install notification callbacks (copied). NULL clears all. Thread: owner. */
 SND_API snd_result SND_CALL snd_set_callbacks(snd_system* sys, const snd_callbacks* callbacks);
@@ -185,6 +205,23 @@ SND_API snd_result SND_CALL snd_resume_playback(snd_system* sys, snd_playback_ha
 /* Schedule the end (Unity SetScheduledEndTime). Replaces an earlier schedule. Must-deliver. */
 SND_API snd_result SND_CALL snd_set_scheduled_stop(snd_system* sys, snd_playback_handle playback,
                                                    const snd_when* when, float fade_seconds);
+
+/* 1.2 (D-104): volume and pitch of one playback, for any kind of playback (events, synths,
+ * user buffers). volume is a linear gain (>= 0, at most 1000) that multiplies the gain of
+ * every voice of the playback; pitch is a rate ratio (> 0, 1 = normal; clamped to
+ * [1/16, 16], and with the other pitches of the voice to Config.max_pitch_ratio) that
+ * multiplies their pitch. Synth voices ignore pitch (D-94). Both start at 1 for a new
+ * playback, keep their value for its life and apply from the block that applies the
+ * command, ramped over that block (no click). A pending playback (start `when` in the
+ * future) starts with the value. Thread: registered. Must-deliver (recorded as a
+ * playback-scope parameter with a reserved id, so the reserve and the coalescing fallback
+ * keep the last value; D-11).
+ * Errors: SND_ERR_INVALID_HANDLE, SND_ERR_INVALID_ARGUMENT (volume NaN / infinite / < 0,
+ * pitch NaN / infinite / <= 0), SND_ERR_THREAD_NOT_REGISTERED, SND_ERR_COMMAND_BUFFER_FULL. */
+SND_API snd_result SND_CALL snd_set_playback_volume(snd_system* sys, snd_playback_handle playback,
+                                                    float volume);
+SND_API snd_result SND_CALL snd_set_playback_pitch(snd_system* sys, snd_playback_handle playback,
+                                                   float pitch);
 
 /* Handle of the transport owned by a music playback (pure computation, 8.1). Thread: any.
  * The transport is valid while the playback plays a music event. */
@@ -301,6 +338,17 @@ SND_API snd_playback_handle SND_CALL snd_play_user_buffer(snd_system* sys,
                                                           snd_user_buffer_handle buffer,
                                                           snd_id bus, snd_emitter_handle emitter,
                                                           const snd_when* when);
+/* 1.2 (D-104): snd_play_user_buffer with the playback's starting volume and pitch (as
+ * snd_set_playback_volume / snd_set_playback_pitch; the same rules, recorded together with
+ * the play so the first block already uses them). Several playbacks may read one STATIC
+ * buffer at once, each with its own position, volume and pitch, without copying it (the
+ * audio side only reads static memory); a STREAM buffer has one reader at a time (D-94).
+ * Invalid handle also when volume or pitch is refused. Thread: registered. */
+SND_API snd_playback_handle SND_CALL snd_play_user_buffer_ex(snd_system* sys,
+                                                             snd_user_buffer_handle buffer,
+                                                             snd_id bus, float volume, float pitch,
+                                                             snd_emitter_handle emitter,
+                                                             const snd_when* when);
 SND_API snd_playback_handle SND_CALL snd_play_input(snd_system* sys, const snd_input_desc* desc,
                                                     snd_emitter_handle emitter,
                                                     const snd_when* when);

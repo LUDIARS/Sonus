@@ -25,6 +25,11 @@ SND_EXTERN_C_BEGIN
 typedef uint32_t snd_id;
 
 #define SND_ID_NONE ((snd_id)0u)
+/* 1.2 (D-104): ids the runtime reserves for itself (the distance curve input 0xFFFFFFFE,
+ * the per-playback volume 0xFFFFFFFD and pitch 0xFFFFFFFC). No name may hash to them
+ * (buildtool reports an error); snd_set_param_* refuse them (SND_ERR_INVALID_ARGUMENT). */
+#define SND_ID_RESERVED_FIRST ((snd_id)0xFFFFFFFCu)
+#define SND_ID_RESERVED_LAST ((snd_id)0xFFFFFFFEu)
 #define SND_FNV1A32_OFFSET 2166136261u
 #define SND_FNV1A32_PRIME 16777619u
 

@@ -131,7 +131,9 @@ Rec Record(Impl& im, Producer& pr, const P& payload, cmd::Delivery delivery = cm
     // D-11: coalesced commands are delivered (not counted); a command the fallback cannot
     // represent is refused synchronously (SND_ERR_COMMAND_BUFFER_FULL, the caller knows);
     // only parameter values beyond the table are lost (counted in CoalesceParam).
-    return Coalesce<P>(im, av, payload);
+    const Rec c = Coalesce<P>(im, av, payload);
+    if (c == Rec::Coalesced) im.fallbackCommands.fetch_add(1u, std::memory_order_relaxed);
+    return c;
   }
   ++av.header->droppedCount;
   av.header->flags |= cmd::kArenaDroppedCommands;

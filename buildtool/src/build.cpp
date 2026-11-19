@@ -322,6 +322,10 @@ void Builder::CheckIds() {
   auto check = [&](const std::string& text, const Object& o, const Value& at) {
     if (text.empty()) return;
     const Id id = HashId(text);
+    if (id >= SND_ID_RESERVED_FIRST && id <= SND_ID_RESERVED_LAST) {  // D-104: the runtime's own ids
+      p_.ErrorAt(o, at, "'" + text + "' hashes to the reserved id " + detail::Hex32(id) + "; rename it", d_);
+      return;
+    }
     const std::string where = o.file + ":" + std::to_string(at.line) + ":" + std::to_string(at.column);
     auto it = seen.find(id);
     if (it == seen.end()) {

@@ -351,6 +351,7 @@ void System::LiveStats(snd_stats* out) const noexcept {
   *out = im.stats;
   out->rejected_commands += im.rejectedCommands.load(std::memory_order_relaxed);
   out->reserve_overflows += im.reserveOverflows.load(std::memory_order_relaxed);
+  out->fallback_commands += im.fallbackCommands.load(std::memory_order_relaxed);
 }
 
 std::uint32_t System::LiveFindCells(Id objectId, std::uint32_t fourcc, std::uint32_t index, LiveCell* out,

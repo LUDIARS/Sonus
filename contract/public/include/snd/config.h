@@ -24,6 +24,12 @@
 
 SND_EXTERN_C_BEGIN
 
+/* 1.2 (D-102): the output device snd_create opens when output.device is NULL. */
+typedef uint32_t snd_output_kind;
+#define SND_OUTPUT_PLATFORM 0u /* the OS device (WASAPI / Core Audio / ALSA, else the silent timer) */
+#define SND_OUTPUT_SILENT   1u /* built-in silent device driven by its own timer thread in real time */
+#define SND_OUTPUT_MANUAL   2u /* built-in silent device the game advances with snd_advance_output */
+
 /* Top level ---------------------------------------------------------------- */
 #define SND_CONFIG_TOP(X)                                                                         \
   /* internal sample rate (1.1) */                                                                \
@@ -91,6 +97,24 @@ SND_EXTERN_C_BEGIN
   /* parameter definitions (PARM ids) */                                                          \
   X(max_param_defs, maxParamDefs, uint32_t, uint32_t, 512u)                                       \
   X(max_duck_rules, maxDuckRules, uint32_t, uint32_t, 64u)
+
+/* Top level, added in contract 1.2 for hosts (D-102, D-103). Stored at the END of snd_config
+ * (after the D-92 capacities): a config whose struct_size ends before them (a caller built
+ * against the earlier 1.2 header, or 1.0 / 1.1) gets the defaults.
+ *  - file_system_root: root directory of the built-in file system (snd_create's file_system
+ *    = NULL). UTF-8; absolute, or relative to the working directory at snd_create (resolved
+ *    once there). NULL or "" = the working directory. Bank and stream paths stay relative to
+ *    it: absolute paths, '\\', ':' and ".." that would leave the root are refused, and links
+ *    whose target lies outside the root are not followed. A root that is not an existing
+ *    directory makes snd_create fail with SND_ERR_NOT_FOUND; a root given together with a
+ *    game file system is SND_ERR_INVALID_ARGUMENT. Copied by snd_create.
+ *  - output_kind: SND_OUTPUT_* (above). Used only when output.device is NULL; another value
+ *    than SND_OUTPUT_PLATFORM together with a game device, or an unknown value, is
+ *    SND_ERR_INVALID_ARGUMENT. The built-in silent devices run at sample_rate with
+ *    output_channels (0 = 2) channels and periods of block_size frames. */
+#define SND_CONFIG_TOP_1_2_HOST(X)                                                                \
+  X(file_system_root, fileSystemRoot, const char*, const char*, NULL)                             \
+  X(output_kind, outputKind, snd_output_kind, ::snd::OutputKind, SND_OUTPUT_PLATFORM)
 
 /* Memory budgets (3.3) ----------------------------------------------------- */
 #define SND_CONFIG_MEMORY(X)                                                                      \
@@ -192,7 +216,8 @@ typedef struct snd_dev_reserve_config { SND_CONFIG_DEV_RESERVE(SND_CONFIG_C_FIEL
 typedef struct snd_livelink_config { SND_CONFIG_LIVELINK(SND_CONFIG_C_FIELD) } snd_livelink_config;
 
 typedef struct snd_output_config {
-  /* NULL = platform default device. Tests pass the null device mock. */
+  /* NULL = the built-in device chosen by output_kind (1.2, D-102; default: the platform's).
+   * Tests pass the null device mock. */
   const snd_output_device* device;
   uint32_t device_index;
   uint32_t reserved;
@@ -221,6 +246,8 @@ typedef struct snd_config {
   SND_CONFIG_TOP_1_1(SND_CONFIG_C_FIELD)
   /* --- contract 1.2 --- */
   SND_CONFIG_TOP_1_2(SND_CONFIG_C_FIELD)
+  /* --- contract 1.2, host additions (D-102, D-103) --- */
+  SND_CONFIG_TOP_1_2_HOST(SND_CONFIG_C_FIELD)
 } snd_config;
 
 /* Upper bound of max_pitch_ratio (= dsp kResamplerMaxRatio). */
@@ -241,6 +268,7 @@ static inline void snd_config_init(snd_config* cfg) {
   SND_CONFIG_TOP(SND_CONFIG_INIT_TOP)
   SND_CONFIG_TOP_1_1(SND_CONFIG_INIT_TOP)
   SND_CONFIG_TOP_1_2(SND_CONFIG_INIT_TOP)
+  SND_CONFIG_TOP_1_2_HOST(SND_CONFIG_INIT_TOP)
   SND_CONFIG_MEMORY(SND_CONFIG_INIT_MEMORY)
   SND_CONFIG_COMMANDS(SND_CONFIG_INIT_COMMANDS)
   SND_CONFIG_JOBS(SND_CONFIG_INIT_JOBS)

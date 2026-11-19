@@ -5,7 +5,7 @@ snd_add_test(api_test
 # Stage 2 api (contract 1.2): the C API end to end through the composition root.
 # They link the full `sonus` library; the buildtool (and its test helpers) makes banks.
 set(_snd_api_tests api_lifetime_test api_create_test api_entry_rules_test api_synth_test api_device_test api_threads_test
-    api_music_test api_end_to_end_test)
+    api_music_test api_end_to_end_test api_host_output_test api_host_fs_test api_playback_gain_test)
 foreach(_t ${_snd_api_tests})
   snd_add_test(${_t}
     SOURCES ${_t}.cpp
@@ -18,7 +18,8 @@ endforeach()
 
 # Independent tests of the api stage (spec/handoff/README.md 3).
 set(_snd_api_indep_tests indep_create_test indep_entry_test indep_synth_test indep_device_test indep_runtime_test
-    indep_music_test indep_fix_test)
+    indep_music_test indep_fix_test indep_host_output_test indep_host_fs_test indep_playback_gain_test
+    indep_host_fix_test)
 foreach(_t ${_snd_api_indep_tests})
   snd_add_test(api_${_t}
     SOURCES ${_t}.cpp

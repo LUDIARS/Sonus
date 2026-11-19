@@ -349,6 +349,9 @@ snd_result CreateImpl(Impl& im) noexcept {
   ap.emitterBlockNext = Arr<std::uint32_t>(im, g.paramOverflowBlocks, MemTag::Tables);
   ap.playbackBlockNext = Arr<std::uint32_t>(im, g.paramOverflowBlocks, MemTag::Tables);
   ap.dynamic = Arr<DynamicDesc>(im, g.maxPlaybacks, MemTag::Tables);
+  ap.playbackVolume = Arr<float>(im, g.maxPlaybacks, MemTag::Tables);
+  ap.playbackPitch = Arr<float>(im, g.maxPlaybacks, MemTag::Tables);
+  if (ap.playbackVolume == nullptr || ap.playbackPitch == nullptr) return SND_ERR_OUT_OF_BUDGET;
   ap.implicitEmitter = Arr<std::uint32_t>(im, g.maxPlaybacks, MemTag::Tables);
   ap.implicitOwnerGen = Arr<std::uint32_t>(im, g.maxEmitters, MemTag::Tables);
   ap.userBufferRefs = Arr<std::uint32_t>(im, g.maxUserBuffers, MemTag::Tables);
@@ -372,6 +375,8 @@ snd_result CreateImpl(Impl& im) noexcept {
   for (std::uint32_t i = 0; i < g.maxPlaybacks; ++i) {
     ap.implicitEmitter[i] = kNoSlot;
     ap.playbackChain[i] = ParamChain{};
+    ap.playbackVolume[i] = 1.0f;
+    ap.playbackPitch[i] = 1.0f;
   }
   for (std::uint32_t i = 0; i < g.maxEmitters; ++i) ap.emitterChain[i] = ParamChain{};
   // RunEventLogic.

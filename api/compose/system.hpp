@@ -144,6 +144,7 @@ struct snd_system {
   snd::IOutputDevice* device = nullptr;
   snd::compose::Late<snd::COutputDevice> cDevice;
   snd::platform::PlatformOutputDevice* ownDevice = nullptr;
+  snd::platform::ManualOutputDevice* manual = nullptr;  // ownDevice when Config.output_kind = MANUAL (D-102)
   snd::compose::WatchedAllocator outputAlloc;  // device + driver memory (OUT_OF_BUDGET vs NO_DEVICE)
   snd::platform::AudioDriver driver;
   bool driverStarted = false;
@@ -182,6 +183,9 @@ void ServiceDevice(snd_system& sys) noexcept;
 // Owner thread: AudioDriver::Resume for a device the OS left SUSPENDED (D-66). false if
 // there was nothing to resume or the device refused.
 bool ResumeDevice(snd_system& sys) noexcept;
+
+// Owner thread: snd_advance_output on the manual device (D-102). Periods advanced.
+std::uint32_t AdvanceManualDevice(snd_system& sys, std::uint32_t periods, float* out) noexcept;
 
 // Owner thread. Installs the game's callbacks (nullptr clears them) through core.
 snd_result SetCallbacks(snd_system& sys, const snd_callbacks* callbacks) noexcept;

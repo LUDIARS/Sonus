@@ -47,6 +47,11 @@ const CommandRule* RuleOf(std::uint16_t type) noexcept;
 // true if the command (header + payload) is acceptable for ApplyCommands in a replay.
 bool CheckCommand(const cmd::CommandHeader& h, const std::uint8_t* payload, const CommandLimits& limits) noexcept;
 
+// 1.2 (D-104): the runtime's reserved ids (SND_ID_RESERVED_FIRST .. LAST, snd/id.h). The
+// public snd_set_param_* refuse them; a recorded SetParam carries one only in the form
+// snd_set_playback_volume / _pitch record (playback scope, volume >= 0 / pitch > 0).
+bool IsReservedId(std::uint32_t id) noexcept;
+
 // Overflow fallback parameter entry (scope, target, finite value for parameters).
 bool CheckOverflowParam(const cmd::OverflowParam& p, const CommandLimits& limits) noexcept;
 
