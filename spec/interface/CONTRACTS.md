@@ -291,7 +291,7 @@ Ergo への組み込み（Ergo の PR #99）で C API に足りなかった 3 �
 - D-104（予約 id）: `SND_ID_RESERVED_FIRST`（0xFFFFFFFC）〜`SND_ID_RESERVED_LAST`（0xFFFFFFFE）を `snd/id.h` に置いた。公開の `snd_set_param_*` はこれを `SND_ERR_INVALID_ARGUMENT` で拒否する。定義と規則は規則表に一か所（`livelink::IsReservedId`、`SetParam` の api 規則と `CheckOverflowParam`）: 記録された `SetParam` が予約 id を持てるのは、`snd_set_playback_*` が記録する形（再生スコープ、音量 ≥ 0 / ピッチ > 0）だけで、再生ファイルの検査もこれに従う。buildtool は名前（エイリアスを含む、種類を問わない）のハッシュが予約 id に当たればエラーにする。スイッチの入口（`snd_set_switch_*`）は従来どおり規則表を通さない（core は予約 id のスイッチを無視する）。
 - D-104（子の再生）: 音量とピッチは、その再生自身のボイスにだけ掛かる（ボイスの `playbackSlot` で引く）。Stinger や音楽のアクションが作る子の再生は別のスロット・ハンドルの再生で、1 / 1 から始まり、親の値は及ばない。
 - D-11 / 統計: `reserve_overflows` は従来どおり（D-11 と既存の独立テストの約束）失われた値の数とし、`types.h` の注記をそれに合わせた。合体のフォールバックに入れた（届けた）コマンドの数は、`snd_stats.reserved0` を `fallback_commands` にして数える（大きさを変えない。`snd_stats` は `notify.hpp` の `SnapshotFrame` に埋まっていて、末尾に足すと内部の契約の配置とライブリンクの統計が変わるため）。**受け入れ側の指示（`reserve_overflows` に合体も数え、失われた数を別に）とは逆の割り当てで、既存のテスト（`core_system_test`、`indep_core_cmd_test`、`indep_core_fixcheck_test`）の約束を守るための選択。受け入れ側の判断を待つ。**
-- 既存の `PlatformOutputDevice::OutputClock`: seqlock の読み手が 64 回で諦めて偽の失敗を返していたのを直した（欠陥）。書き手が書いている間（奇数）と食い違ったときは yield して、整合した値が読めるまで読む。書き手は奇数にした後に release の fence、読み手は値を読んだ後に acquire の fence（seqlock の正しい順序）。
+- 既存の `PlatformOutputDevice::OutputClock`: seqlock の読み手が 64 回で諦めて偽の失敗を返していたのを直した（欠陥）。書き手が書いている間（奇数）と食い違ったときは yield して、整合した値が読めるまで読む。書き手は奇数にするのを acq_rel の fetch_add にして値の書き込みがその前に動かないように、読み手は値を acquire で読んで 2 度目の数の読み出しがその前に動かないようにした（fence は TSan が扱えないので使わない）。
 
 ### 契約 1.2 の候補で入れなかったもの
 

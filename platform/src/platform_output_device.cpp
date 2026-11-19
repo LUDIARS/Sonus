@@ -46,9 +46,9 @@ DeviceStats PlatformOutputDevice::Stats() const noexcept {
 }
 
 void PlatformOutputDevice::PublishClock(std::uint64_t written, std::uint64_t queued, std::uint32_t rate) noexcept {
-  const std::uint32_t s = clockSeq_.load(std::memory_order_relaxed);
-  clockSeq_.store(s + 1u, std::memory_order_relaxed);
-  std::atomic_thread_fence(std::memory_order_release);  // the odd count is visible before any field
+  // Odd count first; the RMW's acquire half keeps the field stores below after it (no fence:
+  // TSan does not model fences).
+  const std::uint32_t s = clockSeq_.fetch_add(1u, std::memory_order_acq_rel);
   clockWritten_.store(written, std::memory_order_release);
   clockPlayed_.store(written > queued ? written - queued : 0u, std::memory_order_release);
   clockNs_.store(MonotonicNanoseconds(), std::memory_order_release);
@@ -57,9 +57,9 @@ void PlatformOutputDevice::PublishClock(std::uint64_t written, std::uint64_t que
 }
 
 void PlatformOutputDevice::ResetClock() noexcept {
-  const std::uint32_t s = clockSeq_.load(std::memory_order_relaxed);
-  clockSeq_.store(s + 1u, std::memory_order_relaxed);
-  std::atomic_thread_fence(std::memory_order_release);  // the odd count is visible before any field
+  // Odd count first; the RMW's acquire half keeps the field stores below after it (no fence:
+  // TSan does not model fences).
+  const std::uint32_t s = clockSeq_.fetch_add(1u, std::memory_order_acq_rel);
   clockWritten_.store(0, std::memory_order_release);
   clockPlayed_.store(0, std::memory_order_release);
   clockNs_.store(0, std::memory_order_release);
@@ -78,11 +78,11 @@ bool PlatformOutputDevice::OutputClock(OutputClockSample* out) const noexcept {
       continue;
     }
     OutputClockSample v;
-    v.framesWritten = clockWritten_.load(std::memory_order_relaxed);
-    v.framesPlayed = clockPlayed_.load(std::memory_order_relaxed);
-    v.timestampNs = clockNs_.load(std::memory_order_relaxed);
-    v.sampleRate = clockRate_.load(std::memory_order_relaxed);
-    std::atomic_thread_fence(std::memory_order_acquire);  // the fields are read before the count again
+    // Acquire loads: the second read of the count below cannot move above them.
+    v.framesWritten = clockWritten_.load(std::memory_order_acquire);
+    v.framesPlayed = clockPlayed_.load(std::memory_order_acquire);
+    v.timestampNs = clockNs_.load(std::memory_order_acquire);
+    v.sampleRate = clockRate_.load(std::memory_order_acquire);
     if (clockSeq_.load(std::memory_order_relaxed) != s1) {
       YieldThread();
       continue;
