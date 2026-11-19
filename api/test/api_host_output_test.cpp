@@ -46,12 +46,13 @@ constexpr std::uint32_t kBlock = 256;
 }  // namespace
 
 SND_TEST(ApiHostOutput, ManualDeviceDeliversEveryRenderedFrameInOrder) {
+  // A looping static buffer of DC 0.5 (mono, centre pan on the stereo master). Its memory
+  // outlives the system.
+  std::vector<float> dc(1024, 0.5f);
   HostSystem h(SND_OUTPUT_MANUAL);
   SND_REQUIRE_EQ(h.created, SND_OK);
   const snd::compose::Parts parts = snd::compose::PartsOf(h.sys);
   SND_REQUIRE(parts.driver != nullptr);
-  // A looping static buffer of DC 0.5 (mono, centre pan on the stereo master).
-  std::vector<float> dc(1024, 0.5f);
   float* ch[1] = {dc.data()};
   snd_user_buffer_desc d{ch, 1, 1024, 0, SND_USER_BUFFER_STATIC, 1, 0};
   const snd_user_buffer_handle b = snd_create_user_buffer(h.sys, &d);

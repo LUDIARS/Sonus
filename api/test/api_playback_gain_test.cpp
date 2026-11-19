@@ -45,9 +45,10 @@ constexpr float kInf = std::numeric_limits<float>::infinity();
 }  // namespace
 
 SND_TEST(ApiPlaybackGain, VolumeScalesTheLevel) {
+  // The sample memory outlives the system (it must stay valid until released).
+  std::vector<float> sine = Sine1k();
   Rig r;
   SND_REQUIRE_EQ(r.created, SND_OK);
-  std::vector<float> sine = Sine1k();
   float* ch[1] = {sine.data()};
   snd_user_buffer_desc d{ch, 1, 48000, 48000, SND_USER_BUFFER_STATIC, 1, 0};
   const snd_user_buffer_handle b = snd_create_user_buffer(r.sys, &d);
@@ -81,9 +82,11 @@ SND_TEST(ApiPlaybackGain, VolumeScalesTheLevel) {
 }
 
 SND_TEST(ApiPlaybackGain, PitchScalesTheFrequency) {
+  // The sample memory outlives the system (it must stay valid until released).
+  std::vector<float> sine = Sine1k();
+  std::vector<float> slow = Sine1k();
   Rig r;
   SND_REQUIRE_EQ(r.created, SND_OK);
-  std::vector<float> sine = Sine1k();
   float* ch[1] = {sine.data()};
   snd_user_buffer_desc d{ch, 1, 48000, 48000, SND_USER_BUFFER_STATIC, 1, 0};
   const snd_user_buffer_handle b = snd_create_user_buffer(r.sys, &d);
@@ -103,7 +106,6 @@ SND_TEST(ApiPlaybackGain, PitchScalesTheFrequency) {
   SND_CHECK_EQ(snd_stop(r.sys, p, 0.0f, nullptr), SND_OK);
   // The buffer's own rate and the pitch multiply: 1 kHz samples declared 24 kHz are 500 Hz at
   // pitch 1, 1.5 kHz at pitch 3.
-  std::vector<float> slow = Sine1k();
   float* sc[1] = {slow.data()};
   snd_user_buffer_desc sd{sc, 1, 48000, 24000, SND_USER_BUFFER_STATIC, 1, 0};
   const snd_user_buffer_handle sb = snd_create_user_buffer(r.sys, &sd);
@@ -118,10 +120,12 @@ SND_TEST(ApiPlaybackGain, PitchScalesTheFrequency) {
 }
 
 SND_TEST(ApiPlaybackGain, SeveralReadersOfOneStaticBuffer) {
-  Rig r;
-  SND_REQUIRE_EQ(r.created, SND_OK);
+  // The sample memory outlives the system (it must stay valid until released).
   std::vector<float> sine = Sine1k();
   const std::vector<float> original = sine;
+  std::vector<float> ring(4096, 0.0f);
+  Rig r;
+  SND_REQUIRE_EQ(r.created, SND_OK);
   float* ch[1] = {sine.data()};
   snd_user_buffer_desc d{ch, 1, 48000, 48000, SND_USER_BUFFER_STATIC, 1, 0};
   const snd_user_buffer_handle b = snd_create_user_buffer(r.sys, &d);
@@ -154,7 +158,6 @@ SND_TEST(ApiPlaybackGain, SeveralReadersOfOneStaticBuffer) {
   for (const End& x : r.ev.ends) ended += (x.handle == a.value || x.handle == c.value || x.handle == e.value) ? 1u : 0u;
   SND_CHECK_EQ(ended, 3u);
   // A stream buffer still has one reader at a time (D-94).
-  std::vector<float> ring(4096, 0.0f);
   float* rc[1] = {ring.data()};
   snd_user_buffer_desc qd{rc, 1, 4096, 48000, SND_USER_BUFFER_STREAM, 0, 0};
   const snd_user_buffer_handle qb = snd_create_user_buffer(r.sys, &qd);
@@ -193,9 +196,10 @@ SND_TEST(ApiPlaybackGain, SynthTakesTheVolumeAndIgnoresThePitch) {
 }
 
 SND_TEST(ApiPlaybackGain, PendingPlaybackStartsWithItsValues) {
+  // The sample memory outlives the system (it must stay valid until released).
+  std::vector<float> dc(1024, 0.5f);
   Rig r;
   SND_REQUIRE_EQ(r.created, SND_OK);
-  std::vector<float> dc(1024, 0.5f);
   float* ch[1] = {dc.data()};
   snd_user_buffer_desc d{ch, 1, 1024, 48000, SND_USER_BUFFER_STATIC, 1, 0};
   const snd_user_buffer_handle b = snd_create_user_buffer(r.sys, &d);
@@ -226,9 +230,10 @@ SND_TEST(ApiPlaybackGain, PendingPlaybackStartsWithItsValues) {
 SND_TEST(ApiPlaybackGain, ANewPlaybackInTheSlotStartsAtOne) {
   snd_config cfg = SmallConfig();
   cfg.max_playbacks = 1;  // the second playback reuses the first one's slot
+  // The sample memory outlives the system (it must stay valid until released).
+  std::vector<float> dc(2048, 0.5f);
   Rig r(cfg);
   SND_REQUIRE_EQ(r.created, SND_OK);
-  std::vector<float> dc(2048, 0.5f);
   float* ch[1] = {dc.data()};
   snd_user_buffer_desc d{ch, 1, 2048, 48000, SND_USER_BUFFER_STATIC, 0, 0};
   const snd_user_buffer_handle b = snd_create_user_buffer(r.sys, &d);
@@ -259,9 +264,10 @@ SND_TEST(ApiPlaybackGain, ANewPlaybackInTheSlotStartsAtOne) {
 }
 
 SND_TEST(ApiPlaybackGain, EntryRules) {
+  // The sample memory outlives the system (it must stay valid until released).
+  std::vector<float> dc(1024, 0.5f);
   Rig r;
   SND_REQUIRE_EQ(r.created, SND_OK);
-  std::vector<float> dc(1024, 0.5f);
   float* ch[1] = {dc.data()};
   snd_user_buffer_desc d{ch, 1, 1024, 48000, SND_USER_BUFFER_STATIC, 1, 0};
   const snd_user_buffer_handle b = snd_create_user_buffer(r.sys, &d);
