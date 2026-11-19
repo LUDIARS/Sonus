@@ -81,8 +81,18 @@ SND_TEST(ApiHostOutput, ManualDeviceDeliversEveryRenderedFrameInOrder) {
     bad += std::fabs(out[f * 2u] - 0.5f * kCenter) > 1e-4f || std::fabs(out[f * 2u + 1u] - 0.5f * kCenter) > 1e-4f;
   }
   SND_CHECK_EQ(bad, 0u);
-  // The common clock follows the advanced periods, not real time: it is the frames
-  // consumed plus at most the render-ahead (target) and the block in progress.
+  // The common clock follows the advanced periods, not real time: once the audio thread has
+  // refilled the render-ahead after the last period, it is the frames consumed plus at most
+  // the render-ahead (target) and a block, and it stays there.
+  auto refilled = [&] {
+    for (int i = 0; i < 20000; ++i) {
+      const snd::platform::DriverStats s = parts.driver->Stats().core;
+      if (s.blocksRendered * kBlock >= s.framesConsumed + s.targetFrames) return true;
+      std::this_thread::sleep_for(std::chrono::microseconds(100));
+    }
+    return false;
+  };
+  SND_REQUIRE(refilled());
   const std::uint64_t c0 = h.Clock();
   SND_CHECK(c0 >= std::uint64_t{kPeriods} * kBlock);
   SND_CHECK(c0 <= std::uint64_t{kPeriods} * kBlock + st.targetFrames + kBlock);
@@ -90,11 +100,7 @@ SND_TEST(ApiHostOutput, ManualDeviceDeliversEveryRenderedFrameInOrder) {
   SND_CHECK_EQ(h.Clock(), c0);
   // Advancing again moves it by exactly the periods (the render-ahead is refilled each time).
   SND_CHECK_EQ(snd_advance_output(h.sys, 10, nullptr, 0), SND_OK);
-  const std::uint64_t target = parts.driver->Stats().core.targetFrames;
-  for (int i = 0; i < 2000 && parts.driver->Stats().core.blocksRendered * kBlock <
-                                  parts.driver->Stats().core.framesConsumed + target; ++i) {
-    std::this_thread::sleep_for(std::chrono::milliseconds(1));
-  }
+  SND_REQUIRE(refilled());
   SND_CHECK_EQ(h.Clock() - c0, 10u * kBlock);
   SND_CHECK_EQ(snd_destroy_user_buffer(h.sys, b), SND_OK);
 }
