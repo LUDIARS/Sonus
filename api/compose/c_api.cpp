@@ -47,6 +47,9 @@ HandleRef Ref(std::uint64_t v) noexcept { return HandleRef::FromValue(v); }
 // D-104: what snd_set_playback_volume / _pitch accept (stricter than SetParam's rule).
 bool VolumeOk(float v) noexcept { return std::isfinite(v) && v >= 0.0f; }
 bool PitchOk(float p) noexcept { return std::isfinite(p) && p > 0.0f; }
+// D-104: the reserved ids are the runtime's; snd_set_param_* refuse them (the rule table's
+// definition, shared with the replay).
+bool ReservedParam(snd_id id) noexcept { return snd::livelink::IsReservedId(id); }
 
 }  // namespace
 
@@ -325,19 +328,25 @@ constexpr std::uint8_t kPlayback = static_cast<std::uint8_t>(snd::ParamScope::Pl
 
 snd_result snd_set_param_global(snd_system* sys, snd_id param, float value) {
   if (sys == nullptr) return SND_ERR_INVALID_ARGUMENT;
-  if (!EntryOk(*sys, CT::SetParam, ParamCmd(kGlobal, param, 0u, value))) return SND_ERR_INVALID_ARGUMENT;
+  if (ReservedParam(param) || !EntryOk(*sys, CT::SetParam, ParamCmd(kGlobal, param, 0u, value))) {
+    return SND_ERR_INVALID_ARGUMENT;
+  }
   return sys->core->SetParamGlobal(param, value);
 }
 snd_result snd_set_param_emitter(snd_system* sys, snd_emitter_handle emitter, snd_id param, float value) {
   if (sys == nullptr) return SND_ERR_INVALID_ARGUMENT;
   if (emitter.value == SND_HANDLE_INVALID_VALUE) return SND_ERR_INVALID_HANDLE;
-  if (!EntryOk(*sys, CT::SetParam, ParamCmd(kEmitter, param, emitter.value, value))) return SND_ERR_INVALID_ARGUMENT;
+  if (ReservedParam(param) || !EntryOk(*sys, CT::SetParam, ParamCmd(kEmitter, param, emitter.value, value))) {
+    return SND_ERR_INVALID_ARGUMENT;
+  }
   return sys->core->SetParamEmitter(emitter, param, value);
 }
 snd_result snd_set_param_playback(snd_system* sys, snd_playback_handle playback, snd_id param, float value) {
   if (sys == nullptr) return SND_ERR_INVALID_ARGUMENT;
   if (playback.value == SND_HANDLE_INVALID_VALUE) return SND_ERR_INVALID_HANDLE;
-  if (!EntryOk(*sys, CT::SetParam, ParamCmd(kPlayback, param, playback.value, value))) return SND_ERR_INVALID_ARGUMENT;
+  if (ReservedParam(param) || !EntryOk(*sys, CT::SetParam, ParamCmd(kPlayback, param, playback.value, value))) {
+    return SND_ERR_INVALID_ARGUMENT;
+  }
   return sys->core->SetParamPlayback(playback, param, value);
 }
 // D-104: playback-scope SetParam with the reserved ids (handle 0 first, then the value,

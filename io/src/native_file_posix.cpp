@@ -8,11 +8,16 @@
 //    resolution that leaves the root (EXDEV). It also refuses ABSOLUTE
 //    symlinks even when they point inside the root, so on EXDEV, and when
 //    openat2 is unavailable (ENOSYS, EPERM under seccomp, ...), we fall back to
-// 2. open the canonical root joined with the path, then check the canonical
-//    path of the OPENED descriptor (/proc/self/fd/N, no race with a concurrent
-//    rename of the link) or, without /proc (macOS, iOS), realpath() of the
-//    path, and require that this path names the opened file (same device and
-//    inode, so a link swapped after the open is caught).
+// 2. without opening anything that is not checked yet (D-103): on Linux an
+//    O_PATH descriptor of the canonical root joined with the path; its kind
+//    (regular file) and canonical path (/proc/self/fd/N, inside the root) are
+//    checked, then it is reopened for reading through /proc/self/fd/N (the very
+//    inode checked). Without O_PATH or /proc (macOS, iOS, ...): realpath() of
+//    the path must be inside the root and lstat() of it a regular file, then
+//    it is opened with O_NOFOLLOW and must be that inode (same device and inode,
+//    so a swap between the check and the open is refused).
+// openat2 itself stays beneath the root in the kernel; what it opens is still
+// checked for a regular file by the caller (O_NONBLOCK: never blocks).
 // The root is resolved once at Open (realpath): a relative root is relative to
 // the working directory of that moment, later chdir() calls do not move it.
 #include "native_file.hpp"
@@ -67,14 +72,20 @@ struct PosixRoot {
     if (rootFd >= 0) {
       open_how how;
       std::memset(&how, 0, sizeof(how));
-      how.flags = static_cast<std::uint64_t>(flags);
+      // O_PATH: the kernel resolves beneath the root; nothing is opened for I/O until the
+      // target is known to be a regular file (ReopenChecked).
+      how.flags = static_cast<std::uint64_t>(O_PATH | O_CLOEXEC);
       how.resolve = RESOLVE_BENEATH;
       long r = -1;
       do {
         r = ::syscall(SYS_openat2, rootFd, rel, &how, sizeof(how));
       } while (r < 0 && errno == EINTR);
-      if (r >= 0) return static_cast<int>(r);
-      if (errno != EXDEV && errno != ENOSYS && errno != EPERM && errno != E2BIG && errno != EINVAL) return -1;
+      if (r >= 0) {
+        const int pfd = static_cast<int>(r);
+        const int fd = ReopenChecked(pfd, flags);
+        ::close(pfd);
+        if (fd != kTryRealpath) return fd;
+      } else if (errno != EXDEV && errno != ENOSYS && errno != EPERM && errno != E2BIG && errno != EINVAL) return -1;
     }
 #endif
     if (rootRealLen == 0u) return -1;
@@ -84,31 +95,74 @@ struct PosixRoot {
     std::size_t at = rootRealLen;
     if (rootRealLen != 1u) full[at++] = '/';  // root "/" already ends with the separator
     std::memcpy(full + at, rel, relLen + 1u);
-    int fd = -1;
+    // D-103: nothing that is not checked yet is opened for reading. The target's kind and
+    // place are established first, without opening it (a FIFO, device or socket would
+    // otherwise be opened before we know it is outside the root or not a regular file).
+#if defined(O_PATH) && defined(__linux__)
+    // Linux: an O_PATH descriptor names the target (links followed) without opening it
+    // for I/O. Its kind (fstat) and canonical path (/proc/self/fd) are checked; the file
+    // is then reopened for reading through that very descriptor (/proc/self/fd/N), so it
+    // is the inode that was checked.
+    int pfd = -1;
     do {
-      fd = ::open(full, flags);
-    } while (fd < 0 && errno == EINTR);
-    if (fd < 0) return -1;
-    char real[PATH_MAX];
-    bool resolved = false;
-#if defined(__linux__)
-    char proc[64];
-    std::snprintf(proc, sizeof(proc), "/proc/self/fd/%d", fd);
-    const ssize_t n = ::readlink(proc, real, sizeof(real) - 1u);
-    if (n > 0 && static_cast<std::size_t>(n) < sizeof(real) - 1u) {
-      real[n] = '\0';
-      resolved = true;
+      pfd = ::open(full, O_PATH | O_CLOEXEC);
+    } while (pfd < 0 && errno == EINTR);
+    if (pfd >= 0) {
+      const int fd = ReopenChecked(pfd, flags);
+      ::close(pfd);
+      if (fd != kTryRealpath) return fd;
     }
 #endif
-    if (!resolved) resolved = ::realpath(full, real) != nullptr;
-    // The canonical path must be inside the root AND name the very file we
-    // opened (same device and inode). This closes the realpath() race (a link
-    // swapped between open() and realpath() resolves to a different inode) and
-    // double-checks /proc. A hard link inside the root to an outside file is a
-    // file of the root (it has a name there) and is accepted.
-    struct stat opened, named;
-    if (!resolved || !InsideRoot(real) || ::fstat(fd, &opened) != 0 || ::stat(real, &named) != 0 ||
-        opened.st_dev != named.st_dev || opened.st_ino != named.st_ino) {
+    return OpenByRealpath(flags);
+  }
+
+#if defined(O_PATH) && defined(__linux__)
+  static constexpr int kTryRealpath = -2;  // /proc is not available: use the realpath() way
+  int ReopenChecked(int pfd, int flags) const noexcept {
+    struct stat st;
+    if (::fstat(pfd, &st) != 0 || !S_ISREG(st.st_mode)) return -1;
+    char proc[64];
+    std::snprintf(proc, sizeof(proc), "/proc/self/fd/%d", pfd);
+    char real[PATH_MAX];
+    const ssize_t n = ::readlink(proc, real, sizeof(real) - 1u);
+    if (n <= 0 || static_cast<std::size_t>(n) >= sizeof(real) - 1u) return kTryRealpath;
+    real[n] = '\0';
+    if (!InsideRoot(real)) return -1;
+    int fd = -1;
+    do {
+      fd = ::open(proc, flags);
+    } while (fd < 0 && errno == EINTR);
+    if (fd < 0) return -1;
+    struct stat opened;
+    if (::fstat(fd, &opened) != 0 || opened.st_dev != st.st_dev || opened.st_ino != st.st_ino) {
+      ::close(fd);
+      return -1;
+    }
+    return fd;
+  }
+#endif
+
+  // Without O_PATH (macOS, iOS, other POSIX) or /proc: the canonical path (realpath, links
+  // resolved) must lie inside the root and name a regular file (lstat of the canonical
+  // path, which has no links left); only then is it opened, without following a link
+  // (O_NOFOLLOW), and the opened file must be that inode (same device and inode: a swap
+  // between the check and the open is refused).
+  int OpenByRealpath(int flags) noexcept {
+    char real[PATH_MAX];
+    if (::realpath(full, real) == nullptr || !InsideRoot(real)) return -1;
+    struct stat named;
+    if (::lstat(real, &named) != 0 || !S_ISREG(named.st_mode)) return -1;
+    int oflags = flags;
+#if defined(O_NOFOLLOW)
+    oflags |= O_NOFOLLOW;
+#endif
+    int fd = -1;
+    do {
+      fd = ::open(real, oflags);
+    } while (fd < 0 && errno == EINTR);
+    if (fd < 0) return -1;
+    struct stat opened;
+    if (::fstat(fd, &opened) != 0 || opened.st_dev != named.st_dev || opened.st_ino != named.st_ino) {
       ::close(fd);
       return -1;
     }

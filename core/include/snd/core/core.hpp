@@ -89,6 +89,7 @@ inline constexpr std::uint16_t kClipRefAssetTrack = music::kClipRefAssetTrack;
 // bank_format's kInputDistance (0xFFFFFFFE). Other scopes ignore them.
 inline constexpr Id kParamPlaybackVolume = 0xFFFFFFFDu;
 inline constexpr Id kParamPlaybackPitch = 0xFFFFFFFCu;
+static_assert(kParamPlaybackPitch == SND_ID_RESERVED_FIRST && kParamPlaybackVolume < SND_ID_RESERVED_LAST);
 
 // Capacities that Config does not have (proposed as Config fields, see the
 // stage-2 report). Shared objects are unified by id across banks (A1-16), so

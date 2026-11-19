@@ -601,6 +601,7 @@ struct System::Impl {
   snd_callbacks callbacks{};
   std::atomic<std::uint32_t> rejectedCommands{0};
   std::atomic<std::uint32_t> reserveOverflows{0};
+  std::atomic<std::uint32_t> fallbackCommands{0};  // coalesced into the fallback (stats.fallback_commands)
   base::Mutex gameMutex;  // language switches, pending registrations (non-RT threads only)
   bk::LanguageSwitch* languagePlan = nullptr;  // [kMaxLanguageSwitches]
   struct PendingSwitch {

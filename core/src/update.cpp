@@ -374,6 +374,7 @@ snd_result System::GetStats(snd_stats* out) const noexcept {
   });
   out->rejected_commands += im.rejectedCommands.load(std::memory_order_relaxed);
   out->reserve_overflows += im.reserveOverflows.load(std::memory_order_relaxed);
+  out->fallback_commands += im.fallbackCommands.load(std::memory_order_relaxed);
   return ready ? SND_OK : SND_ERR_NOT_READY;
 }
 

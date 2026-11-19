@@ -12,6 +12,11 @@ snd_add_test(buildtool_self_check_test
 target_include_directories(buildtool_self_check_test PRIVATE
   ${PROJECT_SOURCE_DIR}/bank/test ${PROJECT_SOURCE_DIR}/buildtool/src)
 
+# D-104: names hashing to the runtime's reserved ids.
+snd_add_test(buildtool_reserved_id_test
+  SOURCES reserved_id_test.cpp
+  LINK sonus_buildtool sonus_mocks)
+
 # --- Independent tests (test owner, not the implementer) -----------------------------
 # JSON (RFC 8259) and WAV readers: boundaries, error positions, fixed-seed fuzz.
 # Tests named Defect_* fail on purpose (see the file).

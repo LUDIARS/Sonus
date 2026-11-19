@@ -5,6 +5,8 @@
 #include <cmath>
 #include <cstring>
 
+#include "snd/core/core.hpp"
+#include "snd/id.h"
 #include "snd/livelink/wire.hpp"
 #include "snd/types.h"
 
@@ -46,6 +48,16 @@ bool Scope(std::uint8_t scope, HandleRef target, const L& k) noexcept {
     case ParamScope::Emitter: return Handle(target, k.emitters);
     case ParamScope::Playback: return Handle(target, k.playbacks);
   }
+  return false;
+}
+// SetParam's value rule (D-104): finite; a reserved id only as the per-playback volume
+// (>= 0) or pitch (> 0) in the playback scope, what snd_set_playback_* record.
+bool ParamOk(std::uint8_t scope, Id id, float value) noexcept {
+  if (!Fin(value)) return false;
+  if (!IsReservedId(id)) return true;
+  if (static_cast<ParamScope>(scope) != ParamScope::Playback) return false;
+  if (id == core::kParamPlaybackVolume) return value >= 0.0f;
+  if (id == core::kParamPlaybackPitch) return value > 0.0f;
   return false;
 }
 // Fades / times the API clamps to >= 0 before recording (SetBusVolume ...).
@@ -126,12 +138,17 @@ constexpr CommandRule kCommandRules[] = {
     {CT::SetListener, true,
      [](const std::uint8_t* p, const L& k) noexcept { return Load<cmd::SetListener>(p).index < k.listeners; }, &True,
      "api: index < max_listeners, any listener contents"},
-    {CT::SetParam, true, [](const std::uint8_t* p, const L&) noexcept { return Fin(Load<cmd::SetParam>(p).value); },
+    {CT::SetParam, true,
+     [](const std::uint8_t* p, const L&) noexcept {
+       const auto c = Load<cmd::SetParam>(p);
+       return ParamOk(c.scope, c.param, c.value);
+     },
      [](const std::uint8_t* p, const L& k) noexcept {
        const auto c = Load<cmd::SetParam>(p);
        return Scope(c.scope, c.target, k);
      },
-     "api: finite value; shape: scope / target"},
+     "api: finite value, reserved ids only as the playback volume (>= 0) / pitch (> 0) (D-104); "
+     "shape: scope / target"},
     {CT::SetSwitch, true, &True,
      [](const std::uint8_t* p, const L& k) noexcept {
        const auto c = Load<cmd::SetSwitch>(p);
@@ -277,12 +294,14 @@ CommandLimits LimitsOf(const snd_config& c) noexcept {
   return k;
 }
 
+bool IsReservedId(std::uint32_t id) noexcept { return id >= SND_ID_RESERVED_FIRST && id <= SND_ID_RESERVED_LAST; }
+
 bool CheckOverflowParam(const cmd::OverflowParam& p, const CommandLimits& k) noexcept {
   if (p.isSwitch > 1u || !Scope(p.scope, p.target, k)) return false;
   if (p.isSwitch == 0u) {
     float f = 0;
     std::memcpy(&f, &p.value, 4);
-    if (!Fin(f)) return false;  // SetParam's API rule
+    if (!ParamOk(p.scope, p.id, f)) return false;  // SetParam's API rule
   }
   return true;
 }

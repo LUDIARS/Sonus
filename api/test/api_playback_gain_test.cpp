@@ -6,12 +6,15 @@
 // the pitch, a pending playback starts with its values, a new playback in the same
 // slot starts at 1 / 1, and the entry rules.
 #include <cmath>
+#include <cstring>
 #include <cstdint>
 #include <limits>
 #include <thread>
 #include <vector>
 
 #include "api_rig.hpp"
+#include "snd/core/core.hpp"
+#include "snd/livelink/command_check.hpp"
 #include "snd/sonus.hpp"
 
 using namespace apitest;
@@ -306,13 +309,88 @@ SND_TEST(ApiPlaybackGain, EntryRules) {
   SND_CHECK_EQ(snd_play_user_buffer_ex(r.sys, b, 0u, kNan, 1.0f, snd_emitter_handle{0}, nullptr).value, 0u);
   SND_CHECK_EQ(snd_play_user_buffer_ex(r.sys, snd_user_buffer_handle{0}, 0u, 1.0f, 1.0f, snd_emitter_handle{0},
                                        nullptr).value, 0u);
-  // Back to 1 / 1; the reserved ids reach nothing in the other scopes (no parameter row).
+  // Back to 1 / 1. The public snd_set_param_* refuse the reserved ids in every scope.
   SND_CHECK_EQ(snd_set_playback_volume(r.sys, p, 1.0f), SND_OK);
   SND_CHECK_EQ(snd_set_playback_pitch(r.sys, p, 1.0f), SND_OK);
-  SND_CHECK_EQ(snd_set_param_global(r.sys, 0xFFFFFFFDu, 0.0f), SND_OK);
-  SND_CHECK_EQ(snd_set_param_global(r.sys, 0xFFFFFFFCu, 4.0f), SND_OK);
+  const snd_emitter_handle em = snd_create_emitter(r.sys);
+  SND_REQUIRE(em.value != 0u);
+  for (snd_id id = SND_ID_RESERVED_FIRST; id <= SND_ID_RESERVED_LAST && id != 0u; ++id) {
+    SND_CHECK_EQ(snd_set_param_global(r.sys, id, 0.0f), SND_ERR_INVALID_ARGUMENT);
+    SND_CHECK_EQ(snd_set_param_emitter(r.sys, em, id, 0.0f), SND_ERR_INVALID_ARGUMENT);
+    SND_CHECK_EQ(snd_set_param_playback(r.sys, p, id, 0.0f), SND_ERR_INVALID_ARGUMENT);
+  }
+  SND_CHECK_EQ(snd_set_param_global(r.sys, SND_ID_RESERVED_FIRST - 1u, 0.0f), SND_OK);  // the range ends there
   r.Step(30);
   for (std::uint64_t c = r.Frames() - 1024; c < r.Frames(); ++c) SND_CHECK_NEAR(r.At(c), 0.5f, 1e-4f);
+  SND_CHECK_EQ(snd_stop(r.sys, p, 0.0f, nullptr), SND_OK);
+  SND_CHECK_EQ(snd_destroy_user_buffer(r.sys, b), SND_OK);
+  r.Step(10);
+}
+
+// The rule table (one place for the API and the replay): a SetParam carries a reserved id
+// only in the playback scope as the volume (>= 0) or pitch (> 0); the fallback entry too.
+SND_TEST(ApiPlaybackGain, RuleTableKnowsTheReservedIds) {
+  namespace ll = snd::livelink;
+  namespace cmd = snd::cmd;
+  const ll::CommandRule* rule = ll::RuleOf(static_cast<std::uint16_t>(cmd::CommandType::SetParam));
+  SND_REQUIRE(rule != nullptr);
+  const ll::CommandLimits k = ll::LimitsOf(SmallConfig());
+  auto ok = [&](snd::ParamScope scope, snd_id id, float v) {
+    cmd::SetParam c{};
+    c.scope = static_cast<std::uint8_t>(scope);
+    c.param = id;
+    c.value = v;
+    if (scope != snd::ParamScope::Global) c.target = snd::HandleRef{1u, 1u};
+    const bool api = rule->api(reinterpret_cast<const std::uint8_t*>(&c), k);
+    cmd::OverflowParam o{};
+    o.scope = c.scope;
+    o.id = id;
+    o.target = c.target;
+    std::memcpy(&o.value, &v, 4);
+    o.used = 1u;
+    SND_CHECK_EQ(ll::CheckOverflowParam(o, k), api);
+    return api;
+  };
+  using S = snd::ParamScope;
+  SND_CHECK(ok(S::Playback, snd::core::kParamPlaybackVolume, 0.0f));
+  SND_CHECK(!ok(S::Playback, snd::core::kParamPlaybackVolume, -1.0f));
+  SND_CHECK(ok(S::Playback, snd::core::kParamPlaybackPitch, 0.5f));
+  SND_CHECK(!ok(S::Playback, snd::core::kParamPlaybackPitch, 0.0f));
+  SND_CHECK(!ok(S::Playback, SND_ID_RESERVED_LAST, 1.0f));  // the distance input: never a parameter
+  SND_CHECK(!ok(S::Global, snd::core::kParamPlaybackVolume, 1.0f));
+  SND_CHECK(!ok(S::Emitter, snd::core::kParamPlaybackPitch, 1.0f));
+  SND_CHECK(ok(S::Global, 0x1234u, -5.0f));  // ordinary ids: any finite value
+  SND_CHECK(ll::IsReservedId(0xFFFFFFFCu) && ll::IsReservedId(0xFFFFFFFEu));
+  SND_CHECK(!ll::IsReservedId(0xFFFFFFFBu) && !ll::IsReservedId(0xFFFFFFFFu));
+}
+
+// Beyond the reserve the volume / pitch are coalesced (D-11): delivered with the last value,
+// counted in stats.fallback_commands, nothing lost (reserve_overflows unchanged).
+SND_TEST(ApiPlaybackGain, CoalescedValuesAreDeliveredAndCounted) {
+  snd_config cfg = SmallConfig();
+  cfg.commands.arena_bytes = 1024;
+  cfg.commands.reserve_bytes = 512;
+  std::vector<float> dc(1024, 0.5f);
+  Rig r(cfg);
+  SND_REQUIRE_EQ(r.created, SND_OK);
+  float* ch[1] = {dc.data()};
+  snd_user_buffer_desc d{ch, 1, 1024, 48000, SND_USER_BUFFER_STATIC, 1, 0};
+  const snd_user_buffer_handle b = snd_create_user_buffer(r.sys, &d);
+  const snd_playback_handle p = snd_play_user_buffer(r.sys, b, 0u, snd_emitter_handle{0}, nullptr);
+  SND_REQUIRE(p.value != 0u);
+  r.Step(10);
+  snd_stats s0{};
+  snd_update(r.sys);
+  SND_REQUIRE_EQ(snd_get_stats(r.sys, &s0), SND_OK);
+  for (int i = 0; i < 200; ++i) SND_CHECK_EQ(snd_set_playback_volume(r.sys, p, 0.01f * float(i)), SND_OK);
+  SND_CHECK_EQ(snd_set_playback_volume(r.sys, p, 0.5f), SND_OK);
+  r.Step(30);
+  snd_stats s1{};
+  snd_update(r.sys);
+  SND_REQUIRE_EQ(snd_get_stats(r.sys, &s1), SND_OK);
+  SND_CHECK(s1.fallback_commands > s0.fallback_commands);
+  SND_CHECK_EQ(s1.reserve_overflows, s0.reserve_overflows);
+  for (std::uint64_t c = r.Frames() - 1024; c < r.Frames(); ++c) SND_CHECK_NEAR(r.At(c), 0.25f, 1e-4f);
   SND_CHECK_EQ(snd_stop(r.sys, p, 0.0f, nullptr), SND_OK);
   SND_CHECK_EQ(snd_destroy_user_buffer(r.sys, b), SND_OK);
   r.Step(10);

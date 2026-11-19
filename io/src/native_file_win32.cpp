@@ -5,6 +5,9 @@
 // (GetFullPathNameW: a relative root is relative to the working directory of
 // that moment), opened as a directory handle and resolved to its final path
 // (GetFinalPathNameByHandleW, links and junctions followed, "\\?\" form).
+// Every path handed to CreateFileW is in the "\\?\" form ("\\?\UNC\" for a
+// share), the root's too, so roots and files beyond MAX_PATH open (roots up to
+// the 2046 bytes the configuration allows).
 //
 // OpenBeneath:
 //   - the relative path is normalised lexically ("." and empty components
@@ -18,9 +21,11 @@
 //     must be a disk file (GetFileType) that is not a directory;
 //   - containment: the final path of the OPENED handle (symbolic links and
 //     junctions resolved by the OS, so no race with a link swapped later) must
-//     be the root's final path followed by '\\' (compared without case, as
-//     NTFS names are by default). Links leaving the root are refused, links
-//     staying inside are followed.
+//     be the root's final path followed by '\\'. Both are final paths, the
+//     names as the file system stores them, so they are compared WITH case
+//     (D-103): right also for directories set to case-sensitive. How the input
+//     path's case is matched is the file system's business. Links leaving the
+//     root are refused, links staying inside are followed.
 // ReadAt: ReadFile with an OVERLAPPED offset on a synchronous handle (a
 // positional read; concurrent reads on one handle are serialised by the OS).
 #include "native_file.hpp"
@@ -75,8 +80,39 @@ DWORD FinalPath(HANDLE h, wchar_t* out, DWORD outChars) noexcept {
   return n;
 }
 
-bool SameText(const wchar_t* a, const wchar_t* b, DWORD n) noexcept {
-  return CompareStringOrdinal(a, static_cast<int>(n), b, static_cast<int>(n), TRUE) == CSTR_EQUAL;
+bool SameText(const wchar_t* a, const wchar_t* b, DWORD n) noexcept { return std::wmemcmp(a, b, n) == 0; }
+
+bool StartsWith(const wchar_t* s, const wchar_t* prefix) noexcept {
+  for (; *prefix != L'\0'; ++s, ++prefix) {
+    if (*s != *prefix) return false;
+  }
+  return true;
+}
+
+// An absolute Win32 path in the "\\?\" form: "C:\x" -> "\\?\C:\x", "\\srv\share\x" ->
+// "\\?\UNC\srv\share\x", already "\\?\..." unchanged. Device paths ("\\.\...") and
+// anything else are refused (false).
+bool ToExtended(const wchar_t* in, wchar_t* out, DWORD outChars) noexcept {
+  const wchar_t* prefix = nullptr;
+  const wchar_t* rest = in;
+  if (StartsWith(in, L"\\\\?\\")) {
+    prefix = L"";
+  } else if (StartsWith(in, L"\\\\.\\")) {
+    return false;
+  } else if (StartsWith(in, L"\\\\")) {
+    prefix = L"\\\\?\\UNC\\";
+    rest = in + 2;
+  } else if (((in[0] >= L'A' && in[0] <= L'Z') || (in[0] >= L'a' && in[0] <= L'z')) && in[1] == L':' && in[2] == L'\\') {
+    prefix = L"\\\\?\\";
+  } else {
+    return false;
+  }
+  const std::size_t p = std::wcslen(prefix);
+  const std::size_t n = std::wcslen(rest);
+  if (p + n + 1u > outChars) return false;
+  std::memcpy(out, prefix, sizeof(wchar_t) * p);
+  std::memcpy(out + p, rest, sizeof(wchar_t) * (n + 1u));
+  return true;
 }
 
 // Lexical normalisation of a ValidatePath-approved UTF-16 relative path into
@@ -118,8 +154,9 @@ bool NativeRoot::Open(IAllocator& allocator, const char* root) noexcept {
   for (DWORD i = 0; given[i] != L'\0'; ++i) {
     if (given[i] == L'/') given[i] = L'\\';
   }
-  const DWORD n = GetFullPathNameW(given, kMaxWide, r->full, nullptr);
+  const DWORD n = GetFullPathNameW(given, kMaxWide, r->opened, nullptr);
   if (n == 0u || n >= kMaxWide) return true;
+  if (!ToExtended(r->opened, r->full, kMaxWide)) return true;  // "\\?\" form: no MAX_PATH limit
   r->dir = CreateFileW(r->full, FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
                        OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr);
   if (r->dir == INVALID_HANDLE_VALUE) return true;
@@ -129,7 +166,9 @@ bool NativeRoot::Open(IAllocator& allocator, const char* root) noexcept {
     r->dir = INVALID_HANDLE_VALUE;
     return true;
   }
-  DWORD len = FinalPath(r->dir, r->finalPath, kMaxWide);
+  DWORD len = FinalPath(r->dir, r->opened, kMaxWide);
+  if (len == 0u || !ToExtended(r->opened, r->finalPath, kMaxWide)) return true;  // normally already "\\?\"
+  len = static_cast<DWORD>(std::wcslen(r->finalPath));
   while (len > 0u && r->finalPath[len - 1u] == L'\\') r->finalPath[--len] = L'\0';  // "\\?\C:\" -> "\\?\C:"
   r->finalLen = len;
   return true;

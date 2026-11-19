@@ -208,9 +208,11 @@ void WaitRenderAhead(void* user) noexcept {
   if (!s.driverStarted) return;
   const auto until = std::chrono::steady_clock::now() + std::chrono::seconds(2);
   for (;;) {
+    // The ring's fill, not rendered - consumed: the consumed count includes the silence of
+    // underruns, which is never rendered, so after one bounded wait that difference would
+    // stay short for good.
     const platform::DriverStats st = s.driver.Stats().core;
-    const std::uint64_t rendered = st.blocksRendered * s.blockFrames;
-    if (st.targetFrames != 0u && rendered >= st.framesConsumed + st.targetFrames) return;
+    if (st.targetFrames != 0u && st.queuedFrames >= st.targetFrames) return;
     if (std::chrono::steady_clock::now() > until) return;
     std::this_thread::sleep_for(std::chrono::microseconds(50));
   }

@@ -1,5 +1,7 @@
 #include "snd/platform/platform_output_device.hpp"
 
+#include <atomic>
+
 #include "snd/platform/clock.hpp"
 
 namespace snd::platform {
@@ -46,6 +48,7 @@ DeviceStats PlatformOutputDevice::Stats() const noexcept {
 void PlatformOutputDevice::PublishClock(std::uint64_t written, std::uint64_t queued, std::uint32_t rate) noexcept {
   const std::uint32_t s = clockSeq_.load(std::memory_order_relaxed);
   clockSeq_.store(s + 1u, std::memory_order_relaxed);
+  std::atomic_thread_fence(std::memory_order_release);  // the odd count is visible before any field
   clockWritten_.store(written, std::memory_order_release);
   clockPlayed_.store(written > queued ? written - queued : 0u, std::memory_order_release);
   clockNs_.store(MonotonicNanoseconds(), std::memory_order_release);
@@ -56,6 +59,7 @@ void PlatformOutputDevice::PublishClock(std::uint64_t written, std::uint64_t que
 void PlatformOutputDevice::ResetClock() noexcept {
   const std::uint32_t s = clockSeq_.load(std::memory_order_relaxed);
   clockSeq_.store(s + 1u, std::memory_order_relaxed);
+  std::atomic_thread_fence(std::memory_order_release);  // the odd count is visible before any field
   clockWritten_.store(0, std::memory_order_release);
   clockPlayed_.store(0, std::memory_order_release);
   clockNs_.store(0, std::memory_order_release);
@@ -65,19 +69,27 @@ void PlatformOutputDevice::ResetClock() noexcept {
 
 bool PlatformOutputDevice::OutputClock(OutputClockSample* out) const noexcept {
   if (out == nullptr) return false;
-  for (int attempt = 0; attempt < 64; ++attempt) {
+  // Seqlock reader: retry until a consistent sample is read (the single writer holds the
+  // odd count only for a few stores), yielding while it writes. Never a false "no clock".
+  for (;;) {
     const std::uint32_t s1 = clockSeq_.load(std::memory_order_acquire);
-    if ((s1 & 1u) != 0u) continue;
+    if ((s1 & 1u) != 0u) {
+      YieldThread();
+      continue;
+    }
     OutputClockSample v;
-    v.framesWritten = clockWritten_.load(std::memory_order_acquire);
-    v.framesPlayed = clockPlayed_.load(std::memory_order_acquire);
-    v.timestampNs = clockNs_.load(std::memory_order_acquire);
-    v.sampleRate = clockRate_.load(std::memory_order_acquire);
-    if (clockSeq_.load(std::memory_order_relaxed) != s1) continue;
+    v.framesWritten = clockWritten_.load(std::memory_order_relaxed);
+    v.framesPlayed = clockPlayed_.load(std::memory_order_relaxed);
+    v.timestampNs = clockNs_.load(std::memory_order_relaxed);
+    v.sampleRate = clockRate_.load(std::memory_order_relaxed);
+    std::atomic_thread_fence(std::memory_order_acquire);  // the fields are read before the count again
+    if (clockSeq_.load(std::memory_order_relaxed) != s1) {
+      YieldThread();
+      continue;
+    }
     *out = v;
     return v.timestampNs != 0u;
   }
-  return false;
 }
 
 void PlatformOutputDevice::PublishWorkgroup(const Workgroup& group) noexcept {
