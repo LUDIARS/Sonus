@@ -15,8 +15,10 @@
 //  E6 snd_destroy(NULL) is a no-op.
 #include <cmath>
 #include <cstdio>
+#if !defined(_WIN32)
 #include <sys/wait.h>
 #include <unistd.h>
+#endif
 #include <cstring>
 #include <limits>
 #include <map>
@@ -282,7 +284,13 @@ SND_TEST(IndepCreate, BoundariesThroughCreateAllocateNothing) {
 
 // A10: an allocation failing at ANY point of snd_create rolls everything back. Each
 // attempt runs in a child process (fork), so a crash in one roll-back path is counted
-// instead of ending the test program.
+// instead of ending the test program. Without fork (Windows) the sweep is skipped.
+#if defined(_WIN32)
+#define SND_INDEP_FORK_SWEEP 0
+#else
+#define SND_INDEP_FORK_SWEEP 1
+#endif
+#if SND_INDEP_FORK_SWEEP
 namespace {
 
 struct Sweep {
@@ -370,29 +378,42 @@ void ReportSweep(const Sweep& s, bool live) {
 }
 
 }  // namespace
+#endif  // SND_INDEP_FORK_SWEEP
 
 SND_TEST(IndepCreate, Defect_AllocationFailureAnywhereRollsBackWithoutLiveLink) {
+#if SND_INDEP_FORK_SWEEP
   const Sweep& s = SweepOf(false);
   ReportSweep(s, false);
   SND_REQUIRE(s.total > 5u);
   SND_CHECK_EQ(s.crashed, 0u);
   SND_CHECK_EQ(s.leaked, 0u);
   SND_CHECK_EQ(s.outSet, 0u);
+#else
+  snd::test::Note("skipped: no fork on this platform");
+#endif
 }
 SND_TEST(IndepCreate, Defect_AllocationFailureAnywhereRollsBackWithLiveLink) {
+#if SND_INDEP_FORK_SWEEP
   const Sweep& s = SweepOf(true);
   ReportSweep(s, true);
   SND_REQUIRE(s.total > 5u);
   SND_CHECK_EQ(s.crashed, 0u);
   SND_CHECK_EQ(s.leaked, 0u);
   SND_CHECK_EQ(s.outSet, 0u);
+#else
+  snd::test::Note("skipped: no fork on this platform");
+#endif
 }
 // A10 (result code): a NULL from the game's allocator is a budget failure: the result must
 // be SND_ERR_OUT_OF_BUDGET, not "no device" or "invalid argument" (snd/types.h).
 SND_TEST(IndepCreate, Defect_AllocationFailureIsReportedAsOutOfBudget) {
+#if SND_INDEP_FORK_SWEEP
   const Sweep& a = SweepOf(false);
   const Sweep& b = SweepOf(true);
   SND_CHECK_EQ(a.wrongCode + b.wrongCode, 0u);
+#else
+  snd::test::Note("skipped: no fork on this platform");
+#endif
 }
 
 // The device cannot be opened: NO_DEVICE, everything given back.

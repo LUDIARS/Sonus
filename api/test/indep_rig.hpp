@@ -10,12 +10,32 @@
 #include <chrono>
 #include <cstdint>
 #include <cstdlib>
+#if defined(_WIN32)
+#include <malloc.h>
+#endif
 #include <thread>
 #include <vector>
 
 #include "api_rig.hpp"
 
 namespace indep {
+
+// Aligned allocation that builds on POSIX and on Windows (MinGW / MSVC).
+inline void* AlignedAlloc(std::size_t bytes, std::size_t align) {
+#if defined(_WIN32)
+  return _aligned_malloc(bytes, align);
+#else
+  void* p = nullptr;
+  return posix_memalign(&p, align, bytes) == 0 ? p : nullptr;
+#endif
+}
+inline void AlignedFree(void* p) {
+#if defined(_WIN32)
+  _aligned_free(p);
+#else
+  std::free(p);
+#endif
+}
 
 // Counting allocator through the C table. `failAt` > 0: the failAt-th call (1-based)
 // returns NULL (fault injection for the roll-back of snd_create).
@@ -33,15 +53,15 @@ struct CountingAllocator {
       return nullptr;
     }
     if (align < 16) align = 16;
-    void* p = nullptr;
-    if (posix_memalign(&p, align, n == 0 ? 1 : n) != 0) return nullptr;
+    void* p = AlignedAlloc(n == 0 ? 1 : n, align);
+    if (p == nullptr) return nullptr;
     c->live.fetch_add(1);
     return p;
   }
   static void SND_CALL Free(void* u, void* p, snd_mem_tag) {
     if (p == nullptr) return;
     static_cast<CountingAllocator*>(u)->live.fetch_sub(1);
-    std::free(p);
+    AlignedFree(p);
   }
   snd_allocator Table() { return snd_allocator{this, &Alloc, &Free}; }
 };
