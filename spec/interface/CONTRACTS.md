@@ -36,6 +36,8 @@
 | `sonus_contract` | 上記 + `snd/internal/*`, `snd/format/*` | 他の全モジュール、テスト |
 | `sonus_<module>` | 各モジュール | 依存表に従う |
 | `sonus` | 構成ルート（`api/compose/`）。ランタイムの全モジュールを束ねる | ゲーム、統合テスト |
+| `Sonus::sonus`（`sonus_c_api`） | C API の窓口: 公開ヘッダの場所と `sonus` のリンク（`cxx_std_20` を伝えない、D-100） | 取り込む親（Ergo） |
+| `Sonus::tool_core`（= `sonus_tool`） | ツールの核（UI に依存しない、Tela なし、`cxx_std_20` を伝える、D-101） | 外のホスト（Ergo Studio）、Tela のツール |
 | `sonus_testkit`, `sonus_testkit_main`, `sonus_testkit_rthooks`, `sonus_mocks` | テスト枠組みとモック | 各モジュールの `test/` |
 
 ## 2. 変更手順（12.4）
@@ -256,6 +258,16 @@ minor（追加のみ）として扱ってよいもの: 新しい関数、列挙�
 - D-95: `snd_suspend` は時計を止めて無音を描くだけで、**デバイスは開いたまま**（止めない）。コールバックを入れる前に起きた通知（レートの違い、LOST）は消さずに印だけ持ち、`on_error` が入った後の最初の `snd_update` で 1 回だけ届ける。`outputLatencySeconds` は、デバイスを開いた後に `core::System::SetOutputLatency` で実際の値に置き換える（次のブロックの通知時刻と統計から）。
 - D-94 の Callback の注記にある「Buffered の開始でリングが無ければ `VOICE_LIMIT`」は D-97 で置き換えた（待つ）。
 
+### 段階6 組み込み（Ergo から取り込む）での決定
+
+契約の版は 1.2 のまま（契約ヘッダは変えない）。凍結ファイルの変更はルートの `CMakeLists.txt` だけで、受け入れ側の決定で
+「サブプロジェクトとして安全にする変更・オプションの追加・`tool/` を読む条件の変更」に限って許した。`cmake/` は変えていない。
+
+| # | 決定 | 理由 |
+| --- | --- | --- |
+| D-100 | **サブプロジェクトとしての取り込み**: 親（ゲームエンジン）は `add_subdirectory(<sonus>)` で取り込み、窓口の別名ターゲットを使う。`Sonus::sonus` = C API（`snd/*.h` を含む公開ヘッダの場所）と構成ルート `sonus`（全ランタイムモジュール）。実体は INTERFACE の `sonus_c_api` で、`$<LINK_ONLY:sonus>` でリンクだけを伝え、`sonus_contract_public` の `cxx_std_20` は伝えない（C ヘッダは C11 / C++17 で通る。C++ のラッパー `snd/sonus.hpp` は C++20 のまま）。ルートの変更: `SND_BUILD_TESTS` の既定を `PROJECT_IS_TOP_LEVEL`（サブプロジェクトでは OFF、`SND_RT_CHECKS` の既定もそれに従う）、ビルド種別の既定（Debug）はトップレベルのときだけ設定、`cmake/` は `include(<パス>)` で読む（親のモジュールパスの同名ファイルを拾わない）。それ以外はもともと親を変えない: 警告・`-Werror`・`-fno-exceptions -fno-rtti`・`-ffp-contract=off`・サニタイザは `snd_apply_options` でターゲットごと、`CMAKE_CXX_STANDARD 20` とモジュールパス・`add_compile_definitions` / `add_link_options` は Sonus のディレクトリの中だけ、パスは `CMAKE_CURRENT_SOURCE_DIR` / `PROJECT_SOURCE_DIR`。検査はテスト `embed_subproject`（`tests/embed/`）: C++17・例外 ON・ディレクトリ全体に `-Wall -Wextra -Werror` の親から取り込み、親の C++ 標準・ビルド種別が変わらないこと、テストが既定で無いこと、Sonus のターゲットが `-fno-exceptions` のままのこと、`snd/sonus.h` だけで（C++17、`-Wpedantic -Wshadow -Wconversion -Wsign-conversion` でも警告なし）無音デバイスを作って回して壊せること、`Sonus::tool_core` が Tela なしでリンクでき C++20 を伝えることを確かめる。`install()` とパッケージ設定ファイルは作らない | Ergo（C++17）にサウンドとして組み込むため。親の設定を壊さず、親の例外・標準が Sonus に入っても Sonus のターゲットの設定が後から勝つ |
+| D-101 | **ツールの核を Tela なしで**: `SND_BUILD_TOOL_CORE`（既定 OFF）で UI に依存しない `sonus_tool`（別名 `Sonus::tool_core`、`sonus::tool_core`。`cxx_std_20` を INTERFACE で伝える）だけを作る。`SND_BUILD_TOOL=ON` は従来どおり核・UI・`sonus-tool`（Tela の `find_package` は UI とアプリの部分だけ）。ルートは `SND_BUILD_TOOL OR SND_BUILD_TOOL_CORE` のとき `tool/` を読む。テストも分けた: モデルのテスト（model、live_mixer、live_profiler、indep_sync、新しい core_host）は核だけで、UI・アプリのテストは `SND_BUILD_TOOL` のときだけ。外のホスト向けに `Session` へ `Tick()`（引数なし）、`NowNs()`（`Tick(nowNs)` の時計。クライアントの受信時刻と比べるので同じ時計が要る）、`StartRecording()` / `StopRecording()`（ライブリンクのクライアントのヘッダ無しで録画できる）を足した。ホストはポーリング型（自分のループから `Tick`、コールバックは無い）、1 つの `Session` へは同時に 1 つのスレッドから（作ったスレッドでなくてよい）。Tela のツールの振る舞いは変えない | Ergo Studio が自前の UI でミキサー・プロファイラ・上書き・録画を使うため。Tela が無い環境でも核をビルド・テストできるように |
+
 ### 契約 1.2 の候補で入れなかったもの
 
 api 段の依頼の範囲（トランスポートのピッチ、Stinger、transport_beats）と、api の配線に要るものを入れた。残りは受け入れ側の判断のため候補のまま。理由は段階2 api の報告。
@@ -348,3 +360,4 @@ bank / buildtool:
 | 1.1（段階2 livelink） | 2026-11-17 | D-83〜D-87 を追加（契約ヘッダは変えない。core への追加: `CoreDesc::liveTap`、`LiveTap::admit`、`System::Live*`。livelink-protocol.md に応答・背圧・セッションの段落を追加。ライブリンクの版は 1.0 のまま） |
 | 1.1（ツール D-67） | 2026-11-17 | **D-67 ツールの UI は LUDIARS Tela**（設計書 11 章・15.2 の「Dear ImGui か Qt か」をユーザーの決定で置き換え）。契約の版は変えない（tool は凍結対象の外）。(1) Tela は同梱も自動取得もしない: `-DSND_BUILD_TOOL=ON` のときだけ `tool/CMakeLists.txt` が `find_package(Tela CONFIG REQUIRED)` で読む（`Tela_DIR` / `CMAKE_PREFIX_PATH`）。既定の構成（OFF）は Tela を必要としない。(2) 使う部品: `Tela::Core`（宣言・配置・ヒット領域・ボタンの状態・ジェスチャーの所有）と `Tela::Raster`（CPU 描画）をすべての OS で、`Tela::Windows`（`WindowsView`）/ `Tela::MacOS`（`MacOSOverlay`）と `Tela::Pictor`（文字）をホストだけで。Linux はウィンドウのホストが無いので `--headless` で画像を出す。(3) サードパーティ依存の例外: Tela（LUDIARS 自前）と、Tela のホストが要る Pictor（Windows / macOS のホストのみ）。(4) 例外と RTTI: Sonus のコードは従来どおり `-fno-exceptions -fno-rtti`。Tela は検証失敗で例外を投げるので、宣言・描画の前に Sonus 側で範囲を検査して投げない呼び方だけをする（`tool/ui/safe_drawing.hpp`、`App::SetViewport` 等）。投げうる Tela のホスト API（`PictorSurface`、`WindowsView`、`MacOSOverlay`）を呼ぶ `tool/app/host_windows.cpp`・`host_macos.mm`・`pictor_text.cpp` だけを `-fexceptions` でコンパイルし、境界ですべて捕まえる。(5) フォントは同梱しない: ウィンドウのホストは `--font <ttf>` が必須。**D-67a**（独立テスト後の決定）: 受け付ける DPI は 0.25〜4（`--dpi` と `App::SetViewport` で同じ。8 では最悪の処理時間グラフが Tela の作業予算に収まらない）、図形の作業量は実際の DPI で見積もり、超えるときは線を分けるか点を間引く。記録ファイルは版 2（チェックサムがヘッダとレコードを覆い、読めないレコードは拒否）。詳細は `tool/README.md` |
 | 1.2（api 段） | 2026-11-18 | D-88〜D-99（D-97〜D-99 は独立テスト後の受け入れの決定）: `snd_set_transport_pitch`（`cmd::SetTempo` の `variant`、`ReservationAction::SetPitch`、EvaluateDspParams の読み出し 2 つ）、`snd_play_stinger`（`cmd::SetMusicState` の `variant`、MSTG.timing、`kStingerPayloadRuleTiming`）、`transport_beats` の注記と `RenderItem` 末尾の 2 欄、`SND_TICKS_PER_BEAT` の注記、`Config` 末尾の容量 6 つ（`SND_CONFIG_TOP_1_2`）、D-82 の定数を `music_if.hpp` へ、`CallbackParams` の注記、規則表の 1.2 の規則。C API の本実装と構成ルート、Callback / UserBuffer 種別、出力の橋渡し、同じブロックで作って壊したトランスポートのスロット返却（core）。版を 1.2 に上げた（`SND_CONTRACT_VERSION_MINOR = 2`、`contract11_test.cpp` の版の検査を「minor が 1 以上」に。受け入れ側の決定、ユーザー承認） |
+| 1.2（段階6 組み込み） | 2026-11-19 | D-100〜D-101: サブプロジェクトとしての取り込み（`Sonus::sonus`、ルートの `SND_BUILD_TESTS` の既定を `PROJECT_IS_TOP_LEVEL`、ビルド種別の既定はトップレベルだけ、`cmake/` をパスで読む）、`SND_BUILD_TOOL_CORE` と `Sonus::tool_core`（`tool/` を読む条件を `SND_BUILD_TOOL OR SND_BUILD_TOOL_CORE` に）、`Session` のホスト向けの関数、テスト `embed_subproject` と `tool_core_host_test`。契約ヘッダと版は変えない（凍結ファイルの変更はルートの `CMakeLists.txt` だけ、受け入れ側の決定） |
