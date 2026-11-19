@@ -44,6 +44,10 @@ snd_when WhenOf(const snd_when* w) noexcept {
 
 HandleRef Ref(std::uint64_t v) noexcept { return HandleRef::FromValue(v); }
 
+// D-104: what snd_set_playback_volume / _pitch accept (stricter than SetParam's rule).
+bool VolumeOk(float v) noexcept { return std::isfinite(v) && v >= 0.0f; }
+bool PitchOk(float p) noexcept { return std::isfinite(p) && p > 0.0f; }
+
 }  // namespace
 
 extern "C" {
@@ -63,6 +67,10 @@ snd_result snd_create(const snd_config* cfg, const snd_allocator* allocator, con
   r = snd::compose::ValidateConfig(c, snd::compose::LiveLinkWanted(c));
   if (r != SND_OK) return r;
   if (allocator != nullptr && (allocator->allocate == nullptr || allocator->deallocate == nullptr)) {
+    return SND_ERR_INVALID_ARGUMENT;
+  }
+  // D-103: the root belongs to the built-in file system; with the game's it means nothing.
+  if (file_system != nullptr && c.file_system_root != nullptr && c.file_system_root[0] != '\0') {
     return SND_ERR_INVALID_ARGUMENT;
   }
   snd::compose::Note("create:config");
@@ -92,6 +100,7 @@ snd_result snd_create(const snd_config* cfg, const snd_allocator* allocator, con
   sys->alloc = allocator != nullptr ? static_cast<snd::IAllocator*>(sys->cAllocator.Emplace(*allocator))
                                     : &snd::base::DefaultAllocator();
   r = snd::compose::Compose(*sys, allocator, file_system);
+  sys->config.file_system_root = nullptr;  // copied by the file system; the game's string may go
   if (r != SND_OK) {
     snd_destroy(sys);
     return r;
@@ -123,6 +132,17 @@ snd_result snd_update(snd_system* sys) {
   const snd_result r = sys->core->Update();
   snd::compose::DeliverHeldEnds(*sys);
   return r;
+}
+// D-102: the manual device runs its periods on the owner thread.
+snd_result snd_advance_output(snd_system* sys, uint32_t periods, float* out, uint32_t out_frames) {
+  if (sys == nullptr) return SND_ERR_INVALID_ARGUMENT;
+  if (std::this_thread::get_id() != sys->owner) return SND_ERR_WRONG_THREAD;
+  if (sys->manual == nullptr) return SND_ERR_UNSUPPORTED;
+  if (out != nullptr && static_cast<std::uint64_t>(periods) * sys->blockFrames > out_frames) {
+    return SND_ERR_INVALID_ARGUMENT;
+  }
+  snd::compose::AdvanceManualDevice(*sys, periods, out);
+  return SND_OK;
 }
 snd_result snd_register_thread(snd_system* sys) { return sys ? sys->core->RegisterThread() : SND_ERR_INVALID_ARGUMENT; }
 snd_result snd_unregister_thread(snd_system* sys) { return sys ? sys->core->UnregisterThread() : SND_ERR_INVALID_ARGUMENT; }
@@ -320,6 +340,20 @@ snd_result snd_set_param_playback(snd_system* sys, snd_playback_handle playback,
   if (!EntryOk(*sys, CT::SetParam, ParamCmd(kPlayback, param, playback.value, value))) return SND_ERR_INVALID_ARGUMENT;
   return sys->core->SetParamPlayback(playback, param, value);
 }
+// D-104: playback-scope SetParam with the reserved ids (handle 0 first, then the value,
+// then core's staleness check; D-93).
+snd_result snd_set_playback_volume(snd_system* sys, snd_playback_handle playback, float volume) {
+  if (sys == nullptr) return SND_ERR_INVALID_ARGUMENT;
+  if (playback.value == SND_HANDLE_INVALID_VALUE) return SND_ERR_INVALID_HANDLE;
+  if (!VolumeOk(volume)) return SND_ERR_INVALID_ARGUMENT;
+  return sys->core->SetParamPlayback(playback, snd::core::kParamPlaybackVolume, volume);
+}
+snd_result snd_set_playback_pitch(snd_system* sys, snd_playback_handle playback, float pitch) {
+  if (sys == nullptr) return SND_ERR_INVALID_ARGUMENT;
+  if (playback.value == SND_HANDLE_INVALID_VALUE) return SND_ERR_INVALID_HANDLE;
+  if (!PitchOk(pitch)) return SND_ERR_INVALID_ARGUMENT;
+  return sys->core->SetParamPlayback(playback, snd::core::kParamPlaybackPitch, pitch);
+}
 snd_result snd_set_switch_global(snd_system* sys, snd_id group, snd_id value) {
   return sys ? sys->core->SetSwitchGlobal(group, value) : SND_ERR_INVALID_ARGUMENT;
 }
@@ -467,6 +501,17 @@ uint32_t snd_write_user_buffer(snd_system* sys, snd_user_buffer_handle buffer, c
 snd_playback_handle snd_play_user_buffer(snd_system* sys, snd_user_buffer_handle buffer, snd_id bus,
                                          snd_emitter_handle emitter, const snd_when* when) {
   return sys ? sys->core->PlayUserBuffer(buffer, bus, emitter, when) : snd_playback_handle{0};
+}
+// D-104: the play and its starting values in one go (the same arena: applied in order,
+// the values before the playback's first block).
+snd_playback_handle snd_play_user_buffer_ex(snd_system* sys, snd_user_buffer_handle buffer, snd_id bus, float volume,
+                                            float pitch, snd_emitter_handle emitter, const snd_when* when) {
+  if (sys == nullptr || !VolumeOk(volume) || !PitchOk(pitch)) return snd_playback_handle{0};
+  const snd_playback_handle h = sys->core->PlayUserBuffer(buffer, bus, emitter, when);
+  if (h.value == SND_HANDLE_INVALID_VALUE) return h;
+  if (volume != 1.0f) sys->core->SetParamPlayback(h, snd::core::kParamPlaybackVolume, volume);
+  if (pitch != 1.0f) sys->core->SetParamPlayback(h, snd::core::kParamPlaybackPitch, pitch);
+  return h;
 }
 snd_playback_handle snd_play_input(snd_system* sys, const snd_input_desc* desc, snd_emitter_handle emitter,
                                    const snd_when* when) {

@@ -17,6 +17,7 @@ set(_snd_platform_sources
   src/cpu.cpp
   src/platform_output_device.cpp
   src/timer_output_device.cpp
+  src/manual_output_device.cpp
   src/output_device_factory.cpp
   src/load_monitor.cpp
   src/driver_core.cpp

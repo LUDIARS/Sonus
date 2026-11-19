@@ -11,6 +11,7 @@ snd_add_header_checks(platform_header_check
     snd/platform/clock.hpp snd/platform/thread.hpp snd/platform/semaphore.hpp
     snd/platform/cpu.hpp snd/platform/output_device.hpp snd/platform/platform_module.hpp
     snd/platform/platform_output_device.hpp snd/platform/timer_output_device.hpp
+    snd/platform/manual_output_device.hpp
     snd/platform/device_enum.hpp snd/platform/workgroup.hpp snd/platform/output_ring.hpp
     snd/platform/load_monitor.hpp snd/platform/driver_core.hpp snd/platform/audio_driver.hpp
   LINK sonus_platform)
@@ -21,6 +22,8 @@ snd_add_test(platform_stream_policy_test SOURCES stream_policy_test.cpp LINK son
 target_include_directories(platform_stream_policy_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src)
 snd_add_test(platform_driver_core_test SOURCES driver_core_test.cpp LINK sonus_platform)
 snd_add_test(platform_audio_driver_test SOURCES audio_driver_test.cpp LINK sonus_platform sonus_mocks)
+# The manual silent device (D-102).
+snd_add_test(platform_manual_device_test SOURCES manual_device_test.cpp LINK sonus_platform)
 
 # ALSA without a sound card (private null / file PCMs). Own main(): exit 77 = SKIP.
 if(SND_PLATFORM_ALSA_ENABLED)

@@ -284,6 +284,10 @@ struct ApplyPriv {
   std::uint32_t* globalParamStorage = nullptr;
   base::IndexFreeList globalFree;
   DynamicDesc* dynamic = nullptr;       // [maxPlaybacks]
+  // [maxPlaybacks] 1.2 (D-104): the playback's own volume (linear) and pitch (ratio), 1 when
+  // created; written by ApplyCommands (kParamPlaybackVolume / Pitch), read by EvaluateDspParams.
+  float* playbackVolume = nullptr;
+  float* playbackPitch = nullptr;
   std::uint32_t* implicitEmitter = nullptr;  // [maxPlaybacks] PlayAt emitter slot
   std::uint32_t* implicitOwnerGen = nullptr; // [maxEmitters] playback generation owning an implicit emitter, 0 none
   std::uint32_t* userBufferRefs = nullptr;   // [maxUserBuffers]

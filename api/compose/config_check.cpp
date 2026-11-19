@@ -47,6 +47,15 @@ snd_result ValidateConfig(const snd_config& c, bool liveLink) noexcept {
   if ((c.plugins.effect_count != 0u && c.plugins.effects == nullptr) || c.plugins.effect_count > 32u) {
     return SND_ERR_INVALID_ARGUMENT;
   }
+  // 1.2 (D-102): a built-in device kind, and only without a game device.
+  if (c.output_kind > SND_OUTPUT_MANUAL) return SND_ERR_INVALID_ARGUMENT;
+  if (c.output.device != nullptr && c.output_kind != SND_OUTPUT_PLATFORM) return SND_ERR_INVALID_ARGUMENT;
+  // 1.2 (D-103): the root fits the built-in file system (at most 2046 bytes + NUL).
+  if (c.file_system_root != nullptr) {
+    std::size_t n = 0;
+    while (n < kMaxFileSystemRootBytes && c.file_system_root[n] != '\0') ++n;
+    if (n + 1u >= kMaxFileSystemRootBytes) return SND_ERR_INVALID_ARGUMENT;  // as DefaultFileSystem::Init
+  }
   if (c.max_registered_threads == 0u) return SND_ERR_INVALID_ARGUMENT;
   if (liveLink && c.max_registered_threads >= 64u) return SND_ERR_INVALID_ARGUMENT;  // core takes at most 64
   return SND_OK;

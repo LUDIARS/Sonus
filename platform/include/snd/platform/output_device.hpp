@@ -2,6 +2,7 @@
 //
 // Backends (one file set per OS under platform/src/<os>/, chosen at build time):
 //   SilentTimer  every OS   timer_output_device.hpp
+//   Manual       every OS   manual_output_device.hpp (advanced by its owner, D-102)
 //   Alsa         Linux      snd_pcm_* on a dedicated thread (SND_OUTPUT_ALSA, default AUTO)
 //   Wasapi       Windows    shared-mode event-driven (IAudioClient3 low latency when
 //                           possible), exclusive mode by option, MMCSS, IMMNotificationClient
@@ -18,12 +19,13 @@
 
 #include "snd/ext/allocator.hpp"
 #include "snd/platform/device_enum.hpp"
+#include "snd/platform/manual_output_device.hpp"
 #include "snd/platform/platform_output_device.hpp"
 #include "snd/platform/timer_output_device.hpp"
 
 namespace snd::platform {
 
-// True if `backend` is compiled into this build (Default and SilentTimer always are).
+// True if `backend` is compiled into this build (Default, SilentTimer and Manual always are).
 bool OutputBackendAvailable(OutputBackend backend) noexcept;
 // Default -> the OS backend (Linux: Alsa if compiled, else SilentTimer;
 // Windows: Wasapi; Apple: CoreAudio; other OSes: SilentTimer). Others unchanged.

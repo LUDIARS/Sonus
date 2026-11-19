@@ -1,6 +1,6 @@
 // Common base of the platform output devices (design.md 2.2, 2.6, CONTRACTS.md D-25, D-61..D-66).
 //
-// Every backend in this module (silent timer, ALSA, WASAPI, Core Audio)
+// Every backend in this module (silent timer, manual, ALSA, WASAPI, Core Audio)
 // implements snd::IOutputDevice through PlatformOutputDevice, which adds what
 // the contract interface does not carry: the backend id, statistics, the
 // output-position clock, the OS workgroup (workgroup.hpp) and one shared
@@ -45,6 +45,7 @@ enum class OutputBackend : std::uint32_t {
   Alsa = 2,         // Linux (SND_OUTPUT_ALSA)
   Wasapi = 3,       // Windows
   CoreAudio = 4,    // macOS (AUHAL / DefaultOutput) and iOS (RemoteIO + AVAudioSession)
+  Manual = 5,       // ManualOutputDevice: no OS audio, advanced by its owner (D-102)
 };
 
 // iOS AVAudioSession category (ignored elsewhere).

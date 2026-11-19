@@ -113,6 +113,13 @@ enum class FocusMode : std::uint32_t {
   PerCategory = SND_FOCUS_PER_CATEGORY,
 };
 
+// 1.2 (D-102): Config::outputKind.
+enum class OutputKind : std::uint32_t {
+  Platform = SND_OUTPUT_PLATFORM,
+  Silent = SND_OUTPUT_SILENT,
+  Manual = SND_OUTPUT_MANUAL,
+};
+
 enum class LogLevel : std::uint32_t {
   Debug = SND_LOG_DEBUG,
   Info = SND_LOG_INFO,
@@ -260,7 +267,7 @@ struct TuningConfig { SND_CONFIG_TUNING(SND_CONFIG_CPP_FIELD) };
 struct DevReserveConfig { SND_CONFIG_DEV_RESERVE(SND_CONFIG_CPP_FIELD) };
 struct LiveLinkConfig { SND_CONFIG_LIVELINK(SND_CONFIG_CPP_FIELD) };
 struct OutputConfig {
-  IOutputDevice* device = nullptr;  // nullptr = platform default
+  IOutputDevice* device = nullptr;  // nullptr = the built-in device of Config::outputKind (1.2)
   std::uint32_t deviceIndex = 0;
 };
 struct PluginConfig {
@@ -275,6 +282,7 @@ struct Config {
   SND_CONFIG_TOP(SND_CONFIG_CPP_FIELD)
   SND_CONFIG_TOP_1_1(SND_CONFIG_CPP_FIELD)  // contract 1.1 (maxVoiceChannels, maxPitchRatio)
   SND_CONFIG_TOP_1_2(SND_CONFIG_CPP_FIELD)  // contract 1.2 (maxBuses .. maxDuckRules, D-92)
+  SND_CONFIG_TOP_1_2_HOST(SND_CONFIG_CPP_FIELD)  // contract 1.2 (fileSystemRoot, outputKind; D-102, D-103)
   MemoryConfig memory;
   CommandsConfig commands;
   JobsConfig jobs;
@@ -300,6 +308,7 @@ inline void ToC(const Config& in, snd_config* out) noexcept {
   SND_CONFIG_TOP(SND_TO_C_TOP)
   SND_CONFIG_TOP_1_1(SND_TO_C_TOP)
   SND_CONFIG_TOP_1_2(SND_TO_C_TOP)
+  SND_CONFIG_TOP_1_2_HOST(SND_TO_C_TOP)
   SND_CONFIG_MEMORY(SND_TO_C_MEMORY)
   SND_CONFIG_COMMANDS(SND_TO_C_COMMANDS)
   SND_CONFIG_JOBS(SND_TO_C_JOBS)
@@ -369,6 +378,11 @@ inline Result UnregisterThread(System* sys) noexcept { return detail::R(snd_unre
 inline Result Flush(System* sys) noexcept { return detail::R(snd_flush(sys)); }
 inline Result Suspend(System* sys) noexcept { return detail::R(snd_suspend(sys)); }
 inline Result Resume(System* sys) noexcept { return detail::R(snd_resume(sys)); }
+// 1.2 (D-102): advance the built-in manual device (OutputKind::Manual). out may be nullptr.
+inline Result AdvanceOutput(System* sys, std::uint32_t periods, float* out = nullptr,
+                            std::uint32_t outFrames = 0) noexcept {
+  return detail::R(snd_advance_output(sys, periods, out, outFrames));
+}
 inline Result SetCallbacks(System* sys, const Callbacks* callbacks) noexcept {
   return detail::R(snd_set_callbacks(sys, callbacks));
 }
@@ -416,6 +430,13 @@ inline Result PlayAt(System* sys, Id event, const Vec3& position,
 inline Result Stop(System* sys, PlaybackHandle p, float fadeSeconds = -1.0f,
                    const When& when = When::Immediate()) noexcept {
   return detail::R(snd_stop(sys, p.ToC(), fadeSeconds, detail::W(when)));
+}
+// 1.2 (D-104): per-playback volume (linear) and pitch (rate ratio).
+inline Result SetPlaybackVolume(System* sys, PlaybackHandle p, float volume) noexcept {
+  return detail::R(snd_set_playback_volume(sys, p.ToC(), volume));
+}
+inline Result SetPlaybackPitch(System* sys, PlaybackHandle p, float pitch) noexcept {
+  return detail::R(snd_set_playback_pitch(sys, p.ToC(), pitch));
 }
 inline Result Pause(System* sys, PlaybackHandle p, float fadeSeconds = 0.0f) noexcept {
   return detail::R(snd_pause(sys, p.ToC(), fadeSeconds));
@@ -568,6 +589,18 @@ inline PlaybackHandle PlayUserBuffer(System* sys, UserBufferHandle b, Id bus = k
                                      const When& when = When::Immediate()) noexcept {
   return PlaybackHandle::FromC(
       snd_play_user_buffer(sys, b.ToC(), bus, emitter.ToC(), detail::W(when)));
+}
+// 1.2 (D-104): a user buffer played with its own starting volume and pitch.
+struct UserBufferPlay {
+  Id bus = kIdNone;
+  float volume = 1.0f;  // linear
+  float pitch = 1.0f;   // rate ratio
+};
+inline PlaybackHandle PlayUserBuffer(System* sys, UserBufferHandle b, const UserBufferPlay& play,
+                                     EmitterHandle emitter = kNoEmitter,
+                                     const When& when = When::Immediate()) noexcept {
+  return PlaybackHandle::FromC(snd_play_user_buffer_ex(sys, b.ToC(), play.bus, play.volume, play.pitch,
+                                                       emitter.ToC(), detail::W(when)));
 }
 inline PlaybackHandle PlayInput(System* sys, const InputDesc& desc,
                                 EmitterHandle emitter = kNoEmitter,

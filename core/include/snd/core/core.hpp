@@ -81,6 +81,15 @@ namespace snd::core {
 inline constexpr std::uint8_t kFireTransportGone = music::kFireTransportGone;
 inline constexpr std::uint16_t kClipRefAssetTrack = music::kClipRefAssetTrack;
 
+// 1.2 (D-104): reserved parameter ids of the per-playback volume and pitch
+// (snd_set_playback_volume / _pitch, snd_play_user_buffer_ex). They travel as
+// playback-scope cmd::SetParam (must-deliver, reserve and coalescing fallback
+// included); ApplyCommands stores them per playback instead of a parameter row,
+// EvaluateDspParams multiplies every voice of the playback by them. Next to
+// bank_format's kInputDistance (0xFFFFFFFE). Other scopes ignore them.
+inline constexpr Id kParamPlaybackVolume = 0xFFFFFFFDu;
+inline constexpr Id kParamPlaybackPitch = 0xFFFFFFFCu;
+
 // Capacities that Config does not have (proposed as Config fields, see the
 // stage-2 report). Shared objects are unified by id across banks (A1-16), so
 // these count distinct ids of the whole project that are loaded at once.

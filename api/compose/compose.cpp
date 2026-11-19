@@ -7,8 +7,10 @@
 // them; it hands them to core through the contract interfaces. The order of
 // creation and destruction is in snd/api/compose.hpp.
 #include <atomic>
+#include <chrono>
 #include <cstring>
 #include <new>
+#include <thread>
 
 #include "config_check.hpp"
 #include "snd/api/api_module.hpp"
@@ -190,7 +192,35 @@ void SND_CALL DeviceEvent(void* user, const snd_device_event* e) {
   }
 }
 
+platform::OutputBackend BuiltInBackend(snd_output_kind kind) noexcept {
+  switch (kind) {
+    case SND_OUTPUT_SILENT: return platform::OutputBackend::SilentTimer;
+    case SND_OUTPUT_MANUAL: return platform::OutputBackend::Manual;
+    default: return platform::OutputBackend::Default;
+  }
+}
+
+// Before each period of the manual device (snd_advance_output, D-102): wait until the audio
+// thread has rendered its render-ahead target, so a slow caller never underruns. At most
+// about 2 s; then the period plays what there is (an underrun, the clock catches up, 2.2).
+void WaitRenderAhead(void* user) noexcept {
+  snd_system& s = *static_cast<snd_system*>(user);
+  if (!s.driverStarted) return;
+  const auto until = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+  for (;;) {
+    const platform::DriverStats st = s.driver.Stats().core;
+    const std::uint64_t rendered = st.blocksRendered * s.blockFrames;
+    if (st.targetFrames != 0u && rendered >= st.framesConsumed + st.targetFrames) return;
+    if (std::chrono::steady_clock::now() > until) return;
+    std::this_thread::sleep_for(std::chrono::microseconds(50));
+  }
+}
+
 }  // namespace
+
+std::uint32_t AdvanceManualDevice(snd_system& sys, std::uint32_t periods, float* out) noexcept {
+  return sys.manual != nullptr && sys.driverStarted ? sys.manual->Advance(periods, out) : 0u;
+}
 
 // ---------------------------------------------------------------------------------------
 // Compose / Decompose
@@ -205,13 +235,16 @@ snd_result Compose(snd_system& sys, const snd_allocator*, const snd_file_system*
   sys.coreChannels = cfg.output_channels == 0u ? 2u : cfg.output_channels;
   sys.blockFrames = cfg.block_size;
 
-  // File system (6.5): the game's, else the OS file system relative to the working directory.
+  // File system (6.5): the game's, else the OS file system under Config.file_system_root
+  // (NULL / "" = the working directory; D-103: a root that is not a directory is NOT_FOUND).
   if (fileSystem != nullptr) {
     sys.fs = sys.cFileSystem.Emplace(*fileSystem);
   } else {
     io::DefaultFileSystemConfig fc;
+    if (cfg.file_system_root != nullptr && cfg.file_system_root[0] != '\0') fc.root = cfg.file_system_root;
     if (!sys.defaultFs.Init(a, fc)) return SND_ERR_OUT_OF_BUDGET;
     sys.ownFs = true;
+    if (!sys.defaultFs.RootAvailable()) return SND_ERR_NOT_FOUND;
     sys.fs = &sys.defaultFs;
     sys.defaultFs.SetCompletionNotify(&io::IoScheduler::WakeThunk, &sys.io);
   }
@@ -247,15 +280,21 @@ snd_result Compose(snd_system& sys, const snd_allocator*, const snd_file_system*
   if (sys.heldEnds == nullptr) return SND_ERR_OUT_OF_BUDGET;
 
   // Output device: its latency feeds core's notification timing (8.1). The value is the
-  // device's estimate before Open (D-93).
+  // device's estimate before Open (D-93). Without a game device, Config.output_kind picks
+  // the platform's or a built-in silent one (D-102): those run at the internal rate with
+  // the core's channels and one block per period.
   if (cfg.output.device != nullptr) {
     sys.device = sys.cDevice.Emplace(*cfg.output.device);
   } else {
     sys.outputAlloc.Bind(&a);
     sys.outputAlloc.Clear();
-    sys.ownDevice = platform::CreateOutputDevice(platform::OutputBackend::Default, sys.outputAlloc, nullptr);
+    sys.ownDevice = platform::CreateOutputDevice(BuiltInBackend(cfg.output_kind), sys.outputAlloc, nullptr);
     if (sys.ownDevice == nullptr) return sys.outputAlloc.Failed() ? SND_ERR_OUT_OF_BUDGET : SND_ERR_NO_DEVICE;
     sys.device = sys.ownDevice;
+    if (sys.ownDevice->Backend() == platform::OutputBackend::Manual) {  // no RTTI: the backend id tells
+      sys.manual = static_cast<platform::ManualOutputDevice*>(sys.ownDevice);
+      sys.manual->SetBeforePeriod(&WaitRenderAhead, &sys);
+    }
   }
 
   core::CoreDesc d;
@@ -309,7 +348,9 @@ snd_result Compose(snd_system& sys, const snd_allocator*, const snd_file_system*
   ad.listener = &DeviceEvent;
   ad.listenerUser = &sys;
   ad.workgroupSource = sys.ownDevice;  // a game device is opaque (no RTTI): no workgroup
-  const DeviceDesc dd{cfg.sample_rate, sys.coreChannels, 0u, cfg.output.device_index};
+  // The built-in silent devices take one block per period (D-102); the others their own.
+  const bool silent = cfg.output.device == nullptr && cfg.output_kind != SND_OUTPUT_PLATFORM;
+  const DeviceDesc dd{cfg.sample_rate, sys.coreChannels, silent ? sys.blockFrames : 0u, cfg.output.device_index};
   sys.outputAlloc.Bind(&a);
   sys.outputAlloc.Clear();
   if (!sys.driver.Start(*sys.device, dd, ad, sys.outputAlloc)) {
@@ -376,6 +417,7 @@ void Decompose(snd_system& sys) noexcept {
   if (sys.ownDevice != nullptr && a != nullptr) {
     platform::DestroyOutputDevice(sys.ownDevice, sys.outputAlloc);
     sys.ownDevice = nullptr;
+    sys.manual = nullptr;
   }
   sys.cDevice.Reset();
   sys.device = nullptr;

@@ -23,6 +23,11 @@ constexpr float kMaxFadeSeconds = 86400.0f;
 constexpr float kMaxVolume = 1000.0f;
 float SaneFade(float s) noexcept { return std::isnan(s) ? -1.0f : (s > kMaxFadeSeconds ? kMaxFadeSeconds : s); }
 float SaneVolume(float v) noexcept { return !(v >= 0.0f) ? 0.0f : (v > kMaxVolume ? kMaxVolume : v); }
+// 1.2 (D-104): playback pitch ratios like transport pitches, [1/16, 16]; NaN / <= 0 = 1.
+float SanePitch(float p) noexcept {
+  if (!(p > 0.0f)) return 1.0f;
+  return p < 1.0f / 16.0f ? 1.0f / 16.0f : (p > 16.0f ? 16.0f : p);
+}
 float SaneWeight(float w) noexcept { return !(w >= 0.0f) ? 0.0f : (w > 1.0f ? 1.0f : w); }
 std::uint32_t FadeFrames(float seconds, std::uint32_t rate) noexcept {
   const float s = SaneFade(seconds);
@@ -186,6 +191,19 @@ float ClampParam(const Impl& im, Id id, float v) noexcept {
 
 void SetParamValue(Impl& im, ParamScope scope, HandleRef target, Id id, ParamKind kind, float value) noexcept {
   schema::Tables& t = im.tables;
+  // 1.2 (D-104): the playback's own volume / pitch (reserved ids, no parameter row).
+  if (id == kParamPlaybackVolume || id == kParamPlaybackPitch) {
+    if (scope != ParamScope::Playback || kind != ParamKind::Continuous || target.slot >= im.cfg.maxPlaybacks ||
+        !base::rows::IsCurrent(t.Playback.rows, target)) {
+      return;
+    }
+    if (id == kParamPlaybackVolume) {
+      im.ap.playbackVolume[target.slot] = SaneVolume(value);
+    } else {
+      im.ap.playbackPitch[target.slot] = SanePitch(value);
+    }
+    return;
+  }
   const float rate = kind == ParamKind::Switch ? 0.0f : RampRateOf(im, id);
   if (kind == ParamKind::Continuous) value = ClampParam(im, id, value);
   switch (scope) {
@@ -330,6 +348,8 @@ void CreatePlayback(Impl& im, HandleRef h, HandleRef emitter, Id event, EventRef
   }
   SND_W(Playback_request)[d] = req;
   ResetChain(im, im.ap.playbackChain[h.slot], true);
+  im.ap.playbackVolume[h.slot] = 1.0f;  // D-104: a new playback starts at its own 1 / 1
+  im.ap.playbackPitch[h.slot] = 1.0f;
 }
 
 PlaybackRequest* RequestOf(Impl& im, HandleRef h) noexcept {

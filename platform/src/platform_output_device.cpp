@@ -11,6 +11,7 @@ const char* OutputBackendName(OutputBackend b) noexcept {
     case OutputBackend::Alsa: return "alsa";
     case OutputBackend::Wasapi: return "wasapi";
     case OutputBackend::CoreAudio: return "coreaudio";
+    case OutputBackend::Manual: return "manual";
   }
   return "?";
 }

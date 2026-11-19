@@ -5,4 +5,7 @@ snd_add_module(io
     src/io_module.cpp
     src/stream_pool.cpp
     src/io_scheduler.cpp
-    src/default_file_system.cpp)
+    src/default_file_system.cpp
+    src/native_file_posix.cpp
+    src/native_file_win32.cpp
+    src/native_file_none.cpp)

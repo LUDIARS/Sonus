@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <cstring>
+#include <new>
 
 #include "snd/base/mpmc.hpp"
 #include "snd/internal/rt_check.hpp"
@@ -9,30 +10,7 @@
 #include "snd/platform/semaphore.hpp"
 #include "snd/platform/thread.hpp"
 
-#if defined(__unix__) || defined(__APPLE__)
-#define SND_IO_POSIX 1
-#include <fcntl.h>
-#include <sys/stat.h>
-#include <sys/types.h>
-#include <unistd.h>
-
-#include <cerrno>
-#include <climits>
-#include <cstdio>
-#include <cstdlib>
-#if defined(__linux__)
-#include <sys/syscall.h>
-#if defined(SYS_openat2) && __has_include(<linux/openat2.h>)
-#include <linux/openat2.h>
-#define SND_IO_OPENAT2 1
-#endif
-#endif
-#else
-#define SND_IO_POSIX 0
-#endif
-#ifndef SND_IO_OPENAT2
-#define SND_IO_OPENAT2 0
-#endif
+#include "native_file.hpp"
 
 namespace snd::io {
 
@@ -47,7 +25,7 @@ constexpr std::uint32_t kGenMask = 0xFFFFFFFFu >> kIndexBits;
 enum : std::uint32_t { kSlotQueued = 1, kSlotDone = 2, kSlotError = 3 };
 
 struct FileEntry {
-  int fd = -1;
+  detail::NativeFile file = detail::kNoNativeFile;
   std::uint32_t gen = 0;
   std::uint32_t inflight = 0;  // IO thread
   std::uint64_t size = 0;
@@ -62,7 +40,7 @@ struct ReadSlot {
   void* dst = nullptr;
   std::uint32_t bytes = 0;
   std::uint32_t fileIndex = 0;
-  int fd = -1;
+  detail::NativeFile file = detail::kNoNativeFile;
   bool active = false;  // IO thread
   // Written by the reader thread.
   std::uint32_t result = 0;
@@ -75,74 +53,7 @@ struct ReadSlot {
 struct DefaultFileSystem::Impl {
   char root[kMaxRootBytes] = {};
   std::uint32_t rootLen = 0;
-#if SND_IO_POSIX
-  int rootFd = -1;                 // the root directory (openat2 base)
-  char rootReal[PATH_MAX] = {};    // canonical root ("" if it could not be resolved)
-  std::size_t rootRealLen = 0;
-
-  // True if the canonical path `real` is the root or below it.
-  bool InsideRoot(const char* real) const noexcept {
-    if (rootRealLen == 0u) return false;
-    if (rootRealLen == 1u) return real[0] == '/';  // root is "/"
-    return std::strncmp(real, rootReal, rootRealLen) == 0 && (real[rootRealLen] == '/' || real[rootRealLen] == '\0');
-  }
-  // Decision b: the resolved file must lie inside the root (symlinks to files
-  // or directories outside are refused, links staying inside are fine).
-  // 1. Linux openat2(rootFd, path, RESOLVE_BENEATH): the kernel refuses any
-  //    resolution that leaves the root (EXDEV). It also refuses ABSOLUTE
-  //    symlinks even when they point inside the root, so on EXDEV, and when
-  //    openat2 is unavailable (ENOSYS, EPERM under seccomp, ...), we fall back to
-  // 2. open the joined path, then check the canonical path of the OPENED
-  //    descriptor (/proc/self/fd/N, no race with a concurrent rename of the
-  //    link) or, without /proc, realpath() of the path.
-  int OpenBeneath(const char* rel, const char* full, int flags) const noexcept {
-#if SND_IO_OPENAT2
-    if (rootFd >= 0) {
-      open_how how;
-      std::memset(&how, 0, sizeof(how));
-      how.flags = static_cast<std::uint64_t>(flags);
-      how.resolve = RESOLVE_BENEATH;
-      long r = -1;
-      do {
-        r = ::syscall(SYS_openat2, rootFd, rel, &how, sizeof(how));
-      } while (r < 0 && errno == EINTR);
-      if (r >= 0) return static_cast<int>(r);
-      if (errno != EXDEV && errno != ENOSYS && errno != EPERM && errno != E2BIG && errno != EINVAL) return -1;
-    }
-#else
-    (void)rel;
-#endif
-    int fd = -1;
-    do {
-      fd = ::open(full, flags);
-    } while (fd < 0 && errno == EINTR);
-    if (fd < 0) return -1;
-    char real[PATH_MAX];
-    bool resolved = false;
-#if defined(__linux__)
-    char proc[64];
-    std::snprintf(proc, sizeof(proc), "/proc/self/fd/%d", fd);
-    const ssize_t n = ::readlink(proc, real, sizeof(real) - 1u);
-    if (n > 0 && static_cast<std::size_t>(n) < sizeof(real) - 1u) {
-      real[n] = '\0';
-      resolved = true;
-    }
-#endif
-    if (!resolved) resolved = ::realpath(full, real) != nullptr;
-    // The canonical path must be inside the root AND name the very file we
-    // opened (same device and inode). This closes the realpath() race (a link
-    // swapped between open() and realpath() resolves to a different inode) and
-    // double-checks /proc. A hard link inside the root to an outside file is a
-    // file of the root (it has a name there) and is accepted.
-    struct stat opened, named;
-    if (!resolved || !InsideRoot(real) || ::fstat(fd, &opened) != 0 || ::stat(real, &named) != 0 ||
-        opened.st_dev != named.st_dev || opened.st_ino != named.st_ino) {
-      ::close(fd);
-      return -1;
-    }
-    return fd;
-  }
-#endif
+  detail::NativeRoot native;  // the OS side (native_file.hpp)
   DefaultFileSystemConfig cfg{};
   FileEntry* files = nullptr;
   ReadSlot* slots = nullptr;
@@ -165,32 +76,16 @@ struct DefaultFileSystem::Impl {
   }
 
   void CloseEntry(FileEntry& e) noexcept {
-#if SND_IO_POSIX
-    if (e.fd >= 0) ::close(e.fd);
-#endif
-    e.fd = -1;
+    detail::CloseFile(e.file);
+    e.file = detail::kNoNativeFile;
     e.used = false;
     e.closePending = false;
     openCount.fetch_sub(1u, std::memory_order_relaxed);
   }
 
   void Perform(ReadSlot& s) noexcept {
-    std::uint32_t state = kSlotError;
     std::uint32_t got = 0;
-#if SND_IO_POSIX
-    auto* dst = static_cast<std::uint8_t*>(s.dst);
-    state = kSlotDone;
-    while (got < s.bytes) {
-      const ssize_t r = ::pread(s.fd, dst + got, s.bytes - got, static_cast<off_t>(s.offset + got));
-      if (r < 0) {
-        if (errno == EINTR) continue;
-        state = kSlotError;
-        break;
-      }
-      if (r == 0) break;  // end of file
-      got += static_cast<std::uint32_t>(r);
-    }
-#endif
+    const std::uint32_t state = detail::ReadAt(s.file, s.offset, s.dst, s.bytes, &got) ? kSlotDone : kSlotError;
     s.result = got;
     // The slot is not retired by Poll while `notifying` is set, so once the IO
     // thread has retired every read no reader is still inside the notify (its
@@ -227,7 +122,7 @@ bool DefaultFileSystem::ValidatePath(const char* path) noexcept {
   for (;;) {
     const std::size_t start = i;
     while (path[i] != '\0' && path[i] != '/') {
-      if (path[i] == '\\') return false;
+      if (path[i] == '\\' || path[i] == ':') return false;  // D-103: no drive letters / streams
       ++i;
     }
     const std::size_t len = i - start;
@@ -266,24 +161,10 @@ bool DefaultFileSystem::Init(IAllocator& allocator, const DefaultFileSystemConfi
   std::memcpy(im.root, root, rootLen + 1u);
   im.rootLen = static_cast<std::uint32_t>(rootLen);
   while (im.rootLen > 1u && im.root[im.rootLen - 1u] == '/') im.root[--im.rootLen] = '\0';
-#if SND_IO_POSIX
-  {
-    int dflags = O_RDONLY;
-#if defined(O_DIRECTORY)
-    dflags |= O_DIRECTORY;
-#endif
-#if defined(O_CLOEXEC)
-    dflags |= O_CLOEXEC;
-#endif
-    im.rootFd = ::open(im.root, dflags);  // -1: a missing root makes every Open fail
-    if (::realpath(im.root, im.rootReal) != nullptr) {
-      im.rootRealLen = std::strlen(im.rootReal);
-    } else {
-      im.rootReal[0] = '\0';
-      im.rootRealLen = 0;
-    }
+  if (!im.native.Open(allocator, im.root)) {  // false: allocation (a missing root is not an error here)
+    Shutdown();
+    return false;
   }
-#endif
   im.files = base::AllocateArray<FileEntry>(allocator, config.maxOpenFiles, MemTag::Misc);
   im.slots = base::AllocateArray<ReadSlot>(allocator, config.maxInFlight, MemTag::Misc);
   im.threads = base::AllocateArray<platform::Thread>(allocator, config.readerThreads, MemTag::Misc);
@@ -314,10 +195,7 @@ void DefaultFileSystem::Shutdown() noexcept {
       if (im.files[i].used) im.CloseEntry(im.files[i]);
     }
   }
-#if SND_IO_POSIX
-  if (im.rootFd >= 0) ::close(im.rootFd);
-  im.rootFd = -1;
-#endif
+  im.native.Close();
   IAllocator& a = *alloc_;
   base::FreeArray(a, im.files, im.cfg.maxOpenFiles, MemTag::Misc);
   base::FreeArray(a, im.slots, im.cfg.maxInFlight, MemTag::Misc);
@@ -337,46 +215,23 @@ void DefaultFileSystem::SetCompletionNotify(CompletionNotifyFn fn, void* user) n
 FileId DefaultFileSystem::Open(const char* path) {
   SND_RT_NOTE(FileIo);
   if (impl_ == nullptr || !ValidatePath(path)) return kInvalidFile;
-#if SND_IO_POSIX
   Impl& im = *impl_;
   std::uint32_t index = 0;
   while (index < im.cfg.maxOpenFiles && im.files[index].used) ++index;
   if (index == im.cfg.maxOpenFiles) return kInvalidFile;
-  char full[kMaxRootBytes + kMaxRelBytes + 2u];
-  const std::size_t rel = std::strlen(path);
-  std::memcpy(full, im.root, im.rootLen);
-  full[im.rootLen] = '/';
-  std::memcpy(full + im.rootLen + 1u, path, rel + 1u);
-  // Only regular files are opened (decision). O_NONBLOCK: opening a FIFO
-  // without a writer (or some devices) would otherwise block the IO thread,
-  // and the fallback below opens BEFORE it can tell whether the target lies
-  // outside the root. O_NOCTTY: never acquire a controlling terminal. The
-  // fstat below then refuses FIFOs, devices, sockets and directories.
-  // (O_NONBLOCK has no effect on reads of regular files.)
-  int flags = O_RDONLY | O_NONBLOCK | O_NOCTTY;
-#if defined(O_CLOEXEC)
-  flags |= O_CLOEXEC;
-#endif
-  const int fd = im.OpenBeneath(path, full, flags);
-  if (fd < 0) return kInvalidFile;
-  struct stat st;
-  if (::fstat(fd, &st) != 0 || !S_ISREG(st.st_mode)) {
-    ::close(fd);
-    return kInvalidFile;
-  }
+  std::uint64_t size = 0;
+  const detail::NativeFile file = im.native.OpenBeneath(path, &size);
+  if (file == detail::kNoNativeFile) return kInvalidFile;
   FileEntry& e = im.files[index];
   e.gen = (e.gen + 1u) & kGenMask;
   if (e.gen == 0u) e.gen = 1u;
-  e.fd = fd;
+  e.file = file;
   e.inflight = 0;
-  e.size = static_cast<std::uint64_t>(st.st_size);
+  e.size = size;
   e.used = true;
   e.closePending = false;
   im.openCount.fetch_add(1u, std::memory_order_relaxed);
   return (e.gen << kIndexBits) | (index + 1u);
-#else
-  return kInvalidFile;
-#endif
 }
 
 std::uint64_t DefaultFileSystem::Size(FileId file) {
@@ -409,7 +264,7 @@ bool DefaultFileSystem::ReadAsync(FileId file, std::uint64_t offset, void* dst, 
   s.dst = dst;
   s.bytes = bytes;
   s.fileIndex = (file & kIndexMask) - 1u;
-  s.fd = e->fd;
+  s.file = e->file;
   s.result = 0;
   s.active = true;
   s.state.store(kSlotQueued, std::memory_order_relaxed);
@@ -456,6 +311,8 @@ void DefaultFileSystem::Close(FileId file) {
   }
   impl_->CloseEntry(*e);
 }
+
+bool DefaultFileSystem::RootAvailable() const noexcept { return impl_ != nullptr && impl_->native.Available(); }
 
 std::uint32_t DefaultFileSystem::OpenFileCount() const noexcept {
   return impl_ == nullptr ? 0u : impl_->openCount.load(std::memory_order_relaxed);
