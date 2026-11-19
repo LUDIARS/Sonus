@@ -511,13 +511,21 @@ void ApplyOne(Impl& im, const cmd::CommandHeader& h, const std::uint8_t* p) noex
       dd.userBuffer = c.buffer;
       dd.bus = c.bus;
       dd.kind = static_cast<std::uint32_t>(SourceKind::UserBuffer);
-      if (c.buffer.slot < im.cfg.maxUserBuffers) ++im.ap.userBufferRefs[c.buffer.slot];
+      // D-97: the playback references the buffer only if it is the current one (its
+      // generation) and its destroy was not applied yet. Otherwise (destroyed earlier, or
+      // already released while the game had not seen it) no reference is taken and the
+      // playback ends without starting (DISCARDED, on_end once), whatever its When.
+      const bool live = c.buffer.slot < im.cfg.maxUserBuffers && c.buffer.generation != 0u &&
+                        im.userBuffers[c.buffer.slot].generation.load(std::memory_order_acquire) == c.buffer.generation &&
+                        im.ap.userBufferDestroy[c.buffer.slot] != c.buffer.generation;
+      if (live) {
+        ++im.ap.userBufferRefs[c.buffer.slot];
+      } else {
+        dd.kind = static_cast<std::uint32_t>(SourceKind::Count);  // nothing to give back at its end
+      }
       CreatePlayback(im, c.playback, c.emitter, 0u, EventRef{kNoBank, kEventRefDynamic, 0u}, c.when, nullptr, 0u,
                      DynamicSourceRef{SourceKind::UserBuffer, {0, 0, 0}, c.playback.slot});
-      // D-97: a buffer whose destroy was applied before (same block, or still waiting for
-      // its playbacks) gets no new playback: it ends without starting (on_end once).
-      if (c.buffer.slot < im.cfg.maxUserBuffers && c.buffer.generation != 0u &&
-          im.ap.userBufferDestroy[c.buffer.slot] == c.buffer.generation) {
+      if (!live) {
         if (PlaybackRequest* rq = RequestOf(im, c.playback); rq != nullptr) rq->flags |= kRequestBufferDestroyed;
       }
       break;
@@ -908,8 +916,8 @@ void ReleaseOwnedRows(Impl& im) noexcept {
   // User buffers whose destroy was requested and that no playback uses (5.1).
   for (std::uint32_t s = 0; s < im.cfg.maxUserBuffers; ++s) {
     const std::uint32_t g = im.ap.userBufferDestroy[s];
-    if (g == 0u || im.ap.userBufferRefs[s] != 0u) continue;
-    im.ap.userBufferDestroy[s] = 0u;
+    if (g == 0u || im.ap.userBufferRefs[s] != 0u || im.ap.userBufferReleased[s] == g) continue;
+    im.ap.userBufferReleased[s] = g;  // userBufferDestroy stays: later plays of g are refused (D-97)
     if (im.releasedUserBufferCount < im.cfg.maxUserBuffers) {
       im.releasedUserBuffers[im.releasedUserBufferCount++] = Released{s, g};
     }
