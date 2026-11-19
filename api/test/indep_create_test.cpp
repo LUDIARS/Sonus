@@ -86,6 +86,9 @@ SND_TEST(IndepCreate, StructSizeSweep) {
     p->struct_size = static_cast<std::uint32_t>(size);
     snd_config norm;
     const snd_result r = snd::compose::NormalizeConfig(p, &norm);
+    // The 1.2 layout before the host fields (D-102 / D-103) is a known layout end too; it is
+    // checked by IndepHostOutput.Defect_EarlierOneTwoStructSizeGetsTheHostDefaults.
+    if (size == offsetof(snd_config, file_system_root)) continue;
     const bool want = size == kConfigSize10 || size == kConfigSize11 || size >= sizeof(snd_config);
     SND_CHECK_MSG((r == SND_OK) == want, "struct_size %llu -> %d", static_cast<unsigned long long>(size), r);
     if (!want) SND_CHECK_EQ(r, SND_ERR_VERSION_MISMATCH);
