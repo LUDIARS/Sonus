@@ -380,7 +380,6 @@ SND_TEST(IndepFix, PendingPlayOfADestroyedBuffer) {
   for (const snd_user_buffer_mode mode : {SND_USER_BUFFER_STREAM, SND_USER_BUFFER_STATIC}) {
     for (const int gap : {0, 1}) {
       for (const bool playFirst : {true, false}) {
-        if (!playFirst && gap > 0) continue;  // a play applied after the release: Defect_PendingPlayAppliedAfterTheReleaseEnds
         indep::Rig r;
         SND_REQUIRE_EQ(r.created, SND_OK);
         BufCase bc(r, mode);
@@ -490,4 +489,100 @@ SND_TEST(IndepFix, Defect_PendingPlayAppliedAfterTheReleaseEnds) {
   SND_CHECK(issued > 0u);
   SND_CHECK_EQ(stuck, 0u);
   SND_CHECK_EQ(newNotReleased, 0u);
+}
+
+// d31131a: userBufferDestroy stays after the release (until a new buffer takes the slot)
+// and the release is published once (userBufferReleased). Slot reuse:
+//  R1 create A -> destroy A -> create B -> play B, all in one arena, and with frames between
+//     each step: B plays (its value is heard), a play of A's handle is refused or DISCARDED,
+//     B's destroy releases it, every play ends once.
+//  R2 a second destroy of the same handle, before and after the release reached the game:
+//     the slot is returned once (all max_user_buffers buffers can be created afterwards, with
+//     distinct slots, and one more fails).
+SND_TEST(IndepFix, UserBufferSlotReuseAfterDestroy) {
+  for (int gap = 0; gap <= 3; ++gap) {
+    snd_config c = SmallConfig();
+    c.max_user_buffers = 1;  // A and B share the slot
+    indep::Rig r(c);
+    SND_REQUIRE_EQ(r.created, SND_OK);
+    std::vector<float> ma(1000, 0.125f), mb(1000, 0.375f);
+    float* ca[1] = {ma.data()};
+    float* cb[1] = {mb.data()};
+    const snd_user_buffer_desc da{ca, 1, 1000, 0, SND_USER_BUFFER_STATIC, 1, 0};
+    const snd_user_buffer_desc db{cb, 1, 1000, 0, SND_USER_BUFFER_STATIC, 1, 0};
+    const snd_user_buffer_handle a = snd_create_user_buffer(r.sys, &da);
+    SND_REQUIRE(a.value != 0u);
+    if (gap > 0) r.Step(static_cast<std::uint32_t>(gap));
+    SND_CHECK_EQ(snd_destroy_user_buffer(r.sys, a), SND_OK);
+    // B can be created once A's slot is back (gap 0: in the same arena it cannot: one slot).
+    snd_user_buffer_handle b{0};
+    for (int i = 0; i < 40 && b.value == 0u; ++i) {
+      if (gap > 0 || i > 0) r.Step(1);
+      b = snd_create_user_buffer(r.sys, &db);
+    }
+    SND_CHECK_MSG(b.value != 0u, "gap %d: the slot never came back", gap);
+    if (b.value == 0u) continue;
+    SND_CHECK_EQ(SND_HANDLE_SLOT(b.value), SND_HANDLE_SLOT(a.value));
+    SND_CHECK(SND_HANDLE_GENERATION(b.value) != SND_HANDLE_GENERATION(a.value));
+    const snd_playback_handle pa = snd_play_user_buffer(r.sys, a, 0u, snd_emitter_handle{0}, nullptr);  // stale
+    if (gap > 1) r.Step(static_cast<std::uint32_t>(gap - 1));
+    const snd_playback_handle pb = snd_play_user_buffer(r.sys, b, 0u, snd_emitter_handle{0}, nullptr);
+    SND_REQUIRE(pb.value != 0u);
+    const std::uint64_t from = r.Frames();
+    r.Step(20);
+    // B is heard (0.375 x centre), A never.
+    std::uint64_t heardB = 0, heardA = 0;
+    for (std::uint64_t f = from; f < r.Frames(); ++f) {
+      const float x = r.Raw(f) / kCenter;
+      heardB += std::fabs(x - 0.375f) < 1e-3f ? 1u : 0u;
+      heardA += std::fabs(x - 0.125f) < 1e-3f ? 1u : 0u;
+    }
+    SND_CHECK_MSG(heardB > 2000u, "gap %d: B heard %llu frames", gap, static_cast<unsigned long long>(heardB));
+    SND_CHECK_EQ(heardA, 0u);
+    SND_CHECK_EQ(r.EndsOf(pb.value), 0u);
+    if (pa.value != 0u) SND_CHECK_EQ(r.EndsOf(pa.value), 1u);
+    SND_CHECK_EQ(snd_destroy_user_buffer(r.sys, b), SND_OK);
+    for (int i = 0; i < 40 && snd_get_user_buffer_released(r.sys, b) == 0; ++i) r.Step(1);
+    SND_CHECK_MSG(snd_get_user_buffer_released(r.sys, b) == 1, "gap %d: B not released", gap);
+    r.Step(4);
+    SND_CHECK_EQ(r.EndsOf(pb.value), 1u);
+  }
+}
+
+SND_TEST(IndepFix, SecondDestroyDoesNotReturnTheSlotTwice) {
+  for (int when = 0; when < 4; ++when) {
+    snd_config c = SmallConfig();
+    c.max_user_buffers = 3;
+    indep::Rig r(c);
+    SND_REQUIRE_EQ(r.created, SND_OK);
+    std::vector<float> m(100, 0.0f);
+    float* ch[1] = {m.data()};
+    const snd_user_buffer_desc d{ch, 1, 100, 0, SND_USER_BUFFER_STATIC, 0, 0};
+    const snd_user_buffer_handle a = snd_create_user_buffer(r.sys, &d);
+    SND_REQUIRE(a.value != 0u);
+    r.Step(2);
+    SND_CHECK_EQ(snd_destroy_user_buffer(r.sys, a), SND_OK);
+    // The second destroy: same arena (0), one frame later (1: the audio side may have
+    // released, the game has not read it), two and three frames later.
+    if (when > 0) r.Step(static_cast<std::uint32_t>(when));
+    const snd_result second = snd_destroy_user_buffer(r.sys, a);
+    SND_CHECK(second == SND_OK || second == SND_ERR_INVALID_HANDLE);
+    r.Step(10);
+    SND_CHECK_EQ(snd_get_user_buffer_released(r.sys, a), 1);
+    // All 3 slots, distinct, and no fourth.
+    snd_user_buffer_handle hs[4] = {};
+    for (auto& h : hs) h = snd_create_user_buffer(r.sys, &d);
+    SND_CHECK(hs[0].value != 0u && hs[1].value != 0u && hs[2].value != 0u);
+    SND_CHECK_MSG(hs[3].value == 0u, "when %d: a fourth buffer was created (a slot was returned twice)", when);
+    SND_CHECK(SND_HANDLE_SLOT(hs[0].value) != SND_HANDLE_SLOT(hs[1].value));
+    SND_CHECK(SND_HANDLE_SLOT(hs[0].value) != SND_HANDLE_SLOT(hs[2].value));
+    SND_CHECK(SND_HANDLE_SLOT(hs[1].value) != SND_HANDLE_SLOT(hs[2].value));
+    for (int k = 0; k < 3; ++k) {
+      if (hs[k].value != 0u) snd_destroy_user_buffer(r.sys, hs[k]);
+    }
+    r.Step(10);
+    for (int k = 0; k < 3; ++k) {
+      if (hs[k].value != 0u) SND_CHECK_EQ(snd_get_user_buffer_released(r.sys, hs[k]), 1);
+    }
+  }
 }
