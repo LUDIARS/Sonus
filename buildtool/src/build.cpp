@@ -2071,6 +2071,7 @@ void Builder::BuildBank(const Object& bank, const std::string& language) {
     };
     auto put = [&](const void* p, std::size_t n) {
       const std::size_t at = blob.size();
+      if (n == 0) return static_cast<std::uint64_t>(at);  // no copy from an empty table (data() may be null)
       blob.resize(at + n);
       std::memcpy(blob.data() + at, p, n);
       return static_cast<std::uint64_t>(at);
