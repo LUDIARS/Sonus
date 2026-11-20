@@ -22,7 +22,7 @@ foreach(_t ${_snd_physics_tests})
 endforeach()
 
 # Independent tests (spec/handoff/README.md 3; properties in INDEP_PROPERTIES.md).
-set(_snd_physics_indep_tests cull resolve footstep track bank play api)
+set(_snd_physics_indep_tests cull resolve footstep track bank play api review)
 foreach(_t ${_snd_physics_indep_tests})
   set(_n physics_indep_${_t})
   set(_srcs indep_${_t}_test.cpp)

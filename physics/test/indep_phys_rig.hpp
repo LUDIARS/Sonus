@@ -218,13 +218,13 @@ struct CullModel {
   std::uint64_t now = 0;
   double carry = 0.0;
   struct CdRec {
-    std::uint64_t a, b;
-    std::uint32_t ma, mb, kind;
-    std::uint64_t last;
-    std::uint64_t seq;
+    std::uint64_t a = 0, b = 0;
+    std::uint32_t ma = 0, mb = 0, kind = 0;
+    std::uint64_t last = 0;
+    bool used = false;
+    bool thisCall = false;
   };
-  std::vector<CdRec> cd;
-  std::uint64_t seq = 0;
+  std::vector<CdRec> cd;  // fixed slots, in order of first use
   ModelStats st;
 
   static std::uint64_t Us(double s) { return static_cast<std::uint64_t>(std::llround(s * 1e6)); }
@@ -237,6 +237,7 @@ struct CullModel {
     std::uint64_t dtUs = Us(static_cast<double>(dt));
     if (dtUs > maxDtUs) dtUs = maxDtUs;
     now += dtUs;
+    for (CdRec& x : cd) x.thisCall = false;
     const double slotsF = carry + bps * (static_cast<double>(dtUs) / 1e6);
     std::uint64_t slots = static_cast<std::uint64_t>(std::floor(slotsF));
     carry = slotsF - std::floor(slotsF);
@@ -294,20 +295,36 @@ struct CullModel {
       }
       live.push_back(g);
     }
-    std::stable_sort(live.begin(), live.end(), [](const G& x, const G& y) {
+    // Step 3 against the table as it was before this call (the steps run in order: the
+    // cooldown decision comes before any request of this call is recorded).
+    auto cdFind = [&](std::uint64_t oa, std::uint64_t ob, const G& g) -> CdRec* {
+      for (CdRec& x : cd) {
+        if (x.used && x.a == oa && x.b == ob && x.ma == g.lo && x.mb == g.hi && x.kind == g.kind) return &x;
+      }
+      return nullptr;
+    };
+    std::vector<G> cand;
+    for (const G& g : live) {
+      const snd_contact& r = cs[g.rep];
+      const CdRec* hit = cdFind(std::min(r.object_a, r.object_b), std::max(r.object_a, r.object_b), g);
+      if (hit != nullptr && now - hit->last < cooldownUs) {
+        ++st.cooldown;
+        continue;
+      }
+      cand.push_back(g);
+    }
+    std::stable_sort(cand.begin(), cand.end(), [](const G& x, const G& y) {
       const bool bx = x.kind == SND_CONTACT_BREAK, by = y.kind == SND_CONTACT_BREAK;
       if (bx != by) return bx;
       if (x.impulse != y.impulse) return x.impulse > y.impulse;
       return x.rep < y.rep;
     });
-    for (const G& g : live) {
+    for (const G& g : cand) {
       const snd_contact& r = cs[g.rep];
       const std::uint64_t oa = std::min(r.object_a, r.object_b), ob = std::max(r.object_a, r.object_b);
-      CdRec* hit = nullptr;
-      for (CdRec& x : cd) {
-        if (x.a == oa && x.b == ob && x.ma == g.lo && x.mb == g.hi && x.kind == g.kind) hit = &x;
-      }
-      if (hit != nullptr && now - hit->last < cooldownUs) {
+      CdRec* hit = cdFind(oa, ob, g);
+      // Undecided 7: the same cooldown key requested earlier in this call (another cell).
+      if (cooldownUs > 0 && hit != nullptr && hit->last == now && hit->thisCall) {
         ++st.cooldown;
         continue;
       }
@@ -317,20 +334,23 @@ struct CullModel {
       }
       --slots;
       ++st.requests;
-      // Record the cooldown.
+      // Record the cooldown. Full table: the oldest record goes; on equal times the
+      // implementer's tie rule is the lowest slot (records live in fixed slots).
       if (hit != nullptr) {
         hit->last = now;
-        hit->seq = ++seq;
+        hit->thisCall = true;
       } else {
+        std::size_t slot = cd.size();
         if (cd.size() >= cooldownCap) {
-          std::size_t old = 0;
+          slot = 0;
           for (std::size_t j = 1; j < cd.size(); ++j) {
-            if (cd[j].last < cd[old].last || (cd[j].last == cd[old].last && cd[j].seq < cd[old].seq)) old = j;
+            if (cd[j].last < cd[slot].last) slot = j;
           }
-          if (now - cd[old].last < cooldownUs) ++st.evictions;
-          cd.erase(cd.begin() + static_cast<std::ptrdiff_t>(old));
+          if (now - cd[slot].last < cooldownUs) ++st.evictions;
+        } else {
+          cd.push_back(CdRec{});
         }
-        cd.push_back(CdRec{oa, ob, g.lo, g.hi, g.kind, now, ++seq});
+        cd[slot] = CdRec{oa, ob, g.lo, g.hi, g.kind, now, true, true};
       }
       auto emit = [&](std::uint16_t m) {
         ModelPlay p{EventOf(m, g.kind), g.kind, g.count, g.impulse, r.object_a, r.object_b,
