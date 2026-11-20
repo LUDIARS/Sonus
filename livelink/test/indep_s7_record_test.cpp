@@ -120,6 +120,8 @@ struct ReplayOut {
   bool bitExact = false;
   bool finished = false;
   bool finishedAtBlocks = false;  // Finished() right after Blocks() blocks
+  bool finishedBefore = true;     // Finished() after Blocks() - 1 blocks
+  bool reproduces = false;        // ReproducesRecordedRun()
   std::uint64_t blocks = 0;
   std::uint32_t editorCalls = 0;
 };
@@ -142,11 +144,13 @@ snd_result Replay(const Recorded& rec, ReplayOut* out, ll::IStructEditor* editor
     const std::size_t from = g.all.size();
     rp->Start();
     out->blocks = rp->Blocks();
-    g.Steps(static_cast<std::uint32_t>(out->blocks));
-    out->finishedAtBlocks = rp->Finished();
+    if (out->blocks > 0u) g.Steps(static_cast<std::uint32_t>(out->blocks - 1u));
+    out->finishedBefore = rp->Finished();  // D-175: not before the last recorded block
+    g.Step();
+    out->finishedAtBlocks = rp->Finished();  // D-175: right after the Blocks()-th block
     const std::size_t to = g.all.size();
-    g.Step();  // Finished() turns true when the block after the span starts (spec gap, see the notes)
     out->finished = rp->Finished();
+    out->reproduces = rp->ReproducesRecordedRun();
     out->info = rp->Info();
     const std::size_t lead = std::size_t{out->info.leadBlocks} * rec.blockSamples;
     out->digest.Add(g.all.data() + from + lead, to - from - lead);
@@ -255,8 +259,9 @@ SND_TEST(IndepS7Record, MidRunOrderAndStartingState) {
   SND_CHECK_EQ(r.blocks, r.info.lastBlock - r.info.firstBlock + 1u + r.info.leadBlocks);  // I10
   SND_CHECK_EQ(r.info.startStateFailures, 0u);
   SND_CHECK(r.finished);
-  std::printf("[indep_s7] Finished() after exactly Blocks()=%llu blocks: %d (after one more: %d)\n",
-              static_cast<unsigned long long>(r.blocks), r.finishedAtBlocks ? 1 : 0, r.finished ? 1 : 0);
+  SND_CHECK(r.finishedAtBlocks);  // D-175 (leadBlocks 1)
+  SND_CHECK(!r.finishedBefore);
+  SND_CHECK(r.reproduces);        // D-175: mid-run with its whole starting state
 }
 
 // I2: a recording that starts before any command was applied (record_commands from Start).
@@ -308,6 +313,10 @@ SND_TEST(IndepS7Record, TwoReplaysAgreeAndEqualTheRecordedRun) {
   SND_REQUIRE_EQ(Replay(rec, &a), SND_OK);
   SND_REQUIRE_EQ(Replay(rec, &b), SND_OK);
   SND_CHECK(a.finished && b.finished);
+  SND_CHECK_EQ(a.info.leadBlocks, 0u);
+  SND_CHECK(a.finishedAtBlocks);  // D-175 (leadBlocks 0)
+  SND_CHECK(!a.finishedBefore);
+  SND_CHECK(a.reproduces);
   SND_CHECK(a.bitExact);
   SND_CHECK_EQ(a.info.conditions & ll::kReplayBreaksBitExact, 0u);
   SND_CHECK_EQ(a.info.skippedCommands, 0u);

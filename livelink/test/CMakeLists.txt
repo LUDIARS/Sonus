@@ -18,7 +18,7 @@ foreach(_t livelink_v11_live_test livelink_v11_record_test livelink_v11_fuzz_tes
 endforeach()
 # Independent tests of protocol 1.1 (组 L, written by a separate tester: indep_s7_properties.md).
 snd_add_test(livelink_indep_s7_unit_test SOURCES indep_s7_unit_test.cpp LINK ${_ll_test_link})
-foreach(_t indep_s7_live_test indep_s7_record_test indep_s7_fuzz_test indep_s7_impl_test indep_s7_stress_test)
+foreach(_t indep_s7_live_test indep_s7_record_test indep_s7_fuzz_test indep_s7_impl_test indep_s7_stress_test indep_s7_recheck_test)
   snd_add_test(livelink_${_t} SOURCES ${_t}.cpp LINK ${_ll_v11_link})
   target_include_directories(livelink_${_t} PRIVATE ${PROJECT_SOURCE_DIR}/core/test ${PROJECT_SOURCE_DIR}/tests/integration)
   set_tests_properties(livelink_${_t} PROPERTIES TIMEOUT 600)
