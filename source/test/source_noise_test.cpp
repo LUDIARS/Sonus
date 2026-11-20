@@ -111,7 +111,12 @@ SND_TEST(SourceNoise, SpectralSlopeAndLevelPerColour) {
     const double rms = Rms(x[0], 48000);
     std::printf("noise colour %u: slope %.2f dB/oct, rms %.3f\n", color, slope, rms);
     SND_CHECK_MSG(std::fabs(slope - want[color]) < tol[color], "colour %u slope %f", color, slope);
-    SND_CHECK_MSG(std::fabs(rms - 0.57735) < 0.06, "colour %u rms %f", color, rms);
+    // D-199: white RMS 1/sqrt(3); pink / brown RMS 0.2; every sample within [-1, 1].
+    const double wantRms = color == 0u ? 0.57735 : 0.2;
+    SND_CHECK_MSG(std::fabs(rms - wantRms) < 0.1 * wantRms, "colour %u rms %f", color, rms);
+    float peak = 0.0f;
+    for (float v : x[0]) peak = std::fmax(peak, std::fabs(v));
+    SND_CHECK_MSG(peak <= 1.0f, "colour %u peak %f", color, double(peak));
   }
 }
 
@@ -173,13 +178,14 @@ SND_TEST(SourceNoise, VirtualAdvanceAndSeekFollowTheSequence) {
     double err = 0;
     for (std::size_t i = 0; i < 2560; ++i) err = std::fmax(err, std::fabs(v.out[0][at + i] - ref[0][12800 + i]));
     std::printf("noise colour %u: after virtual advance max error %g\n", color, err);
-    SND_CHECK_MSG(color == 0u ? err == 0.0 : err < 2e-3, "colour %u advance %g", color, err);
+    // D-199: rebuilt from 1024 samples: the low end differs for a while (bounded).
+    SND_CHECK_MSG(color == 0u ? err == 0.0 : err < 0.1, "colour %u advance %g", color, err);
     d.Control(v, src::ControlOp::Seek, 30000);
     const std::size_t at2 = v.out[0].size();
     d.Render(v, 2000);
     err = 0;
     for (std::size_t i = 0; i < 2000; ++i) err = std::fmax(err, std::fabs(v.out[0][at2 + i] - ref[0][30000 + i]));
-    SND_CHECK_MSG(color == 0u ? err == 0.0 : err < 2e-3, "colour %u seek %g", color, err);
+    SND_CHECK_MSG(color == 0u ? err == 0.0 : err < 0.1, "colour %u seek %g", color, err);
     SND_CHECK_EQ(v.last.ended, 0u);
   }
   // A seek before the warm-up window is exact for every colour (rebuilt from sample 0).

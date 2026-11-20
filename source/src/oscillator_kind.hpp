@@ -23,10 +23,15 @@
 // asset must be resident PCM (PCMF / PC16, LoadForm::PcmResident); channel 0 is
 // read. Table length T = loopEnd - loopStart when the asset has a loop, else 2048
 // when the asset's frames are a multiple of 2048, else all its frames (one table).
-// Tables = frames / T. Position = tablePosition + RenderItem::tablePositionOffset
+// Table k starts at loopStart + k T with a loop (D-198), at k T without one;
+// tables = (frames - origin) / T. Position = tablePosition + RenderItem::tablePositionOffset
 // in [0, 1] over tables 0 .. count - 1, linear between neighbouring tables and
 // linear inside a table. No band limiting (no mip levels in bank format 2.0).
 // Frequencies at or above Nyquist are clamped to just below it (dt < 0.5).
+// D-198: while the effective frequency is 0 (0, negative, NaN, +-Inf frequency or
+// pitch) every waveform outputs 0 and the phase waits; it continues from there once
+// the frequency is positive again. RenderItem inputs that are not finite are made
+// safe per block (pitch -> 0, offsets -> 0): no NaN out, no undefined conversion.
 //
 // Control: Seek(frame) sets the phase to where an unmodulated voice would be
 // after `frame` output frames (start phase + frame x f / rate). Pause / Resume /
@@ -58,6 +63,7 @@ struct OscInst {
   std::uint32_t tableChannels = 0;
   std::uint32_t tableLength = 0;
   std::uint32_t tableCount = 0;
+  std::uint32_t tableOrigin = 0;  // first frame of table 0 (loopStart with a loop, D-198)
 };
 
 class OscillatorKind final : public ISourceKind {

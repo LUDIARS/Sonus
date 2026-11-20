@@ -23,12 +23,16 @@ constexpr double kPinkPole[3] = {0.99765, 0.96300, 0.57000};
 constexpr double kPinkGain[3] = {0.0990460, 0.2965164, 1.0526913};
 constexpr double kPinkDirect = 0.1848;
 constexpr double kBrownPole = 0.995;
+constexpr double kColoredRms = 0.2;  // D-199
 
 constexpr std::uint32_t kColorWhite = 0, kColorPink = 1, kColorBrown = 2;
 
 std::uint32_t LoadState(const NoiseInst& in) noexcept {
   return std::atomic_ref<std::uint32_t>(const_cast<std::uint32_t&>(in.state)).load(std::memory_order_acquire);
 }
+
+// D-199: the coloured outputs are cut to [-1, 1] (rarely reached at RMS 0.2).
+inline float Clip(float v) noexcept { return v > 1.0f ? 1.0f : (v < -1.0f ? -1.0f : v); }
 
 // Rate ratio -> 32.32 source samples per output sample (deterministic rounding).
 inline std::uint64_t Increment(double ratio) noexcept {
@@ -58,11 +62,11 @@ float NoiseKind::Step(std::uint32_t color, float* f, float w) const noexcept {
     f[0] = static_cast<float>(kPinkPole[0]) * f[0] + static_cast<float>(kPinkGain[0]) * w;
     f[1] = static_cast<float>(kPinkPole[1]) * f[1] + static_cast<float>(kPinkGain[1]) * w;
     f[2] = static_cast<float>(kPinkPole[2]) * f[2] + static_cast<float>(kPinkGain[2]) * w;
-    return (f[0] + f[1] + f[2] + static_cast<float>(kPinkDirect) * w) * pinkScale_;
+    return Clip((f[0] + f[1] + f[2] + static_cast<float>(kPinkDirect) * w) * pinkScale_);
   }
   if (color == kColorBrown) {
     f[0] = static_cast<float>(kBrownPole) * f[0] + brownGain_ * w;
-    return f[0];
+    return Clip(f[0] * brownScale_);
   }
   return w;
 }
@@ -111,8 +115,11 @@ bool NoiseKind::Init(void* pool, std::size_t bytes, const SourceLimits& limits, 
   for (int i = 0; i < 4; ++i) {
     for (int j = 0; j < 4; ++j) v += g[i] * g[j] / (1.0 - p[i] * p[j]);
   }
-  pinkScale_ = static_cast<float>(1.0 / std::sqrt(v));
+  // D-199: RMS 0.2 for pink and brown (the white input has variance 1/3).
+  const double toRms = kColoredRms * std::sqrt(3.0);
+  pinkScale_ = static_cast<float>(toRms / std::sqrt(v));
   brownGain_ = static_cast<float>(std::sqrt(1.0 - kBrownPole * kBrownPole));
+  brownScale_ = static_cast<float>(toRms);
   live_.store(0, std::memory_order_relaxed);
   return true;
 }

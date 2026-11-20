@@ -318,3 +318,66 @@ SND_TEST(SourceOscillator, WavetableReadsAndMixesTables) {
   const std::vector<float> y = Render(p, 9600);
   SND_CHECK_NEAR(Tone(y, 0, 9600, 500.0), 1.0, 0.01);
 }
+
+// D-198: an effective frequency of 0 (0, negative, NaN frequency; 0 / NaN / Inf pitch) is
+// silence and the phase waits; non-finite offsets count as 0; never NaN.
+SND_TEST(SourceOscillator, ZeroOrNonFiniteFrequencyIsSilenceAndThePhaseWaits) {
+  for (bf::Waveform w : {bf::Waveform::Sine, bf::Waveform::Saw, bf::Waveform::Square, bf::Waveform::Triangle,
+                         bf::Waveform::Pulse}) {
+    for (float f : {0.0f, -100.0f, std::nanf(""), INFINITY}) {
+      const std::vector<float> x = Render(Osc(w, f, 0.2f), 1000);
+      SND_REQUIRE(x.size() == 1000u);
+      for (float v : x) SND_CHECK_MSG(v == 0.0f, "wave %u f %f: %f", unsigned(w), double(f), double(v));
+    }
+    // Pitch 0 then NaN then Inf for a block each, then 1: the output is the
+    // uninterrupted waveform delayed by three blocks.
+    const src::OscillatorParams p = Osc(w, 700.0f, 0.3f);
+    const std::vector<float> ref = Render(p, 1024);
+    Driver d(snd::SourceKind::Oscillator, Driver::Opt{});
+    Driver::Voice v;
+    SND_REQUIRE(d.Start(v, &p, 1));
+    for (float pv : {0.0f, std::nanf(""), INFINITY}) {
+      Driver::Mod m;
+      m.pitch = snd::Ramp{pv, pv};
+      m.duty = snd::Ramp{std::nanf(""), 0.0f};
+      m.table = snd::Ramp{INFINITY, 0.0f};
+      d.Block({&v}, m);
+    }
+    Driver::Mod bad;
+    bad.duty = snd::Ramp{std::nanf(""), std::nanf("")};
+    d.Render(v, 1024, bad);
+    for (std::size_t i = 0; i < 768; ++i) SND_CHECK_EQ(v.out[0][i], 0.0f);
+    for (std::size_t i = 0; i < 1024; ++i) {
+      SND_CHECK_MSG(v.out[0][768 + i] == ref[i], "wave %u at %u", unsigned(w), unsigned(i));
+    }
+  }
+}
+
+// D-198: with a loop, table k starts at loopStart + k x (loopEnd - loopStart).
+SND_TEST(SourceOscillator, WavetableTablesStartAtTheLoopStart) {
+  // 500 frames of DC 0.9, then two tables of 1000: sin x, sin 2x.
+  std::vector<float> pcm(2500, 0.9f);
+  for (std::uint32_t j = 0; j < 1000; ++j) {
+    pcm[500 + j] = static_cast<float>(std::sin(2.0 * kPi * j / 1000.0));
+    pcm[1500 + j] = static_cast<float>(std::sin(2.0 * kPi * 2.0 * j / 1000.0));
+  }
+  src::SourceAsset a{};
+  a.codec.codec = SND_CODEC_PCM_F32;
+  a.codec.channels = 1;
+  a.codec.sample_rate = 48000;
+  a.codec.total_frames = 2500;
+  a.data = reinterpret_cast<const std::uint8_t*>(pcm.data());
+  a.dataBytes = pcm.size() * 4u;
+  a.form = src::LoadForm::PcmResident;
+  a.loopStart = 500;
+  a.loopEnd = 1500;
+  src::OscillatorParams p = Osc(bf::Waveform::Sine, 400.0f);
+  p.wavetable = &a;
+  const std::vector<float> x0 = Render(p, 9600);
+  SND_CHECK_NEAR(Tone(x0, 0, 9600, 400.0), 1.0, 0.01);
+  SND_CHECK(Tone(x0, 0, 9600, 0.0) < 0.01);
+  Driver::Mod m;
+  m.table = snd::Ramp{1.0f, 1.0f};
+  const std::vector<float> x1 = Render(p, 9600, m);
+  SND_CHECK_NEAR(Tone(x1, 0, 9600, 800.0), 1.0, 0.01);
+}
