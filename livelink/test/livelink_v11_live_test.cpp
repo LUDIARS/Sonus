@@ -667,3 +667,26 @@ SND_TEST(LivelinkV11, ASecondServerOnTheSameRuntimeCannotStart) {
   SND_CHECK_EQ(second->Start(), SND_OK);  // and again after its own Stop
   ll::Server::Destroy(second);
 }
+
+// D-173: a reload whose file holds another bank fails (INVALID_ARGUMENT); the other bank is not
+// kept and the bank asked for stays unloaded (as when the load fails).
+SND_TEST(LivelinkV11, ReloadWithAFileOfAnotherBankFails) {
+  Session s;
+  SND_REQUIRE(s.Ready());
+  indep::BankOpts two;
+  two.name = "Two";
+  s.f.fs.AddFile("two.sndb", indep::IndepBank(two));
+  SND_CHECK_EQ(s.Ack(s.client->ReloadBank(kBankId, 0, "two.sndb")), SND_ERR_INVALID_ARGUMENT);
+  ll::ReloadStatus st[8];
+  const std::uint32_t n = s.client->CopyReloadStatus(st, 8);
+  SND_REQUIRE(n >= 1u);
+  SND_CHECK_EQ(st[n - 1].phase, static_cast<std::uint32_t>(ll::ReloadPhase::Failed));
+  SND_CHECK_EQ(st[n - 1].result, SND_ERR_INVALID_ARGUMENT);
+  SND_REQUIRE(s.f.StepUntil([&] {
+    s.client->QueryBanks();
+    s.f.Steps(4);
+    ll::BankEntry b[4];
+    return s.client->Sequences().bankLists >= 1u && s.client->CopyBanks(b, 4) == 0u;
+  }));
+  SND_CHECK_EQ(s.f.server->Stats().reloadsFailed, 1u);
+}
