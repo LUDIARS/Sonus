@@ -391,7 +391,8 @@ bank / buildtool:
 
 ## 段階 7-D
 
-<<<<<<< HEAD
+### ソース組 1（D-190〜D-196）
+
 ### ソース組 1（Oscillator、Noise、Input）での決定
 
 `source/` に Oscillator、Noise、Input の 3 種別を、既存の種別と同じ `ISourceKind` で足し、`source::Runtime` に配線した
@@ -414,7 +415,9 @@ bank / buildtool:
 | 版 | 日付 | 内容 |
 | --- | --- | --- |
 | 1.2（段階 7-D ソース組 1） | 2026-11-20 | D-190〜D-196: source に Oscillator（PolyBLEP / PolyBLAMP、ウェーブテーブル）、Noise（白・ピンク・ブラウン、カウンタ方式の乱数）、Input（ゲームが書く入力ポート）の種別。内部の `RenderItem` の末尾に `dutyOffset` / `tablePositionOffset`、`SourceStartResult::reserved` の注記（入力のレート）。公開ヘッダに `snd_write_input`（C++ `WriteInput`）、`c_api.cpp` の末尾に実体。版は 1.2 のまま、コマンド種別は足していない |
-=======
+
+### dsp 組（D-208〜D-216）
+
 セッション D（段階6 拡張）の決定。この節は dsp 組（タイムストレッチ、コンボリューション、FFT）の D-208〜D-215。
 ソース組の決定（D-190〜）は同じ見出しの節に別に書かれる（統合のときに 1 つにまとめる）。
 契約ヘッダ（`contract/`）と版の数字は変えていない。dsp の公開ヘッダに追加した: `snd/dsp/fft.hpp`、
@@ -450,4 +453,3 @@ bank / buildtool:
 | # | 決定 | 理由 |
 | --- | --- | --- |
 | D-216 | **`spec/interface/bank-format.md` 6.4 の表の末尾に `snd.fx.convolution` の 1 行を足す**（受け入れ側が実施）。既存の行と本文（「次の 14 種」）は変えない。本文の数は統合のときに直す | `BuildPipeline.BankFormatEffectTableMatchesDsp`（`tests/integration/build_pipeline_test.cpp`）が、`EffectKind::Count` までの全種別の行をこの表に求める。bank-format.md は契約の文書で D の持ち場の外だが、行の追加は契約への追加（minor）の範囲で、足さないと完了条件（全件通過）を満たせない。登録表に載せない案は、バス・DSPN・ライブリンク・ツールで別扱いが要るので採らない |
->>>>>>> work/d-dsp
