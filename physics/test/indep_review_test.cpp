@@ -242,3 +242,40 @@ SND_TEST(IndepReview, Undecided_GroupingBySoundMaterial) {
   SND_CHECK_EQ(r.r.count, 2u);
   SND_CHECK(!r.Has(0x77u));  // the wet contact was merged into the dry representative
 }
+
+// 14 "負荷・バースト": 4 times the real voices requested every frame for a second, with real
+// events. Nothing crashes, the accounting holds, failures of the sonus API are counted
+// (not lost), and every emitter comes back after destroy.
+SND_TEST(IndepReview, FourTimesTheVoicesEveryFrame) {
+  snd_physics_config c = Cfg(nullptr);
+  c.cooldown_seconds = 0.0f;
+  c.budget_per_second = 1.0e6f;
+  Fx f(c);
+  SND_REQUIRE(f.Ok());
+  f.rec.recs.reserve(20000);
+  std::uint64_t obj = 0;
+  for (int frame = 0; frame < 60; ++frame) {
+    std::vector<snd_contact> cs;
+    for (int i = 0; i < 4 * 32; ++i, obj += 2) {
+      cs.push_back(Contact(SND_CONTACT_IMPACT, obj, obj + 1, static_cast<std::uint16_t>(i % 2), static_cast<std::uint16_t>(i % 2),
+                           static_cast<float>(i), 0, 1, 5.0f));
+    }
+    SND_CHECK_EQ(f.Submit(cs, 1.0f / 60.0f), SND_OK);
+  }
+  const snd_physics_stats st = phystest::Stats(f.phys);
+  SND_CHECK_EQ(st.group_requests, 60u * 128u);
+  SND_CHECK_EQ(st.requested_impact, 60u * 128u);
+  SND_CHECK_EQ(st.contacts_received, st.groups);
+  snd::test::Note("4x: play_at_fallbacks %llu, held released early %llu, api_failures %llu",
+                  static_cast<unsigned long long>(st.play_at_fallbacks),
+                  static_cast<unsigned long long>(st.held_emitters_released_early),
+                  static_cast<unsigned long long>(st.api_failures));
+  snd_physics_destroy(f.phys);
+  f.phys = nullptr;
+  f.s.Advance(100);
+  std::vector<snd_emitter_handle> mine;
+  for (int i = 0; i < 128; ++i) mine.push_back(snd_create_emitter(f.s.sys));
+  std::uint32_t ok = 0;
+  for (const snd_emitter_handle e : mine) ok += e.value != 0u ? 1u : 0u;
+  SND_CHECK_EQ(ok, 128u);
+}
