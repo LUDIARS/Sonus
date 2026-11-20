@@ -179,7 +179,7 @@ SND_TEST(LivelinkV11Fuzz, ClientSurvivesMalformed11Messages) {
     std::vector<std::uint8_t> frame(ll::kFrameHeaderBytes + p.size());
     ll::EncodeHeader(frame.data(), static_cast<std::uint16_t>(t), static_cast<std::uint16_t>(g.Below(2)),
                      static_cast<std::uint32_t>(p.size()), g.R());
-    std::memcpy(frame.data() + ll::kFrameHeaderBytes, p.data(), p.size());
+    if (!p.empty()) std::memcpy(frame.data() + ll::kFrameHeaderBytes, p.data(), p.size());
     SND_REQUIRE(game.SendRawBytes(frame));
     if (i % 64u == 0u) {
       ll::BankEntry b[8];
