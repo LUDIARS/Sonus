@@ -11,11 +11,17 @@
 //        filter and before the envelopes (release, D-15 fades, sample-accurate stop)
 //        and the pan. Nothing else touches the slot while the voice holds it (D-43).
 //        The effects of a voice come from its Event's configuration
-//        (snd_set_event_voice_effect) as it was when the voice started: the stage kinds
-//        are captured then; the parameter values are read from the configuration when
-//        the slot is taken (the kind's defaults if the stage's kind changed since).
-//        snd_set_playback_effect_param values of the voice's playback override them
-//        (from the next block, interpolated inside the block, D-26).
+//        (snd_set_event_voice_effect) as it is when the voice takes a slot: at its start
+//        and again when it comes back from virtual (kinds and values read together, so
+//        they always match; a stage removed meanwhile is simply absent, no warning).
+//        A voice holding a slot keeps what it has. No per-voice copy of the values is
+//        kept: virtualising drops the effect state anyway, so coming back is a new start.
+//        The voices of a nested Event use the nested (child) Event's configuration.
+//        snd_set_playback_effect_param values of the voice's playback override the
+//        Event's: from the first block of a slot (no ramp from the Event's value), and
+//        for a sounding voice from the next block, interpolated inside it (D-26).
+//        [init] parameters (kParamInitOnly) are read by the effect's init only: a
+//        playback value for one is refused with a warning when applied.
 // D-133  No free slot, or a chain whose state does not fit voice_effect_bytes: the voice
 //        plays dry (no heavy effects) for this real assignment; never refused. Counted
 //        (System::GetVoiceFxStats) and reported once per assignment as a warning
@@ -114,9 +120,15 @@ std::uint32_t Acquire(Impl& im, SlotIndex v, std::uint32_t d, SlotIndex r, std::
                       const VoiceStatic& vs) noexcept {
   schema::Tables& t = im.tables;
   VoiceFxPriv& x = im.vfx;
-  const std::uint32_t entry = x.voiceEntry[v];
+  // The Event's configuration as it is now (kinds and values together): read every time
+  // the voice takes a slot (start, back from virtual). No configuration: no effect.
+  const Id eventId = EventOfVoice(im, SND_R(Voice_clipRef)[d], vs);
+  if (eventId == 0u) return 0u;
+  const std::uint32_t entry = FindEventEntry(x, eventId);
   if (entry == kNoSlot) return 0u;
-  const Id* kinds = x.voiceKinds + std::size_t{v} * kMaxVoiceEffectChain;
+  const VfxEventEntry* ev = &x.events[entry];
+  Id kinds[kMaxVoiceEffectChain] = {};
+  for (std::uint32_t k = 0; k < x.chain && k < kMaxVoiceEffectChain; ++k) kinds[k] = ev->stage[k].kind;
   std::uint32_t wanted = 0;
   for (std::uint32_t k = 0; k < x.chain; ++k) wanted += kinds[k] != 0u ? 1u : 0u;
   if (wanted == 0u) return 0u;
@@ -136,11 +148,6 @@ std::uint32_t Acquire(Impl& im, SlotIndex v, std::uint32_t d, SlotIndex r, std::
     PostWarning(im, SND_ERR_LIMIT_REACHED, SND_END_DETAIL_VOICE_EFFECT_SLOTS, pbHandle);
     return 0u;
   }
-  // Parameters: the Event's configuration when it still has the captured kind.
-  const Id eventId = EventOfVoice(im, SND_R(Voice_clipRef)[d], vs);
-  const VfxEventEntry* ev = entry < x.settings && x.events[entry].used != 0u && x.events[entry].event == eventId
-                                ? &x.events[entry]
-                                : nullptr;
   VfxSlot& sl = x.slots[s];
   std::uint8_t* mem = x.memory + std::size_t{s} * x.slotBytes;
   const std::uint32_t channels = vs.channels == 0u ? 1u : (vs.channels > kMaxChannels ? kMaxChannels : vs.channels);
@@ -153,14 +160,7 @@ std::uint32_t Acquire(Impl& im, SlotIndex v, std::uint32_t d, SlotIndex r, std::
     if (kinds[k] == 0u) continue;
     const std::uint32_t n = sl.stages;
     const snd_dsp_effect* plugin = PluginOf(im, kinds[k]);
-    VfxStageConfig sc{};
-    sc.kind = kinds[k];
-    if (ev != nullptr && ev->stage[k].kind == kinds[k]) {
-      sc = ev->stage[k];
-    } else {
-      DefaultStage(im, sc);
-      sc.paramCount = 0;
-    }
+    const VfxStageConfig& sc = ev->stage[k];
     const std::uint32_t count = StageCount(plugin, sc.kind, sc.paramCount);
     for (std::uint32_t i = 0; i < dsp::kMaxEffectParams; ++i) sl.base[n][i] = i < count ? ClampStage(plugin, sc.kind, i, sc.params[i]) : 0.0f;
     snd_effect_desc& dd = descs[n];
@@ -222,6 +222,7 @@ std::uint32_t Acquire(Impl& im, SlotIndex v, std::uint32_t d, SlotIndex r, std::
   for (std::uint32_t n = 0; n < live; ++n) {
     for (std::uint32_t i = 0; i < dsp::kMaxEffectParams; ++i) sl.end[n][i] = sl.base[n][i];
   }
+  sl.fresh = 1u;  // first block: start = end = the target (playback values included, no ramp)
   x.ofReal[r] = s + 1u;
   ++x.acquired;
   return s + 1u;
@@ -279,6 +280,15 @@ void ApplyVoiceFxParam(Impl& im, const cmd::SetParam& c) noexcept {
   if (static_cast<ParamScope>(c.scope) != ParamScope::Playback) return;
   const schema::TableRows& pr = im.tables.Playback.rows;
   if (!base::rows::IsCurrent(pr, c.target)) return;
+  // An [init] parameter of the stage's kind (in the playback's Event configuration) cannot
+  // change at run time: refused with a warning (object = playback).
+  if (const std::uint32_t ev = FindEventEntry(x, PlaybackEventId(im, c.target)); ev != kNoSlot) {
+    const Id kind = x.events[ev].stage[stage].kind;
+    if (kind != 0u && EffectParamIsInitOnly(PluginOf(im, kind), kind, k)) {
+      PostWarning(im, SND_ERR_INVALID_ARGUMENT, 0u, c.target.Value());
+      return;
+    }
+  }
   std::uint32_t e = kNoSlot, freeEntry = kNoSlot;
   for (std::uint32_t i = 0; i < x.settings; ++i) {
     VfxPlaybackEntry& pe = x.playbacks[i];
@@ -300,21 +310,6 @@ void ApplyVoiceFxParam(Impl& im, const cmd::SetParam& c) noexcept {
   }
   x.playbacks[e].mask[stage] |= 1u << k;
   x.playbacks[e].value[stage][k] = c.value;
-}
-
-void VfxCaptureVoice(Impl& im, SlotIndex v, std::uint32_t d, const VoiceStatic& vs) noexcept {
-  schema::Tables& t = im.tables;
-  VoiceFxPriv& x = im.vfx;
-  if (x.voiceEntry == nullptr) return;
-  x.voiceEntry[v] = kNoSlot;
-  if (x.chain == 0u) return;
-  const Id event = EventOfVoice(im, SND_R(Voice_clipRef)[d], vs);
-  if (event == 0u) return;
-  const std::uint32_t e = FindEventEntry(x, event);
-  if (e == kNoSlot) return;
-  x.voiceEntry[v] = e;
-  Id* kinds = x.voiceKinds + std::size_t{v} * kMaxVoiceEffectChain;
-  for (std::uint32_t k = 0; k < kMaxVoiceEffectChain; ++k) kinds[k] = k < x.chain ? x.events[e].stage[k].kind : 0u;
 }
 
 void VfxReleaseStale(Impl& im) noexcept {
@@ -341,7 +336,7 @@ void VfxPrepareItem(Impl& im, const source::RenderItem& it, ItemInput& in) noexc
   schema::Tables& t = im.tables;
   VoiceFxPriv& x = im.vfx;
   in.vfxSlot = 0u;
-  if (x.voiceEntry == nullptr || x.chain == 0u) return;
+  if (x.events == nullptr || x.chain == 0u) return;
   const SlotIndex r = it.realSlot;
   const SlotIndex v = it.voiceSlot;
   const std::uint32_t seq = SND_R(RealVoice_assign)[r].assignSeq;
@@ -369,15 +364,17 @@ void VfxPrepareItem(Impl& im, const source::RenderItem& it, ItemInput& in) noexc
     std::uint32_t mask = 0;
     for (std::uint32_t i = 0; i < sl.count[n]; ++i) {
       float target = sl.base[n][i];
-      if (pe != kNoSlot && (x.playbacks[pe].mask[cfgStage] & (1u << i)) != 0u) {
+      if (pe != kNoSlot && (x.playbacks[pe].mask[cfgStage] & (1u << i)) != 0u &&
+          !EffectParamIsInitOnly(sl.plugin[n], sl.kind[n], i)) {
         target = ClampStage(sl.plugin[n], sl.kind[n], i, x.playbacks[pe].value[cfgStage][i]);
       }
-      sl.start[n][i] = sl.end[n][i];
+      sl.start[n][i] = sl.fresh != 0u ? target : sl.end[n][i];
       sl.end[n][i] = target;
       if (target != sl.start[n][i]) mask |= i < 31u ? (1u << i) : (1u << 31);
     }
     sl.mask[n] = mask;
   }
+  sl.fresh = 0u;
   sl.rc = snd_render_context{};
   sl.rc.clock_sample = im.clock;
   sl.rc.playback = snd_playback_handle{pb != kNoSlot && base::rows::IsLive(t.Playback.rows, pb)

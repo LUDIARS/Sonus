@@ -817,6 +817,10 @@ EffectInstance* BusEffectInstance(Impl& im, SlotIndex busSlot, std::uint32_t eff
 // effects); parameters past the instance's count are ignored. Contributions
 // (EffectParamControl::contrib) add on top.
 void SetEffectParam(Impl& im, EffectInstance& e, std::uint32_t param, float value, float fadeSeconds) noexcept;
+// True for a standard effect's [init] parameter (kParamInitOnly): not changeable at run time.
+bool EffectParamIsInitOnly(const snd_dsp_effect* plugin, Id type, std::uint32_t param) noexcept;
+// ApplyCommands: event id of a live playback (0 if none).
+Id PlaybackEventId(Impl& im, HandleRef playback) noexcept;
 // Clamps `v` to parameter `param`'s range (standard effects; plugins: unchanged).
 float ClampEffectParam(const EffectInstance& e, std::uint32_t param, float v) noexcept;
 // Render (MixBuses): this block's ParamBlock values of `e` from its controls; returns the mask.
@@ -837,8 +841,6 @@ void StoreSidechainSources(Impl& im, SlotIndex s, std::uint32_t orderIndex, cons
 bool InitVoiceFx(Impl& im) noexcept;  // Create
 void ApplyVoiceFxSwitch(Impl& im, const cmd::SetSwitch& c) noexcept;  // SetSwitch variant 1
 void ApplyVoiceFxParam(Impl& im, const cmd::SetParam& c) noexcept;    // SetParam variant 1
-// Render, serial: the voice started this block (captures its Event's voice effects).
-void VfxCaptureVoice(Impl& im, SlotIndex voice, std::uint32_t dense, const VoiceStatic& vs) noexcept;
 // Render, serial, before the items: frees the slots of voices that left their real assignment.
 void VfxReleaseStale(Impl& im) noexcept;
 // Render, serial, per item: binds / keeps a slot and writes this block's parameters (in.vfxSlot).

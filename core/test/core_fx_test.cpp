@@ -916,3 +916,146 @@ SND_TEST(CoreFxParallel, LateChunkKeepsTheVoiceEffectState) {
   SND_CHECK_EQ(h.sys->GetVoiceFxStats().slotsInUse, 4u);
   if (calm == 2) SND_CHECK_NEAR(h.out[100 * 2], steady, 1e-4f);
 }
+
+// ===========================================================================
+// Re-check 1 (decisions of the acceptance side)
+// ===========================================================================
+SND_TEST(CoreFxRecheck, VoiceBackFromVirtualReadsTheEventSettingAsItIsNow) {
+  // A voice reads the Event's setting (kind and values together) whenever it takes a slot:
+  // virtual meanwhile, the setting changed from a 500 Hz lowpass to a 2 kHz highpass ->
+  // back to real it is high-passed (DC blocked), never "lowpass with highpass values".
+  snd_config cfg = VfxConfig();
+  cfg.max_real_voices = 1;
+  Harness h(cfg);
+  Warnings w;
+  CatchWarnings(h, &w);
+  h.Load("b", VfxBank().Build(HashId("B")));
+  SND_CHECK_EQ(h.sys->SetEventVoiceEffect(HashId("Dc"), 0, snd::dsp::kEffectLowpass, kLp500, 2), SND_OK);
+  h.Steps(1);
+  h.sys->Play(HashId("Dc"), snd_emitter_handle{0}, nullptr);
+  h.Steps(8);
+  SND_CHECK_NEAR(h.out[0], 0.1f * kCenter, 1e-3f);  // DC through the lowpass
+  const snd_playback_handle hi = h.sys->Play(HashId("Hi"), snd_emitter_handle{0}, nullptr);
+  h.Steps(8);
+  SND_CHECK_EQ(h.sys->GetVoiceFxStats().slotsInUse, 0u);
+  const float hp[2] = {2000.0f, 0.707f};
+  SND_CHECK_EQ(h.sys->SetEventVoiceEffect(HashId("Dc"), 0, snd::dsp::kEffectHighpass, hp, 2), SND_OK);
+  h.Steps(1);
+  h.sys->Stop(hi, 0.0f, nullptr);
+  h.Steps(40);
+  SND_CHECK_EQ(h.sys->GetVoiceFxStats().acquired, 2u);
+  SND_CHECK_EQ(h.sys->GetVoiceFxStats().slotsInUse, 1u);
+  SND_CHECK(std::fabs(h.out[0]) < 1e-3f);  // DC removed: the new kind with its own values
+  SND_CHECK_EQ(w.Count(SND_ERR_LIMIT_REACHED, SND_END_DETAIL_VOICE_EFFECT_SLOTS), 0u);
+}
+
+SND_TEST(CoreFxRecheck, StageRemovedWhileVirtualComesBackWithoutItAndWithoutAWarning) {
+  snd_config cfg = VfxConfig();
+  cfg.max_real_voices = 1;
+  Harness h(cfg);
+  Warnings w;
+  CatchWarnings(h, &w);
+  h.Load("b", VfxBank().Build(HashId("B")));
+  const float hp[2] = {2000.0f, 0.707f};
+  SND_CHECK_EQ(h.sys->SetEventVoiceEffect(HashId("Dc"), 0, snd::dsp::kEffectHighpass, hp, 2), SND_OK);
+  h.Steps(1);
+  h.sys->Play(HashId("Dc"), snd_emitter_handle{0}, nullptr);
+  h.Steps(8);
+  SND_CHECK(std::fabs(h.out[0]) < 1e-3f);  // high-passed DC
+  const snd_playback_handle hi = h.sys->Play(HashId("Hi"), snd_emitter_handle{0}, nullptr);
+  h.Steps(8);
+  SND_CHECK_EQ(h.sys->SetEventVoiceEffect(HashId("Dc"), 0, 0u, nullptr, 0), SND_OK);
+  h.Steps(1);
+  h.sys->Stop(hi, 0.0f, nullptr);
+  h.Steps(16);
+  // Back without the stage: dry DC, no slot, not counted as dry, no warning.
+  SND_CHECK_NEAR(h.out[0], 0.1f * kCenter, 1e-3f);
+  const snd::core::System::VoiceFxStats st = h.sys->GetVoiceFxStats();
+  SND_CHECK_EQ(st.acquired, 1u);
+  SND_CHECK_EQ(st.dry, 0u);
+  SND_CHECK_EQ(st.slotsInUse, 0u);
+  SND_CHECK_EQ(w.Count(SND_ERR_LIMIT_REACHED, SND_END_DETAIL_VOICE_EFFECT_SLOTS), 0u);
+}
+
+SND_TEST(CoreFxRecheck, PlaybackValueAppliesFromTheFirstBlockOfASlot) {
+  GainPlugin plug(HashId("test.gain"));
+  snd_config cfg = VfxConfig();
+  cfg.plugins.effects = &plug.table;
+  cfg.plugins.effect_count = 1;
+  Harness h(cfg);
+  h.Load("b", VfxBank().Build(HashId("B")));
+  const float one[1] = {1.0f};
+  SND_CHECK_EQ(h.sys->SetEventVoiceEffect(HashId("Dc"), 0, HashId("test.gain"), one, 1), SND_OK);
+  h.Steps(1);
+  plug.log.clear();
+  h.Clear();
+  const snd_playback_handle p = h.sys->Play(HashId("Dc"), snd_emitter_handle{0}, nullptr);
+  SND_CHECK_EQ(h.sys->SetPlaybackEffectParam(p, 0, 0, 0.25f), SND_OK);  // before its first block
+  h.Steps(2);
+  SND_REQUIRE(plug.log.size() == 2u);
+  SND_CHECK_NEAR(plug.log[0].start[0], 0.25f, 0.0f);  // no ramp from the Event's 1.0
+  SND_CHECK_NEAR(plug.log[0].end[0], 0.25f, 0.0f);
+  SND_CHECK_EQ(plug.log[0].mask, 0u);
+  SND_CHECK_NEAR(h.At(100, 0), 0.1f * 0.25f * kCenter, 1e-6f);
+}
+
+SND_TEST(CoreFxRecheck, EventVoiceEffectIsRecordedAllOrNothing) {
+  snd_config cfg = VfxConfig();
+  cfg.commands.arena_bytes = 1024;
+  cfg.commands.reserve_bytes = 512;
+  GainPlugin plug(HashId("test.gain"));
+  cfg.plugins.effects = &plug.table;
+  cfg.plugins.effect_count = 1;
+  // How many one-command calls fit an empty arena (normal + reserve)?
+  std::uint32_t capacity = 0;
+  {
+    Harness h(cfg);
+    h.Load("b", VfxBank().Build(HashId("B")));
+    while (capacity < 1000 && h.sys->SetEventVoiceEffect(HashId("Dry"), 0, snd::dsp::kEffectLowpass, nullptr, 0) == SND_OK) {
+      ++capacity;
+    }
+  }
+  SND_REQUIRE(capacity > 20u);
+  Harness h(cfg);
+  h.Load("b", VfxBank().Build(HashId("B")));
+  for (std::uint32_t i = 0; i + 3u < capacity; ++i) {
+    SND_CHECK_EQ(h.sys->SetEventVoiceEffect(HashId("Dry"), 0, snd::dsp::kEffectLowpass, nullptr, 0), SND_OK);
+  }
+  // Room for 3 more commands; this call needs 1 + 16: refused, and nothing of it recorded.
+  float g[16] = {0.5f};
+  SND_CHECK_EQ(h.sys->SetEventVoiceEffect(HashId("Fx"), 0, HashId("test.gain"), g, 16), SND_ERR_COMMAND_BUFFER_FULL);
+  // The room left is still there (nothing was written).
+  for (int i = 0; i < 3; ++i) {
+    SND_CHECK_EQ(h.sys->SetEventVoiceEffect(HashId("Dry"), 0, snd::dsp::kEffectLowpass, nullptr, 0), SND_OK);
+  }
+  h.Steps(2);
+  h.sys->Play(HashId("Fx"), snd_emitter_handle{0}, nullptr);
+  h.Steps(4);
+  SND_CHECK_EQ(plug.inits, 0u);  // "Fx" got no setting at all
+  SND_CHECK_EQ(h.sys->GetVoiceFxStats().acquired, 0u);
+}
+
+SND_TEST(CoreFxRecheck, InitOnlyParametersAreRefusedAtRunTime) {
+  Harness h(VfxConfig());
+  Warnings w;
+  CatchWarnings(h, &w);
+  TestBank b = VfxBank();
+  b.effects.push_back(TEffect{snd::dsp::kEffectEcho, {10.0f, 0.5f, 1.0f, 1.0f, 20.0f}});
+  b.buses[0].effects.assign(1, 0u);
+  h.Load("b", b.Build(HashId("B")));
+  // Bus: Echo MaxDelay (4) is [init]: warned and dropped; Delay (0) is accepted.
+  SND_CHECK_EQ(h.sys->SetEffectParam(HashId("Sfx"), 0, 4, 500.0f, 0.0f), SND_OK);
+  SND_CHECK_EQ(h.sys->SetEffectParam(HashId("Sfx"), 0, 0, 15.0f, 0.0f), SND_OK);
+  // Voice: the event's echo with MaxDelay 50 ms (valid as a setting, read at init).
+  const float echo[5] = {20.0f, 0.5f, 1.0f, 1.0f, 50.0f};
+  SND_CHECK_EQ(h.sys->SetEventVoiceEffect(HashId("Imp"), 0, snd::dsp::kEffectEcho, echo, 5), SND_OK);
+  h.Steps(2);
+  SND_CHECK_EQ(w.Count(SND_ERR_INVALID_ARGUMENT, 0u), 1u);
+  const snd_playback_handle p = h.sys->Play(HashId("Imp"), snd_emitter_handle{0}, nullptr);
+  h.Steps(1);
+  SND_CHECK_EQ(h.sys->GetVoiceFxStats().acquired, 1u);  // 50 ms fits the slot
+  SND_CHECK_EQ(h.sys->SetPlaybackEffectParam(p, 0, 4, 1000.0f), SND_OK);
+  SND_CHECK_EQ(h.sys->SetPlaybackEffectParam(p, 0, 0, 10.0f), SND_OK);
+  h.Steps(2);
+  SND_CHECK_EQ(w.Count(SND_ERR_INVALID_ARGUMENT, 0u), 2u);  // the playback's MaxDelay too
+}

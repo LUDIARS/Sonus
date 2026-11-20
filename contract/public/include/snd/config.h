@@ -124,10 +124,12 @@ typedef uint32_t snd_output_kind;
  *    max_real_voices + fade_reserve_voices). A voice without a free slot plays dry.
  *  - voice_effect_chain: stages per voice, 0..4 (above 4: SND_ERR_INVALID_ARGUMENT).
  *    0 disables the configuration API (snd_set_event_voice_effect: INVALID_ARGUMENT).
- *  - voice_effect_bytes: effect state per voice (all its stages, 64-byte granularity),
- *    at most 64 MiB. The default holds a 48 kHz reverb (about 132 KiB) and a filter.
- *  - voice_effect_settings: entries of the Event configuration table and of the
- *    per-playback value table, 1..65535. */
+ *  - voice_effect_bytes: effect state per voice (all its stages, rounded up to 64 bytes),
+ *    0..64 MiB (above: SND_ERR_INVALID_ARGUMENT; 0 = no slot, every voice dry). The default
+ *    holds a 48 kHz reverb (about 132 KiB) and a filter.
+ *  - voice_effect_settings: entries of the Event setting table and of the per-playback
+ *    value table, 1..65535 (0 or above: SND_ERR_INVALID_ARGUMENT). A setting or value that
+ *    finds its table full is dropped when applied, with a warning SND_ERR_LIMIT_REACHED. */
 #define SND_CONFIG_TOP_S3_VOICE_FX(X)                                                             \
   X(max_voice_effects, maxVoiceEffects, uint32_t, uint32_t, 4u)                                   \
   X(voice_effect_chain, voiceEffectChain, uint32_t, uint32_t, 2u)                                 \
