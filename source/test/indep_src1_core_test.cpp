@@ -451,3 +451,63 @@ SND_TEST(IndepSrc1Core, ThreadedRenderWithAWriterThread) {
   const snd::source::InputPortStats s = port->Stats();
   SND_CHECK_EQ(s.writtenFrames, s.readFrames + s.skippedFrames + port->Buffered());
 }
+
+// D-194 "live" through core: the delay between the frame the game writes and the frame
+// heard stays small (the voice reads what was written just before the block) in steady
+// state, after a pause / resume (the backlog of the pause is not played later) and after a
+// return from virtual. The delay is measured from the phase of a 5 Hz sine (one period =
+// 9600 frames, so the measurement is unambiguous up to that).
+SND_TEST(IndepSrc1Core, InputDelayStaysLiveAcrossPauseAndVirtual) {
+  Built b = BuildBank("live");
+  SND_REQUIRE_MSG(b.ok, "%s", b.diag.c_str());
+  CoreRig r(2, 16);
+  SND_REQUIRE(r.Ok());
+  SND_REQUIRE(r.Load(b));
+  snd::source::InputPort* port = r.runtime.InputPortOf(1);
+  SND_REQUIRE(port != nullptr);
+  snd_input_desc d{};
+  d.device_index = 1;
+  d.channels = 1;
+  const snd_playback_handle h = r.sys->PlayInput(&d, snd_emitter_handle{0}, nullptr);
+  r.Step();  // the start (live from here)
+  r.all.clear();
+  std::uint64_t n = 0;  // input frame written next == output frame rendered next (zero delay)
+  std::vector<float> chunk(256);
+  const float* ch[1] = {chunk.data()};
+  auto step = [&]() {
+    for (float& v : chunk) v = static_cast<float>(0.5 * std::sin(isrc::kTwoPi * double(n++) / 9600.0));
+    port->Write(ch, 1, 256);
+    r.Step();
+  };
+  // Delay in frames of the last 9600 output frames against the written sine.
+  auto delay = [&]() {
+    const std::vector<float> x = r.Channel(0);
+    const std::size_t from = x.size() - 9600;
+    const std::complex<double> c = isrc::Coef(x, from, 9600, 1.0);
+    std::vector<float> ref(9600);
+    for (std::size_t i = 0; i < 9600; ++i) ref[i] = static_cast<float>(std::sin(isrc::kTwoPi * double(from + i) / 9600.0));
+    const std::complex<double> c0 = isrc::Coef(ref, 0, 9600, 1.0);
+    double lag = -std::remainder(std::arg(c) - std::arg(c0), isrc::kTwoPi) * 9600.0 / isrc::kTwoPi;
+    return lag;
+  };
+  for (int i = 0; i < 80; ++i) step();
+  const double steady = delay();
+  r.sys->Pause(h, 0.0f);
+  for (int i = 0; i < 30; ++i) step();
+  r.sys->ResumePlayback(h, 0.0f);
+  for (int i = 0; i < 80; ++i) step();
+  const double afterPause = delay();
+  const snd_playback_handle o1 = r.Play("Hi1000");
+  const snd_playback_handle o2 = r.Play("Hi1500");
+  for (int i = 0; i < 30; ++i) step();
+  r.sys->Stop(o1, 0.0f, nullptr);
+  r.sys->Stop(o2, 0.0f, nullptr);
+  for (int i = 0; i < 80; ++i) step();
+  const double afterVirtual = delay();
+  std::printf("input delay through core: steady %.1f, after pause %.1f, after virtual %.1f frames\n", steady,
+              afterPause, afterVirtual);
+  SND_CHECK_MSG(steady >= 0.0 && steady < 300.0, "steady delay %.1f", steady);
+  SND_CHECK_MSG(std::fabs(afterPause - steady) < 64.0, "after pause %.1f vs %.1f", afterPause, steady);
+  SND_CHECK_MSG(std::fabs(afterVirtual - steady) < 64.0, "after virtual %.1f vs %.1f", afterVirtual, steady);
+  SND_CHECK(r.EndOf(h) == nullptr);
+}

@@ -44,6 +44,10 @@ SND_TEST(IndepSrc1Api, WriteInputEntryRules) {
   SND_CHECK_EQ(snd_write_input(r.sys, ports - 1u, ch, 9, 64), 64u);
   SND_CHECK_EQ(rt->InputPortOf(ports - 1u)->Buffered(), 64u);
   SND_CHECK_EQ(rt->InputPortOf(0)->Buffered(), 0u);
+  // The C++ wrapper (D-195) is the same function.
+  SND_CHECK_EQ(snd::WriteInput(r.sys, 0, ch, 2, 32), 32u);
+  SND_CHECK_EQ(snd::WriteInput(r.sys, ports, ch, 2, 32), 0u);
+  SND_CHECK_EQ(rt->InputPortOf(0)->Buffered(), 32u);
 }
 
 // A writer thread feeds port 0 with a 600 Hz sine at about the real rate while the audio
