@@ -134,11 +134,28 @@ UI に依存せず使えるモデル（`Sonus::tool_core` だけで動く）:
 
 ## 回した構成と結果
 
-（下に追記）
+すべて -j2、ビルドディレクトリはスクラッチパッドの `model/` の下（終わったら消した）。警告ゼロ（-Werror）。
+
+| 構成 | コミット | 実行したテスト | 結果 |
+| --- | --- | --- | --- |
+| 8: `-DSND_BUILD_TOOL_CORE=ON`（gcc Debug） | 9efbb46 | 全部（ctest） | 226 件中 226 件通過（`platform_device_play_test` は既存の Skipped） |
+| 2: clang Debug ＋ `SND_BUILD_TOOL_CORE=ON` | af8f4e7 | `-R 'tool\|buildtool'` | 20 件全部通過 |
+| 3: `SND_SANITIZE=address,undefined` ＋ `SND_BUILD_TOOL_CORE=ON` | af8f4e7 | `-R 'tool\|buildtool'` | 20 件全部通過 |
+| 5: Release ＋ `SND_BUILD_TOOL_CORE=ON` | af8f4e7 | `-R 'tool\|buildtool'` | 20 件全部通過 |
+| 1: gcc Debug（ツールなしの通常構成） | af8f4e7 | `-R 'buildtool\|build_pipeline\|integration'` | 40 件全部通過 |
+| 9: `SND_BUILD_TOOL=ON`（Tela、`$S/tela-prefix`） | af8f4e7 | `-R 'tool'` | 34 件全部通過（既存の UI テストを含む） |
+| 6: `SND_BUILD_TESTS=OFF` Release | af8f4e7 | ビルドのみ | 通過 |
+| 7: `SND_CODEC_OPUS=OFF` | af8f4e7 | ビルドのみ | 通過 |
+| MinGW `-fsyntax-only -Werror` | af8f4e7 | 新しい・変えた .cpp（tool/src、buildtool/src/patch.cpp、組 M のテスト全部） | 通過。例外: `buildtool/src/build.cpp`・`project.cpp` は、変えていない `detail/file_io.hpp`（`fopen(path.c_str())`）の既存のエラーで止まる |
+
+- 構成 8 の全テストは 9efbb46 で回した。af8f4e7 との差は文書と `document_test.cpp` の書式文字列 1 か所（MinGW 対策）だけで、
+  af8f4e7 では構成 2・3・5 で組 M のテストを含む tool / buildtool のテストを回している。af8f4e7 での構成 8 の全テストは回していない。
+- TSan（構成 4）は回していない（組 M のモデルはスレッドを使わない）。並行性の繰り返しテストも対象が無いので回していない。
 
 ## 未検証の箇所
 
-- Windows / macOS での実行（MinGW の構文検査だけ）。`buildtool/src/detail/file_io.hpp`（変えていない）が MinGW で通らないため、
+- TSan の構成（4）は回していない。
+- Windows / macOS での実行（MinGW の構文検査だけ。テストの `doc_fixture.hpp` は `getpid` を使うが MinGW の構文検査は通った）。`buildtool/src/detail/file_io.hpp`（変えていない）が MinGW で通らないため、
   それを含む `build.cpp` / `project.cpp` の MinGW 検査は既存のエラーで止まる（`std::fopen(path.c_str())` が wchar_t）。
 - 文書の保存のファイル操作は 1 段（一時ファイルと rename を使っていない）。途中で失敗すると一部だけ書かれる。
 - `SpatialPreview` の複数リスナー（ランタイムも最も近いリスナーだけ）と Doppler（ランタイム未実装）。
