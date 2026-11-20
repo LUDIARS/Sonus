@@ -130,8 +130,8 @@
 **clip**: `asset` / `event`（入れ子。同じバンクの Event であること。循環はビルドエラー）/ `synth` のどれか 1 つと、
 `startMs`, `weight`, `volumeDb`, `pitchCents`, `random: {volumeDb, pitchCents, pan, startMs, filterHz}`, `switchValue`（名前 → `snd_hash_id`、または整数）,
 `layer: [min, max]`, `fadeInMs`, `fadeOutMs`, `loopCount`（0 = 無限）。
-`synth`: `{kind: oscillator|noise|granular|patch|wavetable, waveform: sine|saw|square|triangle|pulse, frequencyHz, duty, noiseColor: white|pink|brown, asset, channels}`
-（`patch` は段階 6 まで不可）。
+`synth`: `{kind: oscillator|noise|granular|patch|wavetable, waveform: sine|saw|square|triangle|pulse, frequencyHz, duty, noiseColor: white|pink|brown, asset, channels, patch}`
+（`patch`: `kind` が `patch` のときのパッチの参照（必須。無ければエラー）。バンクへの出力は仮の任意チャンク `XPCH`、bank-format.md §9）。
 
 **action**: `{timeMs, action: play|stop|setParameter|applySnapshot, target（Event / parameter / snapshot の参照）, value}`。
 
@@ -184,10 +184,63 @@ event の `music`:
 
 材質番号は `materials` の順。組の上書きは `table[min(a,b) * N + max(a,b)]`。Event は ID（`snd_hash_id`）で入る。
 
+### patch → `XPCH`（仮、bank-format.md §9。設計書 5、5.1）
+
+ツールで組む小さな合成グラフ。ノードの種類・入力・パラメータの表は `buildtool/include/snd/buildtool/patch.hpp`（ビルドツールと
+ツールのパッチエディタが共有する）。
+
+```json
+{"type": "patch", "name": "Patch/Laser",
+ "nodes": [{"id": "osc", "kind": "oscillator", "params": {"waveform": "saw", "frequencyHz": 220}, "position": [100, 0]},
+           {"id": "env", "kind": "adsr", "params": {"attackMs": 2, "releaseMs": 300}},
+           {"id": "vca", "kind": "amp"},
+           {"id": "out", "kind": "output"}],
+ "connections": [{"from": "osc", "to": "vca", "input": "in"}, {"from": "env", "to": "vca", "input": "gain"},
+                 {"from": "vca", "to": "out"}],
+ "output": "out"}
+```
+
+| メンバ | 内容 |
+| --- | --- |
+| `nodes` | ノードの配列（1〜32 個）。`id`（パッチの中で一意）、`kind`、`params`（種類のパラメータ。数値は範囲外なら警告して丸める、列挙は名前）、`position`（`[x, y]`、エディタの画面上の位置。ビルドは使わない） |
+| `connections` | `{from, to, input}`。`from` のノードの出力を `to` のノードの入力 `input`（省略は最初の入力）へ。信号の種類（audio / control）が合うこと、1 つの入力に 1 本、循環は不可 |
+| `output` | 出力ノードの `id`（任意。書くなら `output` 種類のノード）。出力ノードはちょうど 1 個 |
+
+| `kind` | 出力 | 入力 | パラメータ |
+| --- | --- | --- | --- |
+| `oscillator` | audio | `pitch`, `amp`（control） | `waveform`（sine/saw/square/triangle/pulse）, `frequencyHz`, `duty` |
+| `noise` | audio | `amp`（control） | `color`（white/pink/brown）, `seed` |
+| `filter` | audio | `in`（audio、必須）, `cutoff`（control） | `mode`（lowpass/highpass/bandpass）, `cutoffHz`, `q` |
+| `amp` | audio | `in`（audio、必須）, `gain`（control） | `gainDb` |
+| `mix` | audio | `a`, `b`（audio、必須） | `levelADb`, `levelBDb` |
+| `adsr` | control | — | `attackMs`, `decayMs`, `sustain`, `releaseMs` |
+| `lfo` | control | — | `waveform`, `rateHz`, `depth` |
+| `random` | control | — | `rateHz`, `min`, `max` |
+| `parameterCurve` | control | — | `parameter`（パラメータの参照）, `points`（`[[x, y], ...]`、2〜8 点、x 昇順） |
+| `envelopeFollower` | control | `in`（audio、必須） | `attackMs`, `releaseMs` |
+| `output` | — | `in`（audio、必須） | — |
+
+- 出力ノードに届かないノードは警告し、プログラムに入れない。ビルドは依存順の配列（同順位はファイルでの順）に変換する（5.1）。
+- パッチは共有オブジェクト。それを使う Event のバンクに入る（ID 表の種類名は `patch`）。
+- ランタイムの Patch ソースはまだ無い（セッション D）。バンクには仮の `XPCH` で入り、鳴らない。
+
+### ツールが書くときの決まり（オーサリングツール、段階5）
+
+読むだけの buildtool には関係しない。ツール（`tool/include/snd/tool/document.hpp`）が守る。
+
+- 変えていないファイルは書き直さない。変えたファイルは 2 スペースの字下げ・メンバは元の順・末尾に改行の形で書く。
+  ツールが足すメンバは本書の表の順で、その前に来るべきメンバの後ろに入れる。数値は値が往復で変わらない最短の表記。
+- 新しいオブジェクトのファイル: `<種類のフォルダ>/<名前>.json`（`events`, `buses`, `categories`, `parameters`, `snapshots`,
+  `voiceLimitGroups`, `duckings`, `assets`, `segments`, `playlists`, `materials`, `patches`, `banks`、project は `project.json`）。
+  名前の `/` はサブフォルダ、ファイル名に使えない文字は `_`、`.` で始まる部分は先頭に `_`、重なれば `_2`, `_3` …（大文字小文字を区別しない）。
+- 参照は GUID で書く。リネームは旧名を `aliases` に残せる（10.1）。旧名で書かれた参照は GUID に書き換える（ビルドは別名を解決しない）。
+  ファイルが旧名の規則どおりの場所にあれば新しい名前の場所へ移す。
+- 削除はファイルを消す。まだ参照されているオブジェクトの削除は、明示しない限り断る。
+
 ## 3. バンクへの割り当て
 
 - `bank` を持つ event / snapshot / ducking / materialTable はそのバンクに入る。
-- バス・カテゴリ・ボイスリミットグループ・パラメータ・アセット・音楽オブジェクトは、そのバンクの Event 等が参照するものが
+- バス・カテゴリ・ボイスリミットグループ・パラメータ・アセット・音楽オブジェクト・パッチは、そのバンクの Event 等が参照するものが
   **そのバンクに複製**される（形式 1.0 の行参照は同じバンク内に限るため）。バスは親とセンド先まで閉包をとる。
   同じ ID の行が複数バンクに現れうるので、ランタイム（core）は ID で同一視する。
 - `bank` を持つオブジェクトを別のバンクから使うには、使う側がそのバンクに（推移的に）依存していること。違反はエラー。
