@@ -126,6 +126,15 @@ constexpr EffectParamInfo kSurroundParams[] = {
     {"RearLowpassHz", "Hz", 500.0f, 20000.0f, 7000.0f, 0},
     {"CenterDb", "dB", -60.0f, 0.0f, -60.0f, 0},
 };
+constexpr EffectParamInfo kConvolutionParams[] = {  // convolution.hpp
+    {"IrSlot", "", 0.0f, 1024.0f, 0.0f, kInt},
+    {"DryMix", "", 0.0f, 1.0f, 0.0f, 0},
+    {"WetMix", "", 0.0f, 1.0f, 1.0f, 0},
+    {"WetGainDb", "dB", -48.0f, 24.0f, 0.0f, 0},
+    {"PartitionFrames", "", 0.0f, 4096.0f, 0.0f, kInit | kInt},
+    {"ZeroLatency", "", 0.0f, 1.0f, 1.0f, kInit | kInt},
+    {"MaxIrMs", "ms", 10.0f, 10000.0f, 2000.0f, kInit},
+};
 
 #define SND_FX_INFO(Kind, Id, Name, Params, Flags) \
   EffectInfo { Id, EffectKind::Kind, Name, sizeof(Params) / sizeof(Params[0]), Params, Flags }
@@ -146,6 +155,8 @@ constexpr EffectInfo kInfos[] = {
     SND_FX_INFO(PitchShifter, kEffectPitchShifter, "snd.fx.pitchshift", kPitchParams, 0),
     SND_FX_INFO(Normalize, kEffectNormalize, "snd.fx.normalize", kNormalizeParams, 0),
     SND_FX_INFO(Surround, kEffectSurround, "snd.fx.surround", kSurroundParams, 0),
+    SND_FX_INFO(Convolution, kEffectConvolution, "snd.fx.convolution", kConvolutionParams,
+                kEffectHasLatency),
 };
 #undef SND_FX_INFO
 static_assert(sizeof(kInfos) / sizeof(kInfos[0]) == static_cast<std::size_t>(EffectKind::Count));
@@ -178,6 +189,7 @@ constexpr KindOps kOps[] = {
     SND_FX_OPS(Compressor), SND_FX_OPS(Limiter),    SND_FX_OPS(ParamEq),
     SND_FX_OPS(Lowpass),    SND_FX_OPS(Highpass),   SND_FX_OPS(PitchShifter),
     SND_FX_OPS(Normalize),  SND_FX_OPS(Surround),
+    SND_FX_OPS(Convolution),
 };
 #undef SND_FX_OPS
 
@@ -241,6 +253,7 @@ void ProcessKind(EffectKind kind, void* state, const FxIo& io, const FxParams& p
     case EffectKind::PitchShifter: fx::PitchShifterProcess(state, io, p); break;
     case EffectKind::Normalize: fx::NormalizeProcess(state, io, p); break;
     case EffectKind::Surround: fx::SurroundProcess(state, io, p); break;
+    case EffectKind::Convolution: fx::ConvolutionProcess(state, io, p); break;
     case EffectKind::Count: break;
   }
 }
@@ -436,6 +449,7 @@ void EffectProcessBatch(EffectKind kind, const EffectBatchItem* items,
     SND_FX_BATCH(PitchShifter)
     SND_FX_BATCH(Normalize)
     SND_FX_BATCH(Surround)
+    SND_FX_BATCH(Convolution)
 #undef SND_FX_BATCH
     case EffectKind::Count: break;
   }
