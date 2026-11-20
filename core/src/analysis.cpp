@@ -82,7 +82,9 @@ bool InitAnalysis(Impl& im) noexcept {
   return true;
 }
 
-// Render (MixBuses, before the buses): frees the meters of buses that are gone.
+// Render (MixBuses, before the buses): frees the meters of buses that are gone, and gives
+// the free meters to kBusMeter buses without one in the order of the bus rows (the order
+// of registration), whether they sound or not.
 void AnalysisMaintain(Impl& im) noexcept {
   RenderPriv& rd = im.rd;
   const schema::TableRows& br = im.tables.Bus.rows;
@@ -94,6 +96,20 @@ void AnalysisMaintain(Impl& im) noexcept {
       ms.bus = kNoSlot;
     }
   }
+  std::uint32_t next = 1;
+  for (std::uint32_t d = 0; d < br.count; ++d) {
+    const SlotIndex bus = base::rows::SlotAt(br, d);
+    if (bus >= im.cfg.busCap || bus == rd.masterSlot || (im.busDefs[bus].flags & bf::kBusMeter) == 0u) continue;
+    const std::uint32_t have = rd.busMeter[bus];
+    if (have != kNoSlot && rd.meters[have].bus == bus && rd.meters[have].busGen == br.generation[bus]) continue;
+    while (next < rd.meterCount && rd.meters[next].bus != kNoSlot) ++next;
+    if (next >= rd.meterCount) break;  // every meter is taken: this bus has none
+    rd.busMeter[bus] = next;
+    const std::uint32_t ch = im.busDefs[bus].channels == 0u || im.busDefs[bus].channels > kMaxChannels
+                                 ? im.cfg.outChannels
+                                 : im.busDefs[bus].channels;
+    ResetMeter(im, rd.meters[next], bus, br.generation[bus], im.busDefs[bus].id, ch);
+  }
 }
 
 // Render (MixBuses): after the fader, with the peak / RMS meters of the bus.
@@ -102,17 +118,9 @@ void AnalysisMixBus(Impl& im, SlotIndex bus, std::uint32_t d, const float* const
   RenderPriv& rd = im.rd;
   const schema::TableRows& br = im.tables.Bus.rows;
   if (bus >= im.cfg.busCap || bus == rd.masterSlot) return;  // the master is meter 0 (the output)
-  std::uint32_t m = rd.busMeter[bus];
-  if (m != kNoSlot && (rd.meters[m].bus != bus || rd.meters[m].busGen != br.generation[bus])) m = kNoSlot;
-  if (m == kNoSlot) {
-    if ((im.busDefs[bus].flags & bf::kBusMeter) == 0u) return;
-    for (std::uint32_t k = 1; k < rd.meterCount && m == kNoSlot; ++k) {
-      if (rd.meters[k].bus == kNoSlot) m = k;
-    }
-    if (m == kNoSlot) return;  // every meter is taken: this bus has none
-    rd.busMeter[bus] = m;
-    ResetMeter(im, rd.meters[m], bus, br.generation[bus], im.busDefs[bus].id, channels);
-  }
+  const std::uint32_t m = rd.busMeter[bus];
+  if (m == kNoSlot || rd.meters[m].bus != bus || rd.meters[m].busGen != br.generation[bus]) return;  // no meter
+  (void)channels;
   MeterSlot& ms = rd.meters[m];
   dsp::LoudnessMeterProcess(*ms.loudness, chans, im.cfg.blockFrames);
   const AnalysisShared& a = *rd.analysis;

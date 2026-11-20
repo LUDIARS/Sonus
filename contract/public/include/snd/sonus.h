@@ -367,7 +367,10 @@ SND_API snd_result SND_CALL snd_get_position(const snd_system* sys, snd_playback
 SND_API snd_result SND_CALL snd_get_transport_position(const snd_system* sys,
                                                        snd_transport_handle transport,
                                                        snd_position* out);
-/* bus SND_ID_NONE = master. */
+/* bus SND_ID_NONE = master. Loudness (loudness_short / loudness_integrated) is measured for
+ * the output (master) and for buses with BUSS.flags kBusMeter (a fixed number of them, in
+ * the order of their bus rows); other buses report NaN there (not measured; measured
+ * silence reads -200 LUFS). Peak and RMS are measured for every bus. */
 SND_API snd_result SND_CALL snd_get_meter(const snd_system* sys, snd_id bus, snd_meter* out);
 SND_API snd_result SND_CALL snd_get_stats(const snd_system* sys, snd_stats* out);
 
@@ -390,8 +393,8 @@ SND_API snd_playback_handle SND_CALL snd_play_fade(snd_system* sys, snd_id event
  * Returns SND_OK; SND_ERR_INVALID_ARGUMENT (NULL sys / out, bin_count 0);
  * SND_ERR_NOT_FOUND (unknown bus); SND_ERR_UNSUPPORTED (bus without a meter, or channel
  * not below the bus's channels); SND_ERR_NOT_READY (no data yet: the spectrum is kept up to
- * date only while it is read - the first call after ~1 s without one returns NOT_READY and
- * the data follows from the next snd_update()). Thread: any. */
+ * date only while it is read - the first call after ~1 s without one returns NOT_READY, and
+ * the data is there from the first snd_update() that follows a rendered block). Thread: any. */
 SND_API snd_result SND_CALL snd_get_spectrum(const snd_system* sys, snd_id bus, uint32_t channel,
                                              float* out_magnitudes, uint32_t bin_count);
 

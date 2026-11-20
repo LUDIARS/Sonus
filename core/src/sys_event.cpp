@@ -459,6 +459,10 @@ bool CreateVoice(Ctx& c, StartContext& sc, SourceKind kind, const void* params, 
   // D-140: the asset's own return mode (ASST.flags, applied by the source) wins; without
   // one the Event's EVNT.virtualReturn applies (SelectVoices / Render / RunEventLogic).
   vs.virtualReturn = (asset != nullptr && asset->virtualReturn != 0u) || sc.virtualReturn > 2u ? 0u : sc.virtualReturn;
+  // D-146: snd_play_fade's fade-in, per voice from its start frame (Render, sample by sample).
+  vs.fadeInFrames = sc.playback < im.cfg.maxPlaybacks
+                        ? static_cast<std::uint32_t>(im.ap.playbackFadeIn[sc.playback] * static_cast<float>(im.cfg.sampleRate) + 0.5f)
+                        : 0u;
   vs.nextInPlayback = Priv(im, sc.playback).voiceListHead;
   Priv(im, sc.playback).voiceListHead = v;
   const std::uint32_t pd = base::rows::DenseOf(t.Playback.rows, sc.playback);
@@ -651,7 +655,13 @@ void StartClip(Ctx& c, StartContext& sc, const BankRecord& r, std::uint32_t clip
     child.virtualReturn = v.Column<bk::col::EVNT_virtualReturn>()[target];
     child.gainOffsetDb = gainDb;
     child.pitchOffsetCents = pitch;
-    StartEventTracks(c, child, r, target, kNoSlot, depth + 1u, rng);
+    // Its own random sequence: the playback's seed mixed with the nested event's id (two
+    // nested events of one play do not draw the same numbers; the top event is unchanged).
+    schema::Tables& t = c.t;
+    const std::uint32_t pd = base::rows::DenseOf(t.Playback.rows, sc.playback);
+    std::uint32_t childRng =
+        base::MixU32((pd != kNoSlot ? SND_R(Playback_seed)[pd] : 0u) ^ v.Column<bk::col::EVNT_id>()[target] ^ (depth + 1u));
+    StartEventTracks(c, child, r, target, kNoSlot, depth + 1u, childRng);
     sc.created = child.created;
     if (child.failDetail != SND_END_DETAIL_NONE) sc.failDetail = child.failDetail;
     if (child.needsPriming != 0u) sc.needsPriming = child.needsPriming;
@@ -918,116 +928,280 @@ void BeginStop(Ctx& c, std::uint32_t d, float fadeSeconds, bool discard, ClockSa
   }
 }
 
-void Defer(Impl& im, const Deferred& df) noexcept {
-  if (im.ev.deferredCount < im.ev.deferredCap) im.ev.deferred[im.ev.deferredCount++] = df;
+// D-145: a full queue drops the action with one LIMIT_REACHED warning per block.
+void ActionLimit(Impl& im, HandleRef parent) noexcept {
+  if (im.ev.actionWarned != 0u) return;
+  im.ev.actionWarned = 1u;
+  PostWarning(im, SND_ERR_LIMIT_REACHED, 0u, parent.Value());
 }
 
-// Action tracks (4.2, D-145): actions whose playback time t falls in [fromFrame, toFrame)
-// - one block ahead of the playback - go to the next block's ApplyCommands. `playedEnd` is
-// the playback time at blockEnd: an action at t >= playedEnd happens at the clock
-// blockEnd + (t - playedEnd), i.e. inside the next block, where a Play starts at that very
-// sample (CLOCK_SAMPLE) and a stop / parameter / snapshot applies. An action already
-// behind (t < playedEnd: the start block of a scheduled play) applies at the next block's
-// start. Parameter actions write the playback's own scope (ACTN has no scope column).
-void RunActions(Ctx& c, std::uint32_t d, std::uint64_t fromFrame, std::uint64_t toFrame, std::uint64_t playedEnd,
-                ClockSample blockEnd) noexcept {
+bool Defer(Impl& im, const Deferred& df, HandleRef parent = HandleRef{}) noexcept {
+  if (im.ev.deferredCount < im.ev.deferredCap) {
+    im.ev.deferred[im.ev.deferredCount++] = df;
+    return true;
+  }
+  if (parent.generation != 0u) ActionLimit(im, parent);
+  return false;
+}
+
+// --- Action tracks (4.2, D-145) ---------------------------------------------------------
+// The time of an action is the parent's track time (Priv.trackTime: frames played, not
+// advancing while the parent pauses or stops). RunEventLogic takes the actions of the
+// next block ahead (the playback rows of their children are created by ApplyCommands):
+//  - Play: the child is created at the next block's ApplyCommands with a CLOCK_SAMPLE
+//    start at the action's clock (sample accurate);
+//  - StopEvent: at its block, the target playbacks stop from the action's clock (a timed
+//    stop, like snd_stop with a clock);
+//  - SetParam (the parent's own playback scope, ACTN has no scope column) and
+//    ApplySnapshot (at once, ACTN has no time column): block values, so they apply from the
+//    first block that starts at or after the action's clock, never before.
+// The taken actions wait in EventPriv.pending until their block; if the parent pauses,
+// stops or does not start before then, they are dropped (a pause rolls the parent back so
+// they come again after the resume) and the children are cancelled (kPbCancelled).
+
+// 0 = the parent's actions may happen, 1 = paused (they come again later), 2 = stopped / gone.
+std::uint32_t ParentState(Ctx& c, HandleRef parent, ClockSample at) noexcept {
+  Impl& im = c.im;
+  schema::Tables& t = c.t;
+  const std::uint32_t d = base::rows::DenseOf(t.Playback.rows, parent);
+  if (d == kNoSlot) return 2u;
+  const PlaybackPriv& pp = Priv(im, parent.slot);
+  if ((pp.flags & (kPbStopping | kPbEndPending | kPbCancelled)) != 0u) return 2u;
+  if (pp.stopClock != 0u && pp.stopClock <= at) return 2u;
+  const PlaybackRequest& req = SND_R(Playback_request)[d];
+  const bool fresh = req.seq != SND_W(Playback_logic)[d].handledRequestSeq;
+  if (fresh && (req.flags & (kRequestStop | kRequestDiscard)) != 0u) return 2u;
+  if ((pp.flags & (kPbPausedUser | kPbPausedCategory | kPbPausedState)) != 0u) return 1u;
+  if (fresh && (req.flags & kRequestPause) != 0u) return 1u;
+  if (!CategoryIgnoresPause(im, pp.categorySlot)) {
+    const EventRef ref = SND_R(Playback_eventRef)[d];
+    const BankRecord* br = RegisteredBank(im, ref.bankSlot);
+    const bool eventIgnores =
+        br != nullptr && (br->view->Column<bk::col::EVNT_flags>()[ref.eventIndex] & bf::kEventIgnorePause) != 0u;
+    if (!eventIgnores && CategoryPaused(im, pp.categorySlot)) return 1u;
+  }
+  return 0u;
+}
+
+void AddPending(Impl& im, const ActionPending& e) noexcept {
+  if (im.ev.pendingCount < im.ev.deferredCap) {
+    im.ev.pending[im.ev.pendingCount++] = e;
+  } else {
+    ActionLimit(im, e.parent);
+  }
+}
+
+// Marks the playbacks of `target` to stop from `clock` (handled in the loop below).
+void MarkActionStop(Ctx& c, Id target, ClockSample clock) noexcept {
+  Impl& im = c.im;
+  schema::Tables& t = c.t;
+  const schema::TableRows& rows = t.Playback.rows;
+  for (std::uint32_t k = 0; k < rows.count; ++k) {
+    if (SND_R(Playback_eventId)[k] != target) continue;
+    PlaybackPriv& tp = Priv(im, base::rows::SlotAt(rows, k));
+    if ((tp.flags & kPbActionStop) == 0u || clock < tp.actionStopClock) tp.actionStopClock = clock;
+    tp.flags |= kPbActionStop;
+  }
+}
+
+// Takes the actions of the parent at row d with track time t in [from, to); an action at
+// track time u happens at clockAt(u). `due0` is the first block start of the next block.
+template <class ClockAt>
+void TakeActions(Ctx& c, std::uint32_t d, std::uint64_t from, std::uint64_t to, ClockAt&& clockAt,
+                 bool includePlay = true) noexcept {
   Impl& im = c.im;
   schema::Tables& t = c.t;
   const EventRef ref = SND_R(Playback_eventRef)[d];
   const BankRecord* br = RegisteredBank(im, ref.bankSlot);
-  if (br == nullptr) return;
+  if (br == nullptr || from >= to) return;
   const bk::BankView& v = *br->view;
   const std::uint32_t tf = v.Column<bk::col::EVNT_trackFirst>()[ref.eventIndex];
   const std::uint32_t tc = v.Column<bk::col::EVNT_trackCount>()[ref.eventIndex];
   const SlotIndex s = base::rows::SlotAt(t.Playback.rows, d);
+  const HandleRef self{s, t.Playback.rows.generation[s]};
+  const ClockSample blockEnd = im.clock + im.cfg.blockFrames;
   for (std::uint32_t tr = tf; tr < tf + tc; ++tr) {
     const std::uint32_t af = v.Column<bk::col::TRAK_actionFirst>()[tr];
     const std::uint32_t ac = v.Column<bk::col::TRAK_actionCount>()[tr];
     if (af == bf::kNone) continue;
     for (std::uint32_t a = af; a < af + ac; ++a) {
       const std::uint64_t at = ActionFrame(im, v.Column<bk::col::ACTN_timeMs>()[a]);
-      if (at < fromFrame || at >= toFrame) continue;
-      Deferred df{};
-      df.id = v.Column<bk::col::ACTN_target>()[a];
-      df.value = v.Column<bk::col::ACTN_value>()[a];
-      df.startClock = at >= playedEnd ? blockEnd + (at - playedEnd) : 0u;
+      if (at < from || at >= to) continue;
+      ActionPending e{};
+      e.target = v.Column<bk::col::ACTN_target>()[a];
+      e.value = v.Column<bk::col::ACTN_value>()[a];
+      e.parent = self;
+      e.trackTime = at;
+      e.clock = clockAt(at);
       switch (static_cast<bf::ActionKind>(v.Column<bk::col::ACTN_action>()[a])) {
         case bf::ActionKind::PlayEvent: {
+          if (!includePlay) break;
           const HandleRef h = im.playbackSlots.Acquire();
-          if (h.generation == 0u) break;
-          im.oneShot[h.slot].store(1u, std::memory_order_relaxed);
+          if (h.generation == 0u) {
+            ActionLimit(im, self);
+            break;
+          }
+          Deferred df{};
           df.kind = DeferredKind::Play;
+          df.id = e.target;
           df.handle = h;
-          df.ref = ResolveEvent(im, df.id);
+          df.ref = ResolveEvent(im, e.target);
           df.emitter = SND_R(Playback_emitterSlot)[d];
           df.emitterGen = df.emitter != kNoSlot ? t.Emitter.rows.generation[df.emitter] : 0u;
-          Defer(im, df);
+          df.startClock = e.clock;
+          if (!Defer(im, df, self)) {
+            im.playbackSlots.Release(h);
+            break;
+          }
+          im.oneShot[h.slot].store(1u, std::memory_order_relaxed);
+          e.kind = ActionPendingKind::Play;
+          e.child = h;
+          AddPending(im, e);
           break;
         }
         case bf::ActionKind::StopEvent:
-          df.kind = DeferredKind::StopEvent;
-          Defer(im, df);
+          if (e.clock < blockEnd) {
+            MarkActionStop(c, e.target, e.clock < im.clock ? im.clock : e.clock);  // this block
+          } else {
+            e.kind = ActionPendingKind::Stop;
+            AddPending(im, e);
+          }
           break;
         case bf::ActionKind::SetParam:
-          df.kind = DeferredKind::SetParam;
-          df.handle = HandleRef{s, t.Playback.rows.generation[s]};
-          Defer(im, df);
+        case bf::ActionKind::ApplySnapshot: {
+          if (!includePlay && e.clock <= im.clock) break;  // applied by ApplyCommands (its start frame)
+          e.kind = static_cast<bf::ActionKind>(v.Column<bk::col::ACTN_action>()[a]) == bf::ActionKind::SetParam
+                       ? ActionPendingKind::SetParam
+                       : ActionPendingKind::Snapshot;
+          // The first block start at or after the clock (block starts: blockEnd + k blocks).
+          e.due = e.clock <= blockEnd
+                      ? blockEnd
+                      : blockEnd + ((e.clock - blockEnd + im.cfg.blockFrames - 1u) / im.cfg.blockFrames) * im.cfg.blockFrames;
+          if (e.due == blockEnd) {
+            Deferred df{};
+            df.kind = e.kind == ActionPendingKind::SetParam ? DeferredKind::SetParam : DeferredKind::ApplySnapshot;
+            df.id = e.target;
+            df.value = e.value;
+            df.handle = self;
+            Defer(im, df, self);
+          } else {
+            AddPending(im, e);
+          }
           break;
-        case bf::ActionKind::ApplySnapshot:
-          df.kind = DeferredKind::ApplySnapshot;
-          Defer(im, df);
-          break;
+        }
       }
     }
   }
 }
 
-// D-145: StopEvent actions of the first block of a play whose other first-block actions
-// ApplyCommands applied (immediate plays): the playbacks of the target event stop in this
-// block (the loop below handles kPbActionStop like a stop request).
-void FirstBlockStops(Ctx& c, std::uint32_t d) noexcept {
+// The parent's taken actions that have not happened: dropped; a paused parent takes them
+// again from the earliest one.
+void DropPending(Ctx& c, HandleRef parent, bool rollBack) noexcept {
   Impl& im = c.im;
-  schema::Tables& t = c.t;
-  const EventRef ref = SND_R(Playback_eventRef)[d];
-  const BankRecord* br = RegisteredBank(im, ref.bankSlot);
-  if (br == nullptr) return;
-  const bk::BankView& v = *br->view;
-  const std::uint32_t tf = v.Column<bk::col::EVNT_trackFirst>()[ref.eventIndex];
-  const std::uint32_t tc = v.Column<bk::col::EVNT_trackCount>()[ref.eventIndex];
-  for (std::uint32_t tr = tf; tr < tf + tc; ++tr) {
-    const std::uint32_t af = v.Column<bk::col::TRAK_actionFirst>()[tr];
-    const std::uint32_t ac = v.Column<bk::col::TRAK_actionCount>()[tr];
-    if (af == bf::kNone) continue;
-    for (std::uint32_t a = af; a < af + ac; ++a) {
-      if (static_cast<bf::ActionKind>(v.Column<bk::col::ACTN_action>()[a]) != bf::ActionKind::StopEvent) continue;
-      if (ActionFrame(im, v.Column<bk::col::ACTN_timeMs>()[a]) >= im.cfg.blockFrames) continue;
-      const Id target = v.Column<bk::col::ACTN_target>()[a];
-      const schema::TableRows& rows = t.Playback.rows;
-      for (std::uint32_t k = 0; k < rows.count; ++k) {
-        if (SND_R(Playback_eventId)[k] == target) Priv(im, base::rows::SlotAt(rows, k)).flags |= kPbActionStop;
-      }
+  for (std::uint32_t i = 0; i < im.ev.pendingCount;) {
+    ActionPending& e = im.ev.pending[i];
+    if (e.parent.slot != parent.slot || e.parent.generation != parent.generation) {
+      ++i;
+      continue;
     }
+    if (e.kind == ActionPendingKind::Play && base::rows::IsCurrent(c.t.Playback.rows, e.child)) {
+      Priv(im, e.child.slot).flags |= kPbCancelled;
+    }
+    if (rollBack && base::rows::IsCurrent(c.t.Playback.rows, parent)) {
+      PlaybackPriv& pp = Priv(im, parent.slot);
+      if (e.trackTime < pp.actionHorizon) pp.actionHorizon = e.trackTime;
+    }
+    im.ev.pending[i] = im.ev.pending[--im.ev.pendingCount];
   }
 }
 
-// D-145: the parent of first-block actions did not start: its action children do not either.
-void CancelActionChildren(Impl& im, HandleRef parent) noexcept {
-  const schema::TableRows& rows = im.tables.Playback.rows;
+// D-145: the parent of first-block actions did not start: none of its actions happens.
+void CancelActionChildren(Ctx& c, HandleRef parent) noexcept {
+  Impl& im = c.im;
+  const schema::TableRows& rows = c.t.Playback.rows;
   for (std::uint32_t i = 0; i < im.ap.actionChildCount; ++i) {
     const ApplyPriv::ActionChild& ac = im.ap.actionChildren[i];
     if (ac.parent.slot != parent.slot || ac.parent.generation != parent.generation) continue;
     if (base::rows::IsCurrent(rows, ac.child)) Priv(im, ac.child.slot).flags |= kPbCancelled;
   }
+  // (RunEventLogic marks ApplyCommands' tentative snapshot entries: the only write of it here.)
+  for (std::uint32_t i = 0; i < im.ap.tentativeCount; ++i) {
+    ApplyPriv::TentativeSnapshot& ts = im.ap.tentative[i];
+    if (ts.parent.slot == parent.slot && ts.parent.generation == parent.generation) ts.cancelled = 1u;
+  }
+  DropPending(c, parent, false);
 }
 
-// Stage 3 (group 4): per-playback state of a new row (D-145 horizon, D-146 fade-in).
-void InitPlaybackStage3(Impl& im, SlotIndex s, PlaybackPriv& pp, PlaybackLogic& lg, const PlaybackRequest& rq) noexcept {
-  const float fadeIn = im.ap.playbackFadeIn[s];
-  if (fadeIn > 0.0f) {  // the playback fade starts at 0 and rises linearly (the playback fade path)
-    lg.fadeGain = 0.0f;
-    pp.fadeRate = FadeStepFor(im, fadeIn);
+// The pending actions whose block has come (start of RunEventLogic, after the commands of
+// this block: a pause or stop of the parent applied now cancels them).
+void RunPending(Ctx& c) noexcept {
+  Impl& im = c.im;
+  schema::Tables& t = c.t;
+  const ClockSample blockEnd = im.clock + im.cfg.blockFrames;
+  for (std::uint32_t i = 0; i < im.ev.pendingCount;) {
+    ActionPending& e = im.ev.pending[i];
+    if (e.kind == ActionPendingKind::Play) {
+      const std::uint32_t cd = base::rows::DenseOf(t.Playback.rows, e.child);
+      const PlaybackStateId cs = cd == kNoSlot ? PlaybackStateId::Ended : SND_W(Playback_state)[cd];
+      if (cs != PlaybackStateId::Pending && cs != PlaybackStateId::None) {  // started or gone
+        im.ev.pending[i] = im.ev.pending[--im.ev.pendingCount];
+        continue;
+      }
+    } else if (e.kind != ActionPendingKind::Stop && e.due > blockEnd) {
+      ++i;  // a later block
+      continue;
+    }
+    const std::uint32_t ps = ParentState(c, e.parent, e.clock);
+    if (ps != 0u) {
+      const HandleRef parent = e.parent;
+      DropPending(c, parent, ps == 1u);  // (compacts the list: look at i again)
+      continue;
+    }
+    if (e.kind == ActionPendingKind::Play) {  // waits for the child's start (this block)
+      ++i;
+      continue;
+    }
+    if (e.kind == ActionPendingKind::Stop) {
+      MarkActionStop(c, e.target, e.clock);
+    } else {
+      Deferred df{};
+      df.kind = e.kind == ActionPendingKind::SetParam ? DeferredKind::SetParam : DeferredKind::ApplySnapshot;
+      df.id = e.target;
+      df.value = e.value;
+      df.handle = e.parent;
+      Defer(im, df, e.parent);
+    }
+    im.ev.pending[i] = im.ev.pending[--im.ev.pendingCount];
   }
-  pp.actionHorizon = (rq.flags & kRequestActionsApplied) != 0u ? im.cfg.blockFrames : 0u;
+}
+
+// After a playback started at `startClock` in this block: the actions of its first block
+// that were not taken before (by ApplyCommands for a play starting in its apply block, or
+// one block ahead for a scheduled start whose clock was known), then the track time.
+void ActionsAtStart(Ctx& c, std::uint32_t d, ClockSample startClock) noexcept {
+  Impl& im = c.im;
+  schema::Tables& t = c.t;
+  const SlotIndex s = base::rows::SlotAt(t.Playback.rows, d);
+  PlaybackPriv& pp = Priv(im, s);
+  const ClockSample blockEnd = im.clock + im.cfg.blockFrames;
+  const std::uint64_t first = startClock < blockEnd ? blockEnd - startClock : 0u;
+  const PlaybackRequest& req = SND_R(Playback_request)[d];
+  pp.trackTime = 0u;
+  if (pp.actionStart != 0u && pp.actionStart != startClock) {  // looked ahead with another clock
+    const HandleRef self{s, t.Playback.rows.generation[s]};
+    DropPending(c, self, false);
+    pp.actionHorizon = 0u;
+  }
+  auto clockAt = [&](std::uint64_t u) noexcept { return startClock + u; };
+  if ((req.flags & kRequestActionsApplied) != 0u) {
+    // ApplyCommands created the Play children and the actions at the start frame; the rest
+    // of the first block here (Play excluded).
+    TakeActions(c, d, 0u, first, clockAt, false);
+    pp.actionHorizon = first;
+    return;
+  }
+  if (pp.actionHorizon < first) TakeActions(c, d, pp.actionHorizon, first, clockAt);
+  if (pp.actionHorizon < first) pp.actionHorizon = first;
 }
 
 void ApplyFireEntry(Ctx& c, const music::FireEntry& f) noexcept {
@@ -1046,7 +1220,12 @@ void ApplyFireEntry(Ctx& c, const music::FireEntry& f) noexcept {
         EndPlayback(c, d, SND_END_REJECTED, SND_END_DETAIL_RESERVATION_MISSED);
       } else {
         Priv(im, s).flags |= kPbStarted;
-        StartPlayback(c, d, f.fireClock);
+        const HandleRef self{s, t.Playback.rows.generation[s]};
+        if (StartPlayback(c, d, f.fireClock)) {
+          ActionsAtStart(c, d, f.fireClock);
+        } else {
+          CancelActionChildren(c, self);  // D-145: a play that does not start has no actions
+        }
       }
       break;
     }
@@ -1296,6 +1475,7 @@ void RunEventLogic(Impl& im) noexcept {
   Ctx c{im, t, im.clock, im.cfg.blockFrames};
   im.endedCount = 0;
   im.ev.controlCount = 0;
+  im.ev.actionWarned = 0u;
   const ClockSample blockEnd = im.clock + im.cfg.blockFrames;
 
   // 0. New playback rows (ApplyCommands created them this block): initialise, so a
@@ -1319,7 +1499,6 @@ void RunEventLogic(Impl& im) noexcept {
       SND_W(Playback_state)[d] = (rq.startReservation != kNoSlot && (rq.flags & kRequestRejectReservationFull) == 0u)
                                      ? PlaybackStateId::Pending
                                      : PlaybackStateId::None;
-      InitPlaybackStage3(im, s, pp, SND_W(Playback_logic)[d], rq);
     }
   }
 
@@ -1340,13 +1519,15 @@ void RunEventLogic(Impl& im) noexcept {
       const HandleRef self{s, prows.generation[s]};
       const std::uint32_t before = prows.count;
       if (StartPlayback(c, d, im.clock)) {
-        FirstBlockStops(c, d);
+        ActionsAtStart(c, d, im.clock);
       } else {
-        CancelActionChildren(im, self);
+        CancelActionChildren(c, self);
       }
       if (prows.count == before) ++d;
     }
   }
+  // 0c. D-145: actions taken ahead whose block has come.
+  RunPending(c);
 
   // 1. Fired reservations (in fire order, 2.5).
   for (std::uint32_t i = 0; i < im.fire.count; ++i) ApplyFireEntry(c, im.fire.entries[i]);
@@ -1399,7 +1580,19 @@ void RunEventLogic(Impl& im) noexcept {
                          lc.state != static_cast<std::uint8_t>(VoiceStateId::Starting);
       const bool released = lc.state == static_cast<std::uint8_t>(VoiceStateId::Releasing) && lc.stopClock <= im.clock;
       // D-140: a voice whose return mode is "never" ends once it went virtual (SelectVoices).
-      const bool dropped = (im.ev.vs[v].flags & kVsKillVirtual) != 0u;
+      bool dropped = (im.ev.vs[v].flags & kVsKillVirtual) != 0u;
+      if (dropped) {
+        // A voice of a pausing / paused playback is not ended (whatever the order of the pause
+        // and the steal): it is judged again once it is resumed (SelectVoices).
+        const SlotIndex vpb = SND_W(Voice_playbackSlot)[d];
+        const bool pausing = (lc.flags & kVoicePausedFlag) != 0u ||
+                             (vpb < im.cfg.maxPlaybacks &&
+                              (Priv(im, vpb).flags & (kPbPausedUser | kPbPausedCategory | kPbPausedState)) != 0u);
+        if (pausing) {
+          im.ev.vs[v].flags &= ~kVsKillVirtual;
+          dropped = false;
+        }
+      }
       if ((ended || released || dropped) && !VoiceHeld(c, d)) {
         const SlotIndex pb = SND_W(Voice_playbackSlot)[d];
         if (dropped && !ended && !released && pb < im.cfg.maxPlaybacks) Priv(im, pb).flags |= kPbVoiceDropped;
@@ -1428,7 +1621,6 @@ void RunEventLogic(Impl& im) noexcept {
       SND_W(Playback_state)[d] = PlaybackStateId::None;
       SND_W(Playback_schedule)[d] = PlaybackSchedule{0, 0};
       SND_W(Playback_endInfo)[d] = PlaybackEnd{0, 0};
-      InitPlaybackStage3(im, s, pp, lg, SND_R(Playback_request)[d]);
     }
     if ((pp.flags & kPbCancelled) != 0u) {  // D-145: an action child whose parent did not start
       if (!EndPlayback(c, d, SND_END_REJECTED, SND_END_DETAIL_NONE)) ++d;
@@ -1463,6 +1655,8 @@ void RunEventLogic(Impl& im) noexcept {
         state = PlaybackStateId::Pending;
       } else if (!StartPlayback(c, d, im.clock)) {
         continue;
+      } else {
+        ActionsAtStart(c, d, im.clock);
       }
       if (prow.count != before) continue;
       state = SND_W(Playback_state)[d];
@@ -1490,16 +1684,26 @@ void RunEventLogic(Impl& im) noexcept {
       }
       state = SND_W(Playback_state)[d];
     }
-    if ((pp.flags & kPbActionStop) != 0u) {  // D-145: StopEvent action of a start block
+    if ((pp.flags & kPbActionStop) != 0u) {  // D-145: a StopEvent action, from its clock
       pp.flags &= ~kPbActionStop;
       if (state == PlaybackStateId::Pending) {
         if (!EndPlayback(c, d, SND_END_STOPPED, SND_END_DETAIL_NONE)) ++d;
         continue;
       }
-      BeginStop(c, d, -1.0f, false);
+      BeginStop(c, d, -1.0f, false, pp.actionStopClock > im.clock ? pp.actionStopClock : im.clock);
       state = SND_W(Playback_state)[d];
     }
     if (state == PlaybackStateId::Pending) {
+      // D-145: a scheduled start known ahead (CLOCK_SAMPLE / DELAY_US) that falls in the next
+      // block: its first actions are taken now, so that they happen at their sample.
+      const ClockSample startAt = im.ap.playbackStartClock[s];
+      if (startAt >= blockEnd && startAt < blockEnd + im.cfg.blockFrames && pp.actionStart == 0u &&
+          SND_R(Playback_eventRef)[d].bankSlot != kNoBank) {
+        pp.actionStart = startAt;
+        const std::uint64_t to = blockEnd + im.cfg.blockFrames - startAt;
+        TakeActions(c, d, 0u, to, [&](std::uint64_t u) noexcept { return startAt + u; });
+        pp.actionHorizon = to;
+      }
       ++d;
       continue;
     }
@@ -1522,6 +1726,15 @@ void RunEventLogic(Impl& im) noexcept {
       pp.flags &= ~kPbPausedCategory;
     }
     const bool wantPause = (pp.flags & (kPbPausedUser | kPbPausedCategory)) != 0u && (pp.flags & kPbStopping) == 0u;
+    // D-146: the fade-in of a play advances with played time only: held while the playback
+    // pauses or stops (a stop then fades out from the level reached).
+    if (im.ap.playbackFadeIn[s] > 0.0f) {
+      const bool hold = (pp.flags & (kPbPausedUser | kPbPausedCategory | kPbStopping)) != 0u;
+      for (SlotIndex v = pp.voiceListHead, guard = 0; v != kNoSlot && guard < im.cfg.maxVirtual; ++guard) {
+        im.ev.vs[v].flags = hold ? (im.ev.vs[v].flags | kVsFadeInHold) : (im.ev.vs[v].flags & ~kVsFadeInHold);
+        v = im.ev.vs[v].nextInPlayback;
+      }
+    }
     // Fade (stop / pause / resume): logic.fadeGain = value at the end of this block.
     const bool fadeStop = (pp.flags & kPbStopping) != 0u && (pp.flags & kPbTimedStop) == 0u;
     const float g0 = lg.fadeGain;
@@ -1560,11 +1773,15 @@ void RunEventLogic(Impl& im) noexcept {
       std::uint64_t add = im.cfg.blockFrames;
       if (startClock > im.clock) add = startClock < blockEnd ? blockEnd - startClock : 0u;
       lg.playedFrames += add;
-      // D-145: actions one block ahead; none once the playback stops (the rest never fires).
-      if (add != 0u && ref.bankSlot != kNoBank && (pp.flags & kPbStopping) == 0u) {
-        const std::uint64_t ahead = lg.playedFrames + im.cfg.blockFrames;
+      // D-145: the track time does not advance while the playback pauses or stops; the
+      // actions of the next block are taken ahead; none once it stops.
+      if (add != 0u && ref.bankSlot != kNoBank && !wantPause && (pp.flags & kPbStopping) == 0u) {
+        pp.trackTime += add;
+        const std::uint64_t now = pp.trackTime;
+        const std::uint64_t ahead = now + im.cfg.blockFrames;
         if (pp.actionHorizon < ahead) {
-          RunActions(c, d, pp.actionHorizon, ahead, lg.playedFrames, blockEnd);
+          TakeActions(c, d, pp.actionHorizon, ahead,
+                      [&](std::uint64_t u) noexcept { return u >= now ? blockEnd + (u - now) : blockEnd; });
           pp.actionHorizon = ahead;
         }
       }

@@ -195,8 +195,8 @@ struct MarkerRig {
 };
 }  // namespace
 
-// End to end: on_marker for each crossing, with the playback and the clock of the crossing
-// (the resampler's look-ahead makes it up to 16 frames early for source-rate voices).
+// End to end: on_marker for each crossing, with the playback and the clock at which the
+// marker's frame is output (exact at ratio 1).
 SND_TEST(CoreNotify2, ClipMarkersReachOnMarker) {
   MarkerRig r(SmallConfig());
   SND_REQUIRE(r.sys != nullptr);
@@ -225,6 +225,6 @@ SND_TEST(CoreNotify2, ClipMarkersReachOnMarker) {
     SND_CHECK_EQ(r.markers[i].playback, p.value);
     SND_CHECK_EQ(r.markers[i].id, ids[i]);
     const std::int64_t d = static_cast<std::int64_t>(r.markers[i].clock) - static_cast<std::int64_t>(start + at[i]);
-    SND_CHECK_MSG(d <= 0 && d >= -17, "marker %u at %+lld frames", static_cast<unsigned>(i), static_cast<long long>(d));
+    SND_CHECK_MSG(d == 0, "marker %u at %+lld frames", static_cast<unsigned>(i), static_cast<long long>(d));
   }
 }
