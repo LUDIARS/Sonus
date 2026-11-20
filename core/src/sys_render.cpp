@@ -111,6 +111,15 @@ void PostProcessItem(Impl& im, RenderSet& set, const source::RenderItem& it, Ite
       for (std::uint32_t c = 0; c < in.channels; ++c) voiceOut[c][f] *= e;
     }
   }
+  // Stage 3 (group 4): fade toward the clip's end (CLIP.fadeOutMs), per sample.
+  if (in.endFadeActive != 0u) {
+    for (std::uint32_t f = in.endFadeFrom; f < frames; ++f) {
+      float e = in.endFade0 + in.endFadeDelta * static_cast<float>(f - in.endFadeFrom);
+      e = e < 0.0f ? 0.0f : (e > 1.0f ? 1.0f : e);
+      for (std::uint32_t c = 0; c < in.channels; ++c) voiceOut[c][f] *= e;
+    }
+  }
+  if (in.clipEnds != 0u) in.status.ended = 1u;  // D-142: the last pass of a counted loop ended
   // Sample-accurate stop: silence after frameEnd.
   if (in.frameEnd < frames) {
     for (std::uint32_t c = 0; c < in.channels; ++c) std::memset(voiceOut[c] + in.frameEnd, 0, sizeof(float) * (frames - in.frameEnd));
@@ -284,7 +293,10 @@ void ChunkFn(void* p, const jobs::RtChunkContext& c) noexcept {
 // Initial render state of a new real assignment (serial: the voice is in no running chunk).
 void InitRenderState(Impl& im, SlotIndex r, SlotIndex v, std::uint32_t vd, const VoiceStatic& vs, bool sourceRate) noexcept {
   schema::Tables& t = im.tables;
-  const Playhead ph = SND_W(Voice_playhead)[vd];
+  // D-140 "restart": the promoted voice starts again at its start frame, at full level.
+  const bool restart = (vs.flags & kVsRestartReturn) != 0u;
+  if (restart) im.ev.vs[v].flags &= ~kVsRestartReturn;
+  const Playhead ph = restart ? Playhead{vs.startFrame, 0u, 0u} : SND_W(Voice_playhead)[vd];
   t.RealVoice.col.playhead[r] = ph;
   t.RealVoice.col.renderStatus[r] = VoiceRenderStatus{};
   dsp::VoiceFilterInit(t.RealVoice.col.filterState[r], SND_R(Voice_filterTarget)[vd]);
@@ -300,7 +312,54 @@ void InitRenderState(Impl& im, SlotIndex r, SlotIndex v, std::uint32_t vd, const
   // Fresh starts begin at full level (sample-accurate start); devirtualised voices fade in (D-15).
   const bool fresh = ph.frame == vs.startFrame && ph.loopCount == 0u && ph.fraction == 0u;
   im.rd.fade[r] = fresh ? 1.0f : 0.0f;
-  (void)v;
+}
+
+// Stage 3 (group 4), D-142 / CLIP.fadeOutMs: source frames played since the voice's start
+// frame (loops unrolled: the loop region [loopStartFrame, loopEndFrame) of a counted loop).
+double PlayedSourceFrames(const VoiceStatic& vs, const Playhead& ph) noexcept {
+  const double pos = static_cast<double>(ph.frame) + static_cast<double>(ph.fraction) * (1.0 / 4294967296.0);
+  const double start = static_cast<double>(vs.startFrame);
+  if (vs.loopEndFrame == 0u || ph.loopCount == 0u) return pos - start;
+  const double lb = static_cast<double>(vs.loopStartFrame), le = static_cast<double>(vs.loopEndFrame);
+  return (le - start) + static_cast<double>(ph.loopCount - 1u) * (le - lb) + (pos - lb);
+}
+
+// The clip's end inside this block (source-rate asset voices with an end): a counted loop
+// (D-142) is cut at the end of its last pass (frameEnd, sample accurate up to the
+// resampler's rounding; the chunk reports `ended`), and CLIP.fadeOutMs fades linearly
+// toward the end. Output frame i (from frameOffset) reads the source at
+// pos0 + i r0 + (r1 - r0) i (i - 1) / (2 n) (dsp resampler: ratio(i) = r0 + (r1 - r0) i / n),
+// pos0 = played frames + the resampler's pending offset.
+void ClipEnd(const Impl& im, const VoiceStatic& vs, SlotIndex r, ItemInput& in) noexcept {
+  const bool cut = vs.loopEndFrame != 0u;
+  const bool fade = vs.endFadeSeconds > 0.0f;
+  if (vs.playFrames == 0u || (!cut && !fade) || (in.flags & kItemSourceRate) == 0u) return;
+  const std::uint32_t frames = im.cfg.blockFrames;
+  const std::uint32_t n = frames - in.frameOffset;
+  if (n == 0u) return;
+  double pos0 = PlayedSourceFrames(vs, im.tables.RealVoice.col.playhead[r]);
+  if ((in.flags & kItemInitPan) == 0u) pos0 += dsp::ResamplerPendingOffset(im.rd.resamplerPool + im.cfg.resamplerSlotBytes * r);
+  const double r0 = in.ratio0, r1 = in.ratio1;
+  auto posAt = [&](double i) noexcept { return pos0 + i * r0 + (r1 - r0) * i * (i - 1.0) / (2.0 * n); };
+  const double end = static_cast<double>(vs.playFrames);
+  const double fadeFrames = static_cast<double>(vs.endFadeSeconds) * vs.sourceRate;
+  if (fade && posAt(n) > end - fadeFrames) {
+    auto env = [&](double p) noexcept {
+      const double e = (end - p) / fadeFrames;
+      return e < 0.0 ? 0.0 : (e > 1.0 ? 1.0 : e);
+    };
+    in.endFadeActive = 1u;
+    in.endFadeFrom = in.frameOffset;
+    in.endFade0 = static_cast<float>(env(posAt(0.0)));
+    in.endFadeDelta = static_cast<float>((env(posAt(n)) - env(posAt(0.0))) / n);
+  }
+  if (cut && posAt(n) >= end) {
+    std::uint32_t i = 0;
+    while (i < n && posAt(i) < end) ++i;
+    const std::uint32_t at = in.frameOffset + i;
+    if (at < in.frameEnd) in.frameEnd = at;
+    in.clipEnds = 1u;
+  }
 }
 
 // Adds this block's part of the D-15 fade of a held voice's last output.
@@ -497,6 +556,7 @@ void Render(Impl& im) noexcept {
     in.filter = SND_R(Voice_filterTarget)[d];
     const bool targetOpen = in.filter.lowpassHz >= dsp::kVoiceLowpassOffHz && in.filter.highpassHz <= dsp::kVoiceHighpassOffHz;
     in.filterActive = (!targetOpen || !dsp::VoiceFilterIsOpen(t.RealVoice.col.filterState[r], im.cfg.sampleRate)) ? 1u : 0u;
+    ClipEnd(im, vs, r, in);  // stage 3 (group 4): D-142 cut, CLIP.fadeOutMs
   }
   (void)kPi;
 
@@ -605,7 +665,14 @@ void Render(Impl& im) noexcept {
         }
         if (n == 0u) continue;
         src->AdvanceVirtual(adv, n, st);
-        for (std::uint32_t i = 0; i < n; ++i) vStatus[dens[i]] = st[i];
+        for (std::uint32_t i = 0; i < n; ++i) {
+          // D-142: a virtual voice of a counted loop ends once its last pass is over.
+          const VoiceStatic& vs = im.ev.vs[adv[i].voiceSlot];
+          if (vs.loopEndFrame != 0u && PlayedSourceFrames(vs, vPlayhead[dens[i]]) >= static_cast<double>(vs.playFrames)) {
+            st[i].ended = 1u;
+          }
+          vStatus[dens[i]] = st[i];
+        }
       }
     }
   }

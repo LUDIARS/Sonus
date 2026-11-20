@@ -16,8 +16,12 @@
 // EvaluateDspParams weights them by the TRAK.layerParam value). Nested events
 // expand into voices of the same playback (depth <= 4).
 // Limits (4.4) at voice creation: global virtual voice table, voice limit
-// group (steal oldest / quietest ~ lowest priority then oldest / lowest
+// group (steal oldest / quietest by the previous block's audibility / lowest
 // priority / never), per-event instances, retrigger interval.
+// Stage 3 (group 4): D-140 virtual return "never" ends the voice (SelectVoices
+// marks it), D-141 shuffle without a clip limit, D-142 loop counts (Render cuts
+// the last pass), D-144 nested events with their own routing, D-145 action
+// tracks one block ahead (sample-accurate starts), D-146 fade-in of a play.
 #include <bit>
 #include <cmath>
 #include <cstring>
@@ -25,6 +29,7 @@
 #include "access.hpp"
 #include "core_impl.hpp"
 #include "params.hpp"
+#include "snd/base/hash.hpp"
 
 namespace snd::core {
 
@@ -41,11 +46,49 @@ struct Ctx {
 
 PlaybackPriv& Priv(Impl& im, SlotIndex s) noexcept { return im.ev.pb[s]; }
 
+// 32 random bits from a playback's generator (the xorshift state after one step).
+std::uint32_t NextRandomU32(std::uint32_t& state) noexcept {
+  (void)NextRandom(state);
+  return state;
+}
+
+// D-141: keyed permutation of [0, n) without memory: a 4-round Feistel network on the
+// smallest even-bit domain >= n, cycle-walked into [0, n) (a bijection of [0, n) because
+// the network is one of the whole domain; expected < 4 steps, the domain is < 4 n).
+std::uint32_t PermuteIndex(std::uint32_t i, std::uint32_t n, std::uint32_t key) noexcept {
+  if (n <= 1u) return 0u;
+  std::uint32_t bits = 2;
+  while (bits < 30u && (1u << bits) < n) bits += 2u;
+  const std::uint32_t half = bits / 2u;
+  const std::uint32_t mask = (1u << half) - 1u;
+  std::uint32_t x = i;
+  do {
+    std::uint32_t l = x >> half, r = x & mask;
+    for (std::uint32_t round = 0; round < 4u; ++round) {
+      const std::uint32_t f = base::MixU32(r ^ (key + (round + 1u) * 0x9E3779B9u)) & mask;
+      const std::uint32_t nl = r;
+      r = l ^ f;
+      l = nl;
+    }
+    x = (l << half) | r;
+  } while (x >= n);
+  return x;
+}
+
 float FadeStepFor(const Impl& im, float seconds) noexcept {
   if (!(seconds > 0.0f)) seconds = im.cfg.shortFadeSeconds;
   const float blocks = seconds * static_cast<float>(im.cfg.sampleRate) / static_cast<float>(im.cfg.blockFrames);
   return blocks <= 1.0f ? 1.0f : 1.0f / blocks;
 }
+
+}  // namespace
+
+// Playback time (frames) of an action at `ms` (ACTN.timeMs). Shared with ApplyCommands (D-145).
+std::uint64_t ActionFrame(const Impl& im, float ms) noexcept {
+  return ms > 0.0f ? static_cast<std::uint64_t>(static_cast<double>(ms) * 0.001 * im.cfg.sampleRate) : 0u;
+}
+
+namespace {
 
 bool CategoryPaused(const Impl& im, std::uint32_t catSlot) noexcept {
   const schema::Tables& t = im.tables;
@@ -245,6 +288,10 @@ struct StartContext {
   std::uint32_t priority;
   std::uint32_t busSlot;
   std::uint32_t groupSlot;
+  // Stage 3 (group 4).
+  std::uint32_t virtualReturn;  // D-140: EVNT.virtualReturn of the event whose clips start
+  float gainOffsetDb;           // D-144: volume of the nested-event clips above (dB, added)
+  float pitchOffsetCents;       // D-144: pitch of the nested-event clips above (cents, added)
 };
 
 std::uint32_t BusSlotOf(const Impl& im, const BankRecord& r, std::uint32_t busRow) noexcept {
@@ -261,23 +308,33 @@ SlotIndex StealVictim(Ctx& c, std::uint32_t group, std::uint32_t newPriority) no
   SlotIndex best = kNoSlot;
   std::uint32_t bestPrio = 0xFFFFFFFFu;
   ClockSample bestClock = ~ClockSample{0};
+  float bestAud = 0.0f;
   const schema::TableRows& rows = t.Voice.rows;
+  // Quietest (4.4): Voice.audibility of the previous block (EvaluateDspParams). A voice
+  // created in this block has none yet and counts as the loudest; equal values: oldest.
+  const float* aud = SND_R(Voice_audibility);
   for (std::uint32_t d = 0; d < rows.count; ++d) {
     if (SND_W(Voice_limitGroup)[d] != group || VoiceHeld(c, d)) continue;
     const SlotIndex v = base::rows::SlotAt(rows, d);
     if ((im.ev.vs[v].flags & kVsStopped) != 0u) continue;
     const std::uint32_t prio = SND_W(Voice_priority)[d];
     const ClockSample clk = im.ev.vs[v].firstClock;
+    const bool older = clk < bestClock || (clk == bestClock && v < best);
+    float a = 0.0f;
     bool better = false;
     if (g.stealMode == 0u) {  // oldest
-      better = clk < bestClock || (clk == bestClock && v < best);
-    } else {  // 1 quietest (approximated: lowest priority, then oldest), 2 lowest priority
-      better = prio < bestPrio || (prio == bestPrio && (clk < bestClock || (clk == bestClock && v < best)));
+      better = older;
+    } else if (g.stealMode == 1u) {  // quietest
+      a = SND_W(Voice_createdBlock)[d] == im.block ? 3.0e38f : (aud[d] >= 0.0f ? aud[d] : 0.0f);
+      better = best == kNoSlot || a < bestAud || (a == bestAud && older);
+    } else {  // 2 lowest priority, then oldest
+      better = prio < bestPrio || (prio == bestPrio && older);
     }
     if (better) {
       best = v;
       bestPrio = prio;
       bestClock = clk;
+      bestAud = a;
     }
   }
   if (best != kNoSlot && g.stealMode == 2u && bestPrio > newPriority) return kNoSlot;
@@ -399,6 +456,9 @@ bool CreateVoice(Ctx& c, StartContext& sc, SourceKind kind, const void* params, 
   vs.musicTag = musicTag;
   vs.firstClock = c.clock;
   vs.startFrame = startFrame;
+  // D-140: the asset's own return mode (ASST.flags, applied by the source) wins; without
+  // one the Event's EVNT.virtualReturn applies (SelectVoices / Render / RunEventLogic).
+  vs.virtualReturn = (asset != nullptr && asset->virtualReturn != 0u) || sc.virtualReturn > 2u ? 0u : sc.virtualReturn;
   vs.nextInPlayback = Priv(im, sc.playback).voiceListHead;
   Priv(im, sc.playback).voiceListHead = v;
   const std::uint32_t pd = base::rows::DenseOf(t.Playback.rows, sc.playback);
@@ -461,21 +521,39 @@ void StartEventTracks(Ctx& c, StartContext& sc, const BankRecord& r, std::uint32
         break;
       case bf::SequenceKind::Random:
       case bf::SequenceKind::RandomNoRepeat: {
+        // CLIP.weight: chance proportional to the weight; a weight <= 0 (or NaN) is never
+        // chosen, unless every candidate has one: then they are equally likely.
         const bool noRepeat = kind == static_cast<std::uint32_t>(bf::SequenceKind::RandomNoRepeat) && cc > 1u;
         float total = 0.0f;
+        std::uint32_t eligible = 0;
         for (std::uint32_t k = 0; k < cc; ++k) {
           if (noRepeat && cf + k == es.lastChoice) continue;
           const float w = v.Column<bk::col::CLIP_weight>()[cf + k];
           total += w > 0.0f ? w : 0.0f;
+          ++eligible;
         }
-        float x = NextRandom(rng) * total;
+        const float u = NextRandom(rng);
         std::uint32_t pick = kNoSlot;
-        for (std::uint32_t k = 0; k < cc; ++k) {
-          if (noRepeat && cf + k == es.lastChoice) continue;
-          const float w = v.Column<bk::col::CLIP_weight>()[cf + k];
-          pick = cf + k;
-          if (x < (w > 0.0f ? w : 0.0f)) break;
-          x -= w > 0.0f ? w : 0.0f;
+        if (total > 0.0f) {
+          float x = u * total;
+          for (std::uint32_t k = 0; k < cc; ++k) {
+            if (noRepeat && cf + k == es.lastChoice) continue;
+            const float w = v.Column<bk::col::CLIP_weight>()[cf + k];
+            if (!(w > 0.0f)) continue;
+            pick = cf + k;  // the last positive weight takes the rounding remainder
+            if (x < w) break;
+            x -= w;
+          }
+        } else if (eligible != 0u) {
+          std::uint32_t nth = static_cast<std::uint32_t>(u * static_cast<float>(eligible));
+          if (nth >= eligible) nth = eligible - 1u;
+          for (std::uint32_t k = 0; k < cc; ++k) {
+            if (noRepeat && cf + k == es.lastChoice) continue;
+            if (nth-- == 0u) {
+              pick = cf + k;
+              break;
+            }
+          }
         }
         if (pick != kNoSlot) {
           es.lastChoice = pick;
@@ -488,21 +566,21 @@ void StartEventTracks(Ctx& c, StartContext& sc, const BankRecord& r, std::uint32
         start(cf + seqPos % cc);
         break;
       case bf::SequenceKind::Shuffle: {
-        const std::uint32_t n = cc < 64u ? cc : 64u;
-        const std::uint64_t all = n == 64u ? ~std::uint64_t{0} : ((std::uint64_t{1} << n) - 1u);
-        if ((es.shuffleMask & all) == all) es.shuffleMask = 0u;
-        std::uint32_t left = 0;
-        for (std::uint32_t k = 0; k < n; ++k) left += (es.shuffleMask >> k & 1u) == 0u ? 1u : 0u;
-        std::uint32_t nth = static_cast<std::uint32_t>(NextRandom(rng) * static_cast<float>(left));
-        if (nth >= left) nth = left - 1u;
-        for (std::uint32_t k = 0; k < n; ++k) {
-          if ((es.shuffleMask >> k & 1u) != 0u) continue;
-          if (nth-- == 0u) {
-            es.shuffleMask |= std::uint64_t{1} << k;
-            start(cf + k);
-            break;
-          }
+        // D-141: any number of clips, no memory. A round plays a permutation of the clips
+        // keyed by 32 bits of the playback's generator (drawn by the play that starts the
+        // round): no clip twice in a round, a new order every round, and a round that would
+        // start with the clip the previous one ended with is rotated by one.
+        if (es.shufflePos == 0u || es.shufflePos >= cc) {
+          es.shufflePos = 0u;
+          es.shuffleKey = NextRandomU32(rng);
+          es.shuffleRot = (cc > 1u && es.shuffleLast != 0u && PermuteIndex(0u, cc, es.shuffleKey) + 1u == es.shuffleLast)
+                              ? 1u
+                              : 0u;
         }
+        const std::uint32_t k = PermuteIndex((es.shufflePos + es.shuffleRot) % cc, cc, es.shuffleKey);
+        ++es.shufflePos;
+        es.shuffleLast = k + 1u;  // index + 1 (0 = none yet)
+        start(cf + k);
         break;
       }
       case bf::SequenceKind::Switch: {
@@ -536,8 +614,11 @@ void StartClip(Ctx& c, StartContext& sc, const BankRecord& r, std::uint32_t clip
   const float randStart = v.Column<bk::col::CLIP_randStartMs>()[clip];
   const float randFilter = v.Column<bk::col::CLIP_randFilterHz>()[clip];
   // Random ranges (4.2): symmetric for volume / pitch / pan, start offset 0..rand, filter below 20 kHz.
-  const float gainDb = v.Column<bk::col::CLIP_volumeDb>()[clip] + (randVol != 0.0f ? (NextRandom(rng) * 2.0f - 1.0f) * randVol : 0.0f);
-  const float pitch = v.Column<bk::col::CLIP_pitchCents>()[clip] + (randPitch != 0.0f ? (NextRandom(rng) * 2.0f - 1.0f) * randPitch : 0.0f);
+  // D-144: the volume and pitch of nested-event clips above this one add (dB, cents).
+  const float gainDb = sc.gainOffsetDb + v.Column<bk::col::CLIP_volumeDb>()[clip] +
+                       (randVol != 0.0f ? (NextRandom(rng) * 2.0f - 1.0f) * randVol : 0.0f);
+  const float pitch = sc.pitchOffsetCents + v.Column<bk::col::CLIP_pitchCents>()[clip] +
+                      (randPitch != 0.0f ? (NextRandom(rng) * 2.0f - 1.0f) * randPitch : 0.0f);
   float pan = randPan != 0.0f ? (NextRandom(rng) * 2.0f - 1.0f) * randPan : 0.0f;
   pan = pan < -1.0f ? -1.0f : (pan > 1.0f ? 1.0f : pan);
   const float lowpass = randFilter != 0.0f ? 20000.0f - NextRandom(rng) * randFilter : 0.0f;
@@ -547,19 +628,66 @@ void StartClip(Ctx& c, StartContext& sc, const BankRecord& r, std::uint32_t clip
   const std::uint32_t loops = v.Column<bk::col::CLIP_loopCount>()[clip];
   const ClipRef cref{static_cast<std::uint16_t>(r.handle.slot), static_cast<std::uint16_t>(trackRow & 0xFFFFu), clip};
   if (ck == static_cast<std::uint32_t>(bf::ClipKind::NestedEvent)) {
-    StartEventTracks(c, sc, r, target, busSlot, depth + 1u, rng);
+    // D-144: a nested event plays with its OWN routing and settings (bus, category, limit
+    // group, priority, 3D, curves, sequence kind, virtual return), inside the parent's
+    // playback (handle, end, emitter, playback-scope parameters and switches, playback
+    // volume / pitch). The clip's volume and pitch (random included) carry down; its start
+    // offset delays the nested event. Event limits (instances, retrigger) are not applied
+    // to nested events. Deeper than kMaxNestedDepth: nothing plays, with a warning.
+    if (target >= v.Rows(bf::chunk::EVNT)) return;
+    if (depth + 1u > kMaxNestedDepth) {
+      PostWarning(im, SND_ERR_LIMIT_REACHED, 0u, v.Column<bk::col::EVNT_id>()[target]);
+      return;
+    }
+    StartContext child = sc;
+    child.clock = startClock;
+    child.priority = v.Column<bk::col::EVNT_priority>()[target];
+    child.busSlot = BusSlotOf(im, r, v.Column<bk::col::EVNT_bus>()[target]);
+    const std::uint32_t cat = v.Column<bk::col::EVNT_category>()[target];
+    child.categorySlot = cat < r.catCount ? r.catSlot[cat] : im.globalCategory;
+    const std::uint32_t grp = v.Column<bk::col::EVNT_limitGroup>()[target];
+    child.groupSlot = grp < r.groupCount ? r.groupSlot[grp] : kNoSlot;
+    child.threeD = (v.Column<bk::col::EVNT_flags>()[target] & bf::kEvent3D) != 0u && sc.emitter != kNoSlot;
+    child.virtualReturn = v.Column<bk::col::EVNT_virtualReturn>()[target];
+    child.gainOffsetDb = gainDb;
+    child.pitchOffsetCents = pitch;
+    StartEventTracks(c, child, r, target, kNoSlot, depth + 1u, rng);
+    sc.created = child.created;
+    if (child.failDetail != SND_END_DETAIL_NONE) sc.failDetail = child.failDetail;
+    if (child.needsPriming != 0u) sc.needsPriming = child.needsPriming;
     return;
   }
   if (ck == static_cast<std::uint32_t>(bf::ClipKind::Asset)) {
     if (target >= r.assetCount) return;
     const source::SourceAsset& a = r.assets[target];
     const SourceKind kind = a.form == source::LoadForm::Stream ? SourceKind::Stream : SourceKind::Sample;
+    // D-142: CLIP.loopCount = passes of the loop region (the asset's loop points, else the
+    // whole asset). 0 = endless. 1 = the default: one pass, except that an asset with loop
+    // points loops endlessly (unchanged). N >= 2: N passes, cut at the end of the last
+    // one (Render, sample accurate) - the source loops without a count.
     std::uint32_t flags = 0;
-    if (loops != 1u || a.loopEnd != 0u) flags |= source::kStartLoop;
+    const bool assetLoop = a.loopEnd != 0u;
+    if (loops == 0u || loops >= 2u || assetLoop) flags |= source::kStartLoop;
     const std::uint64_t startFrame =
         randStart > 0.0f ? static_cast<std::uint64_t>(NextRandom(rng) * randStart * 0.001f * static_cast<float>(a.codec.sample_rate)) : 0u;
-    CreateVoice(c, sc, kind, nullptr, &a, a.codec.channels, cref, eventRow, trackRow, startClock, startFrame, gainDb,
-                pitch, pan, lowpass, 1.0f, fadeIn, flags, busSlot, 0u, false, 0u);
+    if (!CreateVoice(c, sc, kind, nullptr, &a, a.codec.channels, cref, eventRow, trackRow, startClock, startFrame, gainDb,
+                     pitch, pan, lowpass, 1.0f, fadeIn, flags, busSlot, 0u, false, 0u)) {
+      return;
+    }
+    VoiceStatic& nv = im.ev.vs[Priv(im, sc.playback).voiceListHead];
+    const std::uint64_t total = a.codec.total_frames;
+    const std::uint64_t le = assetLoop ? (a.loopEnd < total || total == 0u ? a.loopEnd : total) : total;
+    const std::uint64_t lb = assetLoop && a.loopStart < le ? a.loopStart : 0u;
+    if ((flags & source::kStartLoop) == 0u) {
+      nv.playFrames = total > startFrame ? total - startFrame : 1u;  // one pass to the asset end
+    } else if (loops >= 2u && le > lb && startFrame < le) {
+      nv.playFrames = (le - startFrame) + std::uint64_t{loops - 1u} * (le - lb);
+      nv.loopStartFrame = lb;
+      nv.loopEndFrame = le;
+    }
+    // CLIP.fadeOutMs: a linear fade over the last fadeOutMs (at the clip's own rate) before
+    // the clip's end; clips without an end (endless loops) have none.
+    if (nv.playFrames != 0u) nv.endFadeSeconds = v.Column<bk::col::CLIP_fadeOutMs>()[clip] * 0.001f;
     return;
   }
   if (ck == static_cast<std::uint32_t>(bf::ClipKind::Synth)) {
@@ -623,6 +751,7 @@ bool StartPlayback(Ctx& c, std::uint32_t d, ClockSample startClock) noexcept {
         const std::uint32_t cat = v.Column<bk::col::EVNT_category>()[tr.eventIndex];
         if (cat < br->catCount) sc.categorySlot = br->catSlot[cat];
         sc.threeD = (v.Column<bk::col::EVNT_flags>()[tr.eventIndex] & bf::kEvent3D) != 0u;
+        sc.virtualReturn = v.Column<bk::col::EVNT_virtualReturn>()[tr.eventIndex];
       }
     }
     if (dd.bus != 0u) {
@@ -696,6 +825,7 @@ bool StartPlayback(Ctx& c, std::uint32_t d, ClockSample startClock) noexcept {
     const std::uint32_t grp = v.Column<bk::col::EVNT_limitGroup>()[row];
     sc.groupSlot = grp < br->groupCount ? br->groupSlot[grp] : kNoSlot;
     sc.threeD = (flags & bf::kEvent3D) != 0u && sc.emitter != kNoSlot;
+    sc.virtualReturn = v.Column<bk::col::EVNT_virtualReturn>()[row];
     // Music events are driven by the music system (segments, 8.3): it starts their voices
     // through RunMusicLogic. Without one, their tracks play like any event.
     if ((flags & bf::kEventMusic) == 0u || im.music == nullptr) StartEventTracks(c, sc, *br, row, kNoSlot, 0u, rng);
@@ -784,8 +914,15 @@ void Defer(Impl& im, const Deferred& df) noexcept {
   if (im.ev.deferredCount < im.ev.deferredCap) im.ev.deferred[im.ev.deferredCount++] = df;
 }
 
-// Action tracks (4.2): actions whose time falls inside this block of the playback.
-void RunActions(Ctx& c, std::uint32_t d, std::uint64_t fromFrame, std::uint64_t toFrame) noexcept {
+// Action tracks (4.2, D-145): actions whose playback time t falls in [fromFrame, toFrame)
+// - one block ahead of the playback - go to the next block's ApplyCommands. `playedEnd` is
+// the playback time at blockEnd: an action at t >= playedEnd happens at the clock
+// blockEnd + (t - playedEnd), i.e. inside the next block, where a Play starts at that very
+// sample (CLOCK_SAMPLE) and a stop / parameter / snapshot applies. An action already
+// behind (t < playedEnd: the start block of a scheduled play) applies at the next block's
+// start. Parameter actions write the playback's own scope (ACTN has no scope column).
+void RunActions(Ctx& c, std::uint32_t d, std::uint64_t fromFrame, std::uint64_t toFrame, std::uint64_t playedEnd,
+                ClockSample blockEnd) noexcept {
   Impl& im = c.im;
   schema::Tables& t = c.t;
   const EventRef ref = SND_R(Playback_eventRef)[d];
@@ -800,11 +937,12 @@ void RunActions(Ctx& c, std::uint32_t d, std::uint64_t fromFrame, std::uint64_t 
     const std::uint32_t ac = v.Column<bk::col::TRAK_actionCount>()[tr];
     if (af == bf::kNone) continue;
     for (std::uint32_t a = af; a < af + ac; ++a) {
-      const std::uint64_t at = static_cast<std::uint64_t>(v.Column<bk::col::ACTN_timeMs>()[a] * 0.001 * im.cfg.sampleRate);
+      const std::uint64_t at = ActionFrame(im, v.Column<bk::col::ACTN_timeMs>()[a]);
       if (at < fromFrame || at >= toFrame) continue;
       Deferred df{};
       df.id = v.Column<bk::col::ACTN_target>()[a];
       df.value = v.Column<bk::col::ACTN_value>()[a];
+      df.startClock = at >= playedEnd ? blockEnd + (at - playedEnd) : 0u;
       switch (static_cast<bf::ActionKind>(v.Column<bk::col::ACTN_action>()[a])) {
         case bf::ActionKind::PlayEvent: {
           const HandleRef h = im.playbackSlots.Acquire();
@@ -836,6 +974,54 @@ void RunActions(Ctx& c, std::uint32_t d, std::uint64_t fromFrame, std::uint64_t 
   }
 }
 
+// D-145: StopEvent actions of the first block of a play whose other first-block actions
+// ApplyCommands applied (immediate plays): the playbacks of the target event stop in this
+// block (the loop below handles kPbActionStop like a stop request).
+void FirstBlockStops(Ctx& c, std::uint32_t d) noexcept {
+  Impl& im = c.im;
+  schema::Tables& t = c.t;
+  const EventRef ref = SND_R(Playback_eventRef)[d];
+  const BankRecord* br = RegisteredBank(im, ref.bankSlot);
+  if (br == nullptr) return;
+  const bk::BankView& v = *br->view;
+  const std::uint32_t tf = v.Column<bk::col::EVNT_trackFirst>()[ref.eventIndex];
+  const std::uint32_t tc = v.Column<bk::col::EVNT_trackCount>()[ref.eventIndex];
+  for (std::uint32_t tr = tf; tr < tf + tc; ++tr) {
+    const std::uint32_t af = v.Column<bk::col::TRAK_actionFirst>()[tr];
+    const std::uint32_t ac = v.Column<bk::col::TRAK_actionCount>()[tr];
+    if (af == bf::kNone) continue;
+    for (std::uint32_t a = af; a < af + ac; ++a) {
+      if (static_cast<bf::ActionKind>(v.Column<bk::col::ACTN_action>()[a]) != bf::ActionKind::StopEvent) continue;
+      if (ActionFrame(im, v.Column<bk::col::ACTN_timeMs>()[a]) >= im.cfg.blockFrames) continue;
+      const Id target = v.Column<bk::col::ACTN_target>()[a];
+      const schema::TableRows& rows = t.Playback.rows;
+      for (std::uint32_t k = 0; k < rows.count; ++k) {
+        if (SND_R(Playback_eventId)[k] == target) Priv(im, base::rows::SlotAt(rows, k)).flags |= kPbActionStop;
+      }
+    }
+  }
+}
+
+// D-145: the parent of first-block actions did not start: its action children do not either.
+void CancelActionChildren(Impl& im, HandleRef parent) noexcept {
+  const schema::TableRows& rows = im.tables.Playback.rows;
+  for (std::uint32_t i = 0; i < im.ap.actionChildCount; ++i) {
+    const ApplyPriv::ActionChild& ac = im.ap.actionChildren[i];
+    if (ac.parent.slot != parent.slot || ac.parent.generation != parent.generation) continue;
+    if (base::rows::IsCurrent(rows, ac.child)) Priv(im, ac.child.slot).flags |= kPbCancelled;
+  }
+}
+
+// Stage 3 (group 4): per-playback state of a new row (D-145 horizon, D-146 fade-in).
+void InitPlaybackStage3(Impl& im, SlotIndex s, PlaybackPriv& pp, PlaybackLogic& lg, const PlaybackRequest& rq) noexcept {
+  const float fadeIn = im.ap.playbackFadeIn[s];
+  if (fadeIn > 0.0f) {  // the playback fade starts at 0 and rises linearly (the playback fade path)
+    lg.fadeGain = 0.0f;
+    pp.fadeRate = FadeStepFor(im, fadeIn);
+  }
+  pp.actionHorizon = (rq.flags & kRequestActionsApplied) != 0u ? im.cfg.blockFrames : 0u;
+}
+
 void ApplyFireEntry(Ctx& c, const music::FireEntry& f) noexcept {
   Impl& im = c.im;
   schema::Tables& t = c.t;
@@ -844,7 +1030,9 @@ void ApplyFireEntry(Ctx& c, const music::FireEntry& f) noexcept {
     case ReservationAction::Play: {
       if (d == kNoSlot || SND_W(Playback_state)[d] != PlaybackStateId::Pending) break;
       const SlotIndex s = f.target.slot;
-      if (f.lateRuleApplied == kFireTransportGone) {
+      if ((Priv(im, s).flags & kPbCancelled) != 0u) {
+        EndPlayback(c, d, SND_END_REJECTED, SND_END_DETAIL_NONE);  // D-145: its parent did not start
+      } else if (f.lateRuleApplied == kFireTransportGone) {
         EndPlayback(c, d, SND_END_REJECTED, SND_END_DETAIL_TRANSPORT_GONE);
       } else if (f.lateRuleApplied == static_cast<std::uint8_t>(ReservationLateRule::Cancel)) {
         EndPlayback(c, d, SND_END_REJECTED, SND_END_DETAIL_RESERVATION_MISSED);
@@ -1123,6 +1311,32 @@ void RunEventLogic(Impl& im) noexcept {
       SND_W(Playback_state)[d] = (rq.startReservation != kNoSlot && (rq.flags & kRequestRejectReservationFull) == 0u)
                                      ? PlaybackStateId::Pending
                                      : PlaybackStateId::None;
+      InitPlaybackStage3(im, s, pp, SND_W(Playback_logic)[d], rq);
+    }
+  }
+
+  // 0b. D-145: immediate plays whose first-block actions ApplyCommands applied start here,
+  //     before the fired reservations and the loop, so that a refused start cancels the
+  //     action children before any of them plays, and the start block's StopEvent actions
+  //     reach their targets in this block.
+  {
+    schema::TableRows& prows = SND_ROWS(Playback);
+    for (std::uint32_t d = 0; d < prows.count;) {
+      const SlotIndex s = base::rows::SlotAt(prows, d);
+      const PlaybackRequest& rq = SND_R(Playback_request)[d];
+      if ((rq.flags & kRequestActionsApplied) == 0u || SND_W(Playback_state)[d] != PlaybackStateId::None ||
+          (Priv(im, s).flags & kPbStarted) != 0u) {
+        ++d;
+        continue;
+      }
+      const HandleRef self{s, prows.generation[s]};
+      const std::uint32_t before = prows.count;
+      if (StartPlayback(c, d, im.clock)) {
+        FirstBlockStops(c, d);
+      } else {
+        CancelActionChildren(im, self);
+      }
+      if (prows.count == before) ++d;
     }
   }
 
@@ -1176,7 +1390,11 @@ void RunEventLogic(Impl& im) noexcept {
       const bool ended = SND_R(Voice_renderStatus)[d].ended != 0u &&
                          lc.state != static_cast<std::uint8_t>(VoiceStateId::Starting);
       const bool released = lc.state == static_cast<std::uint8_t>(VoiceStateId::Releasing) && lc.stopClock <= im.clock;
-      if ((ended || released) && !VoiceHeld(c, d)) {
+      // D-140: a voice whose return mode is "never" ends once it went virtual (SelectVoices).
+      const bool dropped = (im.ev.vs[v].flags & kVsKillVirtual) != 0u;
+      if ((ended || released || dropped) && !VoiceHeld(c, d)) {
+        const SlotIndex pb = SND_W(Voice_playbackSlot)[d];
+        if (dropped && !ended && !released && pb < im.cfg.maxPlaybacks) Priv(im, pb).flags |= kPbVoiceDropped;
         DestroyVoice(c, v);  // the swapped-in row is now at d
         continue;
       }
@@ -1202,6 +1420,11 @@ void RunEventLogic(Impl& im) noexcept {
       SND_W(Playback_state)[d] = PlaybackStateId::None;
       SND_W(Playback_schedule)[d] = PlaybackSchedule{0, 0};
       SND_W(Playback_endInfo)[d] = PlaybackEnd{0, 0};
+      InitPlaybackStage3(im, s, pp, lg, SND_R(Playback_request)[d]);
+    }
+    if ((pp.flags & kPbCancelled) != 0u) {  // D-145: an action child whose parent did not start
+      if (!EndPlayback(c, d, SND_END_REJECTED, SND_END_DETAIL_NONE)) ++d;
+      continue;
     }
     if ((pp.flags & kPbEndPending) != 0u) {
       if (!EndPlayback(c, d, pp.endReason, pp.endDetail)) ++d;
@@ -1257,6 +1480,15 @@ void RunEventLogic(Impl& im) noexcept {
       } else if ((req.flags & kRequestResume) != 0u && (pp.flags & kPbStopping) == 0u) {
         pp.flags &= ~kPbPausedUser;
       }
+      state = SND_W(Playback_state)[d];
+    }
+    if ((pp.flags & kPbActionStop) != 0u) {  // D-145: StopEvent action of a start block
+      pp.flags &= ~kPbActionStop;
+      if (state == PlaybackStateId::Pending) {
+        if (!EndPlayback(c, d, SND_END_STOPPED, SND_END_DETAIL_NONE)) ++d;
+        continue;
+      }
+      BeginStop(c, d, -1.0f, false);
       state = SND_W(Playback_state)[d];
     }
     if (state == PlaybackStateId::Pending) {
@@ -1319,9 +1551,15 @@ void RunEventLogic(Impl& im) noexcept {
       const ClockSample startClock = SND_W(Playback_schedule)[d].startClock;
       std::uint64_t add = im.cfg.blockFrames;
       if (startClock > im.clock) add = startClock < blockEnd ? blockEnd - startClock : 0u;
-      const std::uint64_t from = lg.playedFrames;
       lg.playedFrames += add;
-      if (add != 0u && ref.bankSlot != kNoBank) RunActions(c, d, from, lg.playedFrames);
+      // D-145: actions one block ahead; none once the playback stops (the rest never fires).
+      if (add != 0u && ref.bankSlot != kNoBank && (pp.flags & kPbStopping) == 0u) {
+        const std::uint64_t ahead = lg.playedFrames + im.cfg.blockFrames;
+        if (pp.actionHorizon < ahead) {
+          RunActions(c, d, pp.actionHorizon, ahead, lg.playedFrames, blockEnd);
+          pp.actionHorizon = ahead;
+        }
+      }
     }
     // All voices gone: the playback is complete (4.1).
     if (lg.voiceCount == 0u && st != PlaybackStateId::Pending &&
@@ -1330,8 +1568,11 @@ void RunEventLogic(Impl& im) noexcept {
       // NO_STREAM_SLOT, ...) left the reason in endDetail: the playback is rejected.
       const bool stopping = (pp.flags & kPbStopping) != 0u;
       const bool refused = !stopping && pp.endDetail != SND_END_DETAIL_NONE && (pp.flags & kPbSourceStarted) == 0u;
-      if (!EndPlayback(c, d, stopping ? pp.endReason : (refused ? SND_END_REJECTED : SND_END_COMPLETED),
-                       stopping || refused ? pp.endDetail : SND_END_DETAIL_NONE)) {
+      // D-140: a voice dropped when it went virtual ("never" return): the playback was stolen.
+      const bool dropped = !stopping && !refused && (pp.flags & kPbVoiceDropped) != 0u;
+      if (!EndPlayback(c, d,
+                       stopping ? pp.endReason : (refused ? SND_END_REJECTED : (dropped ? SND_END_STOLEN : SND_END_COMPLETED)),
+                       stopping || refused ? pp.endDetail : (dropped ? SND_END_DETAIL_VOICE_LIMIT : SND_END_DETAIL_NONE))) {
         ++d;
       }
       continue;

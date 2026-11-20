@@ -105,6 +105,12 @@ struct CoreLimits {
   std::uint32_t maxVoicesPerPlay = 64;   // voices one Play may create (nested events included)
   std::uint32_t serviceQueueEntries = 1024;   // postJob / postIo queues
   std::uint32_t maxLiveOverrides = 32;
+  // Stage 3 (group 4), D-147 / D-148: buses with BUSS.flags kBusMeter that get loudness and
+  // spectrum (the output always has them), the spectrum's FFT size (power of two,
+  // 32..8192), and the actions applied in a play's first block (D-145).
+  std::uint32_t maxMeteredBuses = 8;
+  std::uint32_t spectrumFftSize = 1024;
+  std::uint32_t maxActionChildren = 64;
 };
 
 // Called on the audio thread (ApplyCommands) for live-link commands that core
@@ -236,6 +242,8 @@ class System {
   snd_playback_handle Play(Id event, snd_emitter_handle emitter, const snd_when* when) noexcept;
   snd_result PlayOneShot(Id event, snd_emitter_handle emitter, const snd_when* when) noexcept;
   snd_result PlayAt(Id event, const snd_vec3* position, const snd_when* when) noexcept;
+  // Stage 3 (group 4), D-146: Play with a linear fade-in of `fadeInSeconds` (Play.flags bits 16..31, ms).
+  snd_playback_handle PlayFade(Id event, snd_emitter_handle emitter, const snd_when* when, float fadeInSeconds) noexcept;
   snd_result Stop(snd_playback_handle playback, float fadeSeconds, const snd_when* when) noexcept;
   snd_result Pause(snd_playback_handle playback, float fadeSeconds) noexcept;
   snd_result ResumePlayback(snd_playback_handle playback, float fadeSeconds) noexcept;
@@ -289,6 +297,9 @@ class System {
   snd_result GetPosition(snd_playback_handle playback, snd_position* out) const noexcept;
   snd_result GetTransportPosition(snd_transport_handle transport, snd_position* out) const noexcept;
   snd_result GetMeter(Id bus, snd_meter* out) const noexcept;
+  // Stage 3 (group 4), D-148: spectrum of a metered bus (SND_ID_NONE = the output) as of
+  // the latest Update(); fills min(binCount, fftSize / 2 + 1) magnitudes (rest 0). Any thread.
+  snd_result GetSpectrum(Id bus, std::uint32_t channel, float* out, std::uint32_t binCount) const noexcept;
   snd_result GetStats(snd_stats* out) const noexcept;
   snd_bank_state GetBankState(snd_bank_handle bank) const noexcept;
   snd_result GetBankChunk(snd_bank_handle bank, std::uint32_t fourcc, const void** data,

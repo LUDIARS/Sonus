@@ -350,6 +350,75 @@ void CreatePlayback(Impl& im, HandleRef h, HandleRef emitter, Id event, EventRef
   ResetChain(im, im.ap.playbackChain[h.slot], true);
   im.ap.playbackVolume[h.slot] = 1.0f;  // D-104: a new playback starts at its own 1 / 1
   im.ap.playbackPitch[h.slot] = 1.0f;
+  // D-146: snd_play_fade's fade-in (Play.flags bits 16..31, milliseconds).
+  im.ap.playbackFadeIn[h.slot] = static_cast<float>((flags & cmd::kPlayFadeInMsMask) >> cmd::kPlayFadeInMsShift) * 0.001f;
+}
+
+// D-145: the actions inside the first block of an immediate play of a bank event apply
+// in this block (its start block): Play actions create their child playbacks now (at the
+// action's sample, CLOCK_SAMPLE), parameter actions write the playback's own scope and
+// snapshot actions take their weight. RunEventLogic starts such a playback before the
+// fired reservations; if it does not start, it cancels the children (actionChildren), and
+// it applies the StopEvent actions of the block itself. Not for one-shots' children (only
+// a recorded play), so a chain of actions cannot recurse within one block.
+void ApplyFirstBlockActions(Impl& im, HandleRef h, const EventRef& ref) noexcept {
+  schema::Tables& t = im.tables;
+  const BankRecord* br = RegisteredBank(im, ref.bankSlot);
+  const std::uint32_t d = base::rows::DenseOf(t.Playback.rows, h);
+  if (br == nullptr || d == kNoSlot || (ref.flags & (kEventRefDynamic | kEventRefMusic)) != 0u) return;
+  PlaybackRequest& req = SND_W(Playback_request)[d];
+  if (req.startReservation != kNoSlot || (req.flags & kRequestRejectReservationFull) != 0u) return;
+  const bk::BankView& v = *br->view;
+  if (ref.eventIndex >= v.Rows(bf::chunk::EVNT)) return;
+  const std::uint32_t tf = v.Column<bk::col::EVNT_trackFirst>()[ref.eventIndex];
+  const std::uint32_t tc = v.Column<bk::col::EVNT_trackCount>()[ref.eventIndex];
+  bool any = false;
+  for (std::uint32_t tr = tf; tr < tf + tc; ++tr) {
+    if (v.Column<bk::col::TRAK_actionFirst>()[tr] != bf::kNone && v.Column<bk::col::TRAK_actionCount>()[tr] != 0u) any = true;
+  }
+  if (!any) return;
+  req.flags |= kRequestActionsApplied;
+  const SlotIndex es = SND_W(Playback_emitterSlot)[d];
+  for (std::uint32_t tr = tf; tr < tf + tc; ++tr) {
+    const std::uint32_t af = v.Column<bk::col::TRAK_actionFirst>()[tr];
+    const std::uint32_t ac = v.Column<bk::col::TRAK_actionCount>()[tr];
+    if (af == bf::kNone) continue;
+    for (std::uint32_t a = af; a < af + ac; ++a) {
+      const std::uint64_t at = ActionFrame(im, v.Column<bk::col::ACTN_timeMs>()[a]);
+      if (at >= im.cfg.blockFrames) continue;
+      const Id target = v.Column<bk::col::ACTN_target>()[a];
+      const float value = v.Column<bk::col::ACTN_value>()[a];
+      switch (static_cast<bf::ActionKind>(v.Column<bk::col::ACTN_action>()[a])) {
+        case bf::ActionKind::PlayEvent: {
+          if (im.ap.actionChildCount >= im.ap.actionChildCap) break;
+          const HandleRef ch = im.playbackSlots.Acquire();
+          if (ch.generation == 0u) break;
+          im.oneShot[ch.slot].store(1u, std::memory_order_relaxed);
+          snd_when w{};
+          if (at != 0u) {
+            w.kind = static_cast<std::uint8_t>(SND_WHEN_CLOCK_SAMPLE);
+            w.value = im.clock + at;
+          }
+          const HandleRef em = es != kNoSlot ? HandleRef{es, t.Emitter.rows.generation[es]} : HandleRef{};
+          CreatePlayback(im, ch, em, target, ResolveEvent(im, target), w, nullptr, cmd::kPlayOneShot,
+                         DynamicSourceRef{SourceKind::Count, {0, 0, 0}, 0u});
+          im.ap.actionChildren[im.ap.actionChildCount++] = ApplyPriv::ActionChild{h, ch};
+          break;
+        }
+        case bf::ActionKind::SetParam:
+          SetParamValue(im, ParamScope::Playback, h, target, ParamKind::Continuous, value);
+          break;
+        case bf::ActionKind::ApplySnapshot: {
+          const std::uint32_t slot = im.snapMap.Find(target);
+          const std::uint32_t sd = slot == IdMap::kNotFound ? kNoSlot : base::rows::DenseOf(t.Snapshot.rows, slot);
+          if (sd != kNoSlot) SND_W(Snapshot_request)[sd].weight = TimedRamp{SaneWeight(value), SaneWeight(value), im.clock, 0u, 0u};
+          break;
+        }
+        case bf::ActionKind::StopEvent:
+          break;  // RunEventLogic (FirstBlockStops), once the playback started
+      }
+    }
+  }
 }
 
 PlaybackRequest* RequestOf(Impl& im, HandleRef h) noexcept {
@@ -497,8 +566,10 @@ void ApplyOne(Impl& im, const cmd::CommandHeader& h, const std::uint8_t* p) noex
       break;  // the name table lives on the game side (D-50)
     case CT::Play: {
       const auto c = Load<cmd::Play>(p);
-      CreatePlayback(im, c.playback, c.emitter, c.event, ResolveEvent(im, c.event), c.when, &c.position, c.flags,
+      const EventRef ref = ResolveEvent(im, c.event);
+      CreatePlayback(im, c.playback, c.emitter, c.event, ref, c.when, &c.position, c.flags,
                      DynamicSourceRef{SourceKind::Count, {0, 0, 0}, 0u});
+      ApplyFirstBlockActions(im, c.playback, ref);  // D-145
       break;
     }
     case CT::LiveAudition: {
@@ -976,12 +1047,14 @@ void ApplyDeferred(Impl& im) noexcept {
         break;
       }
       case DeferredKind::SetParam:
-        SetParamValue(im, ParamScope::Global, HandleRef{}, df.id, ParamKind::Continuous, df.value);
+        // D-145: the scope of the playback that owns the action (ACTN has no scope column).
+        SetParamValue(im, ParamScope::Playback, df.handle, df.id, ParamKind::Continuous, df.value);
         break;
       case DeferredKind::ApplySnapshot: {
+        // ACTN has no time column for the snapshot: the weight applies at once.
         const std::uint32_t slot = im.snapMap.Find(df.id);
         const std::uint32_t d = slot == IdMap::kNotFound ? kNoSlot : base::rows::DenseOf(t.Snapshot.rows, slot);
-        if (d != kNoSlot) SND_W(Snapshot_request)[d].weight = TimedRamp{df.value, df.value, im.clock, 0u, 0u};
+        if (d != kNoSlot) SND_W(Snapshot_request)[d].weight = TimedRamp{SaneWeight(df.value), SaneWeight(df.value), im.clock, 0u, 0u};
         break;
       }
     }
@@ -994,6 +1067,7 @@ void ApplyDeferred(Impl& im) noexcept {
 void ApplyCommands(Impl& im) noexcept {
   im.releasedEmitterCount = 0;
   im.releasedUserBufferCount = 0;
+  im.ap.actionChildCount = 0;  // D-145: per block
   // Music inputs are reset after RunMusicLogic consumed them (sys_event.cpp RunMusic).
   ReleaseOwnedRows(im);
   ApplyDeferred(im);

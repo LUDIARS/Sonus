@@ -47,3 +47,6 @@ function(snd_indep_core_fixed2 name key)
 endfunction()
 snd_indep_core_fixed2(core_reregistered_thread_reorders_its_commands reregister)
 snd_indep_core_fixed2(core_timed_stop_of_paused_playback_sounds paused_timed_stop)
+
+# Stage 3, session B group 4 (voice management, sequences, notifications, analysis).
+snd_add_test(core_g4_test SOURCES core_voice2_test.cpp LINK ${_core_test_link})

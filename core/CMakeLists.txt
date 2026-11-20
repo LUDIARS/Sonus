@@ -23,4 +23,5 @@ snd_add_module(core
     src/bus_graph.cpp
     src/sys_publish.cpp
     src/frame.cpp
-    src/live_link.cpp)
+    src/live_link.cpp
+    src/analysis.cpp)
