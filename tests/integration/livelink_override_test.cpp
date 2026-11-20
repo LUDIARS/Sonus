@@ -246,7 +246,7 @@ SND_TEST(LivelinkOverride, ParameterAndStateOverridesAuditionAndClear) {
   SND_CHECK_NEAR(s.f.LastLeft() / s.base, 2.0, 1e-4);
   s.f.Steps(20);
   SND_CHECK_NEAR(s.f.LastLeft() / s.base, 1.0, 1e-4);
-  SND_CHECK_EQ(s.Ack(s.client->Audition(0, nullptr, true, true)), SND_ERR_UNSUPPORTED);  // stop all: no core command
+  SND_CHECK_EQ(s.Ack(s.client->Audition(0, nullptr, true, true)), SND_OK);  // D-170（プロトコル 1.1）: 試聴の全停止は動く（§8.6）
   const std::uint64_t args[2] = {1, 2};
   SND_CHECK_EQ(s.Ack(s.client->StructEdit(ll::StructOp::AddBus, HashId("Sfx"), args, 2)), SND_ERR_UNSUPPORTED);
 }
