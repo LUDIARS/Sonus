@@ -374,7 +374,10 @@ SND_TEST(IndepS7Replay, LostStateIsReported) {
   SND_REQUIRE_EQ(rp.result, SND_OK);
   SND_CHECK_EQ(rp.r->Info().lostState, 65535u);
   SND_CHECK((rp.r->Info().conditions & ll::kReplayStateLost) != 0u);
-  SND_CHECK(!rp.r->BitExactExpected());
+  // D-175: lost starting state does not make two replays differ; it means the replay does not
+  // reproduce the recorded run.
+  SND_CHECK(rp.r->BitExactExpected());
+  SND_CHECK(!rp.r->ReproducesRecordedRun());
 }
 
 // J5: malformed 1.1 records are rejected by the reader and by Replayer::Create.
@@ -442,17 +445,14 @@ SND_TEST(IndepS7Replay, MalformedNewRecordsAreRejected) {
 }
 
 // Spec gap probe: an origin value out of range (not 1 / 2). Recorded, not decided.
-SND_TEST(IndepS7Replay, BeginWithUnknownOriginIsRecordedBehaviour) {
-  std::vector<std::uint8_t> v;
-  PutLod(v, 0, 10);
-  Put(v, ll::RecordBegin{ll::kRecordBegin, 7u, 0u, 10u});
-  PutEmptyArena(v, 10);
-  Rp rp(v);
-  if (rp.result == SND_OK) {
-    std::printf("[indep_s7] Begin origin 7: accepted, Info().origin=%u conditions=0x%x\n", rp.r->Info().origin,
-                rp.r->Info().conditions);
-  } else {
-    std::printf("[indep_s7] Begin origin 7: Create -> %d\n", rp.result);
+// D-175: a Begin origin out of range is CORRUPT.
+SND_TEST(IndepS7Replay, BeginWithUnknownOriginIsCorrupt) {
+  for (std::uint16_t origin : {std::uint16_t{0}, std::uint16_t{3}, std::uint16_t{7}, std::uint16_t{0xFFFF}}) {
+    std::vector<std::uint8_t> v;
+    PutLod(v, 0, 10);
+    Put(v, ll::RecordBegin{ll::kRecordBegin, origin, 0u, 10u});
+    PutEmptyArena(v, 10);
+    Rp rp(v);
+    SND_CHECK_MSG(rp.result == SND_ERR_CORRUPT, "origin %u -> %d", origin, rp.result);
   }
-  SND_CHECK(true);
 }

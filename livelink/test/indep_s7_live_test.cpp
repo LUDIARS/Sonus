@@ -271,8 +271,13 @@ SND_TEST(IndepS7Handshake, DeferredSyncDecisionWithBankList) {
     SND_CHECK(!t.c->DecideSync(ll::SyncMode::SendDiffs));  // nothing waits any more
     SND_REQUIRE(t.Ready());
     SND_CHECK_EQ(t.Ack(t.c->OverrideParam(HashId("Knob"), 0.5f, true, true)), SND_OK);
-    // (a SetValue of "Sfx" answers UNSUPPORTED here: the release bank "Rel" holds a copy of
-    // the bus that cannot be written; see the note in livelink-indep.md)
+    // D-171: the release bank "Rel" holds a copy of "Sfx" that cannot be written: the whole
+    // SetValue is UNSUPPORTED and no cell is written
+    SND_CHECK_EQ(t.Ack(t.c->SetValue(lltest::BusVolume("Sfx", -6.0f))), SND_ERR_UNSUPPORTED);
+    ll::CellValue cv{};
+    SND_REQUIRE(WaitCell(t, t.c->ReadCell(SfxVolumeCell()), &cv));
+    SND_CHECK_EQ(cv.current, F32Bits(0.0f));
+    SND_CHECK_EQ(cv.flags & ll::kCellOverridden, 0u);
     t.c->Stop();
     SND_REQUIRE(f.StepUntil([&] { return !f.server->Connected(); }));
   }
@@ -585,9 +590,7 @@ SND_TEST(IndepS7Audition, LimitAndPlacesComeBack) {
   SND_CHECK_EQ(t.Ack(t.c->Audition(HashId("Tone"), nullptr, false, true)), SND_OK);
   SND_CHECK_EQ(f.rt->Drops().auditions, 0u);
   // an audition of an unknown event takes no place
-  const std::int32_t unknown = t.Ack(t.c->Audition(HashId("NoEvent"), nullptr, false, true));
-  f.Steps(10);
-  std::printf("[indep_s7] audition of an unknown event: Ack %d, active %u\n", unknown, f.rt->ActiveAuditions());
+  SND_CHECK_EQ(t.Ack(t.c->Audition(HashId("NoEvent"), nullptr, false, true)), SND_OK);  // D-171: recording result
   SND_CHECK(f.StepUntil([&] { return f.rt->ActiveAuditions() == 1u; }));
 }
 
@@ -660,8 +663,7 @@ SND_TEST(IndepS7Struct, BusReserveExactlyFullOneOverAndGivenBack) {
   SND_CHECK_EQ(t.Ack(t.c->StructEdit(ll::StructOp::RemoveBus, HashId("B1"), nullptr, 0)), SND_OK);
   u = f.rt->ReserveUsage();
   SND_CHECK_EQ(u.buses, 1u);
-  std::printf("[indep_s7] bytes after removing a live-added bus: %llu (added %llu)\n",
-              static_cast<unsigned long long>(u.bytes), static_cast<unsigned long long>(2u * cost));
+  SND_CHECK_EQ(u.bytes, cost);  // D-172: the whole cost of that Add comes back (units and bytes)
   SND_CHECK_EQ(t.Ack(t.c->StructEdit(ll::StructOp::AddBus, HashId("B3"), kMasterArgs, 2)), SND_OK);
   SND_CHECK_EQ(f.rt->ReserveUsage().buses, 2u);
   // removing a bus of the bank (not live-added) gives nothing back
@@ -1124,25 +1126,60 @@ SND_TEST(IndepS7Session, ManyAckRequestsAnsweredOnceNoDisconnect) {
   SND_CHECK_EQ(t.c->Stats().disconnects, 0u);
 }
 
-// Spec gap probe: answers beyond the client's answer store (not documented in client.hpp).
-SND_TEST(IndepS7Session, AnswerStoreOverflowIsRecordedBehaviour) {
+// D-170: the client keeps kClientCellsKept CellValues; one more pushes the oldest out and counts it.
+SND_TEST(IndepS7Session, AnswerStoreLimitsAndLostCounts) {
   Fixture f;
   f.Load(IndepBank(), "a.sndb");
   SND_REQUIRE_EQ(f.StartServer(), SND_OK);
   Tool t(f, NoReconnect(f));
   SND_REQUIRE(t.Ready());
-  std::vector<std::uint32_t> rs;
-  for (int i = 0; i < 600; ++i) rs.push_back(t.c->ReadCell(SfxVolumeCell(), false));
-  const std::uint64_t c0 = t.c->Sequences().cells;
-  SND_CHECK(f.StepUntil([&] { return t.c->Sequences().cells >= c0 + 600u; }));
-  std::uint32_t taken = 0;
-  for (std::uint32_t q : rs) {
-    ll::CellValue cv{};
-    if (t.c->TakeCell(q, &cv)) ++taken;
+  auto burst = [&](std::uint32_t n, std::vector<std::uint32_t>* rs) {
+    const std::uint64_t c0 = t.c->Sequences().cells;
+    for (std::uint32_t i = 0; i < n; ++i) rs->push_back(t.c->ReadCell(SfxVolumeCell(), false));
+    return f.StepUntil([&] { return t.c->Sequences().cells >= c0 + n; });
+  };
+  {  // exactly the limit
+    std::vector<std::uint32_t> rs;
+    SND_REQUIRE(burst(ll::kClientCellsKept, &rs));
+    std::uint32_t taken = 0;
+    for (std::uint32_t q : rs) {
+      ll::CellValue cv{};
+      taken += t.c->TakeCell(q, &cv) ? 1u : 0u;
+    }
+    SND_CHECK_EQ(taken, ll::kClientCellsKept);
+    SND_CHECK_EQ(t.c->Stats().cellsLost, 0u);
   }
-  std::printf("[indep_s7] 600 ReadCell answered, %u CellValues still takeable (received %llu)\n", taken,
-              static_cast<unsigned long long>(t.c->Sequences().cells - c0));
-  SND_CHECK(taken > 0u);
+  {  // taken answers pushed out later do not count
+    std::vector<std::uint32_t> rs;
+    SND_REQUIRE(burst(ll::kClientCellsKept, &rs));
+    SND_CHECK_EQ(t.c->Stats().cellsLost, 0u);  // the previous ones were taken
+    // one over: the oldest of this burst is lost
+    std::vector<std::uint32_t> more;
+    SND_REQUIRE(burst(1, &more));
+    SND_CHECK_EQ(t.c->Stats().cellsLost, 1u);
+    ll::CellValue cv{};
+    SND_CHECK(!t.c->TakeCell(rs[0], &cv));
+    SND_CHECK(t.c->TakeCell(rs[1], &cv));
+    SND_CHECK(t.c->TakeCell(more[0], &cv));
+  }
+  {  // Acks: 1024 kept, the 1025th pushes one out
+    const std::uint32_t lost0 = t.c->Stats().acksLost;
+    std::vector<std::uint32_t> rs;
+    const std::uint64_t a0 = t.c->Sequences().acks;
+    for (std::uint32_t i = 0; i < ll::kClientAcksKept + 1u; ++i) {
+      std::uint32_t q = 0;
+      for (int k = 0; k < 2000 && q == 0u; ++k) {
+        q = t.c->QueryBanks(true);
+        if (q == 0u) f.Step();
+      }
+      rs.push_back(q);
+    }
+    SND_REQUIRE(f.StepUntil([&] { return t.c->Sequences().acks >= a0 + ll::kClientAcksKept + 1u; }, 20000));
+    SND_CHECK_EQ(t.c->Stats().acksLost - lost0, 1u);
+    std::int32_t r = 0;
+    SND_CHECK(!t.c->TakeAck(rs[0], &r));
+    SND_CHECK(t.c->TakeAck(rs.back(), &r));
+  }
 }
 
 // L3: a RevertValue / ReplaceChunk of an earlier Server's session is not applied. The old
