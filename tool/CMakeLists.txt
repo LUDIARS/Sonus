@@ -22,7 +22,8 @@ snd_add_module(tool
     src/names.cpp
     src/session.cpp
     src/document.cpp
-    src/doc_build.cpp)
+    src/doc_build.cpp
+    src/event_editor.cpp)
 # The public headers use C++20 (defaulted operator== in edit_history / project /
 # recording_file.hpp): a C++17 host gets cxx_std_20 for the files that include them.
 target_compile_features(sonus_tool INTERFACE cxx_std_20)
