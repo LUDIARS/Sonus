@@ -195,7 +195,7 @@ SND_TEST(PhysicsApi, OnlyThePhysicsThread) {
   });
   t.join();
   SND_CHECK_EQ(r.size(), 16u);
-  for (std::size_t i = 0; i < r.size(); ++i) SND_CHECK_MSG(r[i] == SND_ERR_WRONG_THREAD, "call %zu: %d", i, r[i]);
+  for (std::size_t i = 0; i < r.size(); ++i) SND_CHECK_MSG(r[i] == SND_ERR_WRONG_THREAD, "call %u: %d", static_cast<unsigned>(i), r[i]);
   SND_CHECK_EQ(count, 0u);
   SND_CHECK_EQ(Stats(p).contacts_received, 0u);
   snd_phys_destroy(p);

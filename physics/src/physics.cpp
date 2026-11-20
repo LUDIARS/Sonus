@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <new>
 #include <thread>
 
 #include "snd/ext.h"
@@ -999,7 +1000,7 @@ snd_result Create(snd_system* sys, const snd_physics_config& cfg, const snd_allo
     b += (64u - (at & 63u)) & 63u;
   }
   std::memset(b, 0, total);
-  snd_phys* p = reinterpret_cast<snd_phys*>(b + oPhys);
+  snd_phys* p = ::new (static_cast<void*>(b + oPhys)) snd_phys();  // placement: no allocation
   p->sys = sys;
   p->allocator = a;
   p->block = block;
@@ -1048,9 +1049,10 @@ snd_result Create(snd_system* sys, const snd_physics_config& cfg, const snd_allo
 }
 
 void Destroy(snd_phys* p) noexcept {
-  if (p == nullptr) return;
+  // NULL, or called from inside the observer (the object is in use): nothing.
+  if (p == nullptr || p->inCallback) return;
   // The playbacks can only be stopped on the physics thread (a registered thread).
-  if (std::this_thread::get_id() == p->thread && !p->inCallback) {
+  if (std::this_thread::get_id() == p->thread) {
     for (std::uint32_t i = 0; i < p->trCap; ++i) {
       if (p->tracks[i].used) StopTrack(*p, p->tracks[i], SND_PHYSICS_STOP_DESTROYED);
     }

@@ -309,7 +309,9 @@ static inline void snd_physics_config_init(snd_physics_config* c) {
  */
 SND_API snd_result SND_CALL snd_physics_create(snd_system* sys, const snd_physics_config* cfg,
                                                const snd_allocator* allocator, snd_phys** out);
-/* Same as snd_phys_destroy. NULL is a no-op. */
+/* Same as snd_phys_destroy: stops the tracked playbacks (fade) and destroys the held emitters on
+ * the physics thread, then frees the memory. On another thread only the memory is freed. NULL,
+ * or a call from inside the observer, is a no-op. */
 SND_API void SND_CALL snd_physics_destroy(snd_phys* phys);
 
 /* 9.5 position-only one-shot: snd_play_at(event, position). Counted in requested_play_at.
