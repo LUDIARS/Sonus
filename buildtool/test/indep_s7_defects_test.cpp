@@ -46,7 +46,9 @@ SND_TEST(IndepS7Defect, Defect_ReadPatchChunkAcceptsOutOfRangeIndices) {
   std::memcpy(later.data() + 16 + 16 * 2 + 16, &two, 4);
   SND_CHECK(!patch::ReadPatchChunk(later.data(), later.size(), &back, &links));
   auto link = good;
+  SND_REQUIRE(link.size() >= 24u);
   const std::uint32_t seven = 7;
-  std::memcpy(link.data() + link.size() - 4, &seven, 4);  // link -> program 7 of 2
+  const std::size_t at = link.size() - 4u;  // the last link's program
+  for (int k = 0; k < 4; ++k) link[at + static_cast<std::size_t>(k)] = static_cast<std::uint8_t>(seven >> (8 * k));  // program 7 of 2
   SND_CHECK(!patch::ReadPatchChunk(link.data(), link.size(), &back, &links));
 }
