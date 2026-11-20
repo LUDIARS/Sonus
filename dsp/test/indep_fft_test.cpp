@@ -402,6 +402,6 @@ SND_TEST(IndepFft, BitExactChecksumAcrossSimdPaths) {
     h = Fnv(out.data(), out.size(), h);
   }
   snd::test::Note("FFT checksum %016llx", static_cast<unsigned long long>(h));
-  constexpr std::uint64_t kExpected = 0x0ull;  // filled in from the first run
+  constexpr std::uint64_t kExpected = 0xf84904a6f83fea77ull;
   SND_CHECK_EQ(h, kExpected);
 }
