@@ -165,9 +165,9 @@ SND_TEST(IndepG2Dsp, NonFiniteAndOutOfRangeRampsStayFinite) {
 }
 
 // effects.hpp: Echo "Delay is clamped to MaxDelay", Delay "Time is clamped to MaxDelay". A
-// value above MaxDelay must give the same delay as MaxDelay itself (480 frames for 10 ms);
-// the echo gives 481 (one frame more than at exactly MaxDelay).
-SND_TEST(IndepG2Dsp, Defect_DelayAboveMaxDelayIsOneFrameLongerThanMaxDelay) {
+// value above MaxDelay gives the same delay as MaxDelay itself (480 frames for 10 ms). Was
+// Defect_DelayAboveMaxDelayIsOneFrameLongerThanMaxDelay (481), fixed in b527335.
+SND_TEST(IndepG2Dsp, DelayAboveMaxDelayEqualsMaxDelay) {
   auto onset = [](snd::Id kind, std::vector<float> params) {
     Inst e(kind, 1, std::move(params));
     if (!e.ok) return -1;
@@ -193,4 +193,192 @@ SND_TEST(IndepG2Dsp, Defect_DelayAboveMaxDelayIsOneFrameLongerThanMaxDelay) {
   SND_CHECK_EQ(echoAbove, 480);
   SND_CHECK_EQ(delayAt, 480);
   SND_CHECK_EQ(delayAbove, 480);
+}
+
+// --- Re-check 2 (b527335: Echo / Delay clamp to the MaxDelay value) ---------------------------
+namespace {
+
+// An instance sized at `sizingRate` and run at `runRate` (desc.sample_rate 0: sizes and inits
+// with their own rate arguments; a run rate above the sizing rate clamps to what fits).
+struct RInst {
+  RInst(snd::Id type, std::uint32_t channels, std::vector<float> params, std::uint32_t sizingRate, std::uint32_t runRate)
+      : p(std::move(params)) {
+    d = snd::EffectDesc{type, channels, 256, static_cast<std::uint32_t>(p.size()), p.data(), nullptr, 0, 0, 0};
+    bytes = dsp::EffectStateBytes(d, sizingRate);
+    mem = bytes != 0u ? AlignedAlloc64(bytes) : nullptr;
+    ok = mem != nullptr && dsp::EffectInit(mem, bytes, d, runRate);
+  }
+  ~RInst() { AlignedFree64(mem); }
+  RInst(const RInst&) = delete;
+  RInst& operator=(const RInst&) = delete;
+  std::vector<float> p;
+  snd::EffectDesc d{};
+  std::uint32_t bytes = 0;
+  void* mem = nullptr;
+  bool ok = false;
+};
+
+// Output of `blocks` blocks for an impulse at frame 0 on channel 0 (others silent) through e.
+std::vector<std::vector<float>> ImpulseThrough(void* mem, std::uint32_t ch, std::uint32_t blocks,
+                                               const snd::ParamBlock* pb = nullptr) {
+  std::vector<std::vector<float>> out(ch, std::vector<float>(std::size_t{blocks} * 256, 0.0f));
+  for (std::uint32_t k = 0; k < blocks; ++k) {
+    std::vector<float*> io(ch);
+    for (std::uint32_t c = 0; c < ch; ++c) {
+      io[c] = out[c].data() + std::size_t{k} * 256;
+      if (k == 0 && c == 0) io[c][0] = 1.0f;
+    }
+    dsp::EffectProcess(mem, io.data(), io.data(), ch, 256, pb);
+  }
+  return out;
+}
+int FirstAbove(const std::vector<float>& x, int from, float thr = 0.1f) {
+  for (std::size_t i = static_cast<std::size_t>(from); i < x.size(); ++i) {
+    if (std::fabs(x[i]) > thr) return static_cast<int>(i);
+  }
+  return -1;
+}
+std::vector<float> EchoP(float ms, float maxMs, float decay = 0.0f) { return {ms, decay, 0.0f, 1.0f, maxMs}; }
+std::vector<float> DelayP(float ms, float maxMs, float fb = 0.0f, float pingPong = 0.0f) {
+  return {ms, fb, -96.0f, 0.0f, 20000.0f, pingPong, maxMs};
+}
+
+}  // namespace
+
+// At, just below and above MaxDelay, at run rates below / equal / above the sizing rate, 1 / 2 /
+// 6 channels: above == at; at == MaxDelay frames when the ring holds it; below is shorter.
+SND_TEST(IndepG2Dsp, ClampToMaxDelayAtAnyRateAndChannelCount) {
+  struct Rates {
+    std::uint32_t sizing, run;
+  };
+  const Rates rates[] = {{48000, 48000}, {48000, 24000}, {48000, 44100}, {24000, 48000}, {44100, 96000}};
+  for (const Rates& r : rates) {
+    for (const std::uint32_t ch : {1u, 2u, 6u}) {
+      for (int kind = 0; kind < 2; ++kind) {
+        const snd::Id id = kind == 0 ? dsp::kEffectEcho : dsp::kEffectDelay;
+        auto onset = [&](float ms) {
+          RInst e(id, ch, kind == 0 ? EchoP(ms, 10.0f) : DelayP(ms, 10.0f), r.sizing, r.run);
+          if (!e.ok) return -2;
+          const auto y = ImpulseThrough(e.mem, ch, 8);
+          return FirstAbove(y[0], 1);
+        };
+        const int at = onset(10.0f), above = onset(37.0f), below = onset(9.0f);
+        const int maxFrames = static_cast<int>(10.0 * r.run / 1000.0 + 0.5);
+        const bool fitsRing = r.run <= r.sizing;
+        SND_CHECK_MSG(above == at, "%s %u->%u Hz %u ch: at MaxDelay %d, above %d", kind == 0 ? "echo" : "delay", r.sizing,
+                      r.run, ch, at, above);
+        if (fitsRing) {
+          SND_CHECK_MSG(std::abs(at - maxFrames) <= 1, "%s %u->%u Hz: at MaxDelay %d, expected %d",
+                        kind == 0 ? "echo" : "delay", r.sizing, r.run, at, maxFrames);
+        }
+        // Below MaxDelay is shorter, unless the ring (sized at the lower sizing rate) bounds both.
+        SND_CHECK_MSG(below > 0 && (fitsRing ? below < at : below <= at && at < maxFrames),
+                      "%s %u->%u Hz %u ch: below %d, at %d (MaxDelay %d frames)", kind == 0 ? "echo" : "delay", r.sizing,
+                      r.run, ch, below, at, maxFrames);
+      }
+    }
+  }
+}
+
+// The delay ramps inside blocks across MaxDelay (5 ms -> 100 ms -> 3 ms, ParamBlock start/end):
+// no jump past the clamp, no NaN, no read outside the ring (ASan), and after the ramp the delay is
+// MaxDelay. With feedback 0.9 and ping-pong, on 2 and 6 channels.
+SND_TEST(IndepG2Dsp, DelayRampAcrossMaxDelayStaysInsideTheRing) {
+  for (const std::uint32_t ch : {2u, 6u}) {
+    for (int kind = 0; kind < 2; ++kind) {
+      const snd::Id id = kind == 0 ? dsp::kEffectEcho : dsp::kEffectDelay;
+      std::vector<float> base = kind == 0 ? EchoP(5.0f, 10.0f, 0.9f) : DelayP(5.0f, 10.0f, 0.9f, 1.0f);
+      RInst e(id, ch, base, 48000, 48000);
+      SND_REQUIRE(e.ok);
+      std::vector<float> st = base, en = base;
+      const std::uint32_t n = static_cast<std::uint32_t>(base.size());
+      std::vector<std::vector<float>> buf(ch, std::vector<float>(256));
+      std::vector<float*> io(ch);
+      bool finite = true;
+      float peak = 0;
+      std::uint64_t t = 0;
+      const float path[] = {5.0f, 9.5f, 10.5f, 100.0f, 100.0f, 9.99f, 10.01f, 3.0f, 10.0f, 4000.0f, 1.0f};
+      for (std::size_t k = 0; k + 1 < sizeof(path) / sizeof(path[0]); ++k) {
+        for (int rep = 0; rep < 6; ++rep) {
+          st[0] = rep == 0 ? path[k] : path[k + 1];
+          en[0] = path[k + 1];
+          snd::ParamBlock pb{st.data(), en.data(), n, 1u, nullptr};
+          for (std::uint32_t c = 0; c < ch; ++c) {
+            for (std::uint32_t i = 0; i < 256; ++i) buf[c][i] = 0.5f * static_cast<float>(std::sin(0.013 * double(t + i) * (c + 1)));
+            io[c] = buf[c].data();
+          }
+          t += 256;
+          dsp::EffectProcess(e.mem, io.data(), io.data(), ch, 256, &pb);
+          for (std::uint32_t c = 0; c < ch; ++c) {
+            for (float v : buf[c]) {
+              finite = finite && std::isfinite(v);
+              peak = std::fmax(peak, std::fabs(v));
+            }
+          }
+        }
+      }
+      SND_CHECK_MSG(finite && peak < 20.0f, "%s %u ch: finite %d peak %g", kind == 0 ? "echo" : "delay", ch, finite ? 1 : 0,
+                    peak);
+      // Settle at 100 ms (clamped) with no feedback: the delay is MaxDelay (480 frames).
+      std::vector<float> fin = kind == 0 ? EchoP(100.0f, 10.0f) : DelayP(100.0f, 10.0f);
+      snd::ParamBlock hold{fin.data(), fin.data(), n, 1u, nullptr};
+      for (int k = 0; k < 40; ++k) {
+        for (std::uint32_t c = 0; c < ch; ++c) {
+          std::fill(buf[c].begin(), buf[c].end(), 0.0f);
+          io[c] = buf[c].data();
+        }
+        dsp::EffectProcess(e.mem, io.data(), io.data(), ch, 256, &hold);
+      }
+      const auto y = ImpulseThrough(e.mem, ch, 6, &hold);
+      SND_CHECK_MSG(FirstAbove(y[0], 1) == 480 || (kind == 1 && FirstAbove(y[1], 1) == 480),
+                    "%s %u ch: after the ramp the delay is %d (left) %d (right)", kind == 0 ? "echo" : "delay", ch,
+                    FirstAbove(y[0], 1), FirstAbove(y[1], 1));
+    }
+  }
+}
+
+// The batch path (EffectProcessBatch, several instances of one kind) gives the same samples as
+// one EffectProcess per instance, with delays at / above / below MaxDelay.
+SND_TEST(IndepG2Dsp, BatchEqualsSingleAcrossTheClamp) {
+  for (int kind = 0; kind < 2; ++kind) {
+    const snd::Id id = kind == 0 ? dsp::kEffectEcho : dsp::kEffectDelay;
+    const float ms[3] = {10.0f, 55.0f, 7.3f};
+    auto params = [&](float m) { return kind == 0 ? EchoP(m, 10.0f, 0.5f) : DelayP(m, 10.0f, 0.5f, 1.0f); };
+    std::vector<std::vector<float>> single(3), batch(3);
+    for (int mode = 0; mode < 2; ++mode) {
+      RInst a(id, 2, params(ms[0]), 48000, 48000), b(id, 2, params(ms[1]), 48000, 48000), c(id, 2, params(ms[2]), 48000, 48000);
+      SND_REQUIRE(a.ok && b.ok && c.ok);
+      RInst* inst[3] = {&a, &b, &c};
+      std::vector<float> bufs[3][2];
+      for (auto& x : bufs) {
+        x[0].assign(256, 0.0f);
+        x[1].assign(256, 0.0f);
+      }
+      auto& dst = mode == 0 ? single : batch;
+      for (int k = 0; k < 10; ++k) {
+        float* io[3][2];
+        for (int i = 0; i < 3; ++i) {
+          for (int c2 = 0; c2 < 2; ++c2) {
+            std::fill(bufs[i][c2].begin(), bufs[i][c2].end(), 0.0f);
+            if (k == 0 && c2 == 0) bufs[i][c2][3] = 1.0f;
+            io[i][c2] = bufs[i][c2].data();
+          }
+        }
+        if (mode == 0) {
+          for (int i = 0; i < 3; ++i) dsp::EffectProcess(inst[i]->mem, io[i], io[i], 2, 256, nullptr);
+        } else {
+          dsp::EffectBatchItem items[3];
+          for (int i = 0; i < 3; ++i) items[i] = dsp::EffectBatchItem{inst[i]->mem, io[i], io[i], 2, 256, nullptr, nullptr};
+          dsp::EffectProcessBatch(kind == 0 ? dsp::EffectKind::Echo : dsp::EffectKind::Delay, items, 3);
+        }
+        for (int i = 0; i < 3; ++i) {
+          dst[static_cast<std::size_t>(i)].insert(dst[static_cast<std::size_t>(i)].end(), bufs[i][0].begin(), bufs[i][0].end());
+          dst[static_cast<std::size_t>(i)].insert(dst[static_cast<std::size_t>(i)].end(), bufs[i][1].begin(), bufs[i][1].end());
+        }
+      }
+    }
+    for (int i = 0; i < 3; ++i) SND_CHECK(single[static_cast<std::size_t>(i)] == batch[static_cast<std::size_t>(i)]);
+    // Instance b (55 ms, above MaxDelay) repeats at 480 frames like instance a (10 ms).
+    SND_CHECK_EQ(FirstAbove(batch[1], 4), FirstAbove(batch[0], 4));
+  }
 }
