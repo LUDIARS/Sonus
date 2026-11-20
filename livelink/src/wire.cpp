@@ -104,10 +104,10 @@ snd_result CheckOverrideState(const OverrideState& m) noexcept {
   return SND_OK;
 }
 
-snd_result CheckSetProfilerMask(const SetProfilerMask& m) noexcept {
-  constexpr std::uint32_t kAll = kProfVoices | kProfTiming | kProfMemory | kProfStreams | kProfLod | kProfEventLog |
-                                 kProfMeters;
-  if ((m.mask & ~kAll) != 0u) return SND_ERR_INVALID_ARGUMENT;
+snd_result CheckSetProfilerMask(const SetProfilerMask& m) noexcept { return CheckSetProfilerMask(m, 0u); }
+
+snd_result CheckSetProfilerMask(const SetProfilerMask& m, std::uint16_t minor) noexcept {
+  if ((m.mask & ~ProfilerMaskOf(minor)) != 0u) return SND_ERR_INVALID_ARGUMENT;
   if (m.meterHz > 1000u) return SND_ERR_INVALID_ARGUMENT;
   return SND_OK;
 }
@@ -119,6 +119,64 @@ snd_result CheckRecordControl(const RecordControl& m) noexcept {
 snd_result CheckStructEdit(const StructEdit& m) noexcept {
   if (m.op > static_cast<std::uint32_t>(StructOp::AddSend)) return SND_ERR_INVALID_ARGUMENT;
   if (m.argCount > 64u) return SND_ERR_INVALID_ARGUMENT;
+  return SND_OK;
+}
+
+namespace {
+bool F32Arg(std::uint64_t a) noexcept {
+  if ((a >> 32) != 0u) return false;
+  const std::uint32_t lo = static_cast<std::uint32_t>(a);
+  float f = 0;
+  std::memcpy(&f, &lo, 4);
+  return Finite(f);
+}
+}  // namespace
+
+snd_result CheckStructArgs(const StructEdit& m, const std::uint64_t* args) noexcept {
+  const snd_result r = CheckStructEdit(m);
+  if (r != SND_OK) return r;
+  if (m.targetId == 0u || (m.argCount != 0u && args == nullptr)) return SND_ERR_INVALID_ARGUMENT;
+  auto id = [](std::uint64_t a) { return a != 0u && a <= 0xFFFFFFFFull; };
+  switch (static_cast<StructOp>(m.op)) {
+    case StructOp::AddBus:
+      if (m.argCount < 2u || m.argCount > 3u || !id(args[0]) || args[0] == m.targetId) return SND_ERR_INVALID_ARGUMENT;
+      if (args[1] < 1u || args[1] > SND_MAX_CHANNELS) return SND_ERR_INVALID_ARGUMENT;
+      if (m.argCount == 3u && !F32Arg(args[2])) return SND_ERR_INVALID_ARGUMENT;
+      return SND_OK;
+    case StructOp::RemoveBus:
+      return m.argCount == 0u ? SND_OK : SND_ERR_INVALID_ARGUMENT;
+    case StructOp::AddEffect:
+      if (m.argCount < 2u || m.argCount > kMaxStructEffectParams + 2u || !id(args[0])) return SND_ERR_INVALID_ARGUMENT;
+      if (args[1] > 0xFFFFFFFFull) return SND_ERR_INVALID_ARGUMENT;  // insert position (~0u: append)
+      for (std::uint32_t i = 2; i < m.argCount; ++i) {
+        if (!F32Arg(args[i])) return SND_ERR_INVALID_ARGUMENT;
+      }
+      return SND_OK;
+    case StructOp::RemoveEffect:
+      return m.argCount == 1u && args[0] <= 0xFFFFu ? SND_OK : SND_ERR_INVALID_ARGUMENT;
+    case StructOp::AddSend:
+      if (m.argCount < 2u || m.argCount > 3u || !id(args[0]) || args[0] == m.targetId || !F32Arg(args[1])) {
+        return SND_ERR_INVALID_ARGUMENT;
+      }
+      if (m.argCount == 3u && args[2] > 1u) return SND_ERR_INVALID_ARGUMENT;  // 1 = pre-fader
+      return SND_OK;
+  }
+  return SND_ERR_INVALID_ARGUMENT;
+}
+
+snd_result CheckReloadBank(const ReloadBank& m, const std::uint8_t* path) noexcept {
+  if (m.bankId == 0u || (m.flags & ~kReloadLoadIfAbsent) != 0u) return SND_ERR_INVALID_ARGUMENT;
+  if (m.pathBytes == 0u || m.pathBytes > kMaxReloadPathBytes || path == nullptr) return SND_ERR_INVALID_ARGUMENT;
+  for (std::uint32_t i = 0; i < m.pathBytes; ++i) {
+    if (path[i] == 0u) return SND_ERR_INVALID_ARGUMENT;
+  }
+  return SND_OK;
+}
+
+snd_result CheckCellAddress(const SetValue& m) noexcept {
+  const int ci = bf::check::KnownChunkIndex(m.chunk);
+  if (ci < 0 || bf::kChunks[ci].kind != bf::ChunkKind::Table) return SND_ERR_NOT_FOUND;
+  if (bf::check::FindColumnInfo(m.chunk, m.column) == nullptr) return SND_ERR_NOT_FOUND;
   return SND_OK;
 }
 
@@ -158,9 +216,13 @@ std::uint32_t EncodeField(std::uint32_t chunkFourcc, std::uint32_t column) noexc
   return (static_cast<std::uint32_t>(ci) << 16) | column;
 }
 
+bool IsMarkerField(std::uint32_t field) noexcept {
+  return field == kFieldRevertAll || field == kFieldSession || field == kFieldRevertBegin || field == kFieldAuditionStop;
+}
+
 bool DecodeField(std::uint32_t field, std::uint32_t* chunkFourcc, std::uint32_t* column) noexcept {
   const std::uint32_t ci = field >> 16;
-  if (field == kFieldRevertAll || ci >= bf::check::kKnownChunkCount) return false;
+  if (IsMarkerField(field) || ci >= bf::check::kKnownChunkCount) return false;
   *chunkFourcc = bf::kChunks[ci].fourcc;
   *column = field & 0xFFFFu;
   return bf::check::FindColumnInfo(*chunkFourcc, *column) != nullptr;
@@ -202,6 +264,15 @@ const char* MessageTypeName(std::uint16_t type) noexcept {
     case MessageType::EventLog: return "EventLog";
     case MessageType::BusMeters: return "BusMeters";
     case MessageType::RecordData: return "RecordData";
+    case MessageType::RevertValue: return "RevertValue";
+    case MessageType::ReadCell: return "ReadCell";
+    case MessageType::QueryBanks: return "QueryBanks";
+    case MessageType::ReloadBank: return "ReloadBank";
+    case MessageType::CellValue: return "CellValue";
+    case MessageType::BankList: return "BankList";
+    case MessageType::StreamList: return "StreamList";
+    case MessageType::BlockDetail: return "BlockDetail";
+    case MessageType::ReloadStatus: return "ReloadStatus";
   }
   return "Unknown";
 }

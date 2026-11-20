@@ -48,6 +48,22 @@ struct AckRec {
   std::int32_t result;
   std::uint32_t used;
 };
+struct CellRec {
+  CellValue value;
+  std::uint32_t used;
+  std::uint32_t reserved;
+};
+
+// Entries numbered after `after` (entry k, 0-based since Start, has number k + 1).
+template <class T>
+std::uint32_t CopySince(const History<T>& h, std::uint64_t after, T* out, std::uint32_t capacity, std::uint64_t* first) noexcept {
+  const std::uint64_t oldest = h.written - h.Size() + 1u;  // number of the oldest kept
+  std::uint64_t from = after + 1u > oldest ? after + 1u : oldest;
+  if (first != nullptr) *first = from;
+  std::uint32_t n = 0;
+  for (std::uint64_t k = from; k <= h.written && n < capacity; ++k) out[n++] = h.items[(k - 1u) % h.capacity];
+  return n;
+}
 
 }  // namespace
 
@@ -80,6 +96,18 @@ struct Client::Impl final : FrameReader::Handler {
   History<LogSample> log;
   History<StallSample> stalls;
   History<LodSample> lods;
+  // 1.1
+  std::uint16_t peerMinor = 0;
+  bool awaitingSync = false;
+  History<CellRec> cells;
+  History<ReloadStatus> reloads;
+  History<BlockDetailSample> details;
+  BankEntry* bankList = nullptr;
+  std::uint32_t bankCount = 0, bankReplySeq = 0;
+  StreamInfo* streams = nullptr;
+  std::uint32_t streamCount = 0;
+  std::uint64_t streamsNs = 0;
+  ClientSequences seqs{};
   VoiceInfo* voices = nullptr;
   std::uint32_t voiceCount = 0;
   std::uint64_t voicesNs = 0;
@@ -88,7 +116,7 @@ struct Client::Impl final : FrameReader::Handler {
   std::uint64_t metersNs = 0;
   MemoryUsage memory{};
   bool haveMemory = false;
-  std::uint64_t received[8] = {};
+  std::uint64_t received[16] = {};
   std::uint8_t* record = nullptr;
   std::uint64_t recordBytes = 0;     // kept in `record`
   std::uint64_t recordReceived = 0;  // offset of the stream (kept + overflow)
@@ -112,7 +140,11 @@ struct Client::Impl final : FrameReader::Handler {
         static_cast<MeterEntry*>(alloc->Allocate(sizeof(MeterEntry) * (desc.maxMeterBuses + 1u), 64, MemTag::LiveLink));
     record = static_cast<std::uint8_t*>(alloc->Allocate(desc.recordBufferBytes != 0u ? desc.recordBufferBytes : 64u, 64,
                                                         MemTag::LiveLink));
+    bankList = static_cast<BankEntry*>(alloc->Allocate(sizeof(BankEntry) * (desc.maxBanks + 1u), 64, MemTag::LiveLink));
+    streams = static_cast<StreamInfo*>(alloc->Allocate(sizeof(StreamInfo) * (desc.maxStreams + 1u), 64, MemTag::LiveLink));
     return recvBuf != nullptr && voices != nullptr && lastMeters != nullptr && record != nullptr &&
+           bankList != nullptr && streams != nullptr && cells.Init(*alloc, 256) && reloads.Init(*alloc, 64) &&
+           details.Init(*alloc, secs * 120u) &&
            acks.Init(*alloc, 1024) && errors.Init(*alloc, 256) && timings.Init(*alloc, secs * 120u) &&
            meters.Init(*alloc, secs * 60u * (desc.maxMeterBuses < 1u ? 1u : desc.maxMeterBuses)) &&
            log.Init(*alloc, secs * 2000u) && stalls.Init(*alloc, 1024) && lods.Init(*alloc, 1024) &&
@@ -130,6 +162,13 @@ struct Client::Impl final : FrameReader::Handler {
     log.Free(*alloc);
     stalls.Free(*alloc);
     lods.Free(*alloc);
+    cells.Free(*alloc);
+    reloads.Free(*alloc);
+    details.Free(*alloc);
+    alloc->Free(bankList, MemTag::LiveLink);
+    alloc->Free(streams, MemTag::LiveLink);
+    bankList = nullptr;
+    streams = nullptr;
     alloc->Free(recvBuf, MemTag::LiveLink);
     alloc->Free(voices, MemTag::LiveLink);
     alloc->Free(lastMeters, MemTag::LiveLink);
@@ -180,7 +219,7 @@ struct Client::Impl final : FrameReader::Handler {
 
   void Count(std::uint16_t type) noexcept {
     const std::uint32_t i = type - static_cast<std::uint16_t>(MessageType::VoiceList);
-    if (type >= static_cast<std::uint16_t>(MessageType::VoiceList) && i < 8u) ++received[i];
+    if (type >= static_cast<std::uint16_t>(MessageType::VoiceList) && i < 16u) ++received[i];
   }
 
   void OnFrame(const FrameHeader& h, const std::uint8_t* p) noexcept override {
@@ -195,9 +234,14 @@ struct Client::Impl final : FrameReader::Handler {
           return;
         }
         reply = ReadFixed<HelloReply>(p, n);
+        peerMinor = reply.protocolMinor;
         if (reply.status == static_cast<std::uint32_t>(HelloStatus::Accepted)) {
           OnReady();
         } else if (reply.status == static_cast<std::uint32_t>(HelloStatus::BuildMismatch)) {
+          if (d.deferSyncDecision) {  // 1.1: the tool decides (DecideSync), QueryBanks meanwhile
+            awaitingSync = true;
+            return;
+          }
           const SyncDecision s{static_cast<std::uint32_t>(d.onMismatch), 0u};
           QueueLocked(true, MessageType::SyncDecision, false, &s, sizeof(s));
           if (d.onMismatch == SyncMode::SendDiffs) {
@@ -225,6 +269,7 @@ struct Client::Impl final : FrameReader::Handler {
       case MessageType::Ack: {
         const Ack a = ReadFixed<Ack>(p, n);
         acks.Push(AckRec{a.seq, a.result, 1u});
+        ++seqs.acks;
         return;
       }
       case MessageType::Error: {
@@ -232,6 +277,7 @@ struct Client::Impl final : FrameReader::Handler {
         e.message[sizeof(e.message) - 1] = '\0';
         errors.Push(e);
         ++stats.errorsReceived;
+        ++seqs.errors;
         return;
       }
       case MessageType::VoiceList:
@@ -240,22 +286,28 @@ struct Client::Impl final : FrameReader::Handler {
         List<VoiceInfo>(p, n, 1u << 20, [&](const VoiceInfo& v, std::uint32_t, std::uint32_t) {
           if (voiceCount < d.maxVoices) voices[voiceCount++] = v;
         });
+        ++seqs.voiceLists;
         return;
       case MessageType::BlockTiming:
         timings.Push(TimingSample{now, ReadFixed<BlockTiming>(p, n)});
+        seqs.timings = timings.written;
         return;
       case MessageType::MemoryUsage:
         memory = ReadFixed<MemoryUsage>(p, n);
         haveMemory = true;
+        ++seqs.memory;
         return;
       case MessageType::StreamStall:
         stalls.Push(StallSample{now, ReadFixed<StreamStall>(p, n)});
+        seqs.stalls = stalls.written;
         return;
       case MessageType::LodChange:
         lods.Push(LodSample{now, ReadFixed<LodChange>(p, n)});
+        seqs.lods = lods.written;
         return;
       case MessageType::EventLog:
         List<LogEntry>(p, n, 1u << 20, [&](const LogEntry& e, std::uint32_t, std::uint32_t) { log.Push(LogSample{now, e}); });
+        seqs.eventLog = log.written;
         return;
       case MessageType::BusMeters:
         meterCount = 0;
@@ -266,6 +318,37 @@ struct Client::Impl final : FrameReader::Handler {
             meters.Push(MeterSample{now, m});
           }
         });
+        seqs.meterEntries = meters.written;
+        ++seqs.meterSnapshots;
+        return;
+      // 1.1
+      case MessageType::CellValue:
+        cells.Push(CellRec{ReadFixed<CellValue>(p, n), 1u, 0u});
+        ++seqs.cells;
+        return;
+      case MessageType::BankList:
+        bankCount = 0;
+        bankReplySeq = h.seq;
+        List<BankEntry>(p, n, 1u << 16, [&](const BankEntry& b, std::uint32_t, std::uint32_t) {
+          if (bankCount < d.maxBanks) bankList[bankCount++] = b;
+        });
+        ++seqs.bankLists;
+        return;
+      case MessageType::StreamList:
+        streamCount = 0;
+        streamsNs = now;
+        List<StreamInfo>(p, n, 1u << 16, [&](const StreamInfo& si, std::uint32_t, std::uint32_t) {
+          if (streamCount < d.maxStreams) streams[streamCount++] = si;
+        });
+        ++seqs.streamLists;
+        return;
+      case MessageType::BlockDetail:
+        details.Push(BlockDetailSample{now, ReadFixed<BlockDetail>(p, n)});
+        seqs.details = details.written;
+        return;
+      case MessageType::ReloadStatus:
+        reloads.Push(ReadFixed<ReloadStatus>(p, n));
+        ++seqs.reloadStatus;
         return;
       case MessageType::RecordData: {
         const RecordData rd = ReadFixed<RecordData>(p, n);
@@ -284,6 +367,7 @@ struct Client::Impl final : FrameReader::Handler {
         if (take != 0u) std::memcpy(record + recordBytes, data, static_cast<std::size_t>(take));
         recordBytes += take;
         recordReceived += rd.bytes;
+        seqs.recordBytes += rd.bytes;
         stats.recordOverflow += static_cast<std::uint32_t>(rd.bytes - take);
         return;
       }
@@ -297,7 +381,7 @@ struct Client::Impl final : FrameReader::Handler {
     SetSt(ClientState::Ready);
     ++stats.connects;
     if (haveMask) {
-      const livelink::SetProfilerMask m{profilerMask, profilerHz};
+      const livelink::SetProfilerMask m{profilerMask & ProfilerMaskOf(peerMinor), profilerHz};
       QueueLocked(false, MessageType::SetProfilerMask, false, &m, sizeof(m));
     }
   }
@@ -311,6 +395,8 @@ struct Client::Impl final : FrameReader::Handler {
     conn = nullptr;
     reader.Reset();
     sender.Clear();
+    awaitingSync = false;
+    peerMinor = 0;
     ++stats.disconnects;
     if (St() != ClientState::Rejected) SetSt(ClientState::Connecting);
     nextAttemptNs = platform::MonotonicNanoseconds() + std::uint64_t{d.reconnectDelayMs} * kMs;
@@ -530,7 +616,7 @@ std::uint32_t Client::SetProfilerMask(std::uint32_t mask, std::uint32_t meterHz,
   impl_->profilerHz = meterHz;
   impl_->haveMask = true;
   if (impl_->St() != ClientState::Ready) return 0;
-  const livelink::SetProfilerMask m{mask, meterHz};
+  const livelink::SetProfilerMask m{mask & ProfilerMaskOf(impl_->peerMinor), meterHz};  // 1.1: the game's bits only
   return impl_->QueueLocked(false, MessageType::SetProfilerMask, wantAck, &m, sizeof(m));
 }
 
@@ -555,6 +641,160 @@ std::uint32_t Client::StructEdit(StructOp op, std::uint32_t targetId, const std:
   if (argCount > 64u || (argCount != 0u && args == nullptr)) return 0;
   const livelink::StructEdit m{static_cast<std::uint32_t>(op), targetId, argCount, 0u};
   return impl_->Command(MessageType::StructEdit, wantAck, &m, sizeof(m), args, argCount * 8u);
+}
+
+std::uint16_t Client::PeerMinor() const noexcept {
+  base::LockGuard g(impl_->mutex);
+  return impl_->peerMinor;
+}
+
+bool Client::Supports(MessageType type) const noexcept { return MinorOf(type) <= PeerMinor(); }
+
+std::uint32_t Client::RevertValue(const livelink::SetValue& target, bool wantAck) noexcept {
+  base::LockGuard g(impl_->mutex);
+  if (impl_->St() != ClientState::Ready || impl_->peerMinor < MinorOf(MessageType::RevertValue)) return 0;
+  return impl_->QueueLocked(false, MessageType::RevertValue, wantAck, &target, sizeof(target));
+}
+
+std::uint32_t Client::ReadCell(const livelink::SetValue& target, bool wantAck) noexcept {
+  base::LockGuard g(impl_->mutex);
+  if (impl_->St() != ClientState::Ready || impl_->peerMinor < MinorOf(MessageType::ReadCell)) return 0;
+  return impl_->QueueLocked(false, MessageType::ReadCell, wantAck, &target, sizeof(target));
+}
+
+std::uint32_t Client::QueryBanks(bool wantAck) noexcept {
+  base::LockGuard g(impl_->mutex);
+  const ClientState st = impl_->St();
+  // Ready, or Handshake while a deferred BuildMismatch waits for DecideSync.
+  if ((st != ClientState::Ready && !(st == ClientState::Handshake && impl_->awaitingSync)) ||
+      impl_->peerMinor < MinorOf(MessageType::QueryBanks)) {
+    return 0;
+  }
+  return impl_->QueueLocked(true, MessageType::QueryBanks, wantAck, nullptr, 0);
+}
+
+std::uint32_t Client::ReloadBank(std::uint32_t bankId, std::uint32_t languageId, const char* path, bool loadIfAbsent,
+                                 bool wantAck) noexcept {
+  if (path == nullptr) return 0;
+  const std::size_t n = std::strlen(path);
+  if (n == 0u || n > kMaxReloadPathBytes) return 0;
+  const livelink::ReloadBank m{bankId, languageId, loadIfAbsent ? static_cast<std::uint32_t>(kReloadLoadIfAbsent) : 0u,
+                               static_cast<std::uint32_t>(n)};
+  base::LockGuard g(impl_->mutex);
+  if (impl_->St() != ClientState::Ready || impl_->peerMinor < MinorOf(MessageType::ReloadBank)) return 0;
+  return impl_->QueueLocked(false, MessageType::ReloadBank, wantAck, &m, sizeof(m), path, static_cast<std::uint32_t>(n));
+}
+
+bool Client::AwaitingSync() const noexcept {
+  base::LockGuard g(impl_->mutex);
+  return impl_->awaitingSync && impl_->St() == ClientState::Handshake;
+}
+
+bool Client::DecideSync(SyncMode mode) noexcept {
+  base::LockGuard g(impl_->mutex);
+  Impl& im = *impl_;
+  if (!im.awaitingSync || im.St() != ClientState::Handshake || im.conn == nullptr) return false;
+  im.awaitingSync = false;
+  const SyncDecision s{static_cast<std::uint32_t>(mode), 0u};
+  im.QueueLocked(true, MessageType::SyncDecision, false, &s, sizeof(s));
+  if (mode == SyncMode::SendDiffs) {
+    im.OnReady();
+  } else {
+    im.SetSt(ClientState::Rejected);
+  }
+  return true;
+}
+
+bool Client::TakeCell(std::uint32_t seq, CellValue* out) noexcept {
+  base::LockGuard g(impl_->mutex);
+  History<CellRec>& h = impl_->cells;
+  for (std::uint32_t i = 0; i < h.Size(); ++i) {
+    CellRec& c = h.items[(h.written - h.Size() + i) % h.capacity];
+    if (c.used != 0u && c.value.requestSeq == seq) {
+      if (out != nullptr) *out = c.value;
+      c.used = 0u;
+      return true;
+    }
+  }
+  return false;
+}
+
+bool Client::WaitCell(std::uint32_t seq, std::uint32_t timeoutMs, CellValue* out) noexcept {
+  const std::uint64_t end = platform::MonotonicNanoseconds() + std::uint64_t{timeoutMs} * kMs;
+  while (!TakeCell(seq, out)) {
+    if (platform::MonotonicNanoseconds() >= end) return false;
+    platform::SleepFor(kMs / 2u);
+  }
+  return true;
+}
+
+std::uint32_t Client::CopyBanks(BankEntry* out, std::uint32_t capacity, std::uint32_t* replySeq) const noexcept {
+  base::LockGuard g(impl_->mutex);
+  const std::uint32_t n = impl_->bankCount < capacity ? impl_->bankCount : capacity;
+  for (std::uint32_t i = 0; i < n; ++i) out[i] = impl_->bankList[i];
+  if (replySeq != nullptr) *replySeq = impl_->bankReplySeq;
+  return n;
+}
+
+std::uint32_t Client::CopyReloadStatus(ReloadStatus* out, std::uint32_t capacity) const noexcept {
+  base::LockGuard g(impl_->mutex);
+  const History<ReloadStatus>& h = impl_->reloads;
+  std::uint32_t n = 0;
+  for (std::uint32_t i = 0; i < h.Size() && n < capacity; ++i) out[n++] = h.At(i);
+  return n;
+}
+
+std::uint32_t Client::CopyStreams(StreamInfo* out, std::uint32_t capacity, std::uint64_t* receivedNs) const noexcept {
+  base::LockGuard g(impl_->mutex);
+  const std::uint32_t n = impl_->streamCount < capacity ? impl_->streamCount : capacity;
+  for (std::uint32_t i = 0; i < n; ++i) out[i] = impl_->streams[i];
+  if (receivedNs != nullptr) *receivedNs = impl_->streamsNs;
+  return n;
+}
+
+ClientSequences Client::Sequences() const noexcept {
+  base::LockGuard g(impl_->mutex);
+  return impl_->seqs;
+}
+
+std::uint32_t Client::CopyTimingsSince(std::uint64_t after, TimingSample* out, std::uint32_t capacity,
+                                       std::uint64_t* first) const noexcept {
+  base::LockGuard g(impl_->mutex);
+  return CopySince(impl_->timings, after, out, capacity, first);
+}
+std::uint32_t Client::CopyEventLogSince(std::uint64_t after, LogSample* out, std::uint32_t capacity,
+                                        std::uint64_t* first) const noexcept {
+  base::LockGuard g(impl_->mutex);
+  return CopySince(impl_->log, after, out, capacity, first);
+}
+std::uint32_t Client::CopyStallsSince(std::uint64_t after, StallSample* out, std::uint32_t capacity,
+                                      std::uint64_t* first) const noexcept {
+  base::LockGuard g(impl_->mutex);
+  return CopySince(impl_->stalls, after, out, capacity, first);
+}
+std::uint32_t Client::CopyLodsSince(std::uint64_t after, LodSample* out, std::uint32_t capacity,
+                                    std::uint64_t* first) const noexcept {
+  base::LockGuard g(impl_->mutex);
+  return CopySince(impl_->lods, after, out, capacity, first);
+}
+std::uint32_t Client::CopyBlockDetailsSince(std::uint64_t after, BlockDetailSample* out, std::uint32_t capacity,
+                                            std::uint64_t* first) const noexcept {
+  base::LockGuard g(impl_->mutex);
+  return CopySince(impl_->details, after, out, capacity, first);
+}
+std::uint32_t Client::CopyMeterHistorySince(std::uint64_t after, std::uint32_t busId, MeterSample* out,
+                                            std::uint32_t capacity, std::uint64_t* first) const noexcept {
+  base::LockGuard g(impl_->mutex);
+  const History<MeterSample>& h = impl_->meters;
+  const std::uint64_t oldest = h.written - h.Size() + 1u;
+  const std::uint64_t from = after + 1u > oldest ? after + 1u : oldest;
+  if (first != nullptr) *first = from;
+  std::uint32_t n = 0;
+  for (std::uint64_t k = from; k <= h.written && n < capacity; ++k) {
+    const MeterSample& m = h.items[(k - 1u) % h.capacity];
+    if (busId == ~0u || m.meter.busId == busId) out[n++] = m;
+  }
+  return n;
 }
 
 std::uint32_t Client::SendRaw(std::uint16_t type, std::uint16_t flags, const void* payload, std::uint32_t bytes) noexcept {
@@ -669,6 +909,12 @@ std::uint32_t Client::CopyLods(LodSample* out, std::uint32_t capacity) const noe
   return CopyRecent(impl_->lods, cutoff, out, capacity);
 }
 
+std::uint32_t Client::CopyBlockDetails(BlockDetailSample* out, std::uint32_t capacity) const noexcept {
+  SND_CLIENT_CUTOFF;
+  base::LockGuard g(impl_->mutex);
+  return CopyRecent(impl_->details, cutoff, out, capacity);
+}
+
 #undef SND_CLIENT_CUTOFF
 
 std::uint32_t Client::CopyVoices(VoiceInfo* out, std::uint32_t capacity, std::uint64_t* receivedNs) const noexcept {
@@ -696,7 +942,7 @@ bool Client::LatestMemory(MemoryUsage* out) const noexcept {
 
 std::uint64_t Client::Received(MessageType type) const noexcept {
   const std::uint32_t i = static_cast<std::uint32_t>(type) - static_cast<std::uint32_t>(MessageType::VoiceList);
-  if (static_cast<std::uint32_t>(type) < static_cast<std::uint32_t>(MessageType::VoiceList) || i >= 8u) return 0;
+  if (static_cast<std::uint32_t>(type) < static_cast<std::uint32_t>(MessageType::VoiceList) || i >= 16u) return 0;
   base::LockGuard g(impl_->mutex);
   return impl_->received[i];
 }
