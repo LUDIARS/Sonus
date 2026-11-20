@@ -11,6 +11,7 @@
 #include "snd/buildtool/diagnostics.hpp"
 #include "snd/buildtool/json.hpp"
 #include "snd/dsp/effects.hpp"
+#include "snd/tool/document.hpp"
 
 namespace snd::tool {
 namespace {
@@ -214,14 +215,38 @@ bool Project::Load(const std::string& dir, const std::string& skipDir) {
     }
   }
   std::sort(files.begin(), files.end());
-
-  std::vector<RawObject> raw;
+  std::vector<std::pair<std::string, std::string>> texts;
   for (const std::string& rel : files) {
     std::string text;
     if (!ReadFile((root / rel).string(), &text)) {
       issues_.push_back(ProjectIssue{true, rel, "cannot read file"});
       continue;
     }
+    texts.emplace_back(rel, std::move(text));
+  }
+  return LoadTexts(texts);
+}
+
+bool Project::Load(const ProjectDocument& doc) {
+  dir_ = doc.directory();
+  name_.clear();
+  buses_.clear();
+  categories_.clear();
+  parameters_.clear();
+  issues_.clear();
+  banks_.clear();
+  buildHash_ = 0;
+  std::vector<std::pair<std::string, std::string>> texts;
+  for (const DocObject& o : doc.objects()) texts.emplace_back(o.file, doc.TextOf(o));
+  std::sort(texts.begin(), texts.end());
+  for (const DocLoadIssue& i : doc.loadIssues()) issues_.push_back(ProjectIssue{true, i.file, i.message});
+  return LoadTexts(texts);
+}
+
+bool Project::LoadTexts(const std::vector<std::pair<std::string, std::string>>& texts) {
+  std::vector<RawObject> raw;
+  for (const auto& [rel, textIn] : texts) {
+    std::string text = textIn;
     if (text.size() >= 3 && static_cast<unsigned char>(text[0]) == 0xEF && static_cast<unsigned char>(text[1]) == 0xBB &&
         static_cast<unsigned char>(text[2]) == 0xBF) {
       text.erase(0, 3);
