@@ -117,6 +117,8 @@ bool PatchEditor::RemoveNode(const std::string& id) {
 bool PatchEditor::MoveNode(const std::string& id, float x, float y, std::uint32_t mergeKey) {
   const int i = NodeIndex(id);
   if (i < 0 || !std::isfinite(x) || !std::isfinite(y)) return false;
+  const PatchNode cur = Nodes()[static_cast<std::size_t>(i)];
+  if (cur.x == x && cur.y == y) return true;  // D-177b (0, 0 when absent)
   Value pos = json::MakeArray();
   pos.items.push_back(Number(x));
   pos.items.push_back(Number(y));
@@ -125,6 +127,7 @@ bool PatchEditor::MoveNode(const std::string& id, float x, float y, std::uint32_
 
 bool PatchEditor::RenameNode(const std::string& id, const std::string& newId) {
   const int i = NodeIndex(id);
+  if (i >= 0 && id == newId) return true;  // D-177b
   if (i < 0 || newId.empty() || NodeIndex(newId) >= 0) return false;
   return doc_.Modify(guid_, [&](Value& d) {
     *FindPath(d, Idx("nodes", static_cast<std::size_t>(i), ".id")) = String(newId);
@@ -146,6 +149,7 @@ bool PatchEditor::SetParam(const std::string& id, const std::string& param, doub
   const pt::NodeKindInfo* k = pt::FindNodeKind(Nodes()[static_cast<std::size_t>(i)].kind);
   const pt::ParamInfo* p = k != nullptr ? pt::FindParam(*k, param) : nullptr;
   if (p == nullptr || p->choices != nullptr || value < p->minValue || value > p->maxValue) return false;
+  if (Param(id, param) == value) return true;  // D-177b (the table default when absent)
   const std::string path = Idx("nodes", static_cast<std::size_t>(i), ".params");
   return doc_.Modify(
       guid_,
@@ -170,8 +174,15 @@ bool PatchEditor::SetChoice(const std::string& id, const std::string& param, con
   const pt::ParamInfo* p = k != nullptr ? pt::FindParam(*k, param) : nullptr;
   if (p == nullptr || p->choices == nullptr) return false;
   bool known = false;
-  for (std::uint32_t c = 0; p->choices[c] != nullptr; ++c) known = known || choice == p->choices[c];
+  std::uint32_t index = 0;
+  for (std::uint32_t c = 0; p->choices[c] != nullptr; ++c) {
+    if (choice == p->choices[c]) {
+      known = true;
+      index = c;
+    }
+  }
   if (!known) return false;
+  if (Param(id, param) == index) return true;  // D-177b
   return doc_.Modify(guid_, [&](Value& d) {
     Value* node = FindPath(d, Idx("nodes", static_cast<std::size_t>(i)));
     Value* ps = FindPath(*node, "params");
@@ -206,7 +217,20 @@ bool PatchEditor::SetCurve(const std::string& id, const std::string& parameterGu
     arr.items.push_back(pt2);
   }
   json::Add(ps, "points", arr);
-  return doc_.Set(guid_, Idx("nodes", static_cast<std::size_t>(i), ".params"), ps);
+  const std::string path = Idx("nodes", static_cast<std::size_t>(i), ".params");
+  if (const Value* cur = FindPath(doc_.Find(guid_)->doc, path); cur != nullptr && cur->IsObject()) {
+    const DocObject* cp = doc_.Resolve("parameter", StringAt(*cur, "parameter"));
+    const Value* cpts = cur->Find("points");
+    if (cp != nullptr && cp->guid == prm->guid && cpts != nullptr && JsonSameMeaning(*cpts, arr)) return true;  // D-177b
+    // Other members of "params" (notes ...) stay.
+    return doc_.Modify(guid_, [&](Value& d) {
+      Value* p = FindPath(d, path);
+      SetMember(*p, "parameter", String(prm->guid), nullptr);
+      SetMember(*p, "points", arr, nullptr);
+      return true;
+    });
+  }
+  return doc_.Set(guid_, path, ps);
 }
 
 double PatchEditor::Param(const std::string& id, const std::string& param) const {

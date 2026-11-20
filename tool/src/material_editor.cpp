@@ -139,6 +139,7 @@ bool MaterialEditor::MoveMaterial(std::uint32_t from, std::uint32_t to, Renumber
 }
 bool MaterialEditor::RenameMaterial(const std::string& from, const std::string& to) {
   const int i = IndexOf(from);
+  if (i >= 0 && from == to) return true;  // D-177b
   if (i < 0 || to.empty() || to == "notes" || IndexOf(to) >= 0) return false;
   return doc_.Modify(guid_, [&](Value& d) {
     Member(d, "materials")->items[static_cast<std::size_t>(i)] = String(to);
@@ -156,6 +157,7 @@ bool MaterialEditor::RenameMaterial(const std::string& from, const std::string& 
 
 bool MaterialEditor::SetSingle(const std::string& material, ContactKind k, const std::string& ev) {
   if (IndexOf(material) < 0) return false;
+  if (!ev.empty() && Single(material, k) == NormalizeGuid(ev)) return true;  // D-177b (by name or GUID)
   if (ev.empty()) {
     const Value* s = doc_.Find(guid_)->doc.Find("single");
     const Value* m = s != nullptr ? s->Find(material) : nullptr;
@@ -188,6 +190,7 @@ bool MaterialEditor::SetSingle(const std::string& material, ContactKind k, const
 }
 bool MaterialEditor::SetPair(const std::string& a, const std::string& b, const std::string& ev) {
   if (IndexOf(a) < 0 || IndexOf(b) < 0) return false;
+  if (!ev.empty() && Pair(a, b) == NormalizeGuid(ev)) return true;  // D-177b
   std::string g;
   if (!ev.empty()) {
     const DocObject* e = doc_.Find(ev);
@@ -227,6 +230,7 @@ bool MaterialEditor::SetPair(const std::string& a, const std::string& b, const s
 }
 bool MaterialEditor::SetFootstep(const std::string& material, const std::string& ev) {
   if (IndexOf(material) < 0) return false;
+  if (!ev.empty() && Footstep(material) == NormalizeGuid(ev)) return true;  // D-177b
   if (ev.empty()) {
     const Value* f = doc_.Find(guid_)->doc.Find("footsteps");
     if (f == nullptr || f->Find(material) == nullptr) return true;  // already clear
@@ -250,6 +254,7 @@ bool MaterialEditor::SetFootstep(const std::string& material, const std::string&
 }
 bool MaterialEditor::SetDefault(ContactKind k, const std::string& ev) {
   if (!valid()) return false;
+  if (!ev.empty() && Default(k) == NormalizeGuid(ev)) return true;  // D-177b
   const std::string path = std::string("defaults.") + ContactName(k);
   if (ev.empty()) return FindPath(doc_.Find(guid_)->doc, path) == nullptr || doc_.Erase(guid_, path);
   const DocObject* e = doc_.Find(ev);
@@ -262,6 +267,15 @@ bool MaterialEditor::SetCurves(const std::string& material, const StrengthCurves
     if (!std::isfinite(v)) return false;
   }
   if (!(t[0] >= 0.0f && t[0] <= t[1] && t[1] <= t[2] && t[2] <= t[3] && t[3] > 0.0f)) return false;
+  {
+    const StrengthCurves cur = Curves(material);
+    bool same = true;
+    for (int i = 0; i < 4; ++i) same = same && cur.impulseToVelocity[i] == t[i];
+    for (int i = 0; i < 2; ++i) {
+      same = same && cur.massToPitchCents[i] == c.massToPitchCents[i] && cur.speedToVolumeDb[i] == c.speedToVolumeDb[i];
+    }
+    if (same) return true;  // D-177b (the build's defaults when absent)
+  }
   Value v = json::MakeObject();
   auto arr = [](const float* p, int n) {
     Value a = json::MakeArray();
