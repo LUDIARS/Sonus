@@ -15,7 +15,7 @@ struct Recorded {
   std::uint32_t blockSamples = 0;
 };
 
-enum class During { Plays, ReplaceChunk, StructEdit, Audition, ToneBefore };
+enum class During { Plays, ReplaceChunk, StructEdit, Audition, ToneBefore, TwoReplaceChunks };
 
 // A session recorded through the tool. `before` edits come before the recording starts.
 void RecordSession(Recorded& rec, bool editsBefore, During during, ll::IStructEditor* editor = nullptr) {
@@ -53,6 +53,12 @@ void RecordSession(Recorded& rec, bool editsBefore, During during, ll::IStructEd
     case During::ToneBefore:
       f.sys->Play(HashId("Blip"), snd_emitter_handle{0}, nullptr);
       break;
+    case During::TwoReplaceChunks: {  // the same slot (same key) twice, other values
+      const std::vector<std::uint8_t> first = BussVolumes({-3.0f, 0.0f});
+      SND_CHECK_EQ(ack(c->ReplaceChunk(kBankId, bf::chunk::BUSS, first.data(), first.size())), SND_OK);
+      f.Steps(3);
+      [[fallthrough]];
+    }
     case During::ReplaceChunk: {
       const std::vector<std::uint8_t> chunk = BussVolumes({-6.0f, 0.0f});
       SND_CHECK_EQ(ack(c->ReplaceChunk(kBankId, bf::chunk::BUSS, chunk.data(), chunk.size())), SND_OK);
@@ -363,4 +369,24 @@ SND_TEST(LivelinkV11Record, PlaybackAliveAtTheStartIsLostState) {
   SND_CHECK(!a.reproduces);
   SND_CHECK_EQ(a.digest, b.digest);
   SND_CHECK(Differences(rec, a) > 0u);
+}
+
+// Two replacements through the same slot (the same pairing key) replay in order.
+SND_TEST(LivelinkV11Record, TwoReplacementsWithTheSameKeyReplayInOrder) {
+  Recorded rec;
+  RecordSession(rec, false, During::TwoReplaceChunks);
+  std::vector<std::uint64_t> keys;
+  ll::RecordReader rr(rec.bytes.data(), rec.bytes.size());
+  ll::RecordItem it;
+  while (rr.Next(&it)) {
+    if (ll::IsKind(it, ll::kRecordLiveData)) keys.push_back(it.liveData.key);
+  }
+  SND_REQUIRE_EQ(keys.size(), 2u);
+  SND_CHECK_EQ(keys[0], keys[1]);
+  Replayed a;
+  Replay(rec, &a);
+  SND_CHECK_EQ(a.info.replacedChunks, 2u);
+  SND_CHECK_EQ(a.info.skippedCommands, 0u);
+  SND_CHECK(a.reproduces);
+  SND_CHECK_EQ(Differences(rec, a), 0u);
 }

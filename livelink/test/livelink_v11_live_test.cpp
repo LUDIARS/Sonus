@@ -561,11 +561,22 @@ SND_TEST(LivelinkV11, UpdateNumbersTellNewAndMissedEntries) {
   SND_CHECK(again == 0u || first == last + 1u);
   // More than the history holds (120): the oldest are missed.
   SND_REQUIRE(s.f.StepUntil([&] { return s.client->Sequences().timings > last + 130u; }, 30000));
+  s.client->SetProfilerMask(0u, 30);  // stop the stream, then let it settle
+  std::uint64_t prev = ~0ull;
+  SND_REQUIRE(s.f.StepUntil([&] {
+    const std::uint64_t q = s.client->Sequences().timings;
+    s.f.Steps(2);
+    std::this_thread::sleep_for(std::chrono::milliseconds(60));
+    const bool still = q == prev && q == s.client->Sequences().timings;
+    prev = q;
+    return still;
+  }));
   const std::uint64_t now = s.client->Sequences().timings;
   n = s.client->CopyTimingsSince(last, t, 256, &first);
-  SND_CHECK(first > last + 1u);           // missed entries
-  SND_CHECK(first + 120u >= now + 1u);    // the oldest one kept
-  SND_CHECK(n >= 120u);
+  SND_CHECK_EQ(n, 120u);                  // what the history keeps (1 s x kClientTimingsPerSecond)
+  SND_CHECK_EQ(first + n - 1u, now);      // up to the newest
+  SND_CHECK_EQ(first - last - 1u, now - last - 120u);  // exactly the missed ones
+  SND_CHECK_EQ(s.client->Stats().timingsLost, now - 120u);
 }
 
 // D-172: removing a live bus also takes away the live effects on it and the live sends from it
@@ -689,4 +700,34 @@ SND_TEST(LivelinkV11, ReloadWithAFileOfAnotherBankFails) {
     return s.client->Sequences().bankLists >= 1u && s.client->CopyBanks(b, 4) == 0u;
   }));
   SND_CHECK_EQ(s.f.server->Stats().reloadsFailed, 1u);
+}
+
+// The ReplaceChunk / StructEdit slots are shared (RuntimeDesc::chunkSlots, default 1): while one
+// waits for the audio thread, the other is refused LIMIT_REACHED and takes nothing.
+SND_TEST(LivelinkV11, SharedSlotIsLimitReachedAndArgCountIsCapped) {
+  FakeEditor ed;
+  ll::RuntimeDesc rd;
+  rd.structEditor = &ed;
+  Session s(Config(), rd);
+  SND_REQUIRE(s.Ready());
+  const std::vector<std::uint8_t> chunk = BussVolumes({-6.0f, 0.0f});
+  const std::uint64_t addBus[2] = {HashId("Master"), 2u};
+  // Nothing is rendered between the two: the first one holds the slot.
+  const std::uint32_t a = s.client->ReplaceChunk(kBankId, bf::chunk::BUSS, chunk.data(), chunk.size());
+  const std::uint32_t b = s.client->StructEdit(ll::StructOp::AddBus, HashId("New"), addBus, 2);
+  std::int32_t rb = 1;
+  SND_REQUIRE(s.client->WaitAck(b, 2000, &rb));
+  SND_CHECK_EQ(rb, SND_ERR_LIMIT_REACHED);
+  SND_CHECK_EQ(s.f.rt->ReserveUsage().buses, 0u);
+  SND_CHECK_EQ(s.f.rt->StructLogPlaces(), 0u);
+  SND_CHECK_EQ(s.Ack(a), SND_OK);
+  SND_CHECK_EQ(s.Ack(s.client->StructEdit(ll::StructOp::AddBus, HashId("New"), addBus, 2)), SND_OK);
+  // 65 arguments (the Client sends at most 64): refused by the game's rules.
+  std::vector<std::uint8_t> raw(sizeof(ll::StructEdit) + 65u * 8u, 0u);
+  const ll::StructEdit m{static_cast<std::uint32_t>(ll::StructOp::AddEffect), HashId("Sfx"), 65u, 0u};
+  std::memcpy(raw.data(), &m, sizeof(m));
+  const std::uint32_t q = s.client->SendRaw(static_cast<std::uint16_t>(ll::MessageType::StructEdit), ll::kFrameWantsAck, raw.data(),
+                                            static_cast<std::uint32_t>(raw.size()));
+  SND_CHECK_EQ(s.Ack(q), SND_ERR_INVALID_ARGUMENT);
+  SND_CHECK_EQ(ed.calls.size(), 1u);
 }
