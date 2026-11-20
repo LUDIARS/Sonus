@@ -551,3 +551,19 @@ snd_result snd_get_stats(const snd_system* sys, snd_stats* out) {
 }
 
 }  // extern "C"
+
+// ---------------------------------------------------------------------------------------
+// Stage 7-D (D-195): input ports of the source module (snd/source/input_port.hpp).
+// Any thread, one writer per port; the port is lock-free and the Runtime is not changed
+// (InputPortOf is const and hands out the port, which the Runtime owns until Destroy).
+// ---------------------------------------------------------------------------------------
+#include "snd/source/input_port.hpp"
+#include "snd/source/runtime.hpp"
+
+extern "C" uint32_t snd_write_input(snd_system* sys, uint32_t device_index, const float* const* channels,
+                                    uint32_t channel_count, uint32_t frames) {
+  if (sys == nullptr || channels == nullptr || channel_count == 0u || frames == 0u) return 0u;
+  const snd::source::Runtime* rt = sys->kinds.SourceRuntime();
+  snd::source::InputPort* port = rt != nullptr ? rt->InputPortOf(device_index) : nullptr;
+  return port != nullptr ? port->Write(channels, channel_count, frames) : 0u;
+}

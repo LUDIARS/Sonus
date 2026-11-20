@@ -215,6 +215,10 @@ struct SourceStartResult {
   SlotIndex sourceSlot;         // kInvalidSlot on failure
   std::uint32_t endDetail;      // snd_end_detail when failed (e.g. NO_STREAM_SLOT)
   std::uint32_t needsPriming;   // 1: playback goes to Priming until QueryReady says ready
+  // Stage 7-D (D-194, comment only): a source-rate kind without an asset (Input) writes
+  // the rate of the frames it delivers here (0 = the internal rate / the asset's rate).
+  // Core should use it as the voice's source rate (requests/D-03); until then it is 0
+  // for every kind except an Input port configured with another rate.
   std::uint32_t reserved;
 };
 
@@ -258,6 +262,12 @@ struct RenderItem {
   // transport_beats at frame f of the block = transportBeats + f * transportBeatsPerSample.
   double transportBeats;
   double transportBeatsPerSample;
+  // Stage 7-D (D-191), appended: synth modulation of the Oscillator kind, copied in the
+  // serial part like `pitch` (offsets at the block's first frame / one past its last,
+  // linear per sample in between). RenderItem{} (zero) = no modulation, which is what
+  // core writes until it fills them from Parameter curves (requests/D-01).
+  Ramp dutyOffset;           // added to OscillatorParams::duty (Pulse)
+  Ramp tablePositionOffset;  // added to OscillatorParams::tablePosition (wavetable, 0..1)
 };
 
 struct RenderBatch {
