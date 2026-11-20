@@ -25,6 +25,22 @@ endforeach()
 target_link_libraries(tool_runtime_compare_test PRIVATE sonus_music)
 target_include_directories(tool_runtime_compare_test PRIVATE ${PROJECT_SOURCE_DIR}/music/src)
 
+# Independent tests of group M (tool/test/indep_s7_model_properties.md, written from the
+# specs before reading the code). Core only. The Defect_* tests are in their own
+# executable, one CTest test each; they fail on purpose (each documents a defect).
+foreach(_t indep_s7_document_test indep_s7_editors_test indep_s7_compute_test indep_s7_build_test
+        indep_s7_robust_test)
+  _snd_tool_test(${_t} "${_tool_core_test_link}")
+endforeach()
+_snd_tool_test(indep_s7_defects_test "${_tool_core_test_link}")
+set_tests_properties(tool_indep_s7_defects_test PROPERTIES DISABLED TRUE)  # run per defect below
+foreach(_d Defect_NegativeZeroLosesItsSign Defect_SetSameValueReturnsFalse
+        Defect_StemChannelsOutsideTheMaterialAccepted
+        Defect_LocateFieldMissesMusicSegmentAndDistanceCurveMembers Defect_LocateFieldLiveWritableForAbsentColumn
+        Defect_SaveIgnoresAFailedDeletion Defect_EmptyMaterialTableBuildIsUndefinedBehaviour)
+  add_test(NAME tool_indep_s7_${_d} COMMAND tool_indep_s7_defects_test --filter ${_d})
+endforeach()
+
 if(NOT SND_BUILD_TOOL)
   return()
 endif()
