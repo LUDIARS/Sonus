@@ -1,6 +1,6 @@
 snd_add_test(source_test
   SOURCES source_smoke_test.cpp
-  LINK sonus_source sonus_mocks)
+  LINK sonus_source sonus_base sonus_mocks)
 
 # Sample / Stream kinds through core: banks built by buildtool, IO through the
 # IO scheduler over the memory FS (source_harness.hpp).
@@ -63,3 +63,10 @@ set_tests_properties(indep_fix6_test PROPERTIES TIMEOUT 1200)
 snd_add_test(indep_fix7_test SOURCES indep_fix7_test.cpp LINK ${_source_test_link})
 target_include_directories(indep_fix7_test PRIVATE ${PROJECT_SOURCE_DIR}/buildtool/test)
 set_tests_properties(indep_fix7_test PROPERTIES TIMEOUT 900)
+
+# Stage 7-D kinds (D-190 .. D-195) driven directly (synth_driver.hpp): Oscillator, Noise.
+snd_add_test(source_osc_test SOURCES source_osc_test.cpp LINK sonus_source sonus_base sonus_mocks)
+set_tests_properties(source_osc_test PROPERTIES TIMEOUT 600)
+snd_add_test(source_noise_test SOURCES source_noise_test.cpp LINK sonus_source sonus_base sonus_mocks)
+target_include_directories(source_noise_test PRIVATE ${PROJECT_SOURCE_DIR}/source/src)
+set_tests_properties(source_noise_test PROPERTIES TIMEOUT 900)
