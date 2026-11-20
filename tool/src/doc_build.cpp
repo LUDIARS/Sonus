@@ -744,8 +744,18 @@ float BitsToFloat(std::uint64_t bits) {
   return f;
 }
 
-const std::vector<FieldColumn>& FieldColumns() {
+const std::vector<FieldColumn>& MemberTable() {
   static const std::vector<FieldColumn> f = MakeFields();
+  return f;
+}
+const std::vector<FieldColumn>& FieldColumns() {
+  static const std::vector<FieldColumn> f = [] {
+    std::vector<FieldColumn> c;
+    for (const FieldColumn& x : MemberTable()) {
+      if (x.effect == FieldEffect::Column) c.push_back(x);
+    }
+    return c;
+  }();
   return f;
 }
 
@@ -759,7 +769,7 @@ FieldEffect ClassifyMember(const std::string& kind, const std::string& path) {
     }
   }
   std::vector<std::uint32_t> idx;
-  for (const FieldColumn& f : FieldColumns()) {
+  for (const FieldColumn& f : MemberTable()) {
     if ((std::string_view(f.kind) == "*" || kind == f.kind) && MatchSegments(path, f.pattern, &idx)) return f.effect;
   }
   return FieldEffect::Unknown;
