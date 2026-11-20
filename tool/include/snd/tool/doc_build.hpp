@@ -227,6 +227,9 @@ struct FieldColumn {
   FieldRow row;
   std::uint32_t aux;
 };
+// Every member pattern with its effect (Column, NotInBank, Structure), first match wins.
+const std::vector<FieldColumn>& MemberTable();
+// The Column entries of MemberTable (member -> bank cell).
 const std::vector<FieldColumn>& FieldColumns();
 // The effect of an edit of `path` ("tracks[2].clips[0].startMs"; "[]" also matches an index).
 FieldEffect ClassifyMember(const std::string& kind, const std::string& path);

@@ -1,6 +1,7 @@
 // Material table editor model (design.md 9.1, 9.3, 11.1 マテリアル表エディタ;
 // project-format.md materialTable -> PHYS).
 //
+// The last material cannot be removed (D-177d: the build needs one).
 // Materials are numbered by their position in "materials" (the number the game passes as
 // a sound material, 9.2). Adding at the end keeps every number; inserting, moving or
 // removing renumbers the materials after the position: the edit returns the old -> new
@@ -23,7 +24,8 @@
 // = cents at 1 kg and at 100 kg; speedToVolumeDb = dB at 0.1 m/s and at 10 m/s. The
 // runtime evaluation belongs to the physics module (session A, a stub when this was
 // written); EvaluateStrength is the tool's provisional reading of those numbers
-// (log-interpolated mass and speed, clamped), to be checked against A's implementation.
+// (log-interpolated mass and speed, clamped; non-finite inputs count as 0, D-180b), to be
+// checked against A's implementation.
 #ifndef SND_TOOL_MATERIAL_EDITOR_HPP
 #define SND_TOOL_MATERIAL_EDITOR_HPP
 

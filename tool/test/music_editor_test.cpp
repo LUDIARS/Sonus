@@ -179,7 +179,10 @@ SND_TEST(MusicEditor, StatesRulesAndStingers) {
   SND_REQUIRE_EQ(un.size(), std::size_t{2});
   SND_CHECK(un[0].first == 1u && un[0].second == 0u && un[1].first == 2u);
   SND_CHECK_EQ(m.Match("Explore", "Battle"), 0);
-  // Auto sort: specific rows first, then "* -> Battle", then "* -> *".
+  // Auto sort is refused while rows are unreachable (D-179e); moving "* -> *" last fixes the table,
+  // and then auto sort keeps it (specific rows first, then "* -> Battle", then "* -> *").
+  SND_CHECK(!m.AutoSort());
+  SND_REQUIRE(m.MoveRule(0, 2));
   SND_REQUIRE(m.AutoSort());
   std::vector<TransitionRule> rs = m.Rules();
   SND_CHECK(rs[0].from == "Explore" && rs[1].from == "*" && rs[1].to == "Battle" && rs[2].to == "*");
@@ -288,6 +291,7 @@ SND_TEST(MusicEditor, MinimumLookaheadAndTransitionPreview) {
   SND_CHECK(p.fireAt.bar == 1 && p.fireAt.beat == 0);
   SND_CHECK(!p.lateApplied);
   // Sorted table: Explore -> Battle, next beat, 0.5 beat fade out, bridge (1 bar at 120 = 2 s).
+  SND_REQUIRE(m.MoveRule(0, 2));
   SND_REQUIRE(m.AutoSort());
   p = m.Preview("Explore", "Battle", 1.1, s);
   SND_CHECK_EQ(p.rule, 0);

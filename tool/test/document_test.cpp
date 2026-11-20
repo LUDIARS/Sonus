@@ -165,7 +165,7 @@ SND_TEST(Document, UndoRedoGroupsAndMerge) {
   SND_CHECK(doc.PendingChanges().empty());
   // No change, no step.
   const std::size_t n = doc.UndoCount();
-  SND_CHECK(!doc.SetNumber(G(3), "volumeDb", -1.5));
+  SND_CHECK(doc.SetNumber(G(3), "volumeDb", -1.5));  // D-177b: success, no step
   SND_CHECK_EQ(doc.UndoCount(), n);
 }
 
