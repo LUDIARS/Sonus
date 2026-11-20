@@ -391,9 +391,7 @@ bank / buildtool:
 
 ## 段階 7-D
 
-### ソース組 1（D-190〜D-196）
-
-### ソース組 1（Oscillator、Noise、Input）での決定
+### ソース組 1（Oscillator、Noise、Input）での決定（D-190〜D-196）
 
 `source/` に Oscillator、Noise、Input の 3 種別を、既存の種別と同じ `ISourceKind` で足し、`source::Runtime` に配線した
 （`RuntimeDesc` の `enableOscillator` / `enableNoise` / `enableInput`、既定はすべて有効）。契約の変更は追加だけ: 内部の
