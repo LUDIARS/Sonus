@@ -8,6 +8,10 @@
 // RevertAll (LiveSetValue with field kFieldRevertAll) restores every remembered
 // cell whose bank is still the same registration, then forgets them.
 //
+// 1.1: RevertCell (LiveSetValue with valueType kValueTypeRevertCell) restores one cell
+// (every bank holding it) and forgets it; ReadCell reads a cell without writing (the
+// current value, the remembered original, whether it is overridden).
+//
 // A command is applied completely or not at all: every cell is validated
 // first. A command that would need more remembered cells than the table holds
 // is refused (SND_ERR_LIMIT_REACHED) so that a revert is always complete.
@@ -50,6 +54,32 @@ struct PendingChunk {
   std::uint32_t reserved = 0;
   std::uint8_t* data = nullptr;  // TableChunkHeader + ColumnEntry[] + columns (capacity: RuntimeDesc::chunkBytes)
   std::uint64_t bytes = 0;
+  // 1.1: fourcc == kStructEditTag: `data` holds StructEdit + args, and this is what it
+  // reserved of Config.dev_reserve (given back if it is not applied).
+  std::uint32_t costBuses = 0;
+  std::uint32_t costEffects = 0;
+  std::uint64_t costBytes = 0;
+};
+
+// 1.1: the answer to a ReadCell (audio thread -> live link thread).
+struct CellReading {
+  std::uint32_t seq = 0;      // the ReadCell frame's seq (LiveSetValue::value)
+  std::uint32_t session = 0;
+  std::int32_t result = 0;    // snd_result
+  std::uint32_t cells = 0;    // banks holding the cell
+  std::uint32_t flags = 0;    // livelink::CellFlags
+  std::uint32_t reserved = 0;
+  std::uint64_t current = 0;
+  std::uint64_t original = 0;
+};
+
+// 1.1: one remembered edit, as the recording's starting state lists it.
+struct EditView {
+  std::uint32_t bankSlot;
+  std::uint32_t fourcc;
+  std::uint32_t column;
+  std::uint32_t row;
+  std::uint64_t original;
 };
 
 struct ApplyOutcome {
@@ -78,6 +108,23 @@ class ValueApplier {
   // cell) and forgets them; cells a newer session wrote stay (D-87: an earlier Server's
   // disconnect revert never undoes a newer Server's edits).
   ApplyOutcome RevertAll(core::System& sys, std::uint32_t session = 0) noexcept;
+  // 1.1: puts one cell (c.objectId, c.field, c.index; every bank holding it) back to the
+  // remembered original and forgets it. cells = cells restored (0: nothing was overridden).
+  // SND_ERR_NOT_FOUND: no such cell.
+  ApplyOutcome RevertCell(core::System& sys, const cmd::LiveSetValue& c) noexcept;
+  // 1.1: reads one cell (no write). *out gets result, cells, flags, current, original.
+  void ReadCell(core::System& sys, const cmd::LiveSetValue& c, CellReading* out) noexcept;
+  // 1.1 (replay of a recording's starting state): writes one cell of the registered banks
+  // with this bank id and remembers its original. SND_ERR_NOT_FOUND if no bank / cell.
+  snd_result WriteCell(core::System& sys, Id bankId, std::uint32_t fourcc, std::uint32_t column, std::uint32_t row,
+                       std::uint64_t bits, std::uint32_t session = 0) noexcept;
+  // 1.1 (audio thread): the remembered edits of the current registrations (up to capacity;
+  // returns how many exist).
+  std::uint32_t CopyEdits(core::System& sys, EditView* out, std::uint32_t capacity) noexcept;
+
+  // 1.1 (audio thread): reads one cell's raw bits without writing (false: no such cell).
+  static bool ReadBits(core::System& sys, const core::LiveCell& cell, std::uint32_t fourcc, std::uint32_t column,
+                       std::uint64_t* bits) noexcept;
 
   // Any thread (statistics).
   std::uint32_t Remembered() const noexcept { return count_.load(std::memory_order_relaxed); }
