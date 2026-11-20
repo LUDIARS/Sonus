@@ -121,19 +121,20 @@ struct Run {
   std::uint64_t ends = 0;
   std::uint64_t markers = 0;
   std::uint64_t spectra = 0;
+  std::uint64_t lateChunks = 0;
 };
 
 // The script. `allocDelta` (if not null) gets the allocations after initialisation; `rt`
 // wraps every render in an RT scope.
 Run RunScript(std::uint32_t workers, CountingAllocator* alloc = nullptr, std::uint64_t* allocDelta = nullptr,
-              bool rt = false, std::uint32_t caseMask = 0xFFFFu) {
+              bool rt = false, std::uint32_t caseMask = 0xFFFFu, bool lateChunks = false) {
   MarkerTable mt;
   mt.asset = HashId("child");
   mt.frames = {100, 3000, 8000};
   mt.ids = {HashId("k0"), HashId("k1"), HashId("k2")};
   snd_config cfg = Config(8, workers);
   // No late chunk (2.5: bit identity holds without deadline misses): wait for every chunk.
-  cfg.tuning.rt_spin_microseconds = 5000000u;
+  cfg.tuning.rt_spin_microseconds = lateChunks ? 0u : 5000000u;
   cfg.max_virtual_voices = 128;
   cfg.max_playbacks = 256;
   snd::core::CoreLimits lim;
@@ -230,6 +231,9 @@ Run RunScript(std::uint32_t workers, CountingAllocator* alloc = nullptr, std::ui
     run.violations = r.osc.ViolationSum();
     run.ends = r.ends.size();
     run.markers = r.markers.size();
+    snd_stats st{};
+    r.sys->Update();
+    if (r.sys->GetStats(&st) == SND_OK) run.lateChunks = st.late_chunks;
   }
   return run;
 }
@@ -256,6 +260,17 @@ SND_TEST(IndepG4System, SameScriptSameBitsSerialAndParallel) {
   SND_CHECK_EQ(a.ends, c.ends);
   SND_CHECK_EQ(a.markers, c.markers);
   SND_CHECK_EQ(a.violations + c.violations, 0u);
+}
+
+// Late chunks (no spin at the deadline): the new per-voice states keep the D-43 rules
+// (IndepKind's checks), every path still ends cleanly (sanitizers).
+SND_TEST(IndepG4System, LateChunksKeepTheD43Rules) {
+  for (int i = 0; i < 3; ++i) {
+    const Run r = RunScript(2, nullptr, nullptr, false, 0xFFFFu, true);
+    snd::test::Note("late chunks %llu", static_cast<unsigned long long>(r.lateChunks));
+    SND_CHECK_EQ(r.violations, 0u);
+    SND_CHECK(r.ends > 0u);
+  }
 }
 
 SND_TEST(IndepG4System, NoAllocationAfterInitialisation) {
