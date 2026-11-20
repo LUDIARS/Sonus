@@ -103,6 +103,21 @@
 | D-179 計算はランタイムに | 9〜15 | `ComposeIgnored(target)` と `CurveEditor::ComposeIgnored()`、`ComposeResult::composeIgnored`。拍子の変化は直前の拍子の小節線だけ（`AddTempo` / `SetTempo` が拒否、読み込んだ小節の途中の変化は `Problems()`）。`TempoMap::MusicalIsApproximate`。到達できない行がある表の `AutoSort` は理由付きで拒否 |
 | D-180 マテリアルとパッチ | 16、17 | `EvaluateStrength` は非有限の入力を 0 に。`ReadPatchChunk` はプログラムの連続、ノードの種類、入力（同じプログラムの前のノード）、対応表のプログラム番号を確かめる。buildtool の PHYS の `put` は大きさ 0 で写さない（同じ形はほかに無い） |
 
+### 差し戻し 2 回目（D-176・D-177 への追記）
+
+- `SaveTo` の「同じディレクトリか」は実体で比べる（`fs::equivalent`、無ければ正規化したパス）。同じなら `Save` と同じ経路
+  （`Defect_SaveToSameDirectoryOtherSpellingLeavesStaleFiles`）。
+- `SaveTo` の宛先の規則: プロジェクトの中・プロジェクトを含む親は拒否。宛先にこの保存が書かない *.json が前からあれば拒否
+  （宛先の下を再帰で見る。`.` で始まるディレクトリは見ない）。拒否は false、理由は `lastSave()`、何も書かず文書と `directory()` は不変。
+  外を指す参照は今のまま（写さず `outside`）。
+- 値が変わらない設定は JSON を一切書き換えない（`Defect_SameValueSettersRewriteExplicitDefaults`）。
+  - 文書: `JsonSameMeaning`（数値は値で比べる）。`Modify` は意味が変わらなければ元のテキストに戻す（手も dirty も増えない）。
+    `SetDefaulted(path, value, default)`（省略を既定値とみなして比べる）。`MoveElement` の同じ位置は true で何もしない。
+  - 全エディタの設定関数を見直した: 既定値のある数値・列挙・真偽は `SetDefaulted` か「今の意味と同じなら true」。参照は名前で
+    書かれていても同じ対象なら書き換えない。オブジェクトを組み直す設定（synth、action、snapshot の値、遷移の行、Stinger、
+    tempo、marker、stem、playlist の entry、カーブの点、パッチの parameterCurve、強さのカーブ）は今の値と比べてから書く。
+    cone と parameterCurve の params は、ほかのメンバ（notes など）を残して書く。Rename 系の同じ名前は true。
+
 ## 契約の変更点
 
 - 契約（`contract/`）は変えていない。livelink のプロトコルも変えていない。
