@@ -187,3 +187,86 @@ CTest: `tool_indep_s7_{document,editors,compute,build,robust}_test`、`buildtool
   「ディレクトリが同名のファイル／空でないディレクトリ」で失敗を作った（root では権限が効かないため）。
 - 履歴の上限（1024 手）を超える列、非常に大きなプロジェクトの速さ。
 - `tool_live_mixer_test`（既存）が構成 8 と clang で 1 回ずつ -j2 の全体実行で失敗した原因（出力が残っていない。単独・ASan・Release では通過）。
+
+## 再確認（差し戻し D-176〜D-180 の後、実装担当の ea3bd7d・3c01e08・0e2852f、先頭 632c212 の上）
+
+決定は `_briefs/M-fix.md`。新しい性質は `indep_s7_model_properties.md` の「再確認」の節（R1〜R10）。
+
+### 決定に合わせて更新した独立テスト（自分のテスト。コメントに D-番号）
+
+| テスト | 前 | 後 |
+| --- | --- | --- |
+| `Defect_EmptyMaterialTableBuildIsUndefinedBehaviour` | エディタで材質を全部消してビルド | D-177d: 最後の 1 つの削除はエディタが拒否し文書・履歴は不変。材質 0 件の表は生の `Set` で作り、ビルドがエラー（その表の guid に）を返す（D-180d、UBSan で UB なし）。名前は前のまま |
+| `IndepS7Doc.C1_NewGuidLayoutAndDeterminism` | 999 回同じ値を返す生成器で成功 | D-177c: 衝突 1・8・15 回は成功、16・17・1000 回は `Create` が "" で文書・履歴不変 |
+| `IndepS7Edit.D14_MusicRules` | 小節線でない拍子の変化を受け入れ | D-179c: 小節線でない位置（3841、1920、3/32 の後の at+1）の拍子の変化は拒否・文書不変。各拍子の小節線ごとに 1/2/4/8/16/32 を足すのは可。拍子を変えないテンポの変化はどこでも可。`Problems()` は空 |
+| `A14_SaveToAnotherDirectoryIsRecorded` → `A14_SaveToAnotherDirectory_D176e` | 記録 | WAV が写る、保存の前後ともビルドのエラー 0、`lastSave()` は ok で outside・missing 無し |
+| `F2_PanCompositionIsRecorded` → `F2_PanCompositionIsAdded_D179a` | 記録 | パン 0.5＋0.5 = 1（ランタイムと同じ） |
+| `F2_WrittenComposeOnARuntimeTargetIsRecorded` → `F2_WrittenComposeOnARuntimeTarget_D179b` | 記録 | 書いた compose は受け入れ、`ComposeIgnored()` が真、結果はランタイムの規則（-12 dB）、`composeIgnored` に 2 本。spread の compose は使われ、報告されない |
+| `F10_MidBarSignatureChangeIsRecorded` | 記録 | 削除し、`IndepS7Recheck.D179c_MidBarChangeIsTheRuntimes`（music の `Timeline` と比較）に置き換え |
+| `F10_HalfNoteBeatsAreRecorded` → `F10_HalfNoteBeatsAreApproximate_D179d` | 記録 | tick 959 で頭打ち、`MusicalIsApproximate` が 3/2・2/1 で真、4/4・3/8 で偽 |
+| `F17_StrengthCurvesProvisional` の NaN | 記録 | D-180b: NaN・±Inf の入力の結果は 0 の入力と同じで、有限 |
+
+前の欠陥テスト 8 件（`Defect_NegativeZero…`、`SetSameValue…`、`StemChannels…`、`LocateFieldMisses…`、`LocateFieldLiveWritable…`、`SaveIgnoresAFailedDeletion`、
+`EmptyMaterialTable…`、`ReadPatchChunk…`）は、直した実装で全部通る（回帰テストとして名前のまま残した）。
+
+### 再確認のテストと結果
+
+`tool/test/indep_s7_recheck_test.cpp`（17 件）、`tool/test/indep_s7_threads_test.cpp`（2 件）、`buildtool/test/indep_s7_recheck_test.cpp`（1 件）。
+
+| 性質 | テスト | 結果 |
+| --- | --- | --- |
+| R1 保存の途中の書き込みの失敗（2 つ目のファイル）: false、`failures` はそのパスだけ、保留はそれと削除だけ、削除は書き込みが全部済むまで行わない、保留でないファイルはディスク＝`TextOf`、一時ファイルなし、次の `Save` で全部済み読み直しと一致 | `R1_WriteFailureInTheMiddle…` | 通過 |
+| R1' 一時ファイルの場所が塞がれている | `R1_TemporaryPathBlocked…` | 通過（失敗を返し、元のファイルは無傷） |
+| R1'' 消せなかったファイルの再試行、その名前は新しいオブジェクトに渡らない | `R1_FailedDeletionIsRetried` | 通過 |
+| R1''' 移す先が書けなければ古い側を消さない（ディスクに GUID の重複なし） | `R1_MovedFileKeeps…` | 通過 |
+| R1'''' 成功の `lastSave()`、保存するものが無いときも ok | `R1_SuccessfulSaveResult` | 通過 |
+| R2 名前を付けて保存（素材・ブロブ、外 = `outside`、読めない = `missing`、既にあるファイルの上書き、写した先を読むと同じ） | `R2_SaveAsOutsideMissingAndOverwrite` | 通過 |
+| R2' 写せないとき false、`directory()` は元、元の場所へまだ保存できる | `R2_SaveAsCopyFailure…` | 通過 |
+| R2'' 同じディレクトリ（同じ綴り）への `SaveTo` は `Save` | `R2_SaveToTheSameDirectoryIsSave` | 通過 |
+| R2''' 同じディレクトリを別の綴り（`dir/`、`dir/.`）で | `Defect_SaveToSameDirectoryOtherSpellingLeavesStaleFiles` | **新しい欠陥** |
+| R3 Windows の予約名（15 例、サブフォルダの部分を含む） | `R3_WindowsReservedNames…` | 通過 |
+| R4 値が変わらない設定（50 の設定関数）は true、手も dirty も増えない | `R4_SameValueSetters…` | 通過（下の 5 つを除く） |
+| R4' 明示した既定値を持つメンバへの同じ値の設定 | `Defect_SameValueSettersRewriteExplicitDefaults` | **新しい欠陥** |
+| R5 非有限は全経路で拒否（3 値 × 34 経路: 生の Set・入れ子の値・Insert・Modify・Create の初期値・全エディタ） | `R5_NonFiniteNumbers…` | 通過 |
+| R6'' stem: 読めない素材は受け入れて `Problems()`、境界、2^32 で回らない | `R6_StemMaterialUnreadable…` | 通過 |
+| R7' 読み込んだ小節の途中の変化は `Problems()`、計算は music の `Timeline` と一致（小節位置・Musical・NextBar・NextBeat・秒）、ビルドのエラーなし | `D179c_MidBarChangeIsTheRuntimes` | 通過 |
+| R7'''' 到達できない行のある表の AutoSort は理由つきで拒否、文書不変 | `D179e_AutoSortRefused…` | 通過 |
+| R8 スキーマの全メンバ（16 種類、200 超）に効果、notes はどこでも NotInBank、Column の数 = FieldColumns | `R8_EverySchemaMemberHasAnEffect` | 通過 |
+| R8' 文書の全葉: Column のセルはバンクのビットと同じ（F32 は値も）、liveWritable なら列がある、数値の編集の DiffBuilds の値の編集は LocateField の live のセルと一致（セル 82、値の編集 29、食い違い 0） | `R8_ColumnMembersMatch…` | 通過 |
+| R8'' NotInBank の編集はバンクを変えない | `R8_NotInBankEdits…` | 通過 |
+| R9 ビルド結果を 8 スレッドから同時に読む・コピー、手で詰めた BankImage の最初の `view()` を 6 スレッドで（20 回） | `IndepS7Threads.*` | 通過（TSan は下の表） |
+| R10 XPCH の変異 2 万件: 受け入れたものは全部 §9 を満たす、null / 0 バイトは拒否 | `IndepS7PatchRecheck.D180c_*` | 通過 |
+
+### 新しい欠陥（失敗のまま）
+
+| テスト | 再現 | 期待 | 実際 | 根拠 | 重さ |
+| --- | --- | --- | --- | --- | --- |
+| `tool_indep_s7_Defect_SaveToSameDirectoryOtherSpellingLeavesStaleFiles` | `Load(dir)` → オブジェクトを Remove、別のを Rename（ファイルが移る）→ `SaveTo(dir + "/")`（`dir + "/."`、`dir/../<名前>` も同じ） | 同じディレクトリなので `Save` と同じ: 消したオブジェクトのファイルと移した古いファイルが消える | `dir == dir_` が文字列の比較なので「名前を付けて保存」の経路に入る。全部書いて true・clean になるが、消すべきファイルが残る。次の Load で消したオブジェクトが戻り、移したオブジェクトは同じ GUID が 2 ファイル（片方は重複として捨てられる） | D-176d・e（失敗を隠さない、同じディレクトリは保存） | 中（UI がパスを正規化せずに渡すと起きる。`fs::equivalent` か正規化で比べること） |
+| `tool_indep_s7_Defect_SameValueSettersRewriteExplicitDefaults` | ファイルに既定値を明示したメンバ（`"preFader": false`、parameter の `"kind": "continuous"`、marker の `"kind": "user"`、遷移の `"late": "nextGrid"`）に今と同じ値を設定（`SetSendPreFader(…, false)`、`SetSwitch(false)`、`SetMarker(0, Markers()[0])`、`SetRule(0, Rules()[0])`） | true、手も dirty も増えず文書不変 | true だが、既定値のメンバを消して書き直す（手が 1 つ増え dirty になる）。`MoveMaterial(1, 1)`（同じ位置）は false | D-177b「全エディタの設定関数で揃える」 | 小（値は変わらないが、ユーザーが書いたメンバが消え、何もしない操作が履歴と保存に出る） |
+
+### 残る仕様の穴
+
+1. **プロジェクトの中のディレクトリへの `SaveTo`**（例 `proj/copy`）: 写した *.json が元のプロジェクトの読み込みの対象になり、元を開き直すと GUID の重複になる。推奨: プロジェクトの中を宛先にするのは拒否する。
+2. **宛先に前からある別の *.json**: 名前を付けて保存は上書きするだけで、宛先にあった別のオブジェクトのファイルは残り、次の Load で混ざる。推奨: 宛先が空でなければ警告する（または拒否する）。
+3. **プロジェクトの外の参照**（`../outside.wav`）: 写さずに `outside` に出す（決定どおり）が、相対パスのまま宛先へ移るので、宛先では別のファイルを指す。決定で「問題の一覧に出す」としているので欠陥にはしない。画面ではっきり警告すること。
+4. 前の穴のうち 1（4.3 との食い違い）と 3（2 分音符の拍）は依頼 C-13 などで受け入れ側が扱う。2・4〜9 は決定で閉じた。
+
+### 再確認で回した構成
+
+| 構成 | コミット | 実行 | 結果 |
+| --- | --- | --- | --- |
+| 8: TOOL_CORE、gcc Debug | 856b351 | 全部（ctest -j2） | 246 件中 244 通過。失敗は新しい欠陥 2 件だけ（意図どおり）。`tool_live_mixer_test` を含めほかは全部通過、`platform_device_play_test` は既存の Skipped |
+| 3 ＋ TOOL_CORE（ASan/UBSan） | 856b351 | `-R 'tool\|buildtool'`（40 件） | 38 通過。失敗は新しい欠陥 2 件だけ。UBSan / ASan の報告なし（前の欠陥 4 の UB は消えた。XPCH のファズも報告なし） |
+| 5 ＋ TOOL_CORE（Release） | 856b351 | `-R 'tool\|buildtool'`（40 件）と threads の 20 回 | 37 通過。失敗は新しい欠陥 2 件と既存の `tool_live_mixer_test`（-j2 の全体実行で 1 回）。threads は 20 回通過。`tool_live_mixer_test` は同じ構成で作り直して単独で 30 回回し、30 回とも通過（再現せず）。失敗した回の出力は、出力の絞り込みのため残っていない |
+| clang ＋ TOOL_CORE | 856b351 | `-R 'tool\|buildtool'`（40 件） | 38 通過。失敗は新しい欠陥 2 件だけ |
+| 4: TSan ＋ TOOL_CORE | 856b351 | `tool_indep_s7_threads_test` を `--repeat until-fail:20`（-j1） | 20 回とも通過、ThreadSanitizer の報告なし |
+| MinGW `-fsyntax-only -Werror -Wall -Wextra -fno-exceptions -fno-rtti` | 856b351 | 新しい・変えた .cpp 全部（tool 9、buildtool 3） | 通過 |
+
+回していない構成: 1、2（clang 以外の通常構成）、6、7、9（Tela。組 M の独立テストは Tela を使わない）。ビルドディレクトリは全部消した。
+
+### 再確認で未検証の箇所
+
+- Windows での保存（一時ファイルを既存ファイルに `rename` する上書き、予約名の実ファイル、ロックされたファイルの削除の失敗）。Linux では失敗を「空でないディレクトリ」で作った。
+- `tool_live_mixer_test`（既存、組 M の範囲外）が、-j2 の全体実行で通算 3 回落ちた（前回の構成 8 と clang、今回の Release）原因。単独では毎回通る。
+- R8' の DiffBuilds との一致は、数値の葉（文書にあるもの）だけ。文字列・真偽値・列挙・参照の編集は、分類（Structure / NotInBank）の検査までで、DiffBuilds とは突き合わせていない。
+- 3D の計算は今回も解析的な期待値だけ（本物の core とは比べていない）。遷移の試聴と `transition.cpp` も比べていない。
