@@ -161,6 +161,21 @@ Release で 7/20 落ちたホットリロードのテスト（ReloadStatus Done 
 gcc Debug の全件を d51b8df で回したとき `api_indep_runtime_test`（IndepRuntime.EndsFromConcurrentProducersAreExactlyOnce）が 1 回失敗し、
 単独で 10 回回すと全通過。livelink を使わないテストで、7cc7d14 の全件では通過（負荷による揺れと見ている。未解明）。
 
+### 差し戻しの後（6d3c2cd）
+
+| 構成 | ctest | 結果 |
+| --- | --- | --- |
+| 1+8 gcc Debug + TOOL_CORE | 全件（227） | 失敗は決定と食い違う独立テスト 2 件だけ（`IndepS7Replay.LostStateIsReported`、`IndepS7Impl.Defect_RemoveOfLiveBusAddedWithFullStructLogKeepsReserve`）。ほかの indep_s7（live 31、record 8、fuzz 7、stress 2）と既存の全テストは通過 |
+| 3 ASan/UBSan | `livelink\|api_`（55） | 同じ 2 件だけ失敗 |
+| 4 TSan | `livelink`（32）、並行性 4 本（v11_stress、v11_live、indep_s7_stress、integration_livelink_stress）を -j1 で 20 回 | 同じ 2 件だけ失敗。20 回: 全通過 |
+| 5 Release | `livelink\|api_`（55）、同じ 4 本を 20 回 | 同じ 2 件だけ失敗。20 回: 全通過 |
+| clang Debug | `livelink\|tool`（37） | 同じ 2 件だけ失敗 |
+| MinGW 構文検査 | — | 変えた runtime.cpp / server.cpp / client.cpp / replayer.cpp、v11 のテスト 5 本、変えたヘッダ 6 本: 通過 |
+
+途中の gcc Debug の `ctest -R 'livelink|tool'`（483e6e4）で `tool_live_mixer_test`（StateSurvivesDisconnectAndReconnect: 切断後 16 ブロックで戻しが
+まだ届いていない）が 1 回失敗し、単独で 10 回回すと全通過、6d3c2cd の全件でも通過（負荷による時間の揺れと見ている。未解明）。
+回していない構成（差し戻しの後）: 6（テストなし Release）、7（Opus なし）、9（ツール入り）。
+
 ## 未検証の箇所
 
 - 構造の変更が core に実際に反映されること（C-01 まで偽の編集器でしか確かめていない）。
