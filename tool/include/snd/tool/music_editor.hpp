@@ -12,15 +12,16 @@
 // tempo points with distinct ticks (sorted), a change of time signature only on a bar line of
 // the signature before it (D-179c), bpm 1e-3 .. 1e5 (D-85), beatsPerBar >= 1,
 // beatUnit 1, 2, 4, 8, 16 or 32; marker names unique in the segment, frames inside the
-// material; entryFrame < exitFrame <= frames; bars >= 1; stems inside the material's
-// channels; playlist weights >= 0, repeat >= 1; state names unique and not "*" (the
+// material; entryFrame < exitFrame <= frames; bars >= 1; stems inside their material's
+// channels (a separate-file stem: that file; unreadable: allowed and listed by Problems, D-177d); playlist weights >= 0, repeat >= 1; state names unique and not "*" (the
 // wildcard), a state's playlist exists; transitions name states of the event or "*".
 // RenameState renames the state in the transitions and the initial state too.
 //
 // Transition rule table (8.5): Match = the first row that matches from top to bottom (the
 // runtime's FindRule; -1 = none: the built-in default, next bar, 1 beat fades);
 // Unreachable = rows an earlier row covers (the build's warning, same rule); AutoSort =
-// stable sort by specificity (exact from and to, then one exact, then * -> *).
+// stable sort by specificity (exact from and to, then one exact, then * -> *), refused while a
+// row is unreachable (D-179e: sorting could then change which rule matches).
 //
 // Minimum lookahead (8.2), per reservation target: one block (blockFrames / sampleRate)
 // plus the target's prime time:

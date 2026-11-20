@@ -142,7 +142,7 @@ SND_TEST(EventEditor, EditsUndoRedoAndRoundTrip) {
   SND_REQUIRE(e.SetCone(60, 120, -9));
   SND_REQUIRE(e.SetVirtualReturn(VirtualReturn::Restart));
   SND_REQUIRE(e.SetCategory(""));
-  SND_CHECK(!e.SetLimitGroup(""));  // absent already: no change
+  SND_CHECK(e.SetLimitGroup(""));  // absent already: no change is success (D-177b)
   SND_REQUIRE(e.AddTrack(1));
   SND_REQUIRE(e.SetTrackBus(1, G(4)));
   SND_REQUIRE(e.AddAssetClip(1, G(7), 40));
