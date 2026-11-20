@@ -11,7 +11,9 @@
 // completed loops in Playhead::loopCount both while rendering and while virtual
 // (AdvanceVirtual, outputFrames * pitch with the same wrap), so core can count N loops
 // (D-142) in either state. Seek / Devirtualize ops move the position (taken in at the next
-// render / advance of the slot; the playhead is core's). Ends past the last frame.
+// render / advance of the slot; the playhead is core's). Like the source module's sample
+// kind, the asset's own mark (SourceAsset::virtualReturn from ASST.flags, D-140) decides on
+// Devirtualize: 1 restart (position 0), 2 kill (the voice reports `ended`). Ends past the last frame.
 #ifndef SND_CORE_TEST_INDEP_G4_FIXTURE_HPP
 #define SND_CORE_TEST_INDEP_G4_FIXTURE_HPP
 
@@ -44,6 +46,7 @@ class G4SampleKind final : public snd::source::ISourceKind {
       loop_[i] = 0;
       live_[i].store(0);
       seek_[i].store(kNoSeek);
+      killed_[i].store(0);
     }
     return true;
   }
@@ -59,6 +62,7 @@ class G4SampleKind final : public snd::source::ISourceKind {
       startFrame_[s] = r[i].startFrame;
       startClock_[s] = r[i].startClock;
       seek_[s].store(kNoSeek);
+      killed_[s].store(0);
       live_[s].store(1);
       res[i].sourceSlot = s;
       starts.fetch_add(1);
@@ -78,8 +82,14 @@ class G4SampleKind final : public snd::source::ISourceKind {
       const snd::SlotIndex s = ops[i].sourceSlot;
       if (s >= n_) continue;
       if (ops[i].op == snd::source::ControlOp::Seek || ops[i].op == snd::source::ControlOp::Devirtualize) {
-        seek_[s].store(ops[i].frame);
-        if (ops[i].op == snd::source::ControlOp::Devirtualize) lastDevirtualizeFrame.store(ops[i].frame);
+        std::uint64_t f = ops[i].frame;
+        if (ops[i].op == snd::source::ControlOp::Devirtualize) {
+          lastDevirtualizeFrame.store(ops[i].frame);
+          const std::uint8_t vr = asset_[s] != nullptr ? asset_[s]->virtualReturn : 0u;
+          if (vr == 1u) f = 0;
+          if (vr == 2u) killed_[s].store(1);
+        }
+        seek_[s].store(f);
       }
       if (ops[i].op == snd::source::ControlOp::SetLoop) loop_[s] = 1;
     }
@@ -93,6 +103,10 @@ class G4SampleKind final : public snd::source::ISourceKind {
       st[i] = snd::VoiceRenderStatus{};
       const snd::SlotIndex s = it.sourceSlot;
       if (s >= n_ || live_[s].load() == 0u) continue;
+      if (killed_[s].load() != 0u) {
+        st[i].ended = 1;
+        continue;
+      }
       TakeSeek(s, it.playhead);
       const snd::source::SourceAsset& a = *asset_[s];
       const std::uint32_t ch = a.codec.channels;
@@ -131,6 +145,10 @@ class G4SampleKind final : public snd::source::ISourceKind {
       st[i] = snd::VoiceRenderStatus{};
       const snd::SlotIndex s = items[i].sourceSlot;
       if (s >= n_ || live_[s].load() == 0u) continue;
+      if (killed_[s].load() != 0u) {
+        st[i].ended = 1;
+        continue;
+      }
       TakeSeek(s, items[i].playhead);
       const snd::source::SourceAsset& a = *asset_[s];
       const std::uint64_t total = a.codec.total_frames;
@@ -177,6 +195,7 @@ class G4SampleKind final : public snd::source::ISourceKind {
   std::uint64_t startClock_[kCap] = {};
   std::atomic<std::uint32_t> live_[kCap];
   std::atomic<std::uint64_t> seek_[kCap];
+  std::atomic<std::uint32_t> killed_[kCap];
 };
 
 // Configuration: indep::Config with the load LOD disabled (2.5: bit identity needs it).
