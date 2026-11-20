@@ -393,7 +393,10 @@ SND_TEST(PhysicsCulling, FourTimesTheVoicesAndEmittersInOneFrame) {
     }
   }
   SND_CHECK_EQ(positionOnly, 96u);
-  // The emitters come back after the system's updates: the next requests are positioned again.
+  // The held emitters are destroyed by a later call once emitter_hold_seconds (0.1 s) passed,
+  // the slots come back with the system's updates, and the next requests are positioned again.
+  sys.Advance(8);
+  SND_CHECK_EQ(snd_phys_submit_contacts(phys, nullptr, 0, 0.1f), SND_OK);
   sys.Advance(8);
   rec.Clear();
   SND_CHECK_EQ(snd_phys_submit_contacts(phys, c.data(), 16, 0.05f), SND_OK);

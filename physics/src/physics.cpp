@@ -233,6 +233,13 @@ struct snd_phys {
   CooldownEntry* cd;     // [cdCap]
   std::uint32_t* cdBucket;  // [cdMask + 1], entry index or kEmptyBucket
 
+  // ---- one-shot emitters held until emitter_hold_seconds have passed (FIFO ring) ----
+  std::uint64_t holdUs;
+  std::uint32_t heldCap, heldHead, heldCount;
+  snd_emitter_handle* heldEmitter;  // [heldCap]
+  std::uint64_t* heldAt;            // [heldCap] clock of the play
+  std::uint32_t* heldStamp;         // [heldCap] call of the play
+
   // ---- tracking table ----
   std::uint32_t trCap;
   Track* tracks;  // [trCap]
@@ -526,8 +533,32 @@ snd_result ApplyPlayback(snd_phys& p, snd_playback_handle h, const Request& q) n
 // play -> parameters -> destroy the emitter (the playbacks keep the last transform);
 // snd_play_at without parameters when no emitter can be used. Emits one PLAY record per event.
 // Returns true when at least one play was recorded.
+// Destroys the oldest held one-shot emitter.
+void ReleaseHead(snd_phys& p) noexcept {
+  const snd_emitter_handle e = p.heldEmitter[p.heldHead];
+  const snd_result r = snd_destroy_emitter(p.sys, e);
+  if (r != SND_OK && r != SND_ERR_INVALID_HANDLE) ++p.stats.api_failures;
+  p.heldHead = (p.heldHead + 1u) % p.heldCap;
+  --p.heldCount;
+}
+// Destroys the held emitters whose hold time has passed (oldest first).
+void ExpireHeld(snd_phys& p) noexcept {
+  while (p.heldCount > 0u && p.now - p.heldAt[p.heldHead] >= p.holdUs) ReleaseHead(p);
+}
+
 bool PlayPositioned(snd_phys& p, Request* qs, std::uint32_t n) noexcept {
-  const snd_emitter_handle e = snd_create_emitter(p.sys);
+  snd_emitter_handle e{0};
+  // Room in the held ring: push out the oldest unless it was made in this very call.
+  bool room = true;
+  if (p.heldCount == p.heldCap) {
+    if (p.heldStamp[p.heldHead] == p.stamp) {
+      room = false;
+    } else {
+      ++p.stats.held_emitters_released_early;
+      ReleaseHead(p);
+    }
+  }
+  if (room) e = snd_create_emitter(p.sys);
   bool positioned = e.value != SND_HANDLE_INVALID_VALUE;
   if (positioned && snd_set_transform(p.sys, e, &qs[0].position, nullptr, nullptr) != SND_OK) {
     ++p.stats.api_failures;
@@ -573,7 +604,13 @@ bool PlayPositioned(snd_phys& p, Request* qs, std::uint32_t n) noexcept {
     rec.result = r;
     Notify(p, rec);
   }
-  if (positioned && snd_destroy_emitter(p.sys, e) != SND_OK) ++p.stats.api_failures;
+  if (positioned) {
+    const std::uint32_t at = (p.heldHead + p.heldCount) % p.heldCap;
+    p.heldEmitter[at] = e;
+    p.heldAt[at] = p.now;
+    p.heldStamp[at] = p.stamp;
+    ++p.heldCount;
+  }
   return any;
 }
 
@@ -790,11 +827,13 @@ bool ReadConfig(const snd_physics_config* in, snd_physics_config* out) noexcept 
   auto nonneg = [](float v) { return Finite(v) && v >= 0.0f; };
   if (!nonneg(c.budget_per_second) || !(Finite(c.grid_size) && c.grid_size > 0.0f) || !nonneg(c.cooldown_seconds) ||
       !nonneg(c.impulse_threshold) || !nonneg(c.min_slide_speed) || !nonneg(c.tracking_timeout_seconds) ||
-      !nonneg(c.tracking_fade_seconds) || !(Finite(c.max_dt_seconds) && c.max_dt_seconds > 0.0f)) {
+      !nonneg(c.tracking_fade_seconds) || !(Finite(c.max_dt_seconds) && c.max_dt_seconds > 0.0f) ||
+      !nonneg(c.emitter_hold_seconds)) {
     return false;
   }
   auto cap = [](std::uint32_t v) { return v >= 1u && v <= SND_PHYSICS_MAX_CAPACITY; };
   if (!cap(c.max_tracked_pairs) || !cap(c.max_cooldowns) || !cap(c.max_groups_per_call) || !cap(c.max_game_materials) ||
+      !cap(c.max_held_emitters) ||
       c.max_materials < 1u || c.max_materials > SND_PHYSICS_MAX_MATERIALS_LIMIT || c.max_game_materials > 0x10000u) {
     return false;
   }
@@ -935,6 +974,9 @@ snd_result Create(snd_system* sys, const snd_physics_config& cfg, const snd_allo
   const std::size_t oCd = L.Take(std::size_t{cfg.max_cooldowns} * sizeof(CooldownEntry));
   const std::size_t oCdBucket = L.Take(std::size_t{cdBuckets} * sizeof(std::uint32_t));
   const std::size_t oTracks = L.Take(std::size_t{cfg.max_tracked_pairs} * sizeof(Track));
+  const std::size_t oHeldE = L.Take(std::size_t{cfg.max_held_emitters} * sizeof(snd_emitter_handle));
+  const std::size_t oHeldAt = L.Take(std::size_t{cfg.max_held_emitters} * sizeof(std::uint64_t));
+  const std::size_t oHeldStamp = L.Take(std::size_t{cfg.max_held_emitters} * sizeof(std::uint32_t));
   const std::size_t oGroups = L.Take(std::size_t{cfg.max_groups_per_call} * sizeof(Group));
   const std::size_t oGStamp = L.Take(std::size_t{gBuckets} * sizeof(std::uint32_t));
   const std::size_t oGIdx = L.Take(std::size_t{gBuckets} * sizeof(std::uint32_t));
@@ -981,6 +1023,11 @@ snd_result Create(snd_system* sys, const snd_physics_config& cfg, const snd_allo
   for (std::uint32_t i = 0; i < cdBuckets; ++i) p->cdBucket[i] = kEmptyBucket;
   p->trCap = cfg.max_tracked_pairs;
   p->tracks = reinterpret_cast<Track*>(b + oTracks);
+  p->holdUs = Micros(cfg.emitter_hold_seconds);
+  p->heldCap = cfg.max_held_emitters;
+  p->heldEmitter = reinterpret_cast<snd_emitter_handle*>(b + oHeldE);
+  p->heldAt = reinterpret_cast<std::uint64_t*>(b + oHeldAt);
+  p->heldStamp = reinterpret_cast<std::uint32_t*>(b + oHeldStamp);
   p->gCap = cfg.max_groups_per_call;
   p->gMask = gBuckets - 1u;
   p->groups = reinterpret_cast<Group*>(b + oGroups);
@@ -1007,6 +1054,7 @@ void Destroy(snd_phys* p) noexcept {
     for (std::uint32_t i = 0; i < p->trCap; ++i) {
       if (p->tracks[i].used) StopTrack(*p, p->tracks[i], SND_PHYSICS_STOP_DESTROYED);
     }
+    while (p->heldCount > 0u) ReleaseHead(*p);
   }
   const snd_allocator a = p->allocator;
   void* block = p->block;
@@ -1336,8 +1384,11 @@ snd_result Submit(snd_phys& p, const snd_contact* contacts, std::uint32_t count,
   if (++p.stamp == 0u) {
     std::memset(p.gStamp, 0, (std::size_t{p.gMask} + 1u) * sizeof(std::uint32_t));
     for (std::uint32_t i = 0; i < p.trCap; ++i) p.tracks[i].reportStamp = 0;
+    for (std::uint32_t i = 0; i < p.heldCap; ++i) p.heldStamp[i] = 0;
+    for (std::uint32_t i = 0; i < p.cdCount; ++i) p.cd[i].stamp = 0;
     p.stamp = 1;
   }
+  ExpireHeld(p);
   const float threshold = p.cfg.impulse_threshold > 0.0f ? p.cfg.impulse_threshold : p.tableThreshold;
   const float grid = p.cfg.grid_size;
   std::uint32_t groupCount = 0;
