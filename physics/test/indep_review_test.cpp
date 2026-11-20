@@ -205,7 +205,7 @@ SND_TEST(IndepReview, HeldEmittersReturnWhilePaused) {
   for (const snd_emitter_handle e : mine) ok += e.value != 0u ? 1u : 0u;
   SND_CHECK_EQ(ok, 8u);
   for (const snd_emitter_handle e : mine) snd_destroy_emitter(f.s.sys, e);
-  SND_CHECK_EQ(phystest::Stats(f.phys).held_emitters_released_early, 0u);
+  SND_CHECK_EQ(phystest::Stats(f.phys).dropped_no_emitter, 0u);
 }
 
 // Same call: Impact groups first, then slide reports, then timeouts. A slide report and an
@@ -290,10 +290,9 @@ SND_TEST(IndepReview, FourTimesTheVoicesEveryFrame) {
   SND_CHECK_EQ(st.contacts_received, st.groups);
   SND_CHECK_EQ(st.groups, st.dropped_no_event + st.dropped_cooldown + st.dropped_budget + st.dropped_no_emitter +
                               st.group_requests);
-  snd::test::Note("4x: dropped_no_emitter %llu, group_requests %llu, held released early %llu, api_failures %llu",
+  snd::test::Note("4x: dropped_no_emitter %llu, group_requests %llu, api_failures %llu",
                   static_cast<unsigned long long>(st.dropped_no_emitter),
                   static_cast<unsigned long long>(st.group_requests),
-                  static_cast<unsigned long long>(st.held_emitters_released_early),
                   static_cast<unsigned long long>(st.api_failures));
   snd_physics_destroy(f.phys);
   f.phys = nullptr;
