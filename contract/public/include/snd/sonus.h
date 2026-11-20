@@ -371,6 +371,38 @@ SND_API snd_result SND_CALL snd_get_transport_position(const snd_system* sys,
 SND_API snd_result SND_CALL snd_get_meter(const snd_system* sys, snd_id bus, snd_meter* out);
 SND_API snd_result SND_CALL snd_get_stats(const snd_system* sys, snd_stats* out);
 
+/* ========================================================================= */
+/* Effects at run time (stage 3, coverage). Thread: registered.               */
+/* ========================================================================= */
+/* D-130: parameter `param_index` of effect `effect_index` (0-based, in the bus's chain)
+ * of bus `bus` (SND_ID_NONE = master) moves to `value` linearly over `fade_seconds`
+ * (< 0 = 0), from the next block; inside a block the dsp interpolates (D-26). The value
+ * is clamped to the parameter's range (standard effects). Recorded as SetBusVolume
+ * variant 1. SND_ERR_INVALID_ARGUMENT: effect_index >= 16, param_index >= 16, value or
+ * fade not finite. An unknown bus / effect / parameter is reported when applied
+ * (warning SND_ERR_NOT_FOUND, object = bus id). */
+SND_API snd_result SND_CALL snd_set_effect_param(snd_system* sys, snd_id bus, uint32_t effect_index,
+                                                 uint32_t param_index, float value, float fade_seconds);
+/* D-132: heavy voice effect `slot` (0 .. snd_config voice_effect_chain - 1) of the voices of
+ * `event` that start after this is applied. effect_kind = a standard effect id
+ * ("snd.fx.*", snd/dsp effects) or a plugin effect type (Config.plugins);
+ * SND_ID_NONE removes the stage. params[0 .. param_count) override the kind's defaults
+ * (param_count <= 16; params may be NULL when param_count is 0). The voice effects run
+ * per real voice after the standard lowpass / highpass and before the pan, in the
+ * voice-effect pool (D-133: without a free slot the voice plays dry; D-134: no tail past
+ * the voice's end). SND_ERR_INVALID_ARGUMENT: event SND_ID_NONE, slot out of range,
+ * param_count > 16, a non-finite value; SND_ERR_NOT_FOUND: unknown effect kind.
+ * Recorded as one SetSwitch (variant 1) and param_count SetParam (variant 1). */
+SND_API snd_result SND_CALL snd_set_event_voice_effect(snd_system* sys, snd_id event, uint32_t slot,
+                                                       snd_id effect_kind, const float* params,
+                                                       uint32_t param_count);
+/* D-132: parameter `param_index` of voice effect `slot` of the voices of `playback`, from
+ * the next block (interpolated inside the block). Kept for the playback's life (voices
+ * that become real later use it too). SND_ERR_INVALID_HANDLE: 0 or stale;
+ * SND_ERR_INVALID_ARGUMENT: slot out of range, param_index >= 16, value not finite. */
+SND_API snd_result SND_CALL snd_set_playback_effect_param(snd_system* sys, snd_playback_handle playback,
+                                                          uint32_t slot, uint32_t param_index, float value);
+
 SND_EXTERN_C_END
 
 #endif /* SND_SONUS_H */

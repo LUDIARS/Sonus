@@ -11,7 +11,9 @@ set(SND_DSP_TEST_SOURCES
   indep_filter_test.cpp
   indep_pan_meter_test.cpp
   indep_effects_test.cpp
-  indep_effects_behaviour_test.cpp)
+  indep_effects_behaviour_test.cpp
+  # Stage 3 group 2: EQ band types (D-135), I3DL2 parameters.
+  effects_coverage_test.cpp)
 
 snd_add_test(dsp_test
   SOURCES ${SND_DSP_TEST_SOURCES}
