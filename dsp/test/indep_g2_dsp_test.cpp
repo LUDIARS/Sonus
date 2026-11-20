@@ -3,6 +3,7 @@
 // standard kind on 1, 2 and 6 channels. Also built against the scalar SIMD path.
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <vector>
 
@@ -161,4 +162,35 @@ SND_TEST(IndepG2Dsp, NonFiniteAndOutOfRangeRampsStayFinite) {
       SND_CHECK_MSG(finite && peak < 1000.0f, "%s, %u channels: finite %d, peak %g", info.name, ch, finite ? 1 : 0, peak);
     }
   }
+}
+
+// effects.hpp: Echo "Delay is clamped to MaxDelay", Delay "Time is clamped to MaxDelay". A
+// value above MaxDelay must give the same delay as MaxDelay itself (480 frames for 10 ms);
+// the echo gives 481 (one frame more than at exactly MaxDelay).
+SND_TEST(IndepG2Dsp, Defect_DelayAboveMaxDelayIsOneFrameLongerThanMaxDelay) {
+  auto onset = [](snd::Id kind, std::vector<float> params) {
+    Inst e(kind, 1, std::move(params));
+    if (!e.ok) return -1;
+    std::vector<float> x(256);
+    for (int k = 0; k < 8; ++k) {
+      std::fill(x.begin(), x.end(), 0.0f);
+      if (k == 0) x[0] = 1.0f;
+      float* io[1] = {x.data()};
+      dsp::EffectProcess(e.mem, io, io, 1, 256, nullptr);
+      for (int i = (k == 0 ? 1 : 0); i < 256; ++i) {
+        if (std::fabs(x[static_cast<std::size_t>(i)]) > 0.1f) return k * 256 + i;
+      }
+    }
+    return -1;
+  };
+  const int echoAt = onset(dsp::kEffectEcho, {10.0f, 0.0f, 0.0f, 1.0f, 10.0f});
+  const int echoAbove = onset(dsp::kEffectEcho, {100.0f, 0.0f, 0.0f, 1.0f, 10.0f});
+  const int delayAt = onset(dsp::kEffectDelay, {10.0f, 0.0f, -96.0f, 0.0f, 20000.0f, 0.0f, 10.0f});
+  const int delayAbove = onset(dsp::kEffectDelay, {100.0f, 0.0f, -96.0f, 0.0f, 20000.0f, 0.0f, 10.0f});
+  std::printf("  echo: at MaxDelay %d, above %d | delay: at MaxDelay %d, above %d\n", echoAt, echoAbove, delayAt,
+              delayAbove);
+  SND_CHECK_EQ(echoAt, 480);
+  SND_CHECK_EQ(echoAbove, 480);
+  SND_CHECK_EQ(delayAt, 480);
+  SND_CHECK_EQ(delayAbove, 480);
 }

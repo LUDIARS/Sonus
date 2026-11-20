@@ -447,7 +447,9 @@ SND_TEST(IndepG2Vfx, StateTooLargeForTheSlotPlaysDry) {
 }
 
 // C12: the Event configuration table holds voice_effect_settings entries.
-SND_TEST(IndepG2Vfx, SpecHole_SettingsTableFull) {
+// Decision: the Event setting table full: the call records, and when applied it warns
+// SND_ERR_LIMIT_REACHED (object = event id) and is dropped (the Event plays dry).
+SND_TEST(IndepG2Vfx, SettingsTableFullWarnsAndDrops) {
   snd_config c = VfxConfig();
   c.voice_effect_settings = 2;
   Fx h(c);
@@ -456,7 +458,12 @@ SND_TEST(IndepG2Vfx, SpecHole_SettingsTableFull) {
   SND_CHECK_EQ(SetDelay(h, "A"), SND_OK);
   SND_CHECK_EQ(SetDelay(h, "B"), SND_OK);
   const snd_result third = SetDelay(h, "C");
-  h.Steps(1);
+  h.errors.clear();
+  h.Steps(2);  // applied, then delivered by the next Update
+  SND_CHECK_EQ(third, SND_OK);
+  SND_REQUIRE_EQ(h.errors.size(), 1u);
+  SND_CHECK_EQ(h.errors[0].code, SND_ERR_LIMIT_REACHED);
+  SND_CHECK_EQ(h.errors[0].object, HashId("C"));
   const std::size_t f0 = h.Total();
   h.sys->Play(HashId("A"), NoEmitter(), nullptr);
   h.sys->Play(HashId("B"), NoEmitter(), nullptr);
@@ -465,11 +472,8 @@ SND_TEST(IndepG2Vfx, SpecHole_SettingsTableFull) {
   const std::size_t f1 = h.Total();
   h.sys->Play(HashId("C"), NoEmitter(), nullptr);
   h.Steps(4);
-  const bool cWet = std::fabs(h.Mean(f1 + 8, f1 + kDelay) - 0.3f * kCenter) < 1e-5f;
-  std::uint32_t warnings = 0;
-  for (const Err& e : h.errors) warnings += e.code != SND_OK ? 1u : 0u;
-  std::printf("  [spec hole C12] third setting: record %d, C %s, %u warnings\n", third, cWet ? "wet" : "dry", warnings);
-  SND_CHECK(true);
+  SND_CHECK_NEAR(h.Mean(f1 + 8, f1 + kDelay), 0.7f * kCenter, 1e-5);  // A, B (wet, sounding): 0.3; C dry at once: 0.4
+
 }
 
 // C14: argument checks of snd_set_event_voice_effect.
