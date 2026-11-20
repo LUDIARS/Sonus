@@ -97,3 +97,11 @@ set_tests_properties(indep_input_test PROPERTIES TIMEOUT 900)
 snd_add_test(indep_src1_core_test SOURCES indep_src1_core_test.cpp LINK ${_source_test_link})
 target_include_directories(indep_src1_core_test PRIVATE ${PROJECT_SOURCE_DIR}/buildtool/test)
 set_tests_properties(indep_src1_core_test PROPERTIES TIMEOUT 1200)
+snd_add_test(indep_src1_load_test SOURCES indep_src1_load_test.cpp LINK sonus_source sonus_base sonus_mocks)
+set_tests_properties(indep_src1_load_test PROPERTIES TIMEOUT 900)
+# snd_write_input / snd_play_input through the C API (the api test rig: null output device, audio thread).
+snd_add_test(indep_src1_api_test SOURCES indep_src1_api_test.cpp
+  LINK sonus sonus_core sonus_music sonus_source sonus_livelink sonus_platform sonus_io sonus_jobs sonus_buildtool
+       sonus_codec sonus_mocks)
+target_include_directories(indep_src1_api_test PRIVATE ${PROJECT_SOURCE_DIR}/api/test ${PROJECT_SOURCE_DIR}/api/compose)
+set_tests_properties(indep_src1_api_test PROPERTIES TIMEOUT 900)

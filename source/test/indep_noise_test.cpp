@@ -433,3 +433,16 @@ SND_TEST(IndepNoise, RefusalsSlotReuseAndFrameOffset) {
   SND_CHECK_EQ(st.ended, 0u);
   SND_CHECK_EQ(c.ph.frame, std::uint64_t{156});
 }
+
+// Gap (recorded, not asserted as right): the colours share the RMS of the uniform white
+// noise (D-193), so pink and brown, close to Gaussian, peak far above full scale (about
+// +9 dB over white's peak of 1) while white never reaches 1. The headroom of a noise
+// synth then depends on its colour.
+SND_TEST(IndepNoise, SpecGap_ColouredPeaksExceedFullScale) {
+  const auto w = Render(0, 1, 1, 1u << 18);
+  const auto p = Render(1, 1, 1, 1u << 18);
+  const auto b = Render(2, 1, 1, 1u << 18);
+  SND_CHECK(isrc::MaxAbs(w[0]) <= 1.0);
+  SND_CHECK(isrc::MaxAbs(p[0]) > 1.5);  // current behaviour
+  SND_CHECK(isrc::MaxAbs(b[0]) > 1.5);  // current behaviour
+}

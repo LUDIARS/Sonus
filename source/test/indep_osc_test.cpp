@@ -615,3 +615,41 @@ SND_TEST(IndepOsc, SlotReuseLeavesNothingBehind) {
   SND_CHECK(b.out[0] == fresh);
   SND_CHECK_EQ(d.runtime.Stats().oscillatorInstances, 1u);
 }
+
+// ---------------------------------------------------------------------------------------
+// Spec gaps (reported for a decision). These tests RECORD the current behaviour only.
+// ---------------------------------------------------------------------------------------
+
+// Gap: a frequency of 0 (also negative / NaN / -Inf, which D-190 maps to 0) holds the phase
+// at its start: the square outputs a constant +1, the pulse 2 - 2 duty - full-scale DC into
+// the mix. Sine, saw and triangle give 0. (Recommendation: silence, or the start values of
+// the band-limited edge, i.e. 0.)
+SND_TEST(IndepOsc, SpecGap_ZeroFrequencyGivesDc) {
+  const std::vector<float> q = Render(Osc(bf::Waveform::Square, 0.0f), 512);
+  SND_CHECK_NEAR(isrc::Mean(q, 1), 1.0, 1e-6);  // current behaviour
+  const std::vector<float> p = Render(Osc(bf::Waveform::Pulse, std::nanf(""), 0.25f), 512);
+  SND_CHECK_NEAR(isrc::Mean(p, 1), 1.5, 1e-6);  // current behaviour
+  const std::vector<float> s = Render(Osc(bf::Waveform::Sine, -5.0f), 512);
+  SND_CHECK_NEAR(isrc::MaxAbs(s), 0.0, 1e-9);
+}
+
+// Gap: D-192 takes the table length from a loop (loopEnd - loopStart) but does not say where
+// the tables start; with loopStart > 0 table 0 starts at frame 0 (not at loopStart).
+SND_TEST(IndepOsc, SpecGap_WavetableLoopNotAtFrameZero) {
+  std::vector<float> s(3000);
+  for (std::uint32_t j = 0; j < 3000; ++j) s[j] = static_cast<float>(j / 1000);
+  src::SourceAsset b{};
+  b.codec.codec = SND_CODEC_PCM_F32;
+  b.codec.channels = 1;
+  b.codec.sample_rate = 48000;
+  b.codec.total_frames = 3000;
+  b.data = reinterpret_cast<const std::uint8_t*>(s.data());
+  b.dataBytes = s.size() * 4u;
+  b.form = src::LoadForm::PcmResident;
+  b.loopStart = 1000;
+  b.loopEnd = 2000;
+  src::OscillatorParams q = Osc(bf::Waveform::Sine, 48.0f);
+  q.wavetable = &b;
+  const std::vector<float> x = Render(q, 500);
+  SND_CHECK_EQ(x[10], 0.0f);  // current behaviour: table 0 = frames 0 .. 999 (not 1000 .. 1999)
+}

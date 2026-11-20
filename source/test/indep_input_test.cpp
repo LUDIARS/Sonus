@@ -521,3 +521,86 @@ SND_TEST(IndepInput, TwoPortsTwoWritersOneBatch) {
   SND_CHECK_EQ(mixed, std::uint64_t{0});
   SND_CHECK_EQ(order, std::uint64_t{0});
 }
+
+// ---------------------------------------------------------------------------------------
+// Spec gaps (reported for a decision). These tests RECORD the current behaviour only; they
+// are not a statement that it is right. Rewrite them once the acceptance side decides.
+// ---------------------------------------------------------------------------------------
+
+// Gap: Devirtualize (and Resume) "skip to live" (D-194) also drop what the writer wrote
+// just before, although a virtual voice already consumed everything up to "now". With a
+// game writing one block per update, the first real block after the return is then empty:
+// silence, `starved`, and an underrun counted although the writer kept pace.
+SND_TEST(IndepInput, SpecGap_DevirtualizeDropsTheFreshBlockAndCountsAnUnderrun) {
+  Driver d(snd::SourceKind::Input, Ports(4096));
+  SND_REQUIRE(d.Ok());
+  src::InputPort& port = *d.runtime.InputPortOf(0);
+  src::InputParams p = In(0);
+  Driver::Voice v;
+  SND_REQUIRE(d.Start(v, &p, 2));
+  std::uint64_t base = 0;
+  for (int i = 0; i < 4; ++i, base += 256) {  // real, in step with the writer
+    WriteSeq(port, base, 256);
+    d.Block({&v}, Driver::Mod{}, 256);
+  }
+  for (int i = 0; i < 4; ++i, base += 256) {  // virtual, still in step
+    WriteSeq(port, base, 256);
+    d.Advance(v, 256, 1.0f);
+  }
+  WriteSeq(port, base, 256);  // the update that makes it real again
+  d.Control(v, src::ControlOp::Devirtualize);
+  d.Block({&v}, Driver::Mod{}, 256);
+  // Current behaviour: the fresh block was skipped.
+  SND_CHECK_EQ(v.last.starved, 1u);
+  SND_CHECK_EQ(port.Stats().underruns, std::uint64_t{1});
+  SND_CHECK_EQ(v.out[0][1024], 0.0f);
+}
+
+// Gap: a block that is the first to deliver frames but is short is already counted as an
+// underrun (`starved`), although the voice had not played before it ("once the voice had
+// played", D-194 / input_port.hpp).
+SND_TEST(IndepInput, SpecGap_FirstShortBlockCountsAsUnderrun) {
+  Driver d(snd::SourceKind::Input, Ports(4096));
+  SND_REQUIRE(d.Ok());
+  src::InputPort& port = *d.runtime.InputPortOf(0);
+  src::InputParams p = In(0);
+  Driver::Voice v;
+  SND_REQUIRE(d.Start(v, &p, 2));
+  WriteSeq(port, 0, 100);
+  d.Block({&v}, Driver::Mod{}, 256);
+  SND_CHECK_EQ(v.last.starved, 1u);  // current behaviour
+  SND_CHECK_EQ(port.Stats().underruns, std::uint64_t{1});
+}
+
+// Gap: InputPort::Configure accepts a latency bound below the frames a block needs; then
+// every block keeps only bound / 2 frames and starves even when the writer keeps pace.
+SND_TEST(IndepInput, SpecGap_LatencyBoundBelowABlockStarvesForever) {
+  Driver d(snd::SourceKind::Input, Ports(4096));
+  SND_REQUIRE(d.Ok());
+  src::InputPort& port = *d.runtime.InputPortOf(0);
+  port.Configure(0, 100);
+  SND_CHECK_EQ(port.MaxLatencyFrames(), 100u);
+  src::InputParams p = In(0);
+  Driver::Voice v;
+  SND_REQUIRE(d.Start(v, &p, 2));
+  for (int i = 0; i < 10; ++i) {
+    WriteSeq(port, std::uint64_t(i) * 256u, 256);
+    d.Block({&v}, Driver::Mod{}, 256);
+  }
+  SND_CHECK_EQ(v.starvedBlocks, 10u);  // current behaviour: 50 of 256 frames per block
+  SND_CHECK_EQ(port.Stats().readFrames, std::uint64_t{500});
+}
+
+// Gap: a voice with more channels than its port (snd_input_desc::channels vs the port's
+// channels) is not specified for the reader; the extra channels repeat the port's last one.
+SND_TEST(IndepInput, SpecGap_VoiceWithMoreChannelsThanThePort) {
+  Driver d(snd::SourceKind::Input, Ports(256, 1, 2));
+  SND_REQUIRE(d.Ok());
+  src::InputParams p = In(0, 4);
+  Driver::Voice v;
+  SND_REQUIRE(d.Start(v, &p, 4));
+  WriteSeq(*d.runtime.InputPortOf(0), 0, 8);
+  d.Block({&v}, Driver::Mod{}, 8);
+  SND_CHECK_EQ(v.out[2][3], -4.0f);  // current behaviour: channel 1 repeated
+  SND_CHECK_EQ(v.out[3][3], -4.0f);
+}
