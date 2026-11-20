@@ -151,3 +151,18 @@
 | L3 | 古いセッションの RevertValue・ReplaceChunk は適用しない（Server の作り直しで捨てる）、`staleEdits` に数える | CT D-87、P §8.2 | 作り直しの前に適用を止めた状態で送る（試せる範囲） |
 </content>
 </invoke>
+
+## M. 再確認（受け入れ側の決定 D-170〜D-175 と差し戻しの修正。決定と公開ヘッダから書いた）
+
+| # | 性質 | 根拠 | 確かめ方 |
+| --- | --- | --- | --- |
+| M1 | 構造の変更は受け付けで戻しの記録の枠を 1 つ取る。入らなければ LIMIT_REACHED、予備容量を取らない、編集器を呼ばない。枠が空けばまた入る | D-172、struct_edit.hpp | maxStructLog = 2 で 3 つ目 |
+| M2 | 記録の枠の不変条件: 落ち着いたとき `StructLogPlaces()` = 記録に残っている編集の数（適用されて残る Add と、バンクのものを外した Remove）、`ReserveUsage()` = 残っている Add の費用の和。断られた・編集器が断った・ライブの Add を打ち消した Remove・戻し・切断と再接続のどの経路でも二重に返さず返し忘れない。`RuntimeDrops::structLog` は 0 | D-172、runtime.hpp | 乱数の操作列と、自前で持つ模型との比較 |
+| M3 | ライブで足したバスを外すと、その上のライブのエフェクトとそのバスから出るライブのセンドの費用も全部返り、記録から外れる。戻しでそれらの Undo は編集器に渡らない | D-172、補足 | 偽の編集器の呼び出しの記録 |
+| M4 | 述語: `BitExactExpected()` は再生どうし（LOD・ストール・外したコマンド・構造の変更・バンクの変化で false）、`ReproducesRecordedRun()` はそれに加えて lostState・Begin なしで false。MidRun は情報だけ。開始時に生きていた再生は lostState に数える | D-175 | 手で組んだ記録の組み合わせの表、本物の記録（開始時に鳴っている音あり／なし） |
+| M5 | `Finished()` は Start の後の `Blocks()` 個目（先行ブロックを含む）を描いた時点で true、その前は false | D-175 | leadBlocks 0 と 1 |
+| M6 | Client の保持数: ちょうど上限なら全部取れて `*Lost` 0、1 つ超えると最も古い 1 つが消えて `*Lost` 1、取ったあとの答えは押し出されても数えない | D-170、client.hpp | CellValue 256 / 257、Ack 1024 / 1025 |
+| M7 | 同じ runtime で 2 つ目の Server の Start は LIMIT_REACHED。先のものを Stop / 破棄するとまた Start できる。Start / Stop の繰り返しと並行に呼んでも同時に 2 つ動かない | D-170、server.hpp | 順と並行（スレッド） |
+| M8 | 別のバンクのファイルの ReloadBank は Failed（INVALID_ARGUMENT）、読んだ別のバンクは残らない、要求したバンクは外れたまま。その後の QueryBanks、正しいファイルでの次の ReloadBank（loadIfAbsent）、編集が動く | D-173 | |
+| M9 | 決定で決まった振る舞い: 試聴の Ack は記録の結果（存在しない Event も OK、枠は戻る）、リリースバンクと共有するオブジェクトの SetValue は全体が UNSUPPORTED、列 0 本の ReplaceChunk は OK、RemoveBus / RemoveEffect は Add の費用を全部返す | D-171、D-172、D-173 | |
+| M10 | 新しい経路のファズ: 記録の枠が一杯の状態で壊れた StructEdit を流しても枠・予備容量が漏れない | D-172、14 章 | |
