@@ -329,6 +329,12 @@ SND_TEST(PhysicsBank, CorruptPhysBytesAreRefused) {
       {"thresholds decreasing", false, [](std::vector<std::uint8_t>* b, std::size_t p, std::size_t, std::uint64_t, std::uint64_t c) {
          Put<float>(b, p + static_cast<std::size_t>(c) + 4u, 0.1f);  // t1 < t0 (0.5)
        }},
+      {"massToPitchCents beyond 4800", false, [](std::vector<std::uint8_t>* b, std::size_t p, std::size_t, std::uint64_t, std::uint64_t c) {
+         Put<float>(b, p + static_cast<std::size_t>(c) + 16u, -4800.5f);  // metal
+       }},
+      {"speedToVolumeDb beyond 200", false, [](std::vector<std::uint8_t>* b, std::size_t p, std::size_t, std::uint64_t, std::uint64_t c) {
+         Put<float>(b, p + static_cast<std::size_t>(c) + 24u, 200.5f);  // metal
+       }},
       {"speedToVolumeDb infinite", false, [](std::vector<std::uint8_t>* b, std::size_t p, std::size_t, std::uint64_t, std::uint64_t c) {
          Put<float>(b, p + static_cast<std::size_t>(c) + 32u + 28u, std::numeric_limits<float>::infinity());  // wood
        }},

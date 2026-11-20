@@ -139,7 +139,16 @@ struct Group {
 struct CooldownEntry {
   Key key;
   std::uint64_t last;   // clock (us) of the last request
+  std::uint64_t order;  // insertion order of the record (eviction ties: the first recorded goes)
   std::uint32_t stamp;  // call that recorded it
+};
+
+// A one-shot emitter kept until the audio side has applied its playbacks.
+struct Held {
+  snd_emitter_handle emitter;
+  snd_playback_handle playback[2];
+  float volume[2];      // the volume recorded on each playback (1 = none recorded)
+  std::uint32_t stamp;  // call that made it
 };
 
 struct Voice {
@@ -156,7 +165,9 @@ struct Track {
   bool used;
   std::uint32_t kind;
   std::uint64_t start, last, seq;
-  std::uint32_t reportStamp;
+  std::uint32_t reportStamp;  // call of the latest report
+  std::uint32_t reportIdx;    // representative contact of this call's report (largest speed)
+  float reportSpeed;
   snd_emitter_handle emitter;
   std::uint32_t voiceCount;
   Voice v[2];
@@ -234,16 +245,17 @@ struct snd_phys {
   CooldownEntry* cd;     // [cdCap]
   std::uint32_t* cdBucket;  // [cdMask + 1], entry index or kEmptyBucket
 
-  // ---- one-shot emitters held until emitter_hold_seconds have passed (FIFO ring) ----
-  std::uint64_t holdUs;
-  std::uint32_t heldCap, heldHead, heldCount;
-  snd_emitter_handle* heldEmitter;  // [heldCap]
-  std::uint64_t* heldAt;            // [heldCap] clock of the play
-  std::uint32_t* heldStamp;         // [heldCap] call of the play
+  std::uint64_t cdOrder;
+
+  // ---- one-shot emitters held until their playbacks are applied (oldest first) ----
+  std::uint32_t heldCap, heldCount;
+  Held* held;  // [heldCap]
 
   // ---- tracking table ----
   std::uint32_t trCap;
   Track* tracks;  // [trCap]
+  Group* fresh;   // [trCap] reports of keys that are not tracked yet (this call)
+  std::uint32_t freshCount;
 
   // ---- work area of one call ----
   std::uint32_t gCap;
@@ -297,19 +309,34 @@ float Eval(const Curve& c, float x) noexcept {
   return c.points[n - 1u].y;
 }
 
-bool ValidCurve(const Curve& c) noexcept {
+// What a curve's y means: a linear volume [0, 1000], a pitch ratio [1/16, 16], or a parameter
+// value (velocity) |y| <= 1e6.
+enum class YRange { Volume, Pitch, Value };
+bool ValidCurve(const Curve& c, YRange range) noexcept {
   if (c.count > kMaxPoints) return false;
   for (std::uint32_t i = 0; i < c.count; ++i) {
-    if (!Finite(c.points[i].x) || !Finite(c.points[i].y)) return false;
-    if (i > 0u && c.points[i].x < c.points[i - 1u].x) return false;
+    const float x = c.points[i].x;
+    const float y = c.points[i].y;
+    if (!Finite(x) || !Finite(y)) return false;
+    if (i > 0u && x < c.points[i - 1u].x) return false;
+    switch (range) {
+      case YRange::Volume:
+        if (y < 0.0f || y > 1000.0f) return false;
+        break;
+      case YRange::Pitch:
+        if (y < 1.0f / 16.0f || y > 16.0f) return false;
+        break;
+      case YRange::Value:
+        if (y < -1.0e6f || y > 1.0e6f) return false;
+        break;
+    }
   }
   return true;
 }
 bool ValidCurves(const Curves& c) noexcept {
-  for (std::uint32_t i = 0; i < 5u; ++i) {
-    if (!ValidCurve(CurveAt(c, i))) return false;
-  }
-  return true;
+  return ValidCurve(c.impulse_to_volume, YRange::Volume) && ValidCurve(c.impulse_to_velocity, YRange::Value) &&
+         ValidCurve(c.mass_to_pitch, YRange::Pitch) && ValidCurve(c.speed_to_volume, YRange::Volume) &&
+         ValidCurve(c.speed_to_pitch, YRange::Pitch);
 }
 
 inline float ClampVolume(float v) noexcept {
@@ -438,9 +465,10 @@ inline float CurveValue(const snd_phys& p, std::uint16_t mat, std::uint32_t whic
 
 Resolution Resolve(const snd_phys& p, std::uint32_t kind, std::uint16_t a, std::uint16_t b) noexcept {
   Resolution r;
-  if (a == kUnknown || b == kUnknown) {
-    r.unknown = true;
-  } else {
+  const bool ka = a != kUnknown;
+  const bool kb = b != kUnknown;
+  r.unknown = !ka || !kb;
+  if (ka && kb) {
     const std::uint16_t lo = std::min(a, b);
     const std::uint16_t hi = std::max(a, b);
     const snd_id pe = p.pair[kind][static_cast<std::size_t>(lo) * p.n + hi];
@@ -451,22 +479,23 @@ Resolution Resolve(const snd_phys& p, std::uint32_t kind, std::uint16_t a, std::
       r.who[0] = kWhoLighter;
       return r;
     }
-    const snd_id sa = p.single[static_cast<std::size_t>(a) * kKinds + kind];
-    const snd_id sb = a == b ? SND_ID_NONE : p.single[static_cast<std::size_t>(b) * kKinds + kind];
-    if (sa != SND_ID_NONE || sb != SND_ID_NONE) {
-      r.stage = SND_PHYSICS_STAGE_SINGLE;
-      if (sa != SND_ID_NONE) {
-        r.event[r.n] = sa;
-        r.who[r.n] = kWhoA;
-        ++r.n;
-      }
-      if (sb != SND_ID_NONE) {
-        r.event[r.n] = sb;
-        r.who[r.n] = kWhoB;
-        ++r.n;
-      }
-      return r;
+  }
+  // Singles of the known materials (one unknown: the known side's only; no pair override).
+  const snd_id sa = ka ? p.single[static_cast<std::size_t>(a) * kKinds + kind] : SND_ID_NONE;
+  const snd_id sb = (kb && !(ka && a == b)) ? p.single[static_cast<std::size_t>(b) * kKinds + kind] : SND_ID_NONE;
+  if (sa != SND_ID_NONE || sb != SND_ID_NONE) {
+    r.stage = SND_PHYSICS_STAGE_SINGLE;
+    if (sa != SND_ID_NONE) {
+      r.event[r.n] = sa;
+      r.who[r.n] = kWhoA;
+      ++r.n;
     }
+    if (sb != SND_ID_NONE) {
+      r.event[r.n] = sb;
+      r.who[r.n] = kWhoB;
+      ++r.n;
+    }
+    return r;
   }
   const snd_id d = p.defaults[kind];
   if (d != SND_ID_NONE) {
@@ -534,84 +563,91 @@ snd_result ApplyPlayback(snd_phys& p, snd_playback_handle h, const Request& q) n
 // play -> parameters -> destroy the emitter (the playbacks keep the last transform);
 // snd_play_at without parameters when no emitter can be used. Emits one PLAY record per event.
 // Returns true when at least one play was recorded.
-// Destroys the oldest held one-shot emitter.
-void ReleaseHead(snd_phys& p) noexcept {
-  const snd_emitter_handle e = p.heldEmitter[p.heldHead];
-  const snd_result r = snd_destroy_emitter(p.sys, e);
+// Destroys held emitter i (keeps the order of the rest).
+void DestroyHeld(snd_phys& p, std::uint32_t i) noexcept {
+  const snd_result r = snd_destroy_emitter(p.sys, p.held[i].emitter);
   if (r != SND_OK && r != SND_ERR_INVALID_HANDLE) ++p.stats.api_failures;
-  p.heldHead = (p.heldHead + 1u) % p.heldCap;
+  for (std::uint32_t j = i + 1u; j < p.heldCount; ++j) p.held[j - 1u] = p.held[j];
   --p.heldCount;
 }
-// Destroys the held emitters whose hold time has passed (oldest first).
-void ExpireHeld(snd_phys& p) noexcept {
-  while (p.heldCount > 0u && p.now - p.heldAt[p.heldHead] >= p.holdUs) ReleaseHead(p);
+
+// True once the audio side has applied the play recorded on the emitter (or the playback is
+// gone). Why this makes the destroy safe: the play was recorded after the emitter's create
+// and transform in the same arena, so the block that applied it created the emitter, and that
+// block's Compute3D ran with the emitter alive (core computes 3D values for live emitters
+// only, A-004). A playback state other than NONE is read from a snapshot published at the end
+// of such a block; the destroy recorded now is applied at a later block, so the playback has
+// already got its 3D values and keeps them (sonus.h). NONE means "not in a published snapshot
+// yet" or "ended and its slot returned": a recording call tells them apart without changing
+// anything (the volume the playback already has): SND_ERR_INVALID_HANDLE = stale (D-29), the
+// playback is over (it ended - played, not loaded, rejected - so its position no longer matters).
+bool Applied(snd_phys& p, snd_playback_handle h, float volume) noexcept {
+  if (h.value == SND_HANDLE_INVALID_VALUE) return true;
+  if (snd_get_playback_state(p.sys, h) != SND_PLAYBACK_STATE_NONE) return true;
+  return snd_set_playback_volume(p.sys, h, volume) == SND_ERR_INVALID_HANDLE;
 }
 
-bool PlayPositioned(snd_phys& p, Request* qs, std::uint32_t n) noexcept {
-  snd_emitter_handle e{0};
-  // Room in the held ring: push out the oldest unless it was made in this very call.
-  bool room = true;
-  if (p.heldCount == p.heldCap) {
-    if (p.heldStamp[p.heldHead] == p.stamp) {
-      room = false;
+// Destroys the held emitters whose playbacks have all been applied (any order).
+void ReleaseHeld(snd_phys& p) noexcept {
+  for (std::uint32_t i = 0; i < p.heldCount;) {
+    const Held& h = p.held[i];
+    if (Applied(p, h.playback[0], h.volume[0]) && Applied(p, h.playback[1], h.volume[1])) {
+      DestroyHeld(p, i);
     } else {
-      ++p.stats.held_emitters_released_early;
-      ReleaseHead(p);
+      ++i;
     }
   }
-  if (room) e = snd_create_emitter(p.sys);
-  bool positioned = e.value != SND_HANDLE_INVALID_VALUE;
-  if (positioned && snd_set_transform(p.sys, e, &qs[0].position, nullptr, nullptr) != SND_OK) {
+}
+
+// An emitter at `position` for one group; false when none can be had (held ring full of this
+// call's emitters, no emitter slot, transform refused).
+bool AcquireEmitter(snd_phys& p, const snd_vec3& position, snd_emitter_handle* out) noexcept {
+  *out = snd_emitter_handle{0};
+  if (p.heldCount == p.heldCap) {
+    if (p.held[0].stamp == p.stamp) return false;
+    ++p.stats.held_emitters_released_early;
+    DestroyHeld(p, 0);
+  }
+  const snd_emitter_handle e = snd_create_emitter(p.sys);
+  if (e.value == SND_HANDLE_INVALID_VALUE) return false;
+  if (snd_set_transform(p.sys, e, &position, nullptr, nullptr) != SND_OK) {
     ++p.stats.api_failures;
     (void)snd_destroy_emitter(p.sys, e);
-    positioned = false;
+    return false;
   }
+  *out = e;
+  return true;
+}
+
+// Plays the events of one group on the acquired emitter (one PLAY record each) and holds the
+// emitter. Returns true when at least one play was recorded.
+bool PlayPositioned(snd_phys& p, snd_emitter_handle e, Request* qs, std::uint32_t n) noexcept {
+  Held h{};
+  h.emitter = e;
+  h.stamp = p.stamp;
   bool any = false;
   for (std::uint32_t i = 0; i < n; ++i) {
     Request& q = qs[i];
-    snd_physics_record rec{};
-    if (!positioned) {
-      ++p.stats.play_at_fallbacks;
-      q.flags |= SND_PHYSICS_RECORD_FLAG_POSITION_ONLY;
-      const snd_result r = snd_play_at(p.sys, q.event, &q.position, nullptr);
-      if (r != SND_OK) {
-        ++p.stats.api_failures;
-      } else {
-        any = true;
-      }
-      rec = BaseRecord(q);
-      rec.kind = SND_PHYSICS_RECORD_PLAY;
-      rec.param_count = 0;
-      rec.params = nullptr;
-      rec.volume = 1.0f;
-      rec.pitch = 1.0f;
-      rec.result = r;
-      Notify(p, rec);
-      continue;
-    }
-    const snd_playback_handle h = snd_play(p.sys, q.event, e, nullptr);
+    const snd_playback_handle ph = snd_play(p.sys, q.event, e, nullptr);
     snd_result r = SND_OK;
-    if (h.value == SND_HANDLE_INVALID_VALUE) {
+    if (ph.value == SND_HANDLE_INVALID_VALUE) {
       ++p.stats.api_failures;
       r = SND_ERR_LIMIT_REACHED;
     } else {
       any = true;
-      (void)ApplyPlayback(p, h, q);
+      (void)ApplyPlayback(p, ph, q);
     }
-    rec = BaseRecord(q);
+    h.playback[i] = ph;
+    h.volume[i] = q.volume;
+    snd_physics_record rec = BaseRecord(q);
     rec.kind = SND_PHYSICS_RECORD_PLAY;
-    rec.playback = h;
+    rec.playback = ph;
     rec.emitter = e;
     rec.result = r;
     Notify(p, rec);
   }
-  if (positioned) {
-    const std::uint32_t at = (p.heldHead + p.heldCount) % p.heldCap;
-    p.heldEmitter[at] = e;
-    p.heldAt[at] = p.now;
-    p.heldStamp[at] = p.stamp;
-    ++p.heldCount;
-  }
+  if (n < 2u) h.volume[1] = 1.0f;
+  p.held[p.heldCount++] = h;  // AcquireEmitter made room
   return any;
 }
 
@@ -665,13 +701,16 @@ void CdRecord(snd_phys& p, const Key& k) noexcept {
   } else {
     slot = 0;
     for (std::uint32_t i = 1; i < p.cdCap; ++i) {
-      if (p.cd[i].last < p.cd[slot].last) slot = i;
+      const CooldownEntry& x = p.cd[i];
+      const CooldownEntry& y = p.cd[slot];
+      if (x.last < y.last || (x.last == y.last && x.order < y.order)) slot = i;
     }
     if (p.now - p.cd[slot].last < p.cooldownUs) ++p.stats.cooldown_evictions;
     CdRemoveBucket(p, CdFindBucket(p, p.cd[slot].key));
   }
   p.cd[slot].key = k;
   p.cd[slot].last = p.now;
+  p.cd[slot].order = ++p.cdOrder;
   p.cd[slot].stamp = p.stamp;
   CdInsertBucket(p, slot);
 }
@@ -828,8 +867,7 @@ bool ReadConfig(const snd_physics_config* in, snd_physics_config* out) noexcept 
   auto nonneg = [](float v) { return Finite(v) && v >= 0.0f; };
   if (!nonneg(c.budget_per_second) || !(Finite(c.grid_size) && c.grid_size > 0.0f) || !nonneg(c.cooldown_seconds) ||
       !nonneg(c.impulse_threshold) || !nonneg(c.min_slide_speed) || !nonneg(c.tracking_timeout_seconds) ||
-      !nonneg(c.tracking_fade_seconds) || !(Finite(c.max_dt_seconds) && c.max_dt_seconds > 0.0f) ||
-      !nonneg(c.emitter_hold_seconds)) {
+      !nonneg(c.tracking_fade_seconds) || !(Finite(c.max_dt_seconds) && c.max_dt_seconds > 0.0f)) {
     return false;
   }
   auto cap = [](std::uint32_t v) { return v >= 1u && v <= SND_PHYSICS_MAX_CAPACITY; };
@@ -922,11 +960,12 @@ snd_result LoadPhys(snd_phys& p, const void* data, std::uint64_t bytes, snd_id t
     for (std::uint32_t i = 0; i < 4u; ++i) {
       if (!Finite(all[i]) || (i > 0u && all[i] < all[i - 1u])) return SND_ERR_CORRUPT;
     }
+    // Ranges keep the mapped values finite in float: 2^(4800/1200) = 16, 10^(200/20) = 1e10.
     for (float v : pc.massToPitchCents) {
-      if (!Finite(v)) return SND_ERR_CORRUPT;
+      if (!Finite(v) || v < -4800.0f || v > 4800.0f) return SND_ERR_CORRUPT;
     }
     for (float v : pc.speedToVolumeDb) {
-      if (!Finite(v)) return SND_ERR_CORRUPT;
+      if (!Finite(v) || v < -200.0f || v > 200.0f) return SND_ERR_CORRUPT;
     }
     threshold = m == 0u ? pc.impulseToVelocity[0] : std::min(threshold, pc.impulseToVelocity[0]);
   }
@@ -975,9 +1014,8 @@ snd_result Create(snd_system* sys, const snd_physics_config& cfg, const snd_allo
   const std::size_t oCd = L.Take(std::size_t{cfg.max_cooldowns} * sizeof(CooldownEntry));
   const std::size_t oCdBucket = L.Take(std::size_t{cdBuckets} * sizeof(std::uint32_t));
   const std::size_t oTracks = L.Take(std::size_t{cfg.max_tracked_pairs} * sizeof(Track));
-  const std::size_t oHeldE = L.Take(std::size_t{cfg.max_held_emitters} * sizeof(snd_emitter_handle));
-  const std::size_t oHeldAt = L.Take(std::size_t{cfg.max_held_emitters} * sizeof(std::uint64_t));
-  const std::size_t oHeldStamp = L.Take(std::size_t{cfg.max_held_emitters} * sizeof(std::uint32_t));
+  const std::size_t oFresh = L.Take(std::size_t{cfg.max_tracked_pairs} * sizeof(Group));
+  const std::size_t oHeld = L.Take(std::size_t{cfg.max_held_emitters} * sizeof(Held));
   const std::size_t oGroups = L.Take(std::size_t{cfg.max_groups_per_call} * sizeof(Group));
   const std::size_t oGStamp = L.Take(std::size_t{gBuckets} * sizeof(std::uint32_t));
   const std::size_t oGIdx = L.Take(std::size_t{gBuckets} * sizeof(std::uint32_t));
@@ -1024,11 +1062,9 @@ snd_result Create(snd_system* sys, const snd_physics_config& cfg, const snd_allo
   for (std::uint32_t i = 0; i < cdBuckets; ++i) p->cdBucket[i] = kEmptyBucket;
   p->trCap = cfg.max_tracked_pairs;
   p->tracks = reinterpret_cast<Track*>(b + oTracks);
-  p->holdUs = Micros(cfg.emitter_hold_seconds);
+  p->fresh = reinterpret_cast<Group*>(b + oFresh);
   p->heldCap = cfg.max_held_emitters;
-  p->heldEmitter = reinterpret_cast<snd_emitter_handle*>(b + oHeldE);
-  p->heldAt = reinterpret_cast<std::uint64_t*>(b + oHeldAt);
-  p->heldStamp = reinterpret_cast<std::uint32_t*>(b + oHeldStamp);
+  p->held = reinterpret_cast<Held*>(b + oHeld);
   p->gCap = cfg.max_groups_per_call;
   p->gMask = gBuckets - 1u;
   p->groups = reinterpret_cast<Group*>(b + oGroups);
@@ -1049,15 +1085,13 @@ snd_result Create(snd_system* sys, const snd_physics_config& cfg, const snd_allo
 }
 
 void Destroy(snd_phys* p) noexcept {
-  // NULL, or called from inside the observer (the object is in use): nothing.
-  if (p == nullptr || p->inCallback) return;
-  // The playbacks can only be stopped on the physics thread (a registered thread).
-  if (std::this_thread::get_id() == p->thread) {
-    for (std::uint32_t i = 0; i < p->trCap; ++i) {
-      if (p->tracks[i].used) StopTrack(*p, p->tracks[i], SND_PHYSICS_STOP_DESTROYED);
-    }
-    while (p->heldCount > 0u) ReleaseHead(*p);
+  // NULL, another thread, or a call from inside the observer (the object is in use): nothing
+  // (the object stays alive and can be destroyed again on its thread).
+  if (p == nullptr || p->inCallback || std::this_thread::get_id() != p->thread) return;
+  for (std::uint32_t i = 0; i < p->trCap; ++i) {
+    if (p->tracks[i].used) StopTrack(*p, p->tracks[i], SND_PHYSICS_STOP_DESTROYED);
   }
+  while (p->heldCount > 0u) DestroyHeld(*p, p->heldCount - 1u);
   const snd_allocator a = p->allocator;
   void* block = p->block;
   if (a.deallocate != nullptr) {
@@ -1161,9 +1195,10 @@ void PlayGroups(snd_phys& p, const snd_contact* contacts, std::uint32_t groupCou
       ++p.stats.dropped_budget;
       continue;
     }
-    ++used;
-    ++p.stats.group_requests;
-    CountStage(p, g.res.stage, g.res.unknown);
+    ++used;  // a group without an emitter still uses its place in the budget
+    snd_emitter_handle emitter{0};
+    const snd_vec3 position{c.position[0], c.position[1], c.position[2]};
+    const bool haveEmitter = AcquireEmitter(p, position, &emitter);
     Request base{};
     base.source = SND_PHYSICS_SOURCE_CONTACT;
     base.kind = g.kind;
@@ -1179,6 +1214,20 @@ void PlayGroups(snd_phys& p, const snd_contact* contacts, std::uint32_t groupCou
     base.position = snd_vec3{c.position[0], c.position[1], c.position[2]};
     base.objA = c.object_a;
     base.objB = c.object_b;
+    if (!haveEmitter) {
+      // Not played: no position-less fallback (a distant hit must not sound at the listener).
+      ++p.stats.dropped_no_emitter;
+      snd_physics_record rec = BaseRecord(base);
+      rec.kind = SND_PHYSICS_RECORD_DROP;
+      rec.event = g.res.event[0];
+      rec.volume = 1.0f;
+      rec.pitch = 1.0f;
+      rec.result = SND_ERR_LIMIT_REACHED;
+      Notify(p, rec);
+      continue;
+    }
+    ++p.stats.group_requests;
+    CountStage(p, g.res.stage, g.res.unknown);
     if (g.res.stage != SND_PHYSICS_STAGE_PAIR) {
       Request fb = base;
       fb.event = g.res.event[0];
@@ -1206,66 +1255,87 @@ void PlayGroups(snd_phys& p, const snd_contact* contacts, std::uint32_t groupCou
         ++p.stats.requested_impact;
       }
     }
-    const bool any = PlayPositioned(p, qs, g.res.n);
+    const bool any = PlayPositioned(p, emitter, qs, g.res.n);
     if (any) CdRecord(p, ck);
   }
 }
 
-void TrackReports(snd_phys& p, const snd_contact* contacts, std::uint32_t groupCount) noexcept {
-  for (std::uint32_t gi = 0; gi < groupCount; ++gi) {
-    Group& g = p.groups[gi];
-    if (g.kind != SND_CONTACT_SLIDE && g.kind != SND_CONTACT_ROLL) continue;
+Track* FindTrack(snd_phys& p, const Key& k) noexcept {
+  for (std::uint32_t i = 0; i < p.trCap; ++i) {
+    if (p.tracks[i].used && SameKey(p.tracks[i].key, k)) return &p.tracks[i];
+  }
+  return nullptr;
+}
+
+// Step (1): the reports of this call to tracked keys (no work area: kept in the entries).
+void UpdateTracked(snd_phys& p, const snd_contact* contacts) noexcept {
+  for (std::uint32_t ti = 0; ti < p.trCap; ++ti) {
+    Track* t = &p.tracks[ti];
+    if (!t->used || t->reportStamp != p.stamp) continue;
+    const snd_contact& c = contacts[t->reportIdx];
+    const Entry* ea = nullptr;
+    const Entry* eb = nullptr;
+    const std::uint16_t ma = MapMaterial(p, c.material_a, &ea);
+    const std::uint16_t mb = MapMaterial(p, c.material_b, &eb);
+    t->last = p.now;
+    // Keep the orientation of the start (voice A stays the material / object A).
+    const bool swap = (c.object_a != c.object_b) ? (c.object_a == t->objB && c.object_b == t->objA)
+                                                 : (ma != mb && ma == t->matB && mb == t->matA);
+    t->matA = swap ? mb : ma;
+    t->matB = swap ? ma : mb;
+    t->gameA = swap ? c.material_b : c.material_a;
+    t->gameB = swap ? c.material_a : c.material_b;
+    t->objA = swap ? c.object_b : c.object_a;
+    t->objB = swap ? c.object_a : c.object_b;
+    t->massA = swap ? c.mass_b : c.mass_a;
+    t->massB = swap ? c.mass_a : c.mass_b;
+    t->speed = t->reportSpeed;
+    t->position = snd_vec3{c.position[0], c.position[1], c.position[2]};
+    if (snd_set_transform(p.sys, t->emitter, &t->position, nullptr, nullptr) != SND_OK) ++p.stats.api_failures;
+    bool restarted = false;
+    for (std::uint32_t vi = 0; vi < t->voiceCount; ++vi) {
+      if (UpdateVoice(p, *t, vi)) continue;
+      // Ended by itself: STOP (ENDED) then START again on the same emitter.
+      Request q = TrackRequest(p, *t, vi);
+      snd_physics_record rec = BaseRecord(q);
+      rec.kind = SND_PHYSICS_RECORD_STOP;
+      rec.stop_reason = SND_PHYSICS_STOP_ENDED;
+      rec.param_count = 0;
+      rec.params = nullptr;
+      rec.playback = t->v[vi].handle;
+      rec.emitter = t->emitter;
+      rec.volume = t->v[vi].lastVolume;
+      rec.pitch = t->v[vi].lastPitch;
+      Notify(p, rec);
+      StartVoice(p, *t, vi, true);
+      restarted = true;
+    }
+    if (restarted) {
+      ++p.stats.tracking_restarted;
+    } else {
+      ++p.stats.tracking_updated;
+    }
+  }
+}
+
+// Step (2): entries not reported in this call whose last report is >= timeout ago.
+void Timeouts(snd_phys& p) noexcept {
+  for (std::uint32_t i = 0; i < p.trCap; ++i) {
+    Track& t = p.tracks[i];
+    if (!t.used || t.reportStamp == p.stamp) continue;
+    if (p.now - t.last >= p.timeoutUs) {
+      ++p.stats.tracking_timeouts;
+      StopTrack(p, t, SND_PHYSICS_STOP_TIMEOUT);
+    }
+  }
+}
+
+// Step (3): keys that are not tracked yet. Eviction only when the table is full of entries
+// that have not timed out (step 2 ran first) and were not reported in this call.
+void StartFresh(snd_phys& p, const snd_contact* contacts) noexcept {
+  for (std::uint32_t fi = 0; fi < p.freshCount; ++fi) {
+    const Group& g = p.fresh[fi];
     const snd_contact& c = contacts[g.rep];
-    Track* t = nullptr;
-    for (std::uint32_t i = 0; i < p.trCap; ++i) {
-      if (p.tracks[i].used && SameKey(p.tracks[i].key, g.key)) {
-        t = &p.tracks[i];
-        break;
-      }
-    }
-    if (t != nullptr) {
-      t->last = p.now;
-      t->reportStamp = p.stamp;
-      // Keep the orientation of the start (voice A stays the material / object A).
-      const bool swap = (c.object_a != c.object_b) ? (c.object_a == t->objB && c.object_b == t->objA)
-                                                   : (g.matA != g.matB && g.matA == t->matB && g.matB == t->matA);
-      t->matA = swap ? g.matB : g.matA;
-      t->matB = swap ? g.matA : g.matB;
-      t->gameA = swap ? g.gameB : g.gameA;
-      t->gameB = swap ? g.gameA : g.gameB;
-      t->objA = swap ? c.object_b : c.object_a;
-      t->objB = swap ? c.object_a : c.object_b;
-      t->massA = swap ? c.mass_b : c.mass_a;
-      t->massB = swap ? c.mass_a : c.mass_b;
-      t->speed = g.value;
-      t->position = snd_vec3{c.position[0], c.position[1], c.position[2]};
-      if (snd_set_transform(p.sys, t->emitter, &t->position, nullptr, nullptr) != SND_OK) ++p.stats.api_failures;
-      bool restarted = false;
-      for (std::uint32_t vi = 0; vi < t->voiceCount; ++vi) {
-        if (UpdateVoice(p, *t, vi)) continue;
-        // Ended by itself: STOP (ENDED) then START again on the same emitter.
-        Request q = TrackRequest(p, *t, vi);
-        snd_physics_record rec = BaseRecord(q);
-        rec.kind = SND_PHYSICS_RECORD_STOP;
-        rec.stop_reason = SND_PHYSICS_STOP_ENDED;
-        rec.param_count = 0;
-        rec.params = nullptr;
-        rec.playback = t->v[vi].handle;
-        rec.emitter = t->emitter;
-        rec.volume = t->v[vi].lastVolume;
-        rec.pitch = t->v[vi].lastPitch;
-        Notify(p, rec);
-        StartVoice(p, *t, vi, true);
-        restarted = true;
-      }
-      if (restarted) {
-        ++p.stats.tracking_restarted;
-      } else {
-        ++p.stats.tracking_updated;
-      }
-      continue;
-    }
-    // A new key.
     const Resolution res = Resolve(p, g.kind, g.matA, g.matB);
     if (res.stage == SND_PHYSICS_STAGE_NOTHING) {
       CountStage(p, SND_PHYSICS_STAGE_NOTHING, res.unknown);
@@ -1357,17 +1427,6 @@ void TrackReports(snd_phys& p, const snd_contact* contacts, std::uint32_t groupC
   }
 }
 
-void Timeouts(snd_phys& p) noexcept {
-  for (std::uint32_t i = 0; i < p.trCap; ++i) {
-    Track& t = p.tracks[i];
-    if (!t.used || t.reportStamp == p.stamp) continue;
-    if (p.now - t.last >= p.timeoutUs) {
-      ++p.stats.tracking_timeouts;
-      StopTrack(p, t, SND_PHYSICS_STOP_TIMEOUT);
-    }
-  }
-}
-
 snd_result Submit(snd_phys& p, const snd_contact* contacts, std::uint32_t count, float dt) noexcept {
   if (!std::isfinite(dt) || dt < 0.0f || (count > 0u && contacts == nullptr)) {
     ++p.stats.calls_rejected;
@@ -1386,11 +1445,12 @@ snd_result Submit(snd_phys& p, const snd_contact* contacts, std::uint32_t count,
   if (++p.stamp == 0u) {
     std::memset(p.gStamp, 0, (std::size_t{p.gMask} + 1u) * sizeof(std::uint32_t));
     for (std::uint32_t i = 0; i < p.trCap; ++i) p.tracks[i].reportStamp = 0;
-    for (std::uint32_t i = 0; i < p.heldCap; ++i) p.heldStamp[i] = 0;
+    for (std::uint32_t i = 0; i < p.heldCount; ++i) p.held[i].stamp = 0;
     for (std::uint32_t i = 0; i < p.cdCount; ++i) p.cd[i].stamp = 0;
     p.stamp = 1;
   }
-  ExpireHeld(p);
+  ReleaseHeld(p);
+  p.freshCount = 0;
   const float threshold = p.cfg.impulse_threshold > 0.0f ? p.cfg.impulse_threshold : p.tableThreshold;
   const float grid = p.cfg.grid_size;
   std::uint32_t groupCount = 0;
@@ -1431,13 +1491,65 @@ snd_result Submit(snd_phys& p, const snd_contact* contacts, std::uint32_t count,
     const Entry* eb = nullptr;
     const std::uint16_t ma = MapMaterial(p, c.material_a, &ea);
     const std::uint16_t mb = MapMaterial(p, c.material_b, &eb);
-    Key k;
-    if (oneShot) {
-      k = Key{static_cast<std::uint64_t>(Cell(c.position[0], grid)), static_cast<std::uint64_t>(Cell(c.position[1], grid)),
-              static_cast<std::uint64_t>(Cell(c.position[2], grid)), MatKind(ma, mb, kind, 1u)};
-    } else {
-      k = Key{std::min(c.object_a, c.object_b), std::max(c.object_a, c.object_b), 0, MatKind(ma, mb, kind, 2u)};
+    if (continuous) {
+      const Key k{std::min(c.object_a, c.object_b), std::max(c.object_a, c.object_b), 0, MatKind(ma, mb, kind, 2u)};
+      // A tracked key: kept in its entry (the largest speed of the call, the first on ties).
+      if (Track* t = FindTrack(p, k)) {
+        if (t->reportStamp == p.stamp) {
+          ++p.stats.merged;
+          if (value > t->reportSpeed) {
+            t->reportSpeed = value;
+            t->reportIdx = i;
+          }
+        } else {
+          ++p.stats.slide_reports;
+          t->reportStamp = p.stamp;
+          t->reportSpeed = value;
+          t->reportIdx = i;
+        }
+        continue;
+      }
+      // A new key: its own area (the tracking capacity), apart from the Impact / Break groups.
+      Group* f = nullptr;
+      for (std::uint32_t j = 0; j < p.freshCount; ++j) {
+        if (SameKey(p.fresh[j].key, k)) {
+          f = &p.fresh[j];
+          break;
+        }
+      }
+      if (f != nullptr) {
+        ++f->count;
+        ++p.stats.merged;
+        if (value > f->value) {
+          f->rep = i;
+          f->value = value;
+          f->matA = ma;
+          f->matB = mb;
+          f->gameA = c.material_a;
+          f->gameB = c.material_b;
+        }
+        continue;
+      }
+      if (p.freshCount >= p.trCap) {
+        ++p.stats.dropped_work_overflow;
+        continue;
+      }
+      Group& ng = p.fresh[p.freshCount++];
+      ng = Group{};
+      ng.key = k;
+      ng.rep = i;
+      ng.count = 1;
+      ng.kind = kind;
+      ng.value = value;
+      ng.matA = ma;
+      ng.matB = mb;
+      ng.gameA = c.material_a;
+      ng.gameB = c.material_b;
+      ++p.stats.slide_reports;
+      continue;
     }
+    const Key k{static_cast<std::uint64_t>(Cell(c.position[0], grid)), static_cast<std::uint64_t>(Cell(c.position[1], grid)),
+                static_cast<std::uint64_t>(Cell(c.position[2], grid)), MatKind(ma, mb, kind, 1u)};
     const std::uint32_t found = FindGroup(p, k);
     if ((found & 0x80000000u) == 0u) {
       Group& g = p.groups[found];
@@ -1471,15 +1583,12 @@ snd_result Submit(snd_phys& p, const snd_contact* contacts, std::uint32_t count,
     g.matB = mb;
     g.gameA = c.material_a;
     g.gameB = c.material_b;
-    if (oneShot) {
-      ++p.stats.groups;
-    } else {
-      ++p.stats.slide_reports;
-    }
+    ++p.stats.groups;
   }
   PlayGroups(p, contacts, groupCount, frameBudget);
-  TrackReports(p, contacts, groupCount);
-  Timeouts(p);
+  UpdateTracked(p, contacts);  // (1)
+  Timeouts(p);                 // (2)
+  StartFresh(p, contacts);     // (3)
   return SND_OK;
 }
 
@@ -1507,14 +1616,16 @@ snd_result Footstep(snd_phys& p, snd_emitter_handle foot, std::uint16_t footMate
   const std::uint32_t chosen = best[0] == kEmptyBucket ? 0u : (best[1] == kEmptyBucket ? 1u : 2u);
   p.stats.footstep_surfaces_ignored += count - chosen;
   if (chosen == 0u) return SND_OK;
-  const float sum = chosen == 1u ? surfaces[best[0]].weight : surfaces[best[0]].weight + surfaces[best[1]].weight;
+  // In double: two finite floats never overflow there (3e38 + 3e38).
+  const double sum = chosen == 1u ? static_cast<double>(surfaces[best[0]].weight)
+                                  : static_cast<double>(surfaces[best[0]].weight) + surfaces[best[1]].weight;
   const Entry* fe = nullptr;
   const std::uint16_t footSound = MapMaterial(p, footMaterial, &fe);
   const Curve& wc = p.weightCurve.count > 0u ? p.weightCurve : p.builtinWeight;
   snd_result first = SND_OK;
   for (std::uint32_t s = 0; s < chosen; ++s) {
     const snd_surface_weight& sw = surfaces[best[s]];
-    const float wn = chosen == 1u ? 1.0f : sw.weight / sum;
+    const float wn = chosen == 1u ? 1.0f : static_cast<float>(static_cast<double>(sw.weight) / sum);
     const Entry* se = nullptr;
     const std::uint16_t m = MapMaterial(p, sw.material, &se);
     Request q{};
@@ -1588,7 +1699,7 @@ snd_result SetTable(snd_phys& p, const snd_physics_table_desc* in) noexcept {
   snd_physics_table_desc_init(&d);
   std::memcpy(&d, in, in->struct_size);
   const std::uint32_t n = d.material_count;
-  if (!Finite(d.impulse_threshold) || d.impulse_threshold < 0.0f || !ValidCurve(d.weight_to_volume)) {
+  if (!Finite(d.impulse_threshold) || d.impulse_threshold < 0.0f || !ValidCurve(d.weight_to_volume, YRange::Volume)) {
     return SND_ERR_INVALID_ARGUMENT;
   }
   if (d.default_curves != nullptr && !ValidCurves(*d.default_curves)) return SND_ERR_INVALID_ARGUMENT;

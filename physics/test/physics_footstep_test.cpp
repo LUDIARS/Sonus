@@ -102,6 +102,14 @@ SND_TEST(PhysicsFootstep, TwoLargestWeightsMappedToVolume) {
   SND_CHECK_NEAR(p[0].r.volume, 0.2f + 0.8f * 0.5f, 1e-6f);  // w = 0.75
   SND_CHECK_NEAR(p[1].r.volume, 0.1f, 1e-6f);                // 0.25
   SND_CHECK_EQ(Stats(f.phys).footsteps, 6u);
+  // Huge finite weights: summed in double (3e38 + 3e38 does not overflow): 0.5 each.
+  SND_REQUIRE_EQ(snd_physics_set_table(f.phys, &d), SND_OK);
+  rec.Clear();
+  SND_CHECK_EQ(f.Step({W(0, 3.0e38f), W(0, 3.0e38f)}), SND_OK);
+  p = rec.Of(SND_PHYSICS_RECORD_PLAY);
+  SND_REQUIRE_EQ(p.size(), 2u);
+  SND_CHECK_NEAR(p[0].r.volume, 0.2f, 1e-6f);  // the table's curve at 0.5
+  SND_CHECK_EQ(p[0].Param(P(SND_PHYSICS_PARAM_SURFACE_WEIGHT_NAME)), 0.5f);
 }
 
 SND_TEST(PhysicsFootstep, EventChainAndParameters) {

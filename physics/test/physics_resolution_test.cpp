@@ -70,7 +70,9 @@ SND_TEST(PhysicsResolution, PairThenSinglesThenDefaultThenNothing) {
       {at(30, SND_CONTACT_IMPACT, 2, 1), {Ev(1, 0)}, SND_PHYSICS_STAGE_SINGLE},  // only B has one
       {at(40, SND_CONTACT_IMPACT, 1, 1), {Ev(1, 0)}, SND_PHYSICS_STAGE_SINGLE},  // same material: once
       {at(50, SND_CONTACT_IMPACT, 2, 2), {0x7000u}, SND_PHYSICS_STAGE_DEFAULT},
-      {at(60, SND_CONTACT_IMPACT, 0, 5), {0x7000u}, SND_PHYSICS_STAGE_DEFAULT},  // 5 >= N: unknown
+      {at(60, SND_CONTACT_IMPACT, 0, 5), {Ev(0, 0)}, SND_PHYSICS_STAGE_SINGLE},  // 5 >= N: the known side's single
+      {at(65, SND_CONTACT_IMPACT, 9, 2), {0x7000u}, SND_PHYSICS_STAGE_DEFAULT},  // known side has none: default
+      {at(66, SND_CONTACT_IMPACT, 9, 7), {0x7000u}, SND_PHYSICS_STAGE_DEFAULT},  // both unknown
       {at(70, SND_CONTACT_BREAK, 0, 1), {Ev(0, 3)}, SND_PHYSICS_STAGE_SINGLE},   // Break column has no (0, 1)
       {at(80, SND_CONTACT_BREAK, 2, 0), {0x9002u}, SND_PHYSICS_STAGE_PAIR},
       {at(90, SND_CONTACT_BREAK, 2, 2), {}, SND_PHYSICS_STAGE_NOTHING},
@@ -92,12 +94,12 @@ SND_TEST(PhysicsResolution, PairThenSinglesThenDefaultThenNothing) {
   }
   snd_physics_stats s = Stats(f.phys);
   SND_CHECK_EQ(s.resolved_pair, 3u);
-  SND_CHECK_EQ(s.fallback_pair_to_single, 4u);
-  SND_CHECK_EQ(s.fallback_single_to_default, 2u);
+  SND_CHECK_EQ(s.fallback_pair_to_single, 5u);
+  SND_CHECK_EQ(s.fallback_single_to_default, 3u);
   SND_CHECK_EQ(s.fallback_none, 1u);
-  SND_CHECK_EQ(s.fallback_unknown_material, 1u);
+  SND_CHECK_EQ(s.fallback_unknown_material, 3u);
   SND_CHECK_EQ(s.dropped_no_event, 1u);
-  SND_CHECK_EQ(s.group_requests, 9u);
+  SND_CHECK_EQ(s.group_requests, 11u);
   // Overlay: without the pair, both single events of (0, 1) play, A's first, on one emitter.
   SND_CHECK_EQ(snd_physics_set_pair_event(f.phys, 1, 0, SND_PHYSICS_ALL_KINDS, SND_ID_NONE), SND_OK);
   rec.Clear();
@@ -107,15 +109,15 @@ SND_TEST(PhysicsResolution, PairThenSinglesThenDefaultThenNothing) {
   SND_CHECK_EQ(two[0].r.event, Ev(0, 0));
   SND_CHECK_EQ(two[1].r.event, Ev(1, 0));
   SND_CHECK_EQ(two[0].r.emitter.value, two[1].r.emitter.value);
-  SND_CHECK_EQ(Stats(f.phys).requested_impact, 9u);  // 7 single-event groups + the overlay's 2
-  SND_CHECK_EQ(Stats(f.phys).group_requests, 10u);
+  SND_CHECK_EQ(Stats(f.phys).requested_impact, 11u);  // 9 single-event groups + the overlay's 2
+  SND_CHECK_EQ(Stats(f.phys).group_requests, 12u);
   // Unknown material and no default: nothing, counted twice (nothing + unknown).
   SND_CHECK_EQ(snd_physics_set_default_event(f.phys, SND_PHYSICS_ALL_KINDS, SND_ID_NONE), SND_OK);
   rec.Clear();
-  SND_CHECK_EQ(f.Submit({at(110, SND_CONTACT_IMPACT, 9, 0)}), SND_OK);
+  SND_CHECK_EQ(f.Submit({at(110, SND_CONTACT_IMPACT, 9, 2)}), SND_OK);
   s = Stats(f.phys);
   SND_CHECK_EQ(s.fallback_none, 2u);
-  SND_CHECK_EQ(s.fallback_unknown_material, 2u);
+  SND_CHECK_EQ(s.fallback_unknown_material, 4u);
   SND_REQUIRE_EQ(rec.Count(SND_PHYSICS_RECORD_FALLBACK), 1u);
   SND_CHECK((rec.recs[0].r.flags & SND_PHYSICS_RECORD_FLAG_UNKNOWN_MATERIAL) != 0u);
   SND_CHECK_EQ(rec.recs[0].r.material_a, SND_PHYSICS_UNMAPPED);
@@ -185,22 +187,40 @@ SND_TEST(PhysicsResolution, StrengthCurvesAndTheLighterObjectRule) {
   SND_CHECK_EQ(p[0].r.mass, 0.0f);
   SND_CHECK_NEAR(p[0].r.volume, 0.55f, 1e-6f);  // B is material 0 here
   SND_CHECK_EQ(p[0].r.pitch, 2.0f);             // mass 0 is left of the first point
-  // Clamping: volume <= 1000, pitch in [1/16, 16].
-  snd_physics_curves loud;
-  std::memset(&loud, 0, sizeof(loud));
-  loud.impulse_to_volume = Linear({{0.0f, 5000.0f}});
-  loud.mass_to_pitch = Linear({{0.0f, 0.0f}, {10.0f, 100.0f}});
-  SND_CHECK_EQ(snd_physics_set_curves(f.phys, 0, &loud), SND_OK);
-  SND_CHECK_EQ(snd_physics_set_pair_event(f.phys, 0, 0, SND_PHYSICS_ALL_KINDS, 0x9100u), SND_OK);
-  rec.Clear();
-  SND_CHECK_EQ(f.Submit({Contact(SND_CONTACT_IMPACT, 1, 2, 0, 0, 50, 0, 0, 5.0f, 2.0f, 0.0f, 0.0f),
-                         Contact(SND_CONTACT_IMPACT, 3, 4, 0, 0, 60, 0, 0, 4.0f, 2.0f, 20.0f, 20.0f)}),
-               SND_OK);
-  p = rec.Of(SND_PHYSICS_RECORD_PLAY);
-  SND_REQUIRE_EQ(p.size(), 2u);
-  SND_CHECK_EQ(p[0].r.volume, 1000.0f);
-  SND_CHECK_EQ(p[0].r.pitch, 1.0f / 16.0f);
-  SND_CHECK_EQ(p[1].r.pitch, 16.0f);
+  // Curve values out of their meaning are refused: volume y in [0, 1000], pitch y in
+  // [1/16, 16], velocity |y| <= 1e6; the bounds themselves are fine (and reach the record).
+  {
+    auto refused = [&](void (*set)(snd_physics_curves*)) {
+      snd_physics_curves cv;
+      std::memset(&cv, 0, sizeof(cv));
+      set(&cv);
+      return snd_physics_set_curves(f.phys, 0, &cv) == SND_ERR_INVALID_ARGUMENT;
+    };
+    SND_CHECK(refused([](snd_physics_curves* c) { c->impulse_to_volume = Linear({{0.0f, 1000.5f}}); }));
+    SND_CHECK(refused([](snd_physics_curves* c) { c->speed_to_volume = Linear({{0.0f, -0.1f}}); }));
+    SND_CHECK(refused([](snd_physics_curves* c) { c->mass_to_pitch = Linear({{0.0f, 0.0f}}); }));
+    SND_CHECK(refused([](snd_physics_curves* c) { c->speed_to_pitch = Linear({{0.0f, 17.0f}}); }));
+    SND_CHECK(refused([](snd_physics_curves* c) { c->impulse_to_velocity = Linear({{0.0f, 2.0e6f}}); }));
+    std::vector<snd_id> s1;
+    snd_physics_table_desc wd = SinglesTable(2, &s1);
+    wd.weight_to_volume = Linear({{0.0f, 2000.0f}});
+    SND_CHECK_EQ(snd_physics_set_table(f.phys, &wd), SND_ERR_INVALID_ARGUMENT);
+    snd_physics_curves edge;
+    std::memset(&edge, 0, sizeof(edge));
+    edge.impulse_to_volume = Linear({{0.0f, 1000.0f}});
+    edge.mass_to_pitch = Linear({{0.0f, 1.0f / 16.0f}, {10.0f, 16.0f}});
+    SND_CHECK_EQ(snd_physics_set_curves(f.phys, 0, &edge), SND_OK);
+    SND_CHECK_EQ(snd_physics_set_pair_event(f.phys, 0, 0, SND_PHYSICS_ALL_KINDS, 0x9100u), SND_OK);
+    rec.Clear();
+    SND_CHECK_EQ(f.Submit({Contact(SND_CONTACT_IMPACT, 1, 2, 0, 0, 50, 0, 0, 5.0f, 2.0f, 0.0f, 0.0f),
+                           Contact(SND_CONTACT_IMPACT, 3, 4, 0, 0, 60, 0, 0, 4.0f, 2.0f, 20.0f, 20.0f)}),
+                 SND_OK);
+    p = rec.Of(SND_PHYSICS_RECORD_PLAY);
+    SND_REQUIRE_EQ(p.size(), 2u);
+    SND_CHECK_EQ(p[0].r.volume, 1000.0f);
+    SND_CHECK_EQ(p[0].r.pitch, 1.0f / 16.0f);
+    SND_CHECK_EQ(p[1].r.pitch, 16.0f);
+  }
   // Built-in curves once nothing is set: impulse 1 -> volume 0.5, velocity 1/3; 0.05 -> 0.25, 0.
   SND_CHECK_EQ(snd_physics_set_curves(f.phys, 0, nullptr), SND_OK);
   SND_CHECK_EQ(snd_physics_set_curves(f.phys, SND_PHYSICS_DEFAULT_MATERIAL, nullptr), SND_OK);
@@ -286,17 +306,21 @@ SND_TEST(PhysicsResolution, MaterialMapAndSurfaceParameters) {
   SND_CHECK_EQ(snd_physics_set_surface_param(f.phys, 0, SND_ID_RESERVED_FIRST, 1.0f), SND_ERR_INVALID_ARGUMENT);
   SND_CHECK_EQ(snd_physics_set_surface_param(f.phys, 0, P("a"), kNan), SND_ERR_INVALID_ARGUMENT);
   SND_CHECK_EQ(snd_physics_set_surface_param(f.phys, 6, P("a"), 1.0f), SND_ERR_NOT_FOUND);
-  // Unknown game materials go to the default (unmapped, >= N, past the map).
+  // Unknown game materials (unmapped, >= N, past the map): the known side's single (with its
+  // surface parameters, game 0 has a..d now), no pair; both unknown: the default.
   rec.Clear();
-  SND_CHECK_EQ(f.Submit({contact(40, 3, 0), contact(50, 4, 0), contact(60, 0, 6)}), SND_OK);
+  SND_CHECK_EQ(f.Submit({contact(40, 3, 0), contact(50, 4, 0), contact(60, 0, 6), contact(65, 3, 6)}), SND_OK);
   p = rec.Of(SND_PHYSICS_RECORD_PLAY);
-  SND_REQUIRE_EQ(p.size(), 3u);
-  for (const Rec& r : p) {
-    SND_CHECK_EQ(r.r.event, 0x7000u);
-    SND_CHECK_EQ(r.r.stage, SND_PHYSICS_STAGE_DEFAULT);
-    SND_CHECK((r.r.flags & SND_PHYSICS_RECORD_FLAG_UNKNOWN_MATERIAL) != 0u);
+  SND_REQUIRE_EQ(p.size(), 4u);
+  for (std::size_t i = 0; i < 3; ++i) {
+    SND_CHECK_EQ(p[i].r.event, Ev(0, 0));
+    SND_CHECK_EQ(p[i].r.stage, SND_PHYSICS_STAGE_SINGLE);
+    SND_CHECK((p[i].r.flags & SND_PHYSICS_RECORD_FLAG_UNKNOWN_MATERIAL) != 0u);
+    SND_CHECK_EQ(p[i].Param(P("d")), 3.0f);
   }
-  SND_CHECK_EQ(Stats(f.phys).fallback_unknown_material, 3u);
+  SND_CHECK_EQ(p[3].r.event, 0x7000u);
+  SND_CHECK_EQ(p[3].r.stage, SND_PHYSICS_STAGE_DEFAULT);
+  SND_CHECK_EQ(Stats(f.phys).fallback_unknown_material, 4u);
   // count 0: the identity again (game 1 is sound material 1, no parameters).
   SND_CHECK_EQ(snd_physics_set_material_map(f.phys, nullptr, 0), SND_OK);
   SND_CHECK_EQ(snd_physics_set_pair_event(f.phys, 0, 1, SND_PHYSICS_ALL_KINDS, SND_ID_NONE), SND_OK);
@@ -394,7 +418,7 @@ SND_TEST(PhysicsResolution, TableReplacementAndSetterErrors) {
   d2.default_event[SND_CONTACT_IMPACT] = 0x7777u;
   SND_CHECK_EQ(snd_physics_set_table(f.phys, &d2), SND_OK);
   rec.Clear();
-  SND_CHECK_EQ(f.Submit({Impact(1, 2, 10, 1.0f, 3, 0)}), SND_OK);
+  SND_CHECK_EQ(f.Submit({Impact(1, 2, 10, 1.0f, 3, 3)}), SND_OK);
   SND_REQUIRE_EQ(rec.Count(SND_PHYSICS_RECORD_PLAY), 1u);
   SND_CHECK_EQ(rec.Of(SND_PHYSICS_RECORD_PLAY)[0].r.event, 0x7777u);
   // An older (smaller) table desc: the fields it does not cover keep their defaults.

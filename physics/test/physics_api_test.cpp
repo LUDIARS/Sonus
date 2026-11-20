@@ -87,7 +87,6 @@ SND_TEST(PhysicsApi, ConfigVersionsAndRanges) {
       {"timeout inf", [](snd_physics_config* x) { x->tracking_timeout_seconds = kInf; }},
       {"fade < 0", [](snd_physics_config* x) { x->tracking_fade_seconds = -1.0f; }},
       {"max dt 0", [](snd_physics_config* x) { x->max_dt_seconds = 0.0f; }},
-      {"hold < 0", [](snd_physics_config* x) { x->emitter_hold_seconds = -1.0f; }},
       {"tracked 0", [](snd_physics_config* x) { x->max_tracked_pairs = 0; }},
       {"cooldowns 0", [](snd_physics_config* x) { x->max_cooldowns = 0; }},
       {"groups too many", [](snd_physics_config* x) { x->max_groups_per_call = SND_PHYSICS_MAX_CAPACITY + 1u; }},
@@ -107,7 +106,6 @@ SND_TEST(PhysicsApi, ConfigVersionsAndRanges) {
   ok.budget_per_second = 0.0f;
   ok.cooldown_seconds = 0.0f;
   ok.tracking_timeout_seconds = 0.0f;
-  ok.emitter_hold_seconds = 0.0f;
   ok.max_materials = SND_PHYSICS_MAX_MATERIALS_LIMIT;
   ok.max_game_materials = 0x10000u;
   SND_CHECK_EQ(CreateWith(sys.sys, ok), SND_OK);
@@ -201,10 +199,14 @@ SND_TEST(PhysicsApi, OnlyThePhysicsThread) {
   snd_phys_destroy(p);
   SND_CHECK_EQ(alloc.allocs, 1u);
   SND_CHECK_EQ(alloc.frees, 1u);
-  // Destroyed on another thread: the memory is freed (the playbacks cannot be stopped there).
+  // Destroyed on another thread: nothing happens; the object still works and is destroyed on
+  // its own thread.
   SND_REQUIRE_EQ(snd_physics_create(sys.sys, &c, &at, &p), SND_OK);
   std::thread t2([&] { snd_phys_destroy(p); });
   t2.join();
+  SND_CHECK_EQ(alloc.frees, 1u);
+  SND_CHECK_EQ(snd_phys_submit_contacts(p, nullptr, 0, 0.01f), SND_OK);
+  snd_phys_destroy(p);
   SND_CHECK_EQ(alloc.frees, 2u);
 }
 
@@ -306,12 +308,12 @@ SND_TEST(PhysicsApi, StatsCopyResetAndInvalidInput) {
   snd_phys_destroy(p);
 }
 
-SND_TEST(PhysicsApi, HeldEmittersHoldTimeAndCapacity) {
+SND_TEST(PhysicsApi, HeldEmittersReleaseAndCapacity) {
   Sys sys;
   SND_REQUIRE_EQ(sys.created, SND_OK);
+  sys.Advance(4);
   Recorder rec;
   snd_physics_config c = OpenConfig(&rec);
-  c.emitter_hold_seconds = 0.1f;
   c.max_held_emitters = 2;
   snd_phys* p = nullptr;
   SND_REQUIRE_EQ(snd_physics_create(sys.sys, &c, nullptr, &p), SND_OK);
@@ -324,25 +326,29 @@ SND_TEST(PhysicsApi, HeldEmittersHoldTimeAndCapacity) {
     rec.Clear();
     SND_CHECK_EQ(snd_phys_submit_contacts(p, v.empty() ? nullptr : v.data(), static_cast<std::uint32_t>(n), dt), SND_OK);
   };
-  // 3 groups in one call with room for 2: the third falls back to snd_play_at.
+  // 3 groups in one call with room for 2: the third is dropped (all held ones are this call's).
   submit(3, 0.01f);
   snd_physics_stats s = Stats(p);
-  SND_CHECK_EQ(s.play_at_fallbacks, 1u);
+  SND_CHECK_EQ(s.dropped_no_emitter, 1u);
   SND_CHECK_EQ(s.held_emitters_released_early, 0u);
   const std::vector<Rec> first = rec.Of(SND_PHYSICS_RECORD_PLAY);
-  SND_REQUIRE_EQ(first.size(), 3u);
-  // Still held 50 ms later: the next group pushes the oldest out early.
-  submit(1, 0.05f);
+  SND_REQUIRE_EQ(first.size(), 2u);
+  SND_CHECK_EQ(rec.Count(SND_PHYSICS_RECORD_DROP), 1u);
+  // The system has not applied them yet (no update): however much physics time passes, they
+  // stay held; a new group pushes the oldest out early.
+  submit(0, 1.0f);
+  submit(0, 1.0f);
+  SND_CHECK_EQ(Stats(p).held_emitters_released_early, 0u);
+  submit(1, 0.01f);
   s = Stats(p);
   SND_CHECK_EQ(s.held_emitters_released_early, 1u);
-  SND_CHECK_EQ(s.play_at_fallbacks, 1u);
-  // The emitter of the first group is gone (destroying it again is refused as stale once the
-  // system has released it); the second's is still alive.
+  SND_CHECK_EQ(s.dropped_no_emitter, 1u);
+  // The first group's emitter is gone; the second's is alive until the plays are seen applied.
   sys.Advance(8);
   SND_CHECK_EQ(snd_set_transform(sys.sys, first[1].r.emitter, nullptr, nullptr, nullptr), SND_OK);
   SND_CHECK_EQ(snd_set_transform(sys.sys, first[0].r.emitter, nullptr, nullptr, nullptr), SND_ERR_INVALID_HANDLE);
-  // 100 ms after its play (dt 0.05 + 0.05) the second is released by the next call.
-  submit(0, 0.05f);
+  // Applied (the system advanced): the next call releases the rest, even with dt 0.
+  submit(0, 0.0f);
   sys.Advance(8);
   SND_CHECK_EQ(snd_set_transform(sys.sys, first[1].r.emitter, nullptr, nullptr, nullptr), SND_ERR_INVALID_HANDLE);
   SND_CHECK_EQ(Stats(p).held_emitters_released_early, 1u);

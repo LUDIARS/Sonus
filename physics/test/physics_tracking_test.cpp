@@ -245,7 +245,7 @@ SND_TEST(PhysicsTracking, SurfaceParameterChangesReachATrackedSlide) {
   // Unknown materials: the default Slide event; nothing at all: no entry.
   SND_CHECK_EQ(snd_physics_set_default_event(f.phys, SND_CONTACT_SLIDE, 0x7100u), SND_OK);
   rec.Clear();
-  SND_CHECK_EQ(f.Submit({Slide(1, 2, 1.0f), Slide(3, 4, 1.0f, 5, 0)}), SND_OK);
+  SND_CHECK_EQ(f.Submit({Slide(1, 2, 1.0f), Slide(3, 4, 1.0f, 5, 5)}), SND_OK);
   std::vector<Rec> s = rec.Of(SND_PHYSICS_RECORD_START);
   SND_REQUIRE_EQ(s.size(), 1u);
   SND_CHECK_EQ(s[0].r.event, 0x7100u);
@@ -258,4 +258,34 @@ SND_TEST(PhysicsTracking, SurfaceParameterChangesReachATrackedSlide) {
   SND_CHECK_EQ(st.fallback_none, 1u);
   SND_CHECK_EQ(st.slide_reports,
                st.tracking_started + st.tracking_updated + st.tracking_restarted + st.tracking_dropped + st.fallback_none);
+}
+
+SND_TEST(PhysicsTracking, TimeoutComesBeforeEvictionAndImpactsDoNotPushOutReports) {
+  Recorder rec;
+  snd_physics_config cfg = OpenConfig(&rec);
+  cfg.max_tracked_pairs = 1;
+  cfg.tracking_timeout_seconds = 0.1f;
+  cfg.max_groups_per_call = 4;
+  Fixture f(cfg);
+  SND_CHECK_EQ(f.Submit({Slide(1, 2, 1.0f)}, 0.05f), SND_OK);
+  // 100 ms later, without a report from A and with a new key B: A times out (step 2) before B
+  // starts (step 3); no eviction.
+  rec.Clear();
+  SND_CHECK_EQ(f.Submit({Slide(3, 4, 1.0f)}, 0.1f), SND_OK);
+  const std::vector<Rec> stop = rec.Of(SND_PHYSICS_RECORD_STOP);
+  SND_REQUIRE_EQ(stop.size(), 1u);
+  SND_CHECK_EQ(stop[0].r.stop_reason, SND_PHYSICS_STOP_TIMEOUT);
+  SND_CHECK_EQ(Stats(f.phys).tracking_timeouts, 1u);
+  SND_CHECK_EQ(Stats(f.phys).tracking_evictions, 0u);
+  SND_CHECK_EQ(Stats(f.phys).tracking_started, 2u);
+  // A burst of Impacts that fills the Impact / Break work area does not push out the report
+  // of the tracked slide (it does not use that area).
+  std::vector<snd_contact> burst;
+  for (int i = 0; i < 20; ++i) burst.push_back(Impact(static_cast<std::uint64_t>(i) * 2u + 100u, 0, static_cast<float>(i), 1.0f));
+  burst.push_back(Slide(3, 4, 2.0f));
+  rec.Clear();
+  SND_CHECK_EQ(f.Submit(burst, 0.05f), SND_OK);
+  SND_CHECK_EQ(Stats(f.phys).dropped_work_overflow, 16u);
+  SND_CHECK_EQ(Stats(f.phys).tracking_updated, 1u);
+  SND_CHECK_EQ(rec.Count(SND_PHYSICS_RECORD_UPDATE), 1u);
 }
