@@ -15,7 +15,8 @@ endfunction()
 
 # Core only (no Tela). core_host_test uses the core the way an outside host does (D-101).
 foreach(_t model_test live_mixer_test live_profiler_test indep_sync_test core_host_test document_test
-        event_editor_test mixer_editor_test curve_editor_test)
+        event_editor_test mixer_editor_test curve_editor_test
+        spatial_preview_test runtime_compare_test)
   _snd_tool_test(${_t} "${_tool_core_test_link}")
 endforeach()
 
