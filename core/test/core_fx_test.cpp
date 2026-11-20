@@ -306,7 +306,7 @@ SND_TEST(CoreFx, SidechainSameBlockOrPreviousBlockByGraphOrder) {
       SND_CHECK_EQ(found, run == 0 ? found : onset[first]);  // the same every run
     }
   }
-  snd::test::Note("onset block: voice mixed later %zu, voice mixed first %zu", onset[0], onset[1]);
+  snd::test::Note("onset block: voice mixed later %u, voice mixed first %u", unsigned(onset[0]), unsigned(onset[1]));
   SND_CHECK_EQ(onset[1], 10u);
   SND_CHECK_EQ(onset[0], 11u);
 }
