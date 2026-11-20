@@ -225,6 +225,6 @@ SND_TEST(CoreNotify2, ClipMarkersReachOnMarker) {
     SND_CHECK_EQ(r.markers[i].playback, p.value);
     SND_CHECK_EQ(r.markers[i].id, ids[i]);
     const std::int64_t d = static_cast<std::int64_t>(r.markers[i].clock) - static_cast<std::int64_t>(start + at[i]);
-    SND_CHECK_MSG(d <= 0 && d >= -17, "marker %zu at %+lld frames", i, static_cast<long long>(d));
+    SND_CHECK_MSG(d <= 0 && d >= -17, "marker %u at %+lld frames", static_cast<unsigned>(i), static_cast<long long>(d));
   }
 }
