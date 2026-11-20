@@ -126,8 +126,35 @@ UI に依存しない livelink の API はそのまま使える: `Client` の 1.
 
 ## 回した構成と結果
 
-（最後の節に記録する）
+すべて -j2、ビルドは $S/livelink/b-*（終わったら消した）。「既知の 3 件」= C-09 の 3 件
+（`integration_livelink_override_test`、`integration_indep_livelink_protocol_test`、`integration_indep_livelink_profile_record_test`。
+1.1 の決めた振る舞いとアサーションが食い違う。直していない）。それ以外の失敗は無し、警告 0。
+
+| 構成 | コミット | ctest | 結果 |
+| --- | --- | --- | --- |
+| 1+8 gcc Debug + `SND_BUILD_TOOL_CORE=ON` | 7cc7d14 | 全部（221） | 既知の 3 件だけ失敗（platform_device_play_test は Skipped） |
+| 2 clang Debug | 7cc7d14 | `livelink\|api\|tool`（54） | 既知の 3 件だけ失敗 |
+| 3 ASan/UBSan | 7cc7d14 | `livelink\|api_`（49） | 既知の 3 件だけ失敗。ファズ（livelink_v11_fuzz_test）は SND_FUZZ_ITERATIONS=60000 でも通過（91378fe） |
+| 4 TSan | 7cc7d14 | `livelink`（26） | 既知の 3 件だけ失敗。並行性（livelink_v11_stress / livelink_v11_live / integration_livelink_stress）を -j1 で `--repeat until-fail:20`: 全通過 |
+| 5 Release | RELEASE_COMMIT | RELEASE_RESULT |
+| 6 テストなし Release | NOTESTS |
+| 7 Opus なし | NOOPUS |
+| 9 ツール入り（Tela） | 7cc7d14 | `livelink\|tool`（50） | 既知の 3 件だけ失敗。既存の tool/test は全通過 |
+| MinGW 構文検査 | 7cc7d14 | — | livelink/src の全 .cpp と新しいテスト 5 本、変えたヘッダ、`livelink_protocol.hpp` を `-Werror -Wall -Wextra -Wpedantic -Wshadow …` で通過（MinGW は apt で入れた。テストの std::thread を含めて通った） |
+
+途中で見つけて直したもの: UBSan（テストの空ベクタの memcpy、91378fe）、Release の `-Wstringop-overflow` の誤検知（テストの補助、d51b8df）、
+Release で 7/20 落ちたホットリロードのテスト（ReloadStatus Done を新しい登録の公開前に送っていた → サーバを直した。テスト側の再接続の
+競合も直した、7cc7d14）、再生中の LOD のテストが機械の速さに依存（単体テストで固定、7cc7d14）。
+gcc Debug の全件を d51b8df で回したとき `api_indep_runtime_test`（IndepRuntime.EndsFromConcurrentProducersAreExactlyOnce）が 1 回失敗し、
+単独で 10 回回すと全通過。livelink を使わないテストで、7cc7d14 の全件では通過（負荷による揺れと見ている。未解明）。
 
 ## 未検証の箇所
 
-（最後の節に記録する）
+- 構造の変更が core に実際に反映されること（C-01 まで偽の編集器でしか確かめていない）。
+- ストリームを読む再生での StreamList（Active、ストールの数）。テストの資産は常駐なので Idle だけを見た。ストールの数は core の stall タップ経由で数えるが、本物のストールでは確かめていない。
+- TCP での 1.1（テストはメモリの転送路だけ。1.0 の TCP テストは通っている）。
+- 試聴の全停止で、試聴の上限（maxAuditions）を超えて追跡できなかった試聴（`RuntimeDrops::auditions`）が出る場合（予約で防ぐので起きない想定）。
+- ホットリロードで、依存元があって外せないバンク（BANK_IN_USE）と、言語バンク（languageId != 0）。
+- 途中からの記録でセルが記録用リングに入りきらない場合（lostState）、LiveData が入りきらない場合（大きなチャンク × 記録中）。
+- 1.1 の Client と 1.0 の本物のゲーム（テストは手で書いた 1.0 のゲーム側で確かめた）。
+- Windows / macOS での実行（MinGW は構文検査だけ）。
