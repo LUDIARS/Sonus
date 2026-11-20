@@ -64,7 +64,6 @@ SND_TEST(IndepApi, CreateRejectsBadConfig) {
       {"fade -1", [](snd_physics_config& x) { x.tracking_fade_seconds = -1.0f; }},
       {"max dt 0", [](snd_physics_config& x) { x.max_dt_seconds = 0.0f; }},
       {"max dt inf", [](snd_physics_config& x) { x.max_dt_seconds = kInf; }},
-      {"hold -1", [](snd_physics_config& x) { x.emitter_hold_seconds = -1.0f; }},
       {"materials 0", [](snd_physics_config& x) { x.max_materials = 0; }},
       {"materials limit + 1", [](snd_physics_config& x) { x.max_materials = SND_PHYSICS_MAX_MATERIALS_LIMIT + 1; }},
       {"cooldowns cap + 1", [](snd_physics_config& x) { x.max_cooldowns = SND_PHYSICS_MAX_CAPACITY + 1; }},
@@ -91,7 +90,6 @@ SND_TEST(IndepApi, CreateRejectsBadConfig) {
   ok.cooldown_seconds = 0.0f;
   ok.tracking_timeout_seconds = 0.0f;
   ok.tracking_fade_seconds = 0.0f;
-  ok.emitter_hold_seconds = 0.0f;
   SND_CHECK_EQ(snd_physics_create(s.sys, &ok, nullptr, &p), SND_OK);
   snd_physics_destroy(p);
 }

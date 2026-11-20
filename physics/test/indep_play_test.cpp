@@ -63,11 +63,16 @@ snd_contact ImpactAt(std::uint64_t obj, float x, float impulse = 100.0f, std::ui
 
 }  // namespace
 
-// P38 (core, outside physics): the minimal public-API reproduction of A-004.
-// sonus.h: "Playbacks on the emitter keep the last transform". An emitter created, moved,
-// played on and destroyed before the same snd_update must still place the sound 2 m to
-// the right (L ~ 0, R > 0), like play_at and like the same sequence without the destroy.
-SND_TEST(IndepPlay, Defect_CoreEmitterDestroyedInSameUpdateLosesPosition) {
+// P38 (core, outside physics): record of the core behaviour of request A-004, public API
+// only (spec/handoff/parallel/requests/A-004.md). sonus.h: "Playbacks on the emitter keep the
+// last transform". An emitter created, moved, played on and destroyed before one snd_update:
+//   (a) correct:      L ~ 0, R ~ 0.25 (2 m to the right, like play_at / no destroy)
+//   (b) known defect: L ~ R ~ 0.3536 (at the listener, no attenuation)
+// Anything else fails. While core shows (b), physics must hold one-shot emitters until the
+// plays are applied; once core shows (a), that hold can be simplified (destroy at once).
+// That physics' own hits sound at their position is checked by other tests
+// (ImpactIsPositioned, Defect_HoldInPhysicsTimeSubstepsLosePosition, ...).
+SND_TEST(IndepPlay, CoreA004_EmitterCreatedAndDestroyedInOneUpdate) {
   Lr res[4] = {};
   for (int variant = 0; variant < 4; ++variant) {
     Sys s;
@@ -88,20 +93,17 @@ SND_TEST(IndepPlay, Defect_CoreEmitterDestroyedInSameUpdateLosesPosition) {
       if (variant >= 1) SND_CHECK_EQ(snd_destroy_emitter(s.sys, e), SND_OK);
     }
     res[variant] = Measure(s, 6, 8);
-    snd::test::Note("variant %d (%s): L %.4f R %.4f", variant,
-                    variant == 0   ? "keep emitter"
-                    : variant == 1 ? "destroy in the same update"
-                    : variant == 2 ? "destroy one block later"
-                                   : "snd_play_at",
-                    res[variant].l, res[variant].r);
   }
   // The reference cases place the sound on the right.
-  SND_CHECK(res[0].r > 0.1 && res[0].l < 0.02);
-  SND_CHECK(res[2].r > 0.1 && res[2].l < 0.02);
-  SND_CHECK(res[3].r > 0.1 && res[3].l < 0.02);
-  // The defect: destroyed in the same update -> centred at the listener.
-  SND_CHECK_MSG(res[1].l < 0.02, "L %.4f (expected ~0, the sound should be on the right)", res[1].l);
-  SND_CHECK_NEAR(res[1].r, res[0].r, 0.02);
+  SND_CHECK(res[0].r > 0.2 && res[0].r < 0.3 && res[0].l < 0.02);
+  SND_CHECK(res[2].r > 0.2 && res[2].r < 0.3 && res[2].l < 0.02);
+  SND_CHECK(res[3].r > 0.2 && res[3].r < 0.3 && res[3].l < 0.02);
+  const bool correct = res[1].l < 0.02 && std::fabs(res[1].r - res[0].r) < 0.02;
+  const bool knownDefect = std::fabs(res[1].l - 0.3536) < 0.02 && std::fabs(res[1].r - 0.3536) < 0.02;
+  snd::test::Note("core A-004: %s (L %.4f R %.4f)",
+                  correct ? "(a) correct: the position is kept" : knownDefect ? "(b) known defect: at the listener" : "neither",
+                  res[1].l, res[1].r);
+  SND_CHECK(correct || knownDefect);
 }
 
 // P36: an Impact is heard at its position (right / left), through physics.
@@ -121,8 +123,8 @@ SND_TEST(IndepPlay, ImpactIsPositioned) {
   }
 }
 
-// Undecided 2 (weakness) -> defect of decision D ("Emitter を作って位置を与えて snd_play"):
-// the hold is measured in physics time, not in snd_update calls. A fixed-step game that
+// Defect 2 of the first round (fixed by the decision "release when the plays are seen
+// applied"; assertions unchanged): it was measured in physics time, not in snd_update calls. A fixed-step game that
 // catches up after a hitch runs several sub-steps before one snd_update (here 7 x 1/60 s);
 // the hold (0.1 s) passes inside the same command batch, the emitter is destroyed in the
 // batch that plays on it -> the A-004 situation: the hit 2 m to the right is centred.
@@ -137,45 +139,54 @@ SND_TEST(IndepPlay, Defect_HoldInPhysicsTimeSubstepsLosePosition) {
   SND_CHECK_MSG(m.l < 0.02, "L %.4f: the impact 2 m to the right is heard on the left", m.l);
 }
 
-// P37: no emitter -> snd_play_at (position only, counted); emitters come back after the hold.
-SND_TEST(IndepPlay, EmitterExhaustionFallsBackToPlayAt) {
+// P37 (decision: no position-less fallback): no emitter -> the group is dropped
+// (dropped_no_emitter, a DROP record with result LIMIT_REACHED and the group's first event),
+// its budget place is used, no cooldown is recorded, not counted as a request. The emitters
+// come back once the plays are applied, and the dropped keys can play again at once.
+SND_TEST(IndepPlay, EmitterExhaustionDropsTheGroup) {
   snd_config sc = phystest::SmallConfig();
   sc.max_emitters = 6;
   snd_physics_config c = Cfg(nullptr);
-  c.cooldown_seconds = 0.0f;
-  c.budget_per_second = 1.0e6f;
+  c.cooldown_seconds = 10.0f;
+  c.budget_per_second = 100.0f;  // 0.1 s -> 10 places
   Fx f(c, sc);
   SND_REQUIRE(f.Ok());
   std::vector<snd_contact> cs;
-  for (std::uint64_t i = 0; i < 10; ++i) cs.push_back(ImpactAt(i * 2, static_cast<float>(i)));
-  SND_CHECK_EQ(f.Submit(cs, 0.01f), SND_OK);
-  f.s.Advance(1);
-  std::uint32_t positionOnly = 0;
-  for (const Rec& r : f.rec.Of(SND_PHYSICS_RECORD_PLAY)) {
-    if (r.r.flags & SND_PHYSICS_RECORD_FLAG_POSITION_ONLY) {
-      ++positionOnly;
-      SND_CHECK_EQ(r.r.param_count, 0u);
-      SND_CHECK_EQ(r.r.playback.value, 0u);
-    }
+  for (std::uint64_t i = 0; i < 12; ++i) cs.push_back(ImpactAt(i * 2, static_cast<float>(i), 100.0f - static_cast<float>(i)));
+  SND_CHECK_EQ(f.Submit(cs, 0.1f), SND_OK);
+  SND_CHECK_EQ(f.rec.Count(SND_PHYSICS_RECORD_PLAY), 6u);
+  const std::vector<Rec> drops = f.rec.Of(SND_PHYSICS_RECORD_DROP);
+  SND_REQUIRE_EQ(drops.size(), 4u);
+  for (const Rec& r : drops) {
+    SND_CHECK_EQ(r.r.result, SND_ERR_LIMIT_REACHED);
+    SND_CHECK_EQ(r.r.event, kDc);
+    SND_CHECK_EQ(r.r.playback.value, 0u);
+    SND_CHECK(r.r.object_a >= 12u);  // the 7th..10th largest impulses (objects 12..18)
   }
-  SND_CHECK_EQ(f.rec.Count(SND_PHYSICS_RECORD_PLAY), 10u);
-  SND_CHECK_EQ(positionOnly, 4u);
-  SND_CHECK_EQ(phystest::Stats(f.phys).play_at_fallbacks, 4u);
-  // After the hold (0.1 s of physics time) the emitters are returned and used again.
-  for (int i = 0; i < 12; ++i) {
-    SND_CHECK_EQ(f.Submit({}, 0.01f), SND_OK);
+  snd_physics_stats st = phystest::Stats(f.phys);
+  SND_CHECK_EQ(st.dropped_no_emitter, 4u);
+  SND_CHECK_EQ(st.group_requests, 6u);
+  SND_CHECK_EQ(st.requested_impact, 6u);
+  SND_CHECK_EQ(st.dropped_budget, 2u);  // the places of the dropped groups were used
+  SND_CHECK_EQ(st.groups, st.dropped_no_event + st.dropped_cooldown + st.dropped_budget + st.dropped_no_emitter +
+                              st.group_requests);
+  // Once applied, the emitters come back; a dropped key is not in cooldown.
+  for (int i = 0; i < 4; ++i) {
     f.s.Advance(1);
+    SND_CHECK_EQ(f.Submit({}, 0.0f), SND_OK);
   }
-  SND_CHECK_EQ(f.Submit({ImpactAt(500, 1.0f)}, 0.01f), SND_OK);
-  SND_REQUIRE_EQ(f.rec.Count(SND_PHYSICS_RECORD_PLAY), 1u);
-  SND_CHECK_EQ(f.rec.Of(SND_PHYSICS_RECORD_PLAY)[0].r.flags & SND_PHYSICS_RECORD_FLAG_POSITION_ONLY, 0u);
-  // The game's own emitters are starved meanwhile: document how many the game can still get.
   f.s.Advance(1);
+  SND_CHECK_EQ(f.Submit({ImpactAt(12, 6.0f)}, 0.1f), SND_OK);
+  SND_CHECK_EQ(f.rec.Count(SND_PHYSICS_RECORD_PLAY), 1u);
+  SND_CHECK_EQ(f.rec.Count(SND_PHYSICS_RECORD_DROP), 0u);
+  SND_CHECK_EQ(f.Submit({ImpactAt(0, 0.0f)}, 0.1f), SND_OK);  // played before: in cooldown
+  SND_CHECK_EQ(f.rec.Count(SND_PHYSICS_RECORD_PLAY), 0u);
 }
 
-// Undecided 2: the hold ring. max_held_emitters 4, 6 impacts in one call: 4 held, 2 fall
-// back; the next call releases the oldest early.
-SND_TEST(IndepPlay, Undecided_HoldRingFull) {
+// The hold ring (decision): full of this call's emitters -> the new group is dropped; full
+// with emitters of an earlier call that are not applied yet -> the oldest is destroyed early
+// (held_emitters_released_early); applied ones are released normally (not early).
+SND_TEST(IndepPlay, HoldRingFull) {
   snd_physics_config c = Cfg(nullptr);
   c.cooldown_seconds = 0.0f;
   c.budget_per_second = 1.0e6f;
@@ -185,13 +196,18 @@ SND_TEST(IndepPlay, Undecided_HoldRingFull) {
   std::vector<snd_contact> cs;
   for (std::uint64_t i = 0; i < 6; ++i) cs.push_back(ImpactAt(i * 2, static_cast<float>(i)));
   SND_CHECK_EQ(f.Submit(cs, 0.01f), SND_OK);
-  f.s.Advance(1);
-  SND_CHECK_EQ(phystest::Stats(f.phys).play_at_fallbacks, 2u);
+  SND_CHECK_EQ(phystest::Stats(f.phys).dropped_no_emitter, 2u);
+  // No snd_update in between: the 4 held are not applied -> 2 released early.
   SND_CHECK_EQ(f.Submit({ImpactAt(100, 1.0f), ImpactAt(102, 3.0f)}, 0.01f), SND_OK);
-  f.s.Advance(1);
-  const snd_physics_stats st = phystest::Stats(f.phys);
+  snd_physics_stats st = phystest::Stats(f.phys);
   SND_CHECK_EQ(st.held_emitters_released_early, 2u);
-  SND_CHECK_EQ(st.play_at_fallbacks, 2u);
+  SND_CHECK_EQ(st.dropped_no_emitter, 2u);
+  // Applied now: the next call releases them normally.
+  f.s.Advance(4);
+  SND_CHECK_EQ(f.Submit({ImpactAt(104, 1.0f), ImpactAt(106, 3.0f), ImpactAt(108, 5.0f), ImpactAt(110, 7.0f)}, 0.01f), SND_OK);
+  st = phystest::Stats(f.phys);
+  SND_CHECK_EQ(st.held_emitters_released_early, 2u);
+  SND_CHECK_EQ(st.dropped_no_emitter, 2u);
 }
 
 // P37 / P35: destroy releases held emitters at once (all slots usable afterwards).

@@ -97,9 +97,9 @@ SND_TEST(IndepReview, Defect_FootstepHugeWeightsOverflow) {
   }
 }
 
-// Undecided (decision D says only "足の材質は Parameter"): the foot material parameter is the
-// foot's SOUND material and is omitted when the foot's material is unknown.
-SND_TEST(IndepReview, Undecided_FootMaterialParameterIsTheSoundMaterialOrNothing) {
+// Approved (decision 6 of the review): the foot material parameter is the foot's SOUND
+// material and is omitted when the foot's material is unknown.
+SND_TEST(IndepReview, FootMaterialParameterIsTheSoundMaterialOrNothing) {
   Fx f;
   SND_REQUIRE(f.Ok());
   snd_physics_material_entry e[3] = {};
@@ -137,30 +137,54 @@ SND_TEST(IndepReview, StaleFootEmitterPlaysIn2D) {
   SND_CHECK_EQ(r, SND_OK);
 }
 
-// Undecided (physics.h: "On another thread only the memory is freed"): destroying from
-// another thread leaves a tracked looping playback running forever (and its emitter
-// taken). Pinned here so the acceptance side sees the consequence.
-SND_TEST(IndepReview, Undecided_DestroyOnAnotherThreadOrphansTrackedLoops) {
-  Fx f;
-  SND_REQUIRE(f.Ok());
-  SND_CHECK_EQ(f.Submit({Slide(1)}), SND_OK);
-  SND_REQUIRE_EQ(f.rec.Count(SND_PHYSICS_RECORD_START), 1u);
-  const snd_playback_handle h = f.rec.Of(SND_PHYSICS_RECORD_START)[0].r.playback;
-  snd_phys* p = f.phys;
-  f.phys = nullptr;
-  std::thread t([p] { snd_physics_destroy(p); });
-  t.join();
-  f.s.Advance(100);  // 0.5 s of audio, far past any timeout / fade
-  const snd_playback_state st = snd_get_playback_state(f.s.sys, h);
-  snd::test::Note("tracked loop after a cross-thread destroy: state %u", st);
-  SND_CHECK_EQ(st, SND_PLAYBACK_STATE_PLAYING);  // orphaned: nobody will ever stop it
-  snd_stop(f.s.sys, h, 0.0f, nullptr);
+// Decision 3 of the review: snd_physics_destroy on another thread does nothing (no stop, no
+// free); the object stays usable and is destroyed later on its own thread.
+SND_TEST(IndepReview, DestroyOnAnotherThreadDoesNothing) {
+  Sys s;
+  snd_bank_handle bank{};
+  SND_REQUIRE(s.LoadBank("phys.sndb", TestBank(), &bank));
+  phystest::CountingAllocator a;
+  const snd_allocator at = a.Table();
+  Recorder rec;
+  snd_physics_config c = Cfg(&rec);
+  snd_phys* p = nullptr;
+  SND_REQUIRE_EQ(snd_physics_create(s.sys, &c, &at, &p), SND_OK);
+  std::vector<snd_id> single(4, SND_ID_NONE);
+  single[SND_CONTACT_SLIDE] = kLoop;
+  snd_physics_table_desc d;
+  snd_physics_table_desc_init(&d);
+  d.material_count = 1;
+  d.single = single.data();
+  SND_REQUIRE_EQ(snd_physics_set_table(p, &d), SND_OK);
+  const snd_contact x = Slide(1);
+  SND_CHECK_EQ(snd_phys_submit_contacts(p, &x, 1, 0.05f), SND_OK);
+  SND_REQUIRE_EQ(rec.Count(SND_PHYSICS_RECORD_START), 1u);
+  const snd_playback_handle h = rec.Of(SND_PHYSICS_RECORD_START)[0].r.playback;
+  std::thread t1([p] { snd_physics_destroy(p); });
+  t1.join();
+  std::thread t2([p] { snd_phys_destroy(p); });
+  t2.join();
+  SND_CHECK_EQ(a.frees, 0u);
+  SND_CHECK_EQ(rec.Count(SND_PHYSICS_RECORD_STOP), 0u);
+  s.Advance(20);
+  SND_CHECK_EQ(snd_get_playback_state(s.sys, h), SND_PLAYBACK_STATE_PLAYING);
+  // Still usable on its thread.
+  SND_CHECK_EQ(snd_phys_submit_contacts(p, &x, 1, 0.05f), SND_OK);
+  SND_CHECK_EQ(snd_physics_material_count(p), 1u);
+  rec.Clear();
+  snd_physics_destroy(p);
+  SND_CHECK_EQ(rec.Count(SND_PHYSICS_RECORD_STOP), 1u);
+  SND_CHECK_EQ(a.frees, a.allocs);
+  s.Advance(60);
+  const snd_playback_state st = snd_get_playback_state(s.sys, h);
+  SND_CHECK(st == SND_PLAYBACK_STATE_ENDED || st == SND_PLAYBACK_STATE_NONE);
 }
 
-// Undecided 2 (weakness): one-shot emitters are held in physics time. While the game does
-// not advance physics time (paused: dt = 0, or no submit at all) the held emitters are
-// never returned, and the game's own snd_create_emitter fails.
-SND_TEST(IndepReview, Undecided_HeldEmittersStarveTheGameWhilePhysicsTimeStands) {
+// Decision (release when applied): while the game is paused (dt 0, count 0 every frame) and
+// the audio side runs, the held one-shot emitters come back; the game is not starved.
+// (The old implementation held them for 0.1 s of physics time, so with dt 0 they were never
+// returned: with max_emitters 8 and 8 hits, the game's snd_create_emitter got 0.)
+SND_TEST(IndepReview, HeldEmittersReturnWhilePaused) {
   snd_config sc = phystest::SmallConfig();
   sc.max_emitters = 8;
   snd_physics_config c = Cfg(nullptr);
@@ -173,16 +197,15 @@ SND_TEST(IndepReview, Undecided_HeldEmittersStarveTheGameWhilePhysicsTimeStands)
     cs.push_back(Contact(SND_CONTACT_IMPACT, i * 2, i * 2 + 1, 0, 0, static_cast<float>(i), 0, 0, 5.0f));
   }
   SND_CHECK_EQ(f.Submit(cs, 0.01f), SND_OK);
-  for (int i = 0; i < 50; ++i) SND_CHECK_EQ(f.Submit({}, 0.0f), SND_OK);  // paused for 50 frames
-  const snd_emitter_handle mine = snd_create_emitter(f.s.sys);
-  snd::test::Note("game emitter while physics holds 8 for a paused game: %llu",
-                  static_cast<unsigned long long>(mine.value));
-  SND_CHECK_EQ(mine.value, 0u);  // the starvation (pinned)
-  SND_CHECK_EQ(f.Submit({}, 0.1f), SND_OK);  // time moves: all released
-  f.s.Advance(4);                             // (core frees the slots once it applied the destroys)
-  const snd_emitter_handle again = snd_create_emitter(f.s.sys);
-  SND_CHECK(again.value != 0u);
-  snd_destroy_emitter(f.s.sys, again);
+  SND_CHECK_EQ(f.rec.Count(SND_PHYSICS_RECORD_PLAY), 8u);
+  for (int i = 0; i < 10; ++i) SND_CHECK_EQ(f.Submit({}, 0.0f), SND_OK);  // paused, audio runs
+  std::vector<snd_emitter_handle> mine;
+  for (int i = 0; i < 8; ++i) mine.push_back(snd_create_emitter(f.s.sys));
+  std::uint32_t ok = 0;
+  for (const snd_emitter_handle e : mine) ok += e.value != 0u ? 1u : 0u;
+  SND_CHECK_EQ(ok, 8u);
+  for (const snd_emitter_handle e : mine) snd_destroy_emitter(f.s.sys, e);
+  SND_CHECK_EQ(phystest::Stats(f.phys).held_emitters_released_early, 0u);
 }
 
 // Same call: Impact groups first, then slide reports, then timeouts. A slide report and an
@@ -202,30 +225,29 @@ SND_TEST(IndepReview, ImpactAndSlideOfTheSameObjectsInOneCall) {
   SND_CHECK(play < start);
 }
 
-// Work area shared by Impact groups and slide reports: a burst of impacts can push the
-// reports of running slides out of the call (array order). Pinned: the slide is not
-// reported in that call and its stop follows only after the timeout.
-SND_TEST(IndepReview, Undecided_ImpactBurstCrowdsOutSlideReports) {
+// Decision 4 of the review: reports to tracked keys do not use the Impact / Break work area;
+// a burst of impacts that overflows it does not push a running slide out.
+SND_TEST(IndepReview, ImpactBurstDoesNotCrowdOutSlideReports) {
   snd_physics_config c = Cfg(nullptr);
   c.max_groups_per_call = 4;
   Fx f(c);
   SND_REQUIRE(f.Ok());
   SND_CHECK_EQ(f.Submit({Slide(1)}), SND_OK);
   std::vector<snd_contact> cs;
-  for (std::uint64_t i = 0; i < 4; ++i) {
+  for (std::uint64_t i = 0; i < 6; ++i) {
     cs.push_back(Contact(SND_CONTACT_IMPACT, 50 + i, 60 + i, 0, 0, static_cast<float>(i), 0, 0, 5.0f));
   }
   cs.push_back(Slide(1));
   SND_CHECK_EQ(f.Submit(cs), SND_OK);
   const snd_physics_stats st = phystest::Stats(f.phys);
-  SND_CHECK_EQ(st.dropped_work_overflow, 1u);
-  SND_CHECK_EQ(st.tracking_updated, 0u);
+  SND_CHECK_EQ(st.dropped_work_overflow, 2u);  // the 5th and 6th impact groups
+  SND_CHECK_EQ(st.groups, 4u);
+  SND_CHECK_EQ(st.tracking_updated, 1u);
 }
 
-// The Count parameter and the merged statistics with mixed game materials that map to
-// the same sound materials: grouping is by SOUND material (undecided): the
-// representative's game materials (and their surface parameters) are used.
-SND_TEST(IndepReview, Undecided_GroupingBySoundMaterial) {
+// Approved (decision 6 of the review): grouping is by SOUND material; the representative's
+// game materials (and their surface parameters) are used.
+SND_TEST(IndepReview, GroupingBySoundMaterial) {
   Fx f;
   SND_REQUIRE(f.Ok());
   snd_physics_material_entry e[2] = {};
@@ -263,11 +285,14 @@ SND_TEST(IndepReview, FourTimesTheVoicesEveryFrame) {
     SND_CHECK_EQ(f.Submit(cs, 1.0f / 60.0f), SND_OK);
   }
   const snd_physics_stats st = phystest::Stats(f.phys);
-  SND_CHECK_EQ(st.group_requests, 60u * 128u);
-  SND_CHECK_EQ(st.requested_impact, 60u * 128u);
+  SND_CHECK_EQ(st.group_requests + st.dropped_no_emitter, 60u * 128u);
+  SND_CHECK_EQ(st.requested_impact, st.group_requests);
   SND_CHECK_EQ(st.contacts_received, st.groups);
-  snd::test::Note("4x: play_at_fallbacks %llu, held released early %llu, api_failures %llu",
-                  static_cast<unsigned long long>(st.play_at_fallbacks),
+  SND_CHECK_EQ(st.groups, st.dropped_no_event + st.dropped_cooldown + st.dropped_budget + st.dropped_no_emitter +
+                              st.group_requests);
+  snd::test::Note("4x: dropped_no_emitter %llu, group_requests %llu, held released early %llu, api_failures %llu",
+                  static_cast<unsigned long long>(st.dropped_no_emitter),
+                  static_cast<unsigned long long>(st.group_requests),
                   static_cast<unsigned long long>(st.held_emitters_released_early),
                   static_cast<unsigned long long>(st.api_failures));
   snd_physics_destroy(f.phys);
