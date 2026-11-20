@@ -58,3 +58,8 @@ set_tests_properties(core_g4_system_test PROPERTIES TIMEOUT 300)
 # Load: 4x the limit over steal modes; 128 voices with loudness and spectrum (< 30 % in Release).
 snd_add_test(core_g4_load_test SOURCES core_g4_load_test.cpp LINK ${_core_test_link})
 set_tests_properties(core_g4_load_test PROPERTIES TIMEOUT 600)
+
+# Stage 3 group 4, independent tester (own fixture indep_g4_fixture.hpp). Defect_* tests fail
+# on purpose until the implementation is fixed.
+snd_add_test(indep_g4_seq_test SOURCES indep_g4_seq_test.cpp LINK ${_core_test_link})
+set_tests_properties(indep_g4_seq_test PROPERTIES TIMEOUT 600)
