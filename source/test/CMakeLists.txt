@@ -92,3 +92,8 @@ snd_add_test(indep_osc_test SOURCES indep_osc_test.cpp LINK sonus_source sonus_b
 set_tests_properties(indep_osc_test PROPERTIES TIMEOUT 900)
 snd_add_test(indep_noise_test SOURCES indep_noise_test.cpp LINK sonus_source sonus_base sonus_mocks)
 set_tests_properties(indep_noise_test PROPERTIES TIMEOUT 900)
+snd_add_test(indep_input_test SOURCES indep_input_test.cpp LINK sonus_source sonus_base sonus_mocks)
+set_tests_properties(indep_input_test PROPERTIES TIMEOUT 900)
+snd_add_test(indep_src1_core_test SOURCES indep_src1_core_test.cpp LINK ${_source_test_link})
+target_include_directories(indep_src1_core_test PRIVATE ${PROJECT_SOURCE_DIR}/buildtool/test)
+set_tests_properties(indep_src1_core_test PROPERTIES TIMEOUT 1200)
