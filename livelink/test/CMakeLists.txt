@@ -11,7 +11,7 @@ set_tests_properties(livelink_indep_unit_test PROPERTIES TIMEOUT 600)
 # tests/integration, included unchanged), recording / replay, fuzz of the new messages.
 snd_add_test(livelink_v11_unit_test SOURCES livelink_v11_unit_test.cpp LINK ${_ll_test_link})
 set(_ll_v11_link ${_ll_test_link} sonus_buildtool)
-foreach(_t livelink_v11_live_test livelink_v11_record_test livelink_v11_fuzz_test)
+foreach(_t livelink_v11_live_test livelink_v11_record_test livelink_v11_fuzz_test livelink_v11_stress_test)
   snd_add_test(${_t} SOURCES ${_t}.cpp LINK ${_ll_v11_link})
   target_include_directories(${_t} PRIVATE ${PROJECT_SOURCE_DIR}/core/test ${PROJECT_SOURCE_DIR}/tests/integration)
   set_tests_properties(${_t} PROPERTIES TIMEOUT 600)
