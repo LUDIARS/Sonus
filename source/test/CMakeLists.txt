@@ -75,3 +75,11 @@ set_tests_properties(source_input_test PROPERTIES TIMEOUT 600)
 # Voice limit: RT scope, no allocation after Init, time per block (printed).
 snd_add_test(source_synth_load_test SOURCES source_synth_load_test.cpp LINK sonus_source sonus_base sonus_mocks)
 set_tests_properties(source_synth_load_test PROPERTIES TIMEOUT 900)
+# Through core: SYNP banks built by buildtool, the oscillator following a Parameter,
+# noise colours, a wavetable, an input playback fed through the Runtime's port.
+snd_add_test(source_synth_e2e_test SOURCES source_synth_e2e_test.cpp LINK ${_source_test_link})
+target_include_directories(source_synth_e2e_test PRIVATE ${PROJECT_SOURCE_DIR}/buildtool/test)
+set_tests_properties(source_synth_e2e_test PROPERTIES TIMEOUT 900)
+# snd_write_input through the C API (MANUAL output device; the driver's audio thread reads).
+snd_add_test(source_input_api_test SOURCES source_input_api_test.cpp LINK sonus sonus_source sonus_base sonus_mocks)
+set_tests_properties(source_input_api_test PROPERTIES TIMEOUT 600)
