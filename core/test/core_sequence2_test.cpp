@@ -666,7 +666,11 @@ SND_TEST(CoreSequence2, ActionSetParamWritesThePlaybackScope) {
   h.Steps(8);
   SND_CHECK_NEAR(h.At(100, 0), 0.05f * kCenter, 1e-4f);  // the start block
   SND_CHECK_NEAR(h.At(700, 0), 0.05f * kCenter, 1e-4f);
-  SND_CHECK_NEAR(h.At(1100, 0), 0.5f * kCenter, 1e-4f);  // the block of frame 1000
+  // D-145: a parameter action applies from the first block starting at or after its time
+  // (frame 1000 -> the block of 1024, ramping over it like snd_set_param): not before.
+  SND_CHECK_NEAR(h.At(1000, 0), 0.05f * kCenter, 1e-4f);
+  SND_CHECK_NEAR(h.At(1023, 0), 0.05f * kCenter, 1e-4f);
+  SND_CHECK_NEAR(h.At(1300, 0), 0.5f * kCenter, 1e-4f);
   h.Clear();
   h.sys->Play(HashId("O"), snd_emitter_handle{0}, nullptr);  // Q stays at its default for O
   h.Steps(3);

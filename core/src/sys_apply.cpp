@@ -347,6 +347,13 @@ void CreatePlayback(Impl& im, HandleRef h, HandleRef emitter, Id event, EventRef
     }
   }
   SND_W(Playback_request)[d] = req;
+  // D-145: the start clock known ahead (CLOCK_SAMPLE; DELAY_US resolved as UpdateTransport does).
+  im.ap.playbackStartClock[h.slot] = 0u;
+  if (req.startReservation != kNoSlot && w.kind == SND_WHEN_CLOCK_SAMPLE) im.ap.playbackStartClock[h.slot] = w.value;
+  if (req.startReservation != kNoSlot && w.kind == SND_WHEN_DELAY_US) {
+    im.ap.playbackStartClock[h.slot] =
+        im.clock + static_cast<ClockSample>(static_cast<double>(w.value) * im.cfg.sampleRate / 1e6 + 0.5);
+  }
   ResetChain(im, im.ap.playbackChain[h.slot], true);
   im.ap.playbackVolume[h.slot] = 1.0f;  // D-104: a new playback starts at its own 1 / 1
   im.ap.playbackPitch[h.slot] = 1.0f;
@@ -354,20 +361,35 @@ void CreatePlayback(Impl& im, HandleRef h, HandleRef emitter, Id event, EventRef
   im.ap.playbackFadeIn[h.slot] = static_cast<float>((flags & cmd::kPlayFadeInMsMask) >> cmd::kPlayFadeInMsShift) * 0.001f;
 }
 
-// D-145: the actions inside the first block of an immediate play of a bank event apply
-// in this block (its start block): Play actions create their child playbacks now (at the
-// action's sample, CLOCK_SAMPLE), parameter actions write the playback's own scope and
-// snapshot actions take their weight. RunEventLogic starts such a playback before the
-// fired reservations; if it does not start, it cancels the children (actionChildren), and
-// it applies the StopEvent actions of the block itself. Not for one-shots' children (only
-// a recorded play), so a chain of actions cannot recurse within one block.
+// D-145: one LIMIT_REACHED warning per block when action children do not fit.
+void ActionChildLimit(Impl& im, HandleRef parent) noexcept {
+  if (im.ap.actionChildWarned != 0u) return;
+  im.ap.actionChildWarned = 1u;
+  PostWarning(im, SND_ERR_LIMIT_REACHED, 0u, parent.Value());
+}
+
+// D-145: a play of a bank event that starts inside this block (immediate, or a CLOCK_SAMPLE /
+// DELAY_US start in this block) gets the actions of its start block here, in its start
+// block: Play actions create their child playbacks now (CLOCK_SAMPLE at start + time), and
+// the parameter / snapshot actions at its very first frame apply now (the parameter in the
+// play's own scope; the snapshot as a tentative weight that RunEventLogic cancels if the
+// play does not start, committed by the next ApplyCommands). RunEventLogic does the rest of
+// the block (StopEvent, later parameters and snapshots) once the play started, and cancels
+// the children (actionChildren) if it did not. Only for recorded plays (not for the children
+// of actions: a chain of actions cannot recurse within one block).
 void ApplyFirstBlockActions(Impl& im, HandleRef h, const EventRef& ref) noexcept {
   schema::Tables& t = im.tables;
   const BankRecord* br = RegisteredBank(im, ref.bankSlot);
   const std::uint32_t d = base::rows::DenseOf(t.Playback.rows, h);
   if (br == nullptr || d == kNoSlot || (ref.flags & (kEventRefDynamic | kEventRefMusic)) != 0u) return;
   PlaybackRequest& req = SND_W(Playback_request)[d];
-  if (req.startReservation != kNoSlot || (req.flags & kRequestRejectReservationFull) != 0u) return;
+  if ((req.flags & kRequestRejectReservationFull) != 0u) return;
+  const ClockSample blockEnd = im.clock + im.cfg.blockFrames;
+  ClockSample start = im.clock;
+  if (req.startReservation != kNoSlot) {
+    start = im.ap.playbackStartClock[h.slot];
+    if (start < im.clock || start >= blockEnd) return;  // not in this block (or not known)
+  }
   const bk::BankView& v = *br->view;
   if (ref.eventIndex >= v.Rows(bf::chunk::EVNT)) return;
   const std::uint32_t tf = v.Column<bk::col::EVNT_trackFirst>()[ref.eventIndex];
@@ -385,19 +407,26 @@ void ApplyFirstBlockActions(Impl& im, HandleRef h, const EventRef& ref) noexcept
     if (af == bf::kNone) continue;
     for (std::uint32_t a = af; a < af + ac; ++a) {
       const std::uint64_t at = ActionFrame(im, v.Column<bk::col::ACTN_timeMs>()[a]);
-      if (at >= im.cfg.blockFrames) continue;
+      const ClockSample clock = start + at;
+      if (clock >= blockEnd) continue;
       const Id target = v.Column<bk::col::ACTN_target>()[a];
       const float value = v.Column<bk::col::ACTN_value>()[a];
       switch (static_cast<bf::ActionKind>(v.Column<bk::col::ACTN_action>()[a])) {
         case bf::ActionKind::PlayEvent: {
-          if (im.ap.actionChildCount >= im.ap.actionChildCap) break;
+          if (im.ap.actionChildCount >= im.ap.actionChildCap) {
+            ActionChildLimit(im, h);
+            break;
+          }
           const HandleRef ch = im.playbackSlots.Acquire();
-          if (ch.generation == 0u) break;
+          if (ch.generation == 0u) {
+            ActionChildLimit(im, h);
+            break;
+          }
           im.oneShot[ch.slot].store(1u, std::memory_order_relaxed);
           snd_when w{};
-          if (at != 0u) {
+          if (clock > im.clock) {
             w.kind = static_cast<std::uint8_t>(SND_WHEN_CLOCK_SAMPLE);
-            w.value = im.clock + at;
+            w.value = clock;
           }
           const HandleRef em = es != kNoSlot ? HandleRef{es, t.Emitter.rows.generation[es]} : HandleRef{};
           CreatePlayback(im, ch, em, target, ResolveEvent(im, target), w, nullptr, cmd::kPlayOneShot,
@@ -406,19 +435,38 @@ void ApplyFirstBlockActions(Impl& im, HandleRef h, const EventRef& ref) noexcept
           break;
         }
         case bf::ActionKind::SetParam:
-          SetParamValue(im, ParamScope::Playback, h, target, ParamKind::Continuous, value);
+          if (clock == im.clock) SetParamValue(im, ParamScope::Playback, h, target, ParamKind::Continuous, value);
           break;
         case bf::ActionKind::ApplySnapshot: {
+          if (clock != im.clock) break;
           const std::uint32_t slot = im.snapMap.Find(target);
-          const std::uint32_t sd = slot == IdMap::kNotFound ? kNoSlot : base::rows::DenseOf(t.Snapshot.rows, slot);
-          if (sd != kNoSlot) SND_W(Snapshot_request)[sd].weight = TimedRamp{SaneWeight(value), SaneWeight(value), im.clock, 0u, 0u};
+          if (slot == IdMap::kNotFound) break;
+          if (im.ap.tentativeCount >= im.ap.actionChildCap) {
+            ActionChildLimit(im, h);
+            break;
+          }
+          im.ap.tentative[im.ap.tentativeCount++] = ApplyPriv::TentativeSnapshot{slot, SaneWeight(value), h, 0u, 0u};
           break;
         }
         case bf::ActionKind::StopEvent:
-          break;  // RunEventLogic (FirstBlockStops), once the playback started
+          break;  // RunEventLogic, once the play started (ActionsAtStart)
       }
     }
   }
+}
+
+// D-145: the tentative snapshot weights of the last block whose play started become the
+// snapshots' requests (before this block's commands, which may change them again).
+void CommitTentativeSnapshots(Impl& im) noexcept {
+  schema::Tables& t = im.tables;
+  for (std::uint32_t i = 0; i < im.ap.tentativeCount; ++i) {
+    const ApplyPriv::TentativeSnapshot& ts = im.ap.tentative[i];
+    const std::uint32_t sd = base::rows::DenseOf(t.Snapshot.rows, ts.snapshot);
+    if (ts.cancelled == 0u && sd != kNoSlot) {
+      SND_W(Snapshot_request)[sd].weight = TimedRamp{ts.weight, ts.weight, im.clock, 0u, 0u};
+    }
+  }
+  im.ap.tentativeCount = 0;
 }
 
 PlaybackRequest* RequestOf(Impl& im, HandleRef h) noexcept {
@@ -1068,6 +1116,8 @@ void ApplyCommands(Impl& im) noexcept {
   im.releasedEmitterCount = 0;
   im.releasedUserBufferCount = 0;
   im.ap.actionChildCount = 0;  // D-145: per block
+  im.ap.actionChildWarned = 0u;
+  CommitTentativeSnapshots(im);
   // Music inputs are reset after RunMusicLogic consumed them (sys_event.cpp RunMusic).
   ReleaseOwnedRows(im);
   ApplyDeferred(im);

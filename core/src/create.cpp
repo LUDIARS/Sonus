@@ -470,9 +470,16 @@ snd_result CreateImpl(Impl& im) noexcept {
   dsp::LoudnessMeterInit(*rd.loudness, g.outChannels, g.sampleRate);
   // Stage 3 (group 4): D-143 layer weights, D-145 action children, D-146 fade-ins, analysis.
   im.dp.layerGain = Arr<float>(im, g.maxVirtual, MemTag::Tables);
+  rd.voicePlayed = Arr<std::uint64_t>(im, g.maxVirtual, MemTag::Tables);
+  rd.voiceLookahead = Arr<double>(im, g.maxVirtual, MemTag::Tables);
+  if (rd.voicePlayed == nullptr || rd.voiceLookahead == nullptr) return SND_ERR_OUT_OF_BUDGET;
   im.ap.playbackFadeIn = Arr<float>(im, g.maxPlaybacks, MemTag::Tables);
   im.ap.actionChildCap = im.desc.limits.maxActionChildren;
   im.ap.actionChildren = Arr<ApplyPriv::ActionChild>(im, im.ap.actionChildCap, MemTag::Tables);
+  im.ap.tentative = Arr<ApplyPriv::TentativeSnapshot>(im, im.ap.actionChildCap, MemTag::Tables);
+  im.ap.playbackStartClock = Arr<ClockSample>(im, g.maxPlaybacks, MemTag::Tables);
+  im.ev.pending = Arr<ActionPending>(im, im.ev.deferredCap, MemTag::Tables);
+  if (im.ap.tentative == nullptr || im.ap.playbackStartClock == nullptr || im.ev.pending == nullptr) return SND_ERR_OUT_OF_BUDGET;
   if (im.dp.layerGain == nullptr || im.ap.playbackFadeIn == nullptr || im.ap.actionChildren == nullptr ||
       !InitAnalysis(im)) {
     return SND_ERR_OUT_OF_BUDGET;

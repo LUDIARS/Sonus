@@ -234,14 +234,7 @@ void EvaluateDspParams(Impl& im) noexcept {
       }
     }
     const bool fresh = vlc[d].state == static_cast<std::uint8_t>(VoiceStateId::Starting);
-    // D-146: a new voice of a playback that fades in starts at the fade's value at the block
-    // start (not at its end), so the fade-in is a ramp from 0 from the first sample.
-    float gStart = gEnd;
-    if (fresh && ownPb && pd != kNoSlot && im.ap.playbackFadeIn[pb] > 0.0f && fadeEnd > 0.0f) {
-      const float fadeStart = fadeEnd - SND_R(Playback_logic)[pd].fadeStep;
-      gStart = gEnd * ((fadeStart > 0.0f ? fadeStart : 0.0f) / fadeEnd);
-    }
-    vgain[d] = Ramp{fresh ? gStart : vgain[d].end, gEnd};
+    vgain[d] = Ramp{fresh ? gEnd : vgain[d].end, gEnd};
     vpitch[d] = Ramp{fresh ? pEnd : vpitch[d].end, pEnd};
     vfilt[d] = FilterTarget{lowpass, highpass};
     im.dp.pan[v] = pan < -1.0f ? -1.0f : (pan > 1.0f ? 1.0f : pan);
@@ -284,7 +277,11 @@ void EvaluateDspParams(Impl& im) noexcept {
   float* sw = SND_W(Snapshot_weight);
   for (std::uint32_t d = 0; d < sr.count; ++d) {
     const SlotIndex s = base::rows::SlotAt(sr, d);
-    const float w = RampValue(SND_R(Snapshot_request)[d].weight, endClock);
+    float w = RampValue(SND_R(Snapshot_request)[d].weight, endClock);
+    // D-145: a snapshot action at the first frame of a play that started in this block.
+    for (std::uint32_t i = 0; i < im.ap.tentativeCount; ++i) {
+      if (im.ap.tentative[i].snapshot == s && im.ap.tentative[i].cancelled == 0u) w = im.ap.tentative[i].weight;
+    }
     sw[d] = w;
     if (w == 0.0f) continue;
     const SnapDef& def = im.snapDefs[s];

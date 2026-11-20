@@ -203,12 +203,10 @@ SND_TEST(CoreVoice2, VirtualReturnContinueKeepsTheTimeline) {
   ReturnRun r(0u);
   SND_CHECK(r.h.ends.Has(r.hi, SND_END_COMPLETED));
   SND_CHECK_EQ(r.h.ends.CountOf(r.v), 0u);
-  // On the timeline it would have had without the interruption. A source-rate voice comes
-  // back ahead by the resampler's look-ahead (the virtual position continues from the
-  // frames the resampler had read: 16 for Sinc at ratio 1) - a known limit, reported.
+  // On the timeline it would have had without the interruption, to the frame.
   for (std::size_t f = r.h.TotalFrames() - 8; f < r.h.TotalFrames(); ++f) {
     const long d = FrameAt(r.h, f) - static_cast<long>(f - r.vStart);
-    SND_CHECK_MSG(d >= 0 && d <= 17, "frame offset %ld", d);
+    SND_CHECK_MSG(d == 0, "frame offset %ld", d);  // (the resampler's look-ahead is taken back)
   }
 }
 
@@ -246,7 +244,7 @@ SND_TEST(CoreVoice2, VirtualReturnTheAssetFlagWins) {
   SND_CHECK_EQ(r.h.ends.CountOf(r.v), 0u);
   const std::size_t last = r.h.TotalFrames() - 1;
   const long d = FrameAt(r.h, last) - static_cast<long>(last - r.vStart);
-  SND_CHECK_MSG(d >= 0 && d <= 17, "frame offset %ld", d);  // continued (look-ahead: see above)
+  SND_CHECK_MSG(d == 0, "frame offset %ld", d);  // continued
 }
 
 // "Never": a voice that never gets a real slot ends at once (it went virtual at its start).

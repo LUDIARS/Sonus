@@ -328,6 +328,23 @@ struct ApplyPriv {
   };
   ActionChild* actionChildren = nullptr;  // [actionChildCap]
   std::uint32_t actionChildCount = 0, actionChildCap = 0;
+  std::uint32_t actionChildWarned = 0;    // a LIMIT_REACHED warning was posted this block
+  // D-145: snapshot actions at a play's very first frame (its start block): a weight that is
+  // in force only if the play starts. RunEventLogic cancels the entries of a play that did
+  // not start; EvaluateDspParams uses the others in this block; the next ApplyCommands
+  // writes them into Snapshot.request.
+  struct TentativeSnapshot {
+    SlotIndex snapshot;
+    float weight;
+    HandleRef parent;
+    std::uint32_t cancelled;
+    std::uint32_t reserved;
+  };
+  TentativeSnapshot* tentative = nullptr;  // [actionChildCap]
+  std::uint32_t tentativeCount = 0;
+  // D-145: the start clock a scheduled play (CLOCK_SAMPLE / DELAY_US) is expected to have,
+  // 0 = not known ahead (immediate, musical). RunEventLogic looks its actions ahead with it.
+  ClockSample* playbackStartClock = nullptr;  // [maxPlaybacks]
 };
 
 // ---------------------------------------------------------------------------
@@ -367,8 +384,13 @@ struct PlaybackPriv {
   ClockSample stopClock;   // scheduled stop from a fired reservation
   float stopFadeSeconds;
   std::uint32_t voiceListHead;  // first voice slot of the playback (linked through VoiceStatic.nextInPlayback)
-  // Stage 3 (group 4), D-145: playback frames up to which the actions were fired.
+  // Stage 3 (group 4), D-145: the track time (frames the playback played, not counting
+  // pauses or the stop), the track time up to which its actions were taken, the start clock
+  // its actions were looked ahead with (scheduled plays), a StopEvent action's clock.
   std::uint64_t actionHorizon;
+  std::uint64_t trackTime;
+  ClockSample actionStart;
+  ClockSample actionStopClock;
 };
 
 enum VoiceStaticFlags : std::uint32_t {
@@ -388,6 +410,7 @@ enum VoiceStaticFlags : std::uint32_t {
   // Stage 3 (group 4).
   kVsRestartReturn = 1u << 13,  // D-140: promoted with "restart": Render starts it at startFrame (SelectVoices sets, Render clears)
   kVsKillVirtual = 1u << 14,    // D-140: went virtual with "never": RunEventLogic ends it (SelectVoices sets)
+  kVsFadeInHold = 1u << 15,     // D-146: the play's fade-in does not advance (pausing / stopping; RunEventLogic)
 };
 // Static per-voice values set by RunEventLogic at creation; read by
 // EvaluateDspParams, SelectVoices, BuildRenderList and Render (proposed schema
@@ -431,6 +454,8 @@ struct VoiceStatic {
   float reserved4;
   const std::uint64_t* markerFrames;  // [markerCount] source frames (bank memory)
   const Id* markerIds;                // [markerCount]
+  std::uint32_t fadeInFrames;   // D-146: the play's fade-in (frames of played time from the voice's start), 0 none
+  std::uint32_t reserved5;
 };
 
 struct StartBatch {  // RunEventLogic: Start() requests per kind, issued once per block
@@ -455,6 +480,21 @@ struct Deferred {
 };
 inline constexpr std::uint32_t kVoicePausedFlag = 1u << 4;  // core-internal VoiceLifecycle.flags bit (paused)
 
+// D-145: actions taken ahead, waiting for their block (cancelled if the parent pauses,
+// stops or does not start before they happen). RunEventLogic private.
+enum class ActionPendingKind : std::uint32_t { Play = 0, Stop = 1, SetParam = 2, Snapshot = 3 };
+struct ActionPending {
+  ActionPendingKind kind;
+  Id target;
+  HandleRef parent;
+  HandleRef child;         // Play: the child playback
+  float value;
+  std::uint32_t reserved;
+  std::uint64_t trackTime; // the action's time on the parent's track
+  ClockSample clock;       // the action's clock
+  ClockSample due;         // SetParam / Snapshot: the block start it applies at
+};
+
 struct EventPriv {
   PlaybackPriv* pb = nullptr;      // [maxPlaybacks]
   VoiceStatic* vs = nullptr;       // [maxVirtual] (read by later systems, see above)
@@ -474,6 +514,10 @@ struct EventPriv {
   std::uint32_t deferredCount = 0, deferredCap = 0;
   std::uint32_t* releaseKind = nullptr;  // [maxVirtual]
   std::uint32_t releaseCount = 0;
+  // Stage 3 (group 4), D-145.
+  ActionPending* pending = nullptr;  // [deferredCap]
+  std::uint32_t pendingCount = 0;
+  std::uint32_t actionWarned = 0;    // a LIMIT_REACHED warning was posted this block
 };
 
 // ---------------------------------------------------------------------------
@@ -531,6 +575,10 @@ struct ItemInput {
   std::uint32_t endFadeActive;
   std::uint32_t endFadeFrom;
   float endFade0, endFadeDelta;
+  // D-146: the play's fade-in, per sample from fadeInFrom: min(1, fadeIn0 + fadeInDelta (f - from)).
+  std::uint32_t fadeInActive;
+  std::uint32_t fadeInFrom;
+  double fadeIn0, fadeInDelta;
 };
 enum ItemFlags : std::uint32_t {
   kItemSourceRate = 1u << 0,
@@ -596,6 +644,10 @@ struct RenderPriv {
   std::uint32_t meterCount = 0;            // CoreLimits.maxMeteredBuses + 1
   std::uint32_t* busMeter = nullptr;       // [busCap] meter of the bus slot, kNoSlot none
   struct AnalysisShared* analysis = nullptr;
+  // D-146: played frames of each voice (fade-in); markers / "continue": the resampler's
+  // look-ahead (source frames read ahead of the output) at the voice's last render.
+  std::uint64_t* voicePlayed = nullptr;   // [maxVirtual]
+  double* voiceLookahead = nullptr;       // [maxVirtual]
 };
 
 struct TransportPriv {  // core's UpdateTransport when no music system is present
