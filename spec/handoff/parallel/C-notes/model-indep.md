@@ -175,7 +175,7 @@ CTest: `tool_indep_s7_{document,editors,compute,build,robust}_test`、`buildtool
 | 3 ＋ `SND_BUILD_TOOL_CORE=ON`（ASan/UBSan） | 3854b9d | `-R 'tool\|buildtool'`（35 件） | 欠陥 7 件（意図どおり）と `tool_indep_s7_build_test`（E1 が上の UB の箇所に当たる。欠陥 `Defect_EmptyMaterialTableBuildIsUndefinedBehaviour` と同じ原因）以外は通過。8 件目の欠陥テストは次のコミット（下の行）で足し、その構成で失敗（意図どおり）を確認。`tool_live_mixer_test` は通過 |
 | 5 ＋ `SND_BUILD_TOOL_CORE=ON`（Release） | bb5c465 | `-R 'tool\|buildtool'` | 35 件。失敗は欠陥 8 件だけ（7 件は意図どおり。`Defect_EmptyMaterialTableBuildIsUndefinedBehaviour` は当時 `b.ok` も確かめていて Release で失敗したため、その確かめを外した（空の表はビルドのエラーになるのが正しい。欠陥は途中の未定義動作だけ）。外したあとの Release での単独実行は通過、UBSan での失敗は 3854b9d の後の確認どおり同じ経路）。`tool_live_mixer_test` を含むほかは全部通過 |
 | clang Debug ＋ `SND_BUILD_TOOL_CORE=ON` | f46d4e0 | `-R 'tool\|buildtool'` | 欠陥 7 件（意図どおり）以外の組 M の独立テストは全部通過。既存の `tool_live_mixer_test` が失敗（構成 8 でも 1 回。単独では通る） |
-| MinGW `-fsyntax-only -Werror -Wall -Wextra -fno-exceptions -fno-rtti` | 810512d | 新しい .cpp 全部（tool 7、buildtool 2） | 通過（`%zu` を直したあと） |
+| MinGW `-fsyntax-only -Werror -Wall -Wextra -fno-exceptions -fno-rtti` | d52907f | 新しい .cpp 全部（tool 7、buildtool 2） | 通過（`%zu` を直したあと） |
 
 回していない構成: 1、2（clang 以外の通常）、4（TSan、対象なし）、6、7、9（Tela。組 M の独立テストは Tela を使わない）。
 
@@ -186,4 +186,4 @@ CTest: `tool_indep_s7_{document,editors,compute,build,robust}_test`、`buildtool
 - Windows / macOS での実行（MinGW の構文検査だけ）。ファイル操作のテスト（A13、削除の欠陥）は Linux で、読み取り専用の代わりに
   「ディレクトリが同名のファイル／空でないディレクトリ」で失敗を作った（root では権限が効かないため）。
 - 履歴の上限（1024 手）を超える列、非常に大きなプロジェクトの速さ。
-- `tool_live_mixer_test` の一度だけの失敗の原因（出力が上書きされて残っていない）。
+- `tool_live_mixer_test`（既存）が構成 8 と clang で 1 回ずつ -j2 の全体実行で失敗した原因（出力が残っていない。単独・ASan・Release では通過）。
