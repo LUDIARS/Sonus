@@ -22,6 +22,20 @@
 //   std::uint32_t seq = c->SetValue(BusVolume(bus, -6.0f), true);
 //   ... c->TakeAck(seq, &result); c->CopyMeterHistory(bus, samples, n); ...
 //   c->Stop(); Client::Destroy(c);
+//
+// Protocol 1.1 (livelink-protocol.md §8). The client says minor 1 in Hello and reads
+// the game's minor from HelloReply (PeerMinor). A 1.1 request to a 1.0 game is not sent:
+// its sender returns 0 (Supports(type) says beforehand), and SetProfilerMask drops the
+// mask bits the game does not know. 1.1 additions for the tool (组 P):
+//   - RevertValue / ReadCell (+ TakeCell / WaitCell): item revert and read-back of a cell;
+//   - QueryBanks (+ CopyBanks): the game's loaded banks (bankId, language, build hash,
+//     content hash, writable) to decide "send every diff" per bank after BuildMismatch
+//     (allowed before SyncDecision: set ClientDesc::onMismatch = SendDiffs);
+//   - ReloadBank (+ CopyReloadStatus): hot reload of a rebuilt bank file;
+//   - StopAuditions: stop every audition this live link started;
+//   - StreamList / BlockDetail profiler streams (kProfStreamList, kProfBlockDetail);
+//   - update numbers: Sequences() and the Copy*Since functions tell a UI what is new
+//     since it last looked and how much it missed (entries overwritten before it looked).
 #ifndef SND_LIVELINK_CLIENT_HPP
 #define SND_LIVELINK_CLIENT_HPP
 
@@ -54,6 +68,12 @@ struct ClientDesc {
   std::uint32_t reconnectDelayMs = 250;
   bool autoReconnect = true;
   std::uint32_t pollMs = 5;
+  // 1.1
+  // 1.1: on BuildMismatch, stay in Handshake (AwaitingSync()) and let the tool decide with
+  // DecideSync after looking at QueryBanks; false: answer onMismatch at once (1.0 behaviour).
+  bool deferSyncDecision = false;
+  std::uint32_t maxBanks = 256;    // kept from the latest BankList
+  std::uint32_t maxStreams = 256;  // kept from the latest StreamList
 };
 
 enum class ClientState : std::uint8_t {
@@ -83,6 +103,22 @@ struct StallSample {
 struct LodSample {
   std::uint64_t receivedNs;
   LodChange lod;
+};
+struct BlockDetailSample {  // 1.1
+  std::uint64_t receivedNs;
+  BlockDetail detail;
+};
+
+// 1.1: update numbers. Each counts what was received since Start (history streams: the
+// entries; latest-value streams: the messages). A UI keeps the numbers it saw; a larger
+// number means new data. For the history streams, Copy*Since(after, ..., &first) returns
+// the entries numbered after `after` that are still kept; first > after + 1 means
+// first - after - 1 entries were overwritten before the UI looked (missed).
+struct ClientSequences {
+  std::uint64_t timings = 0, meterEntries = 0, eventLog = 0, stalls = 0, lods = 0, details = 0;  // history entries
+  std::uint64_t voiceLists = 0, meterSnapshots = 0, memory = 0, streamLists = 0, bankLists = 0;  // messages
+  std::uint64_t errors = 0, acks = 0, cells = 0, reloadStatus = 0;
+  std::uint64_t recordBytes = 0;  // recording bytes received (kept + overflow)
 };
 
 struct ClientStats {
@@ -130,6 +166,22 @@ class Client {
   std::uint32_t StopRecording(bool wantAck = true) noexcept;
   std::uint32_t StructEdit(StructOp op, std::uint32_t targetId, const std::uint64_t* args, std::uint32_t argCount,
                            bool wantAck = true) noexcept;
+  // --- protocol 1.1 (0 when the connected game is 1.0: see Supports) ------------------
+  std::uint16_t PeerMinor() const noexcept;           // HelloReply.protocolMinor of the connection
+  bool Supports(MessageType type) const noexcept;      // MinorOf(type) <= PeerMinor()
+  // `target`: the cell as for SetValue (valueType / value ignored).
+  std::uint32_t RevertValue(const livelink::SetValue& target, bool wantAck = true) noexcept;
+  std::uint32_t ReadCell(const livelink::SetValue& target, bool wantAck = false) noexcept;
+  // QueryBanks may be sent in Handshake (after a BuildMismatch reply) or Ready.
+  std::uint32_t QueryBanks(bool wantAck = false) noexcept;
+  // `path`: the rebuilt bank file, relative to the game's file system root (D-103).
+  std::uint32_t ReloadBank(std::uint32_t bankId, std::uint32_t languageId, const char* path, bool loadIfAbsent = false,
+                           bool wantAck = true) noexcept;
+  std::uint32_t StopAuditions(bool wantAck = true) noexcept { return Audition(0, nullptr, true, wantAck); }
+  // deferSyncDecision: true while a BuildMismatch waits for DecideSync (state Handshake).
+  bool AwaitingSync() const noexcept;
+  // Answers the BuildMismatch: SendDiffs -> Ready, Disconnect -> Rejected. false if none waits.
+  bool DecideSync(SyncMode mode) noexcept;
   // Any frame (tests, fuzzing). The payload is sent as given.
   std::uint32_t SendRaw(std::uint16_t type, std::uint16_t flags, const void* payload, std::uint32_t bytes) noexcept;
 
@@ -153,6 +205,31 @@ class Client {
   bool LatestMemory(MemoryUsage* out) const noexcept;
   // Number of profiler messages of `type` received since Start.
   std::uint64_t Received(MessageType type) const noexcept;
+
+  // --- 1.1 answers and streams ----------------------------------------------------------
+  // The CellValue answering ReadCell `seq` (consumed).
+  bool TakeCell(std::uint32_t seq, CellValue* out) noexcept;
+  bool WaitCell(std::uint32_t seq, std::uint32_t timeoutMs, CellValue* out) noexcept;
+  // The latest BankList (*replySeq: the QueryBanks seq it answered).
+  std::uint32_t CopyBanks(BankEntry* out, std::uint32_t capacity, std::uint32_t* replySeq = nullptr) const noexcept;
+  // ReloadStatus messages received (oldest first, the last 64).
+  std::uint32_t CopyReloadStatus(ReloadStatus* out, std::uint32_t capacity) const noexcept;
+  std::uint32_t CopyStreams(StreamInfo* out, std::uint32_t capacity, std::uint64_t* receivedNs = nullptr) const noexcept;
+  std::uint32_t CopyBlockDetails(BlockDetailSample* out, std::uint32_t capacity) const noexcept;
+  ClientSequences Sequences() const noexcept;
+  std::uint32_t CopyTimingsSince(std::uint64_t after, TimingSample* out, std::uint32_t capacity,
+                                 std::uint64_t* first = nullptr) const noexcept;
+  std::uint32_t CopyEventLogSince(std::uint64_t after, LogSample* out, std::uint32_t capacity,
+                                  std::uint64_t* first = nullptr) const noexcept;
+  std::uint32_t CopyStallsSince(std::uint64_t after, StallSample* out, std::uint32_t capacity,
+                                std::uint64_t* first = nullptr) const noexcept;
+  std::uint32_t CopyLodsSince(std::uint64_t after, LodSample* out, std::uint32_t capacity,
+                              std::uint64_t* first = nullptr) const noexcept;
+  std::uint32_t CopyBlockDetailsSince(std::uint64_t after, BlockDetailSample* out, std::uint32_t capacity,
+                                      std::uint64_t* first = nullptr) const noexcept;
+  // Meter entries (all buses) numbered after `after`; busId filters (~0u: every bus).
+  std::uint32_t CopyMeterHistorySince(std::uint64_t after, std::uint32_t busId, MeterSample* out, std::uint32_t capacity,
+                                      std::uint64_t* first = nullptr) const noexcept;
 
   // --- recording (11.3) ------------------------------------------------------------------
   std::uint64_t RecordingBytes() const noexcept;

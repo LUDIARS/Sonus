@@ -82,9 +82,27 @@ snd_result CheckSetValue(const SetValue& m) noexcept;
 snd_result CheckAudition(const Audition& m) noexcept;
 snd_result CheckOverrideParam(const OverrideParam& m) noexcept;
 snd_result CheckOverrideState(const OverrideState& m) noexcept;
+// The 1.0 mask bits (a 1.0 game's rule); the overload takes the protocol minor whose bits
+// are accepted (the server passes its own kProtocolMinor).
 snd_result CheckSetProfilerMask(const SetProfilerMask& m) noexcept;
+snd_result CheckSetProfilerMask(const SetProfilerMask& m, std::uint16_t minor) noexcept;
 snd_result CheckRecordControl(const RecordControl& m) noexcept;
 snd_result CheckStructEdit(const StructEdit& m) noexcept;
+// 1.1: the arguments of each StructOp (livelink-protocol.md §8.4). `args` holds argCount
+// values (nullptr only when argCount == 0).
+//   AddBus       targetId = new bus id; args = {parent bus id, channels 1..8 [, volumeDb f32]}
+//   RemoveBus    targetId = bus id; no args
+//   AddEffect    targetId = bus id; args = {effect type id, insert position (~0u = append),
+//                param0 f32 .. (up to kMaxStructEffectParams)}
+//   RemoveEffect targetId = bus id; args = {effect index on the bus (< 65536)}
+//   AddSend      targetId = source bus id; args = {destination bus id, level dB f32 [, 1 = pre-fader]}
+// Ids are non-zero 32-bit values; f32 args are finite and in the low 32 bits.
+inline constexpr std::uint32_t kMaxStructEffectParams = 32;
+snd_result CheckStructArgs(const StructEdit& m, const std::uint64_t* args) noexcept;
+// 1.1: ReloadBank with its trailing path (`path` = pathBytes bytes, no NUL).
+snd_result CheckReloadBank(const ReloadBank& m, const std::uint8_t* path) noexcept;
+// 1.1: the address part of RevertValue / ReadCell (a known table column; value ignored).
+snd_result CheckCellAddress(const SetValue& m) noexcept;
 // ReplaceChunk data: a table chunk (TableChunkHeader + ColumnEntry[]) of a known table
 // whose columns lie inside `bytes` with the element size of their type. Unknown column
 // ids are allowed (ignored, protocol §3 / bank-format.md). *rows = its row count.
@@ -103,6 +121,16 @@ inline constexpr std::uint32_t kFieldSession = 0xFFFFFFFEu;
 // LiveClearOverrides of the same producer belongs to the revert (D-87: a revert is applied
 // even when its session is old; a tool's ClearOverrides of an old session is not).
 inline constexpr std::uint32_t kFieldRevertBegin = 0xFFFFFFFDu;
+// 1.1: the live link's "stop every audition started so far" marker (objectId 0). The audio
+// side hands the audition playbacks it saw before the marker to the live link thread, which
+// stops them (System::Stop with Config.tuning.short_fade_ms).
+inline constexpr std::uint32_t kFieldAuditionStop = 0xFFFFFFFCu;
+// 1.1: LiveSetValue::valueType of the live link's cell requests (the field is a real
+// (chunk, column) field): put the cell back to the remembered bank value (RevertValue),
+// read the cell (ReadCell; value = the request's seq). Never sent by a tool.
+inline constexpr std::uint32_t kValueTypeRevertCell = 0x52565254u;  // 'RVRT'
+inline constexpr std::uint32_t kValueTypeReadCell = 0x52454144u;    // 'READ'
+bool IsMarkerField(std::uint32_t field) noexcept;  // a live link marker field (objectId 0)
 std::uint32_t EncodeField(std::uint32_t chunkFourcc, std::uint32_t column) noexcept;  // kFieldRevertAll if unknown
 bool DecodeField(std::uint32_t field, std::uint32_t* chunkFourcc, std::uint32_t* column) noexcept;
 

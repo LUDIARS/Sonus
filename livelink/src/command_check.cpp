@@ -227,11 +227,13 @@ constexpr CommandRule kCommandRules[] = {
     {CT::LiveSetValue, true,
      [](const std::uint8_t* p, const L&) noexcept {
        const auto c = Load<cmd::LiveSetValue>(p);
-       if (c.field == kFieldRevertAll || c.field == kFieldSession || c.field == kFieldRevertBegin) return c.objectId == 0u;
+       if (IsMarkerField(c.field)) return c.objectId == 0u;
        std::uint32_t chunk = 0, column = 0;
-       return DecodeField(c.field, &chunk, &column) && c.valueType <= static_cast<std::uint32_t>(cmd::LiveValueType::Id);
+       return DecodeField(c.field, &chunk, &column) &&
+              (c.valueType <= static_cast<std::uint32_t>(cmd::LiveValueType::Id) || c.valueType == kValueTypeRevertCell ||
+               c.valueType == kValueTypeReadCell);
      },
-     &True, "server: known (chunk, column) field or a live link marker, value type 0..3"},
+     &True, "server: known (chunk, column) field or a live link marker, value type 0..3 or a cell request (1.1)"},
     {CT::LiveReplaceChunk, false, &False, &False, "data of the recording process"},
     {CT::LiveAudition, true,
      [](const std::uint8_t* p, const L&) noexcept {

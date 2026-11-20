@@ -15,6 +15,19 @@
 // What the profiler produces is gated by the mask the tool sets
 // (SetProfilerMask); with mask 0 the hooks only do the override layer and the
 // recording.
+//
+// 1.1 (protocol §8):
+//   - auditions: every LiveAudition the arenas carry is tracked (playback handle)
+//     until it ends; the kFieldAuditionStop marker hands the tracked handles to the
+//     live link thread (auditionStops()), which stops them with System::Stop. Only
+//     auditions are stopped, never the game's playbacks;
+//   - cell requests: RevertValue / ReadCell (CellReading through readings());
+//   - structural edits (struct_edit.hpp): Config.dev_reserve accounting, the editor
+//     seam, the log of applied edits for the disconnect revert;
+//   - profiler: StreamList (TripleSlot streams()) and BlockDetail (details());
+//   - recording: the starting state (RecordBegin, RecordCell, RecordOverride) after the
+//     first Lod and BankMap records, and the data of every LiveReplaceChunk
+//     (RecordLiveData, written just before the Arena record that carries the command).
 #ifndef SND_LIVELINK_RUNTIME_HPP
 #define SND_LIVELINK_RUNTIME_HPP
 
@@ -29,6 +42,7 @@
 #include "snd/internal/notify.hpp"
 #include "snd/livelink/record_format.hpp"
 #include "snd/livelink/rings.hpp"
+#include "snd/livelink/struct_edit.hpp"
 #include "snd/livelink/value_applier.hpp"
 
 namespace snd::core {
@@ -54,6 +68,11 @@ struct RuntimeDesc {
   std::uint32_t maxMeters = 0;         // 0: 256 buses
   std::uint32_t chunkSlots = 1;        // ReplaceChunk in flight (PendingChunk pool)
   std::uint32_t chunkBytes = 1u << 20; // largest ReplaceChunk table (data bytes)
+  // 1.1
+  std::uint32_t maxAuditions = 32;     // auditions tracked at once (more: Audition answers LIMIT_REACHED)
+  std::uint32_t detailEntries = 1024;  // BlockDetail channel
+  std::uint32_t maxStructLog = 64;     // applied structural edits remembered for the revert
+  IStructEditor* structEditor = nullptr;  // null: structural edits answer SND_ERR_UNSUPPORTED (C-01)
 };
 
 // LogEntry.kind values the runtime produces (protocol §6, LogEntry):
@@ -85,6 +104,20 @@ struct RecordEnd {
 struct RuntimeDrops {
   std::uint32_t log = 0, timing = 0, stalls = 0, lod = 0, results = 0, records = 0;
   std::uint32_t staleEdits = 0;  // edits of an earlier Server's session, not applied (D-87)
+  // 1.1
+  std::uint32_t readings = 0;    // CellReading channel full
+  std::uint32_t auditions = 0;   // auditions not tracked (table / stop channel full)
+  std::uint32_t details = 0;     // BlockDetail channel full
+  std::uint32_t structLog = 0;   // applied structural edits that could not be remembered (no undo)
+  std::uint32_t structUndo = 0;  // undo refused by the editor during a revert
+};
+
+// 1.1: Config.dev_reserve in use by live structural edits (any thread).
+struct DevReserveUsage {
+  std::uint32_t buses = 0, effects = 0;
+  std::uint64_t bytes = 0;
+  std::uint32_t busesLimit = 0, effectsLimit = 0;
+  std::uint64_t bytesLimit = 0;
 };
 
 // Snapshots published through TripleSlots (live link thread reads them).
@@ -100,6 +133,11 @@ struct StatsSnapshot {
 struct BankSnapshotHeader {
   std::uint32_t count;
   std::uint32_t reserved;
+};
+struct StreamSnapshotHeader {  // + StreamInfo[count]
+  std::uint32_t count;
+  std::uint32_t reserved;
+  std::uint64_t block;
 };
 
 class LiveRuntime {
@@ -139,6 +177,29 @@ class LiveRuntime {
   TripleSlot& banks() noexcept { return banks_; }     // BankSnapshotHeader + core::LiveBankInfo[]
   RuntimeDrops Drops() const noexcept;
   ValueApplier& applier() noexcept { return applier_; }
+  // 1.1 channels
+  base::SpscRing<CellReading>& readings() noexcept { return readings_; }
+  base::SpscRing<std::uint64_t>& auditionStops() noexcept { return auditionStops_; }  // playback handle values
+  base::SpscRing<BlockDetail>& details() noexcept { return details_; }
+  TripleSlot& streams() noexcept { return streams_; }  // StreamSnapshotHeader + StreamInfo[]
+  std::uint32_t MaxStreams() const noexcept { return maxStreams_; }
+
+  // --- 1.1 auditions (live link thread) -------------------------------------------------
+  // Takes one place among maxAuditions before an Audition is recorded (false: full).
+  // ReleaseAudition gives it back when the command could not be recorded; the audio thread
+  // gives it back when the audition ends.
+  bool ReserveAudition() noexcept;
+  void ReleaseAudition() noexcept;
+  std::uint32_t ActiveAuditions() const noexcept { return auditionsActive_.load(std::memory_order_relaxed); }
+
+  // --- 1.1 structural edits (live link thread; usage from any thread) --------------------
+  // Takes the edit's cost from Config.dev_reserve. SND_ERR_OUT_OF_BUDGET when it does not fit
+  // (the tool rebuilds and hot reloads). The audio thread gives it back if the edit is not
+  // applied, and when a revert undoes it or a remove takes away what a live edit added.
+  snd_result ReserveStruct(const StructCost& cost) noexcept;
+  void ReleaseStruct(const StructCost& cost) noexcept;
+  DevReserveUsage ReserveUsage() const noexcept;
+  bool HasStructEditor() const noexcept { return structEditor_ != nullptr; }
 
   // --- ReplaceChunk slots (live link thread) -------------------------------------------
   // The pool outlives any Server: the audio thread writes results into it even if the
@@ -174,7 +235,14 @@ class LiveRuntime {
   void PushLog(std::uint32_t kind, std::uint32_t id, std::uint32_t handleSlot, std::uint32_t detail) noexcept;
   void PushRecord(const void* rec, std::uint32_t bytes) noexcept;
   void UpdateBanks(core::System& sys) noexcept;
-
+  // 1.1
+  void ScanArena(const core::LiveArenaView& a) noexcept;           // auditions, stop markers, recorded chunk data
+  void WriteLiveData(const cmd::LiveReplaceChunk& c) noexcept;
+  void RecordStartState(core::System& sys) noexcept;
+  void TrackAudition(HandleRef h) noexcept;
+  void ApplyStruct(core::System& sys, PendingChunk& p, std::uint32_t session, ApplyResult* r) noexcept;
+  void UndoStructs(core::System& sys, std::uint32_t session) noexcept;
+  void PublishStreams(core::System& sys, std::uint64_t block) noexcept;
   IAllocator* alloc_ = nullptr;
   snd_config config_{};
   std::atomic<core::System*> system_{nullptr};
@@ -186,8 +254,11 @@ class LiveRuntime {
   base::SpscRing<StreamStall> stalls_;
   base::SpscRing<LodChange> lods_;
   base::SpscRing<ApplyResult> results_;
+  base::SpscRing<CellReading> readings_;
+  base::SpscRing<std::uint64_t> auditionStops_;
+  base::SpscRing<BlockDetail> details_;
   MessageRing records_;
-  TripleSlot voices_, meters_, stats_, banks_;
+  TripleSlot voices_, meters_, stats_, banks_, streams_;
   // controls
   std::atomic<std::uint32_t> mask_{0};
   std::atomic<std::uint32_t> meterEvery_{1};
@@ -204,6 +275,9 @@ class LiveRuntime {
     Id id;
     std::uint32_t session;
     std::uint32_t used;
+    std::uint32_t value = 0;     // 1.1: for the recording's starting state
+    std::uint32_t reserved = 0;
+    std::uint64_t target = 0;
   };
   static constexpr std::uint32_t kMaxOverrideOwners = 256;
   OverrideOwner overrideOwners_[kMaxOverrideOwners] = {};
@@ -214,6 +288,34 @@ class LiveRuntime {
   // drops
   std::atomic<std::uint32_t> dropLog_{0}, dropTiming_{0}, dropStalls_{0}, dropLod_{0}, dropResults_{0},
       dropRecords_{0};
+  std::atomic<std::uint32_t> dropReadings_{0}, dropAuditions_{0}, dropDetails_{0}, dropStructLog_{0}, dropStructUndo_{0};
+  // 1.1 auditions: places taken (live link thread reserves, audio thread releases at the end)
+  std::atomic<std::uint32_t> auditionsActive_{0};
+  std::uint32_t maxAuditions_ = 0;
+  std::uint64_t* auditions_ = nullptr;  // [maxAuditions_] audio thread: tracked handle values (0 = empty)
+  // 1.1 structural edits
+  IStructEditor* structEditor_ = nullptr;
+  std::atomic<std::uint32_t> usedBuses_{0}, usedEffects_{0};
+  std::atomic<std::uint64_t> usedBytes_{0};
+  struct StructLogEntry {
+    std::uint32_t used;
+    std::uint32_t op;
+    std::uint32_t targetId;
+    std::uint32_t argCount;  // of the original edit (args beyond kLoggedArgs are not kept)
+    std::uint32_t session;
+    std::uint32_t buses, effects;  // cost (given back by the undo)
+    std::uint32_t reserved;
+    std::uint64_t bytes;
+    std::uint64_t args[4];
+  };
+  StructLogEntry* structLog_ = nullptr;  // [structLogCap_] audio thread, oldest first
+  std::uint32_t structLogCap_ = 0, structLogCount_ = 0;
+  // 1.1 profiler / recording (audio thread)
+  std::uint32_t maxStreams_ = 0;
+  std::uint32_t* streamStalls_ = nullptr;  // [maxStreams_]
+  std::uint64_t arenasSeen_ = 0;           // non-empty arenas applied before (FromCreation / MidRun)
+  EditView* editScratch_ = nullptr;        // [maxEdits] starting state of a recording
+  std::uint32_t editScratchCap_ = 0;
   // audio thread private
   std::uint32_t recordDroppedSession_ = 0;
   std::uint32_t lod_ = 0;

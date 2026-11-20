@@ -59,6 +59,10 @@ LiveRuntime::~LiveRuntime() {
     alloc_->Free(chunkMemory_, MemTag::LiveLink);
     alloc_->Free(producerSession_, MemTag::LiveLink);
     alloc_->Free(revertOpen_, MemTag::LiveLink);
+    alloc_->Free(auditions_, MemTag::LiveLink);
+    alloc_->Free(structLog_, MemTag::LiveLink);
+    alloc_->Free(streamStalls_, MemTag::LiveLink);
+    alloc_->Free(editScratch_, MemTag::LiveLink);
   }
 }
 
@@ -90,6 +94,28 @@ bool LiveRuntime::Init(const RuntimeDesc& d) noexcept {
       new (&chunks_[i]) PendingChunk();
       chunks_[i].data = chunkMemory_ + std::size_t{chunkBytes_} * i;
     }
+  }
+  // 1.1
+  maxAuditions_ = d.maxAuditions != 0u ? d.maxAuditions : 1u;
+  auditions_ = static_cast<std::uint64_t*>(a.Allocate(sizeof(std::uint64_t) * maxAuditions_, 64, MemTag::LiveLink));
+  structEditor_ = d.structEditor;
+  structLogCap_ = d.maxStructLog != 0u ? d.maxStructLog : 1u;
+  structLog_ = static_cast<StructLogEntry*>(a.Allocate(sizeof(StructLogEntry) * structLogCap_, 64, MemTag::LiveLink));
+  maxStreams_ = config_.max_streams;
+  streamStalls_ = static_cast<std::uint32_t*>(
+      a.Allocate(sizeof(std::uint32_t) * (maxStreams_ != 0u ? maxStreams_ : 1u), 64, MemTag::LiveLink));
+  editScratchCap_ = d.maxEdits != 0u ? d.maxEdits : 1u;
+  editScratch_ = static_cast<EditView*>(a.Allocate(sizeof(EditView) * editScratchCap_, 64, MemTag::LiveLink));
+  if (auditions_ == nullptr || structLog_ == nullptr || streamStalls_ == nullptr || editScratch_ == nullptr) return false;
+  std::memset(auditions_, 0, sizeof(std::uint64_t) * maxAuditions_);
+  std::memset(static_cast<void*>(structLog_), 0, sizeof(StructLogEntry) * structLogCap_);
+  std::memset(streamStalls_, 0, sizeof(std::uint32_t) * (maxStreams_ != 0u ? maxStreams_ : 1u));
+  if (!readings_.Init(a, d.resultEntries, MemTag::LiveLink) ||
+      !auditionStops_.Init(a, maxAuditions_ * 4u, MemTag::LiveLink) ||
+      !details_.Init(a, d.detailEntries != 0u ? d.detailEntries : 1u, MemTag::LiveLink) ||
+      !streams_.Init(a, static_cast<std::uint32_t>(sizeof(StreamSnapshotHeader) +
+                                                   sizeof(StreamInfo) * (maxStreams_ != 0u ? maxStreams_ : 1u)))) {
+    return false;
   }
   knownBanks_ = static_cast<core::LiveBankInfo*>(a.Allocate(sizeof(core::LiveBankInfo) * maxBanks_, 64, MemTag::LiveLink));
   scratchBanks_ =
@@ -167,7 +193,74 @@ RuntimeDrops LiveRuntime::Drops() const noexcept {
   d.results = dropResults_.load(std::memory_order_relaxed);
   d.records = dropRecords_.load(std::memory_order_relaxed);
   d.staleEdits = dropStale_.load(std::memory_order_relaxed);
+  d.readings = dropReadings_.load(std::memory_order_relaxed);
+  d.auditions = dropAuditions_.load(std::memory_order_relaxed);
+  d.details = dropDetails_.load(std::memory_order_relaxed);
+  d.structLog = dropStructLog_.load(std::memory_order_relaxed);
+  d.structUndo = dropStructUndo_.load(std::memory_order_relaxed);
   return d;
+}
+
+// --- 1.1: auditions and the dev reserve (live link thread side) -----------------------------
+bool LiveRuntime::ReserveAudition() noexcept {
+  std::uint32_t v = auditionsActive_.load(std::memory_order_relaxed);
+  do {
+    if (v >= maxAuditions_) return false;
+  } while (!auditionsActive_.compare_exchange_weak(v, v + 1u, std::memory_order_acq_rel));
+  return true;
+}
+
+void LiveRuntime::ReleaseAudition() noexcept {
+  std::uint32_t v = auditionsActive_.load(std::memory_order_relaxed);
+  do {
+    if (v == 0u) return;
+  } while (!auditionsActive_.compare_exchange_weak(v, v - 1u, std::memory_order_acq_rel));
+}
+
+StructCost StructCostOf(StructOp op, std::uint32_t argCount) noexcept {
+  StructCost c;
+  switch (op) {
+    case StructOp::AddBus: c.buses = 1u; break;
+    case StructOp::AddEffect: c.effects = 1u; break;
+    case StructOp::AddSend: break;
+    case StructOp::RemoveBus:
+    case StructOp::RemoveEffect:
+      return c;  // removes take nothing
+  }
+  c.bytes = kStructEditBaseBytes + std::uint64_t{argCount} * 8u;
+  return c;
+}
+
+// One reserving thread (the live link thread); the audio thread only gives back, so a
+// check-then-add cannot oversubscribe.
+snd_result LiveRuntime::ReserveStruct(const StructCost& c) noexcept {
+  const snd_dev_reserve_config& r = config_.dev_reserve;
+  if (usedBuses_.load(std::memory_order_acquire) + c.buses > r.buses ||
+      usedEffects_.load(std::memory_order_acquire) + c.effects > r.effects ||
+      usedBytes_.load(std::memory_order_acquire) + c.bytes > r.bytes) {
+    return SND_ERR_OUT_OF_BUDGET;
+  }
+  usedBuses_.fetch_add(c.buses, std::memory_order_acq_rel);
+  usedEffects_.fetch_add(c.effects, std::memory_order_acq_rel);
+  usedBytes_.fetch_add(c.bytes, std::memory_order_acq_rel);
+  return SND_OK;
+}
+
+void LiveRuntime::ReleaseStruct(const StructCost& c) noexcept {
+  usedBuses_.fetch_sub(c.buses, std::memory_order_acq_rel);
+  usedEffects_.fetch_sub(c.effects, std::memory_order_acq_rel);
+  usedBytes_.fetch_sub(c.bytes, std::memory_order_acq_rel);
+}
+
+DevReserveUsage LiveRuntime::ReserveUsage() const noexcept {
+  DevReserveUsage u;
+  u.buses = usedBuses_.load(std::memory_order_acquire);
+  u.effects = usedEffects_.load(std::memory_order_acquire);
+  u.bytes = usedBytes_.load(std::memory_order_acquire);
+  u.busesLimit = config_.dev_reserve.buses;
+  u.effectsLimit = config_.dev_reserve.effects;
+  u.bytesLimit = config_.dev_reserve.bytes;
+  return u;
 }
 
 // ---------------------------------------------------------------------------
@@ -215,7 +308,7 @@ bool LiveRuntime::Admit(cmd::CommandType type, const void* payload) noexcept {
         for (std::uint32_t i = 0; i < kMaxOverrideOwners && slot == nullptr; ++i) {
           if (overrideOwners_[i].used == 0u) slot = &overrideOwners_[i];
         }
-        if (slot != nullptr) *slot = OverrideOwner{c.kind, c.id, session, 1u};
+        if (slot != nullptr) *slot = OverrideOwner{c.kind, c.id, session, 1u, c.value, 0u, c.target.Value()};
       }
     }
     return true;
@@ -249,6 +342,24 @@ void LiveRuntime::OnCommand(core::System& sys, cmd::CommandType type, const void
       if (known) revertOpen_[currentProducer_] = 1u;
       return;
     }
+    if (c.field == kFieldAuditionStop && c.objectId == 0u) {  // 1.1: the stops went out in ScanArena
+      if (!results_.TryPush(r)) Bump(dropResults_);
+      return;
+    }
+    if (c.valueType == kValueTypeReadCell) {  // 1.1: a read changes nothing; a stale one is not answered
+      if (StaleProducer()) {
+        r.result = SND_ERR_INVALID_HANDLE;
+      } else {
+        CellReading rd;
+        applier_.ReadCell(sys, c, &rd);
+        rd.session = r.session;
+        if (!readings_.TryPush(rd)) Bump(dropReadings_);
+        r.result = rd.result;
+        r.cells = rd.cells;
+      }
+      if (!results_.TryPush(r)) Bump(dropResults_);
+      return;
+    }
     // D-87: an earlier Server's edit is not applied (its result is dropped there); its
     // disconnect revert is (it only restores the cells that session wrote last).
     if (c.field != kFieldRevertAll && StaleProducer()) {
@@ -262,6 +373,7 @@ void LiveRuntime::OnCommand(core::System& sys, cmd::CommandType type, const void
     r.result = o.result;
     r.cells = o.cells;
     r.revert = c.field == kFieldRevertAll ? 1u : 0u;
+    if (c.field == kFieldRevertAll) UndoStructs(sys, r.session);  // 1.1: newest first
   } else if (type == cmd::CommandType::LiveReplaceChunk) {
     const auto c = Load<cmd::LiveReplaceChunk>(payload);
     PendingChunk* p = static_cast<PendingChunk*>(const_cast<void*>(c.prepared));
@@ -269,17 +381,29 @@ void LiveRuntime::OnCommand(core::System& sys, cmd::CommandType type, const void
     bool ours = false;
     for (std::uint32_t i = 0; i < chunkCount_ && !ours; ++i) ours = p == &chunks_[i];
     const std::uint32_t st = ours ? p->state.load(std::memory_order_acquire) : PendingChunk::kFree;
+    // 1.1: a structural edit that is not applied gives its dev reserve back.
+    const bool structEdit = ours && p->fourcc == kStructEditTag;
+    const StructCost cost = structEdit ? StructCost{p->costBuses, p->costEffects, p->costBytes} : StructCost{};
     if (ours && StaleProducer() && (st == PendingChunk::kQueued || st == PendingChunk::kCancelled)) {
       Bump(dropStale_);  // D-87: not applied; the slot goes back to the pool
+      if (structEdit) ReleaseStruct(cost);
       p->state.store(PendingChunk::kFree, std::memory_order_release);
       r.result = SND_ERR_INVALID_HANDLE;
     } else if (st == PendingChunk::kCancelled) {
+      if (structEdit) ReleaseStruct(cost);
       p->state.store(PendingChunk::kFree, std::memory_order_release);  // its Server is gone
       r.result = SND_ERR_INVALID_HANDLE;
     } else if (st != PendingChunk::kQueued) {
       r.result = SND_ERR_INVALID_ARGUMENT;
     } else {
-      const ApplyOutcome o = applier_.ReplaceChunk(sys, *p, r.session);
+      ApplyOutcome o;
+      if (structEdit) {
+        ApplyStruct(sys, *p, r.session, &r);
+        o.result = r.result;
+        o.cells = r.cells;
+      } else {
+        o = applier_.ReplaceChunk(sys, *p, r.session);
+      }
       r.result = o.result;
       r.cells = o.cells;
       p->result = o.result;
@@ -298,6 +422,8 @@ void LiveRuntime::OnCommand(core::System& sys, cmd::CommandType type, const void
 void LiveRuntime::OnArena(const core::LiveArenaView& a) noexcept {
   block_ = a.appliedBlock;
   currentProducer_ = a.producer;
+  ScanArena(a);  // 1.1: before the Arena record (RecordLiveData precedes it)
+  if (a.normalBytes != 0u || a.reserveBytes != 0u || a.fallback != nullptr) ++arenasSeen_;
   if (recording_.load(std::memory_order_relaxed) != 0u && !WriteArenaRecord(records_, a, caps_)) {
     Bump(dropRecords_);
     ++recordDroppedSession_;
@@ -344,12 +470,21 @@ void LiveRuntime::OnEvent(const notify::EventRecord& rec) noexcept {
   PushLog(rec.type, rec.a, static_cast<std::uint32_t>(rec.object), problem ? rec.detail : rec.b);
 }
 
-void LiveRuntime::OnEnded(std::uint32_t slot, std::uint32_t, std::uint32_t reason, std::uint32_t detail) noexcept {
+void LiveRuntime::OnEnded(std::uint32_t slot, std::uint32_t generation, std::uint32_t reason, std::uint32_t detail) noexcept {
+  const std::uint64_t v = HandleRef{slot, generation}.Value();
+  for (std::uint32_t i = 0; i < maxAuditions_; ++i) {  // 1.1: a tracked audition ended
+    if (auditions_[i] == v) {
+      auditions_[i] = 0u;
+      ReleaseAudition();
+      break;
+    }
+  }
   if ((mask_.load(std::memory_order_relaxed) & kProfEventLog) == 0u) return;
   PushLog(kLogPlaybackEnded, 0u, slot, (reason << 16) | (detail & 0xFFFFu));
 }
 
 void LiveRuntime::OnStall(std::uint32_t slot, Id eventId, std::uint32_t count, BlockIndex block) noexcept {
+  if (slot < maxStreams_) streamStalls_[slot] += count;
   if ((mask_.load(std::memory_order_relaxed) & kProfStreams) != 0u &&
       !stalls_.TryPush(StreamStall{eventId, slot, clock_})) {
     Bump(dropStalls_);
@@ -410,6 +545,20 @@ void LiveRuntime::OnBlock(core::System& sys) noexcept {
                         ss.stats.underruns};
     if (!timing_.TryPush(t)) Bump(dropTiming_);
   }
+  if ((mask & kProfBlockDetail) != 0u) {  // 1.1
+    const BlockDetail bd{bp.block,
+                         static_cast<float>(static_cast<double>(bp.totalNs) / 1000.0),
+                         static_cast<float>(static_cast<double>(bp.logicNs) / 1000.0),
+                         static_cast<float>(static_cast<double>(bp.renderNs) / 1000.0),
+                         ss.stats.block_budget_us,
+                         bp.renderedVoices,
+                         bp.chunks,
+                         bp.lateChunks,
+                         bp.heldVoices,
+                         bp.parallel,
+                         ss.stats.lod_level};
+    if (!details_.TryPush(bd)) Bump(dropDetails_);
+  }
   if (++blocksSinceMeters_ >= meterEvery_.load(std::memory_order_relaxed)) {
     blocksSinceMeters_ = 0;
     if ((mask & kProfVoices) != 0u) {
@@ -419,6 +568,7 @@ void LiveRuntime::OnBlock(core::System& sys) noexcept {
       std::memcpy(b, &h, sizeof(h));
       voices_.Publish();
     }
+    if ((mask & kProfStreamList) != 0u) PublishStreams(sys, bp.block);  // 1.1
     if ((mask & kProfMeters) != 0u) {
       std::uint8_t* b = meters_.Back();
       const std::uint32_t total = sys.LiveMeters(reinterpret_cast<MeterEntry*>(b + sizeof(VoiceSnapshotHeader)), maxMeters_);
@@ -445,11 +595,195 @@ void LiveRuntime::OnBlock(core::System& sys) noexcept {
                             knownBanks_[i].contentHash};
       PushRecord(&m, sizeof(m));
     }
+    RecordStartState(sys);  // 1.1: after the first Lod and the BankMap records
     recording_.store(1u, std::memory_order_release);
   } else if (!want && on) {
     const RecordEnd e{kRecordEndMarker, recordDroppedSession_};
     if (records_.Push(&e, sizeof(e))) recording_.store(0u, std::memory_order_release);
     // else: retried at the next block (the end marker is never lost)
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 1.1 (audio thread)
+// ---------------------------------------------------------------------------
+void LiveRuntime::TrackAudition(HandleRef h) noexcept {
+  for (std::uint32_t i = 0; i < maxAuditions_; ++i) {
+    if (auditions_[i] == 0u) {
+      auditions_[i] = h.Value();
+      return;
+    }
+  }
+  Bump(dropAuditions_);  // not stoppable by StopAll (the place reservation should prevent it)
+}
+
+void LiveRuntime::WriteLiveData(const cmd::LiveReplaceChunk& c) noexcept {
+  PendingChunk* p = static_cast<PendingChunk*>(const_cast<void*>(c.prepared));
+  bool ours = false;
+  for (std::uint32_t i = 0; i < chunkCount_ && !ours; ++i) ours = p == &chunks_[i];
+  if (!ours || p->state.load(std::memory_order_acquire) != PendingChunk::kQueued || p->bytes > chunkBytes_) return;
+  const std::uint32_t bytes = static_cast<std::uint32_t>(p->bytes);
+  const std::uint32_t padded = (bytes + 7u) & ~7u;
+  const RecordLiveData h{kRecordLiveData, p->fourcc, static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(p)),
+                         p->bankId, bytes};
+  if (!records_.Begin(static_cast<std::uint32_t>(sizeof(h)) + padded)) {
+    Bump(dropRecords_);
+    ++recordDroppedSession_;
+    return;
+  }
+  records_.Put(&h, sizeof(h));
+  if (bytes != 0u) records_.Put(p->data, bytes);
+  const std::uint64_t zero = 0;
+  if (padded != bytes) records_.Put(&zero, padded - bytes);
+  records_.Commit();
+}
+
+void LiveRuntime::ScanArena(const core::LiveArenaView& a) noexcept {
+  const bool recording = recording_.load(std::memory_order_relaxed) != 0u;
+  auto scan = [&](const cmd::CommandHeader& h, const std::uint8_t* p) {
+    switch (static_cast<cmd::CommandType>(h.type)) {
+      case cmd::CommandType::LiveAudition:
+        TrackAudition(Load<cmd::LiveAudition>(p).playback);
+        break;
+      case cmd::CommandType::LiveSetValue: {
+        const auto c = Load<cmd::LiveSetValue>(p);
+        if (c.objectId != 0u || c.field != kFieldAuditionStop) break;
+        for (std::uint32_t i = 0; i < maxAuditions_; ++i) {  // the auditions started before the marker
+          if (auditions_[i] != 0u && !auditionStops_.TryPush(auditions_[i])) Bump(dropAuditions_);
+        }
+        break;
+      }
+      case cmd::CommandType::LiveReplaceChunk:
+        if (recording) WriteLiveData(Load<cmd::LiveReplaceChunk>(p));
+        break;
+      default:
+        break;
+    }
+  };
+  cmd::ForEachCommand(a.normal, a.normal + a.normalBytes, scan);
+  cmd::ForEachCommand(a.reserve, a.reserve + a.reserveBytes, scan);
+}
+
+void LiveRuntime::ApplyStruct(core::System& sys, PendingChunk& p, std::uint32_t session, ApplyResult* r) noexcept {
+  const StructCost cost{p.costBuses, p.costEffects, p.costBytes};
+  StructEdit h{};
+  if (p.bytes < sizeof(h)) {
+    ReleaseStruct(cost);
+    r->result = SND_ERR_INVALID_ARGUMENT;
+    return;
+  }
+  std::memcpy(&h, p.data, sizeof(h));
+  const std::uint64_t* args = reinterpret_cast<const std::uint64_t*>(p.data + sizeof(StructEdit));
+  const StructEditRequest q{static_cast<StructOp>(h.op), h.targetId, h.argCount, session, args};
+  const snd_result res = structEditor_ != nullptr ? structEditor_->Apply(sys, q) : SND_ERR_UNSUPPORTED;
+  r->result = res;
+  r->cells = res == SND_OK ? 1u : 0u;
+  if (res != SND_OK) {
+    ReleaseStruct(cost);
+    return;
+  }
+  // A remove of what a live edit added cancels both (the reserve comes back, nothing to undo).
+  const bool removeBus = q.op == StructOp::RemoveBus, removeFx = q.op == StructOp::RemoveEffect;
+  if (removeBus || removeFx) {
+    for (std::uint32_t i = structLogCount_; i-- > 0u;) {
+      StructLogEntry& e = structLog_[i];
+      const bool match = removeBus ? (e.op == static_cast<std::uint32_t>(StructOp::AddBus) && e.targetId == q.targetId)
+                                   : (e.op == static_cast<std::uint32_t>(StructOp::AddEffect) && e.targetId == q.targetId);
+      if (!match) continue;
+      ReleaseStruct(StructCost{e.buses, e.effects, e.bytes});
+      for (std::uint32_t k = i; k + 1u < structLogCount_; ++k) structLog_[k] = structLog_[k + 1u];
+      --structLogCount_;
+      return;
+    }
+  }
+  if (structLogCount_ >= structLogCap_) {
+    Bump(dropStructLog_);  // applied, but a revert cannot undo it; its reserve stays taken
+    return;
+  }
+  StructLogEntry& e = structLog_[structLogCount_++];
+  e = StructLogEntry{};
+  e.used = 1u;
+  e.op = h.op;
+  e.targetId = h.targetId;
+  e.argCount = h.argCount;
+  e.session = session;
+  e.buses = cost.buses;
+  e.effects = cost.effects;
+  e.bytes = cost.bytes;
+  for (std::uint32_t k = 0; k < h.argCount && k < 4u; ++k) e.args[k] = args[k];
+}
+
+void LiveRuntime::UndoStructs(core::System& sys, std::uint32_t session) noexcept {
+  std::uint32_t kept = 0;
+  // Newest first; the kept ones (a newer session's) stay in order.
+  for (std::uint32_t i = structLogCount_; i-- > 0u;) {
+    StructLogEntry& e = structLog_[i];
+    if (session != 0u && e.session > session) continue;
+    const std::uint32_t logged = e.argCount < 4u ? e.argCount : 4u;
+    const StructEditRequest q{static_cast<StructOp>(e.op), e.targetId, logged, e.session, e.args};
+    const snd_result res = structEditor_ != nullptr ? structEditor_->Undo(sys, q) : SND_ERR_UNSUPPORTED;
+    if (res != SND_OK) Bump(dropStructUndo_);
+    ReleaseStruct(StructCost{e.buses, e.effects, e.bytes});
+    e.used = 0u;
+  }
+  for (std::uint32_t i = 0; i < structLogCount_; ++i) {
+    if (structLog_[i].used != 0u) structLog_[kept++] = structLog_[i];
+  }
+  structLogCount_ = kept;
+}
+
+void LiveRuntime::PublishStreams(core::System& sys, std::uint64_t block) noexcept {
+  std::uint8_t* b = streams_.Back();
+  const StreamSnapshotHeader h{maxStreams_, 0u, block};
+  std::memcpy(b, &h, sizeof(h));
+  for (std::uint32_t s = 0; s < maxStreams_; ++s) {
+    const Id ev = sys.LiveStreamEvent(s);
+    const StreamInfo si{s, ev, static_cast<std::uint32_t>(ev != 0u ? StreamState::Active : StreamState::Idle),
+                        streamStalls_[s]};
+    std::memcpy(b + sizeof(h) + std::size_t{s} * sizeof(StreamInfo), &si, sizeof(si));
+  }
+  streams_.Publish();
+}
+
+void LiveRuntime::RecordStartState(core::System& sys) noexcept {
+  std::uint32_t edits = applier_.CopyEdits(sys, editScratch_, editScratchCap_);
+  std::uint32_t lost = 0;
+  if (edits > editScratchCap_) {
+    lost += edits - editScratchCap_;
+    edits = editScratchCap_;
+  }
+  auto bankOf = [&](std::uint32_t slot, Id* id) {
+    for (std::uint32_t k = 0; k < knownBankCount_; ++k) {
+      if (knownBanks_[k].handle.slot == slot) {
+        *id = knownBanks_[k].bankId;
+        return true;
+      }
+    }
+    return false;
+  };
+  std::uint32_t cells = 0;
+  for (std::uint32_t i = 0; i < edits; ++i) {
+    Id id = 0;
+    cells += bankOf(editScratch_[i].bankSlot, &id) ? 1u : 0u;
+  }
+  lost += edits - cells;
+  const RecordBegin b{kRecordBegin,
+                      static_cast<std::uint16_t>(arenasSeen_ == 0u ? RecordOrigin::FromCreation : RecordOrigin::MidRun),
+                      static_cast<std::uint16_t>(lost < 0xFFFFu ? lost : 0xFFFFu), block_};
+  PushRecord(&b, sizeof(b));
+  for (std::uint32_t i = 0; i < edits; ++i) {
+    const EditView& e = editScratch_[i];
+    Id id = 0;
+    if (!bankOf(e.bankSlot, &id)) continue;
+    std::uint64_t now = e.original;
+    ValueApplier::ReadBits(sys, core::LiveCell{e.bankSlot, e.row}, e.fourcc, e.column, &now);
+    const RecordCell c{kRecordCell, id, e.fourcc, e.column, e.row, 0u, now, e.original};
+    PushRecord(&c, sizeof(c));
+  }
+  for (const OverrideOwner& o : overrideOwners_) {
+    if (o.used == 0u) continue;
+    const RecordOverride r{kRecordOverride, o.kind, o.id, o.value, o.target};
+    PushRecord(&r, sizeof(r));
   }
 }
 
