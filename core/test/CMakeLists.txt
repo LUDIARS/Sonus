@@ -66,3 +66,5 @@ snd_add_test(indep_g2_voicefx_test SOURCES indep_g2_voicefx_test.cpp LINK ${_cor
 set_tests_properties(indep_g2_voicefx_test PROPERTIES TIMEOUT 600)
 snd_add_test(indep_g2_kinds_test SOURCES indep_g2_kinds_test.cpp LINK ${_core_test_link})
 set_tests_properties(indep_g2_kinds_test PROPERTIES TIMEOUT 900)
+# snd_config's previous layout through snd_create (api; records the behaviour, see the report).
+snd_add_test(indep_g2_config_test SOURCES indep_g2_config_test.cpp LINK sonus)
