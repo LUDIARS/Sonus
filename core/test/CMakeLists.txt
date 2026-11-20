@@ -65,3 +65,7 @@ snd_add_test(indep_g4_seq_test SOURCES indep_g4_seq_test.cpp LINK ${_core_test_l
 set_tests_properties(indep_g4_seq_test PROPERTIES TIMEOUT 600)
 snd_add_test(indep_g4_voice_test SOURCES indep_g4_voice_test.cpp LINK ${_core_test_link})
 set_tests_properties(indep_g4_voice_test PROPERTIES TIMEOUT 600)
+snd_add_test(indep_g4_analysis_test SOURCES indep_g4_analysis_test.cpp LINK ${_core_test_link})
+set_tests_properties(indep_g4_analysis_test PROPERTIES TIMEOUT 600)
+snd_add_test(indep_g4_system_test SOURCES indep_g4_system_test.cpp LINK ${_core_test_link})
+set_tests_properties(indep_g4_system_test PROPERTIES TIMEOUT 600)
