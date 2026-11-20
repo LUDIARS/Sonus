@@ -500,7 +500,7 @@ SND_TEST(IndepG2Kinds, SurroundFeedsTheRearsOfA51Bus) {
   SND_REQUIRE(front > 0.1f);
   for (std::uint32_t c : {4u, 5u}) {
     const std::size_t at = r.ArgMaxAbs(f0, f0 + 2000, c);
-    std::printf("  rear %u: peak %.4f at +%zu (front %.4f)\n", c, r.h.At(at, c), at - f0, front);
+    std::printf("  rear %u: peak %.4f at +%llu (front %.4f)\n", c, r.h.At(at, c), static_cast<unsigned long long>(at - f0), front);
     SND_CHECK_NEAR(double(at - f0), 720.0, 3.0);
     SND_CHECK(r.MaxAbs(f0, f0 + 700, c) < 1e-3f * front);
   }

@@ -16,6 +16,18 @@
 
 namespace {
 
+// 64-byte aligned memory (std::aligned_alloc is not in the MinGW C library).
+inline void* AlignedAlloc64(std::size_t bytes) {
+  void* raw = std::malloc(bytes + 64u + sizeof(void*));
+  if (raw == nullptr) return nullptr;
+  const std::uintptr_t a = (reinterpret_cast<std::uintptr_t>(raw) + sizeof(void*) + 63u) & ~std::uintptr_t{63u};
+  reinterpret_cast<void**>(a)[-1] = raw;
+  return reinterpret_cast<void*>(a);
+}
+inline void AlignedFree64(void* p) {
+  if (p != nullptr) std::free(static_cast<void**>(p)[-1]);
+}
+
 using namespace g2;
 using snd::HashId;
 
@@ -271,8 +283,8 @@ SND_TEST(IndepG2Vfx, StagesRunInSlotOrder) {
     snd::EffectDesc dg{dsp::kEffectEcho, 1, 256, 5, g, nullptr, 0, 48000, 0};
     snd::EffectDesc dd{dsp::kEffectDistortion, 1, 256, 4, d, nullptr, 0, 48000, 0};
     const std::uint32_t bg = dsp::EffectStateBytes(dg, 48000), bd = dsp::EffectStateBytes(dd, 48000);
-    void* sg = std::aligned_alloc(64, bg);
-    void* sd = std::aligned_alloc(64, bd);
+    void* sg = AlignedAlloc64(bg);
+    void* sd = AlignedAlloc64(bd);
     dsp::EffectInit(sg, bg, dg, 48000);
     dsp::EffectInit(sd, bd, dd, 48000);
     std::vector<float> x(256, 1.0f);
@@ -288,8 +300,8 @@ SND_TEST(IndepG2Vfx, StagesRunInSlotOrder) {
       }
     }
     const float v = x[255];
-    std::free(sg);
-    std::free(sd);
+    AlignedFree64(sg);
+    AlignedFree64(sd);
     return v;
   };
   const float ref01 = offline(true), ref10 = offline(false);
@@ -662,7 +674,7 @@ SND_TEST(IndepG2Vfx, DeterministicSerialAndParallel) {
   SND_CHECK(a == c);
   for (std::size_t i = 0; i < a.size() && i < c.size(); ++i) {
     if (a[i] != c[i]) {
-      std::printf("  first difference at frame %zu (block %zu): %.7f vs %.7f\n", i / 2, i / 2 / 256, a[i], c[i]);
+      std::printf("  first difference at frame %llu (block %llu): %.7f vs %.7f\n", static_cast<unsigned long long>(i / 2), static_cast<unsigned long long>(i / 2 / 256), a[i], c[i]);
       break;
     }
   }

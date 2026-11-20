@@ -11,6 +11,18 @@
 
 namespace {
 
+// 64-byte aligned memory (std::aligned_alloc is not in the MinGW C library).
+inline void* AlignedAlloc64(std::size_t bytes) {
+  void* raw = std::malloc(bytes + 64u + sizeof(void*));
+  if (raw == nullptr) return nullptr;
+  const std::uintptr_t a = (reinterpret_cast<std::uintptr_t>(raw) + sizeof(void*) + 63u) & ~std::uintptr_t{63u};
+  reinterpret_cast<void**>(a)[-1] = raw;
+  return reinterpret_cast<void*>(a);
+}
+inline void AlignedFree64(void* p) {
+  if (p != nullptr) std::free(static_cast<void**>(p)[-1]);
+}
+
 namespace dsp = snd::dsp;
 constexpr std::uint32_t kRate = 48000;
 
@@ -19,10 +31,10 @@ struct Inst {
     d = snd::EffectDesc{type, channels, 256, static_cast<std::uint32_t>(p.size()), p.empty() ? nullptr : p.data(),
                         nullptr, 0, kRate, 0};
     bytes = dsp::EffectStateBytes(d, kRate);
-    mem = bytes != 0u ? std::aligned_alloc(64, bytes) : nullptr;
+    mem = bytes != 0u ? AlignedAlloc64(bytes) : nullptr;
     ok = mem != nullptr && dsp::EffectInit(mem, bytes, d, kRate);
   }
-  ~Inst() { std::free(mem); }
+  ~Inst() { AlignedFree64(mem); }
   Inst(const Inst&) = delete;
   Inst& operator=(const Inst&) = delete;
   std::vector<float> p;

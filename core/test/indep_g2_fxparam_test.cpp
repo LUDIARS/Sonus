@@ -57,7 +57,7 @@ SND_TEST(IndepG2Param, FadeIsOneLinearRampFromTheNextBlock) {
   const std::size_t s = RampStart(r, f0);
   SND_REQUIRE(s != static_cast<std::size_t>(-1));
   // Starts in the block that applies the command (or the one after: "the next block").
-  SND_CHECK_MSG(s / kB == f0 / kB || s / kB == f0 / kB + 1, "ramp starts at %zu, command applied at %zu", s, f0);
+  SND_CHECK_MSG(s / kB == f0 / kB || s / kB == f0 / kB + 1, "ramp starts at %llu, command applied at %llu", static_cast<unsigned long long>(s), static_cast<unsigned long long>(f0));
   const std::size_t start = (s / kB) * kB;
   // The whole fade is one line: value(f) = 1 - (f - start + k) / (kN * kB), k in {0, 1}.
   double worst0 = 0, worst1 = 0;
@@ -71,7 +71,7 @@ SND_TEST(IndepG2Param, FadeIsOneLinearRampFromTheNextBlock) {
   if (std::fmin(worst0, worst1) >= 1e-3) {
     for (std::size_t b = 0; b <= kN + 1; ++b) {
       const std::size_t f = start + b * kB;
-      std::printf("  block %zu: first %.6f second %.6f last %.6f\n", b, r.Ratio(f), r.Ratio(f + 1), r.Ratio(f + kB - 1));
+      std::printf("  block %llu: first %.6f second %.6f last %.6f\n", static_cast<unsigned long long>(b), r.Ratio(f), r.Ratio(f + 1), r.Ratio(f + kB - 1));
     }
   }
   SND_CHECK_MSG(std::fmin(worst0, worst1) < 1e-3, "fade deviates from one line by %g / %g", worst0, worst1);
@@ -120,7 +120,7 @@ SND_TEST(IndepG2Param, NewTargetDuringAFadeContinuesFromTheCurrentValue) {
       at = f;
     }
   }
-  SND_CHECK_MSG(worst <= maxStep, "jump of %g (ratio) at frame %zu (max legal step %g)", worst, at, maxStep);
+  SND_CHECK_MSG(worst <= maxStep, "jump of %g (ratio) at frame %llu (max legal step %g)", worst, static_cast<unsigned long long>(at), maxStep);
   double lowest = 1.0;
   for (std::size_t f = f0; f < r.h.Total(); ++f) lowest = std::fmin(lowest, r.Ratio(f));
   SND_CHECK(lowest > 0.35 && lowest < 0.65);  // turned around near the middle
@@ -635,7 +635,7 @@ SND_TEST(IndepG2Lod, BypassWaitsForTheTail) {
   for (int k = 1; k <= 4; ++k) {
     const std::size_t at = in0 + std::size_t(960 * k) + 32;
     const float exp = kCenter * std::pow(0.5f, float(k - 1));
-    SND_CHECK_MSG(std::fabs(h.At(at, 0) - exp) < 0.02f, "echo %d at %zu: %.4f, expected %.4f", k, at, h.At(at, 0),
+    SND_CHECK_MSG(std::fabs(h.At(at, 0) - exp) < 0.02f, "echo %d at %llu: %.4f, expected %.4f", k, static_cast<unsigned long long>(at), h.At(at, 0),
                   exp);
   }
 }
