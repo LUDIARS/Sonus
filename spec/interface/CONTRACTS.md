@@ -420,3 +420,9 @@ bank / buildtool:
 | 版 | 日付 | 内容 |
 | --- | --- | --- |
 | 1.2（段階 7-D dsp） | 2026-11-20 | D-208〜D-215: dsp に自前の実数 FFT（`fft.hpp`）、WSOLA のタイムストレッチ（`time_stretch.hpp`）、コンボリューション（`convolution.hpp`、標準エフェクト `snd.fx.convolution` = `EffectKind::Convolution` 14、`Count` 15、準備済み IR の登録表と IrSlot、ブロブ形式 SCIR）。契約ヘッダ・版・バンク形式（2.0）は変えない。`bank-format.md` 6.4 の表への 1 行の追記を依頼（D-11）。ボイスへの配線は依頼（D-10） |
+
+受け入れ側の決定（D-216〜）:
+
+| # | 決定 | 理由 |
+| --- | --- | --- |
+| D-216 | **`spec/interface/bank-format.md` 6.4 の表の末尾に `snd.fx.convolution` の 1 行を足す**（受け入れ側が実施）。既存の行と本文（「次の 14 種」）は変えない。本文の数は統合のときに直す | `BuildPipeline.BankFormatEffectTableMatchesDsp`（`tests/integration/build_pipeline_test.cpp`）が、`EffectKind::Count` までの全種別の行をこの表に求める。bank-format.md は契約の文書で D の持ち場の外だが、行の追加は契約への追加（minor）の範囲で、足さないと完了条件（全件通過）を満たせない。登録表に載せない案は、バス・DSPN・ライブリンク・ツールで別扱いが要るので採らない |
