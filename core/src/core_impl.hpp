@@ -149,6 +149,14 @@ struct EventState {  // RunEventLogic private, per EVNT row (4.2, 4.4)
   std::uint64_t shuffleMask;
   ClockSample lastStartClock;
   ClockSample comboClock;
+  // Stage 3 (group 4), D-141: shuffle without a clip limit. The order of a round is a
+  // permutation of the clips keyed by shuffleKey (drawn from the playback that starts
+  // the round); shufflePos = plays done in the round; shuffleRot = 1 when the round is
+  // rotated by one so that it does not start with the last clip of the previous round.
+  std::uint32_t shuffleKey;
+  std::uint32_t shufflePos;
+  std::uint32_t shuffleRot;
+  std::uint32_t shuffleLast;  // clip index (within the track) played last + 1, 0 = none
 };
 
 struct BankRecord {
@@ -308,6 +316,18 @@ struct ApplyPriv {
   std::uint32_t overrideCount = 0;
   std::uint32_t suspended = 0;
   std::uint32_t graphDirty = 0;
+  // Stage 3 (group 4).
+  // D-146: fade-in of the playback's start (seconds, 0 = none), from Play.flags; read by
+  // RunEventLogic when it initialises the row and by EvaluateDspParams.
+  float* playbackFadeIn = nullptr;  // [maxPlaybacks]
+  // D-145: child playbacks ApplyCommands created for the actions inside the first block of
+  // an immediate play (cancelled by RunEventLogic if the parent does not start). Per block.
+  struct ActionChild {
+    HandleRef parent;
+    HandleRef child;
+  };
+  ActionChild* actionChildren = nullptr;  // [actionChildCap]
+  std::uint32_t actionChildCount = 0, actionChildCap = 0;
 };
 
 // ---------------------------------------------------------------------------
@@ -316,6 +336,8 @@ struct ApplyPriv {
 // Core-internal PlaybackRequest flag bits (above the contract's, D-17 request column).
 inline constexpr std::uint32_t kRequestRejectReservationFull = 1u << 16;  // no reservation slot: end REJECTED
 inline constexpr std::uint32_t kRequestBufferDestroyed = 1u << 17;  // D-97: its user buffer is being destroyed
+// D-145: ApplyCommands applied the actions of the playback's first block already.
+inline constexpr std::uint32_t kRequestActionsApplied = 1u << 18;
 
 enum PlaybackPrivFlags : std::uint32_t {
   kPbStarted = 1u << 0,
@@ -328,6 +350,10 @@ enum PlaybackPrivFlags : std::uint32_t {
   kPbPausedState = 1u << 7,  // currently in Paused state (voices paused)
   kPbSourceStarted = 1u << 8,  // a source accepted at least one voice (FlushSourceCalls)
   kPbTimedStop = 1u << 9,    // stopping by voice releases from a clock (sample accurate)
+  // Stage 3 (group 4).
+  kPbVoiceDropped = 1u << 10,  // D-140: a voice ended because it went virtual ("never" return)
+  kPbCancelled = 1u << 11,     // D-145: child of an action whose parent did not start
+  kPbActionStop = 1u << 12,    // D-145: a StopEvent action of a start block asks to stop
 };
 struct PlaybackPriv {
   std::uint32_t flags;
@@ -341,6 +367,8 @@ struct PlaybackPriv {
   ClockSample stopClock;   // scheduled stop from a fired reservation
   float stopFadeSeconds;
   std::uint32_t voiceListHead;  // first voice slot of the playback (linked through VoiceStatic.nextInPlayback)
+  // Stage 3 (group 4), D-145: playback frames up to which the actions were fired.
+  std::uint64_t actionHorizon;
 };
 
 enum VoiceStaticFlags : std::uint32_t {
@@ -357,6 +385,9 @@ enum VoiceStaticFlags : std::uint32_t {
   kVsCtlPending = 1u << 10,  // a pause / resume waits for the end of the hold (D-43)
   kVsWantPaused = 1u << 11,  // the state to send then
   kVsVirtualized = 1u << 12, // SelectVoices sent Virtualize; Devirtualize on the next promotion
+  // Stage 3 (group 4).
+  kVsRestartReturn = 1u << 13,  // D-140: promoted with "restart": Render starts it at startFrame (SelectVoices sets, Render clears)
+  kVsKillVirtual = 1u << 14,    // D-140: went virtual with "never": RunEventLogic ends it (SelectVoices sets)
 };
 // Static per-voice values set by RunEventLogic at creation; read by
 // EvaluateDspParams, SelectVoices, BuildRenderList and Render (proposed schema
@@ -389,6 +420,17 @@ struct VoiceStatic {
   HandleRef followTransport;
   double transportBeats;
   double transportBeatsPerSample;
+  // Stage 3 (group 4).
+  std::uint32_t virtualReturn;   // D-140: 0 continue, 1 restart, 2 never (Event value when the asset sets none)
+  std::uint32_t markerCount;     // markers of the clip (no bank column yet: always 0, see markers.hpp)
+  // D-142 / CLIP.fadeOutMs: finite asset clips. playFrames = source frames from startFrame to
+  // the end (the asset end, or the end of the loop's last pass); 0 = endless (or not an asset).
+  std::uint64_t playFrames;
+  std::uint64_t loopStartFrame, loopEndFrame;  // loop counted (loopEnd 0 = no loop)
+  float endFadeSeconds;          // CLIP.fadeOutMs: linear fade over the last part (source time)
+  float reserved4;
+  const std::uint64_t* markerFrames;  // [markerCount] source frames (bank memory)
+  const Id* markerIds;                // [markerCount]
 };
 
 struct StartBatch {  // RunEventLogic: Start() requests per kind, issued once per block
@@ -448,6 +490,8 @@ struct DspPriv {
   std::uint32_t* catPlaying = nullptr;  // [catCap] voices playing per category this block
   float* catGainPrev = nullptr;
   float* pan = nullptr;  // [maxVirtual] 2D pan of the voice this block (clip random + curves), read by Render
+  // Stage 3 (group 4), D-143: layer crossfade weight at the end of the last block, per voice.
+  float* layerGain = nullptr;  // [maxVirtual]
 };
 
 struct SelectPriv {
@@ -481,6 +525,12 @@ struct ItemInput {
   // Outputs (chunk writes):
   float tail[kMaxChannels];  // last output frame per bus channel (late-chunk fade, D-15)
   VoiceRenderStatus status;
+  // Stage 3 (group 4), D-142 / CLIP.fadeOutMs: the clip's end inside this block (frameEnd
+  // is the cut; the chunk reports `ended`), and the linear fade toward it from endFadeFrom.
+  std::uint32_t clipEnds;
+  std::uint32_t endFadeActive;
+  std::uint32_t endFadeFrom;
+  float endFade0, endFadeDelta;
 };
 enum ItemFlags : std::uint32_t {
   kItemSourceRate = 1u << 0,
@@ -540,6 +590,12 @@ struct RenderPriv {
   float* outBuf = nullptr;                // [kMaxChannels * blockFrames] master output
   std::uint32_t lateTotal = 0;
   std::uint32_t lod = 0;
+  // Stage 3 (group 4), D-147 / D-148: loudness and spectrum of the output (meter 0) and of
+  // the buses with kBusMeter (meters 1..). analysis.cpp.
+  struct MeterSlot* meters = nullptr;      // [meterCount]
+  std::uint32_t meterCount = 0;            // CoreLimits.maxMeteredBuses + 1
+  std::uint32_t* busMeter = nullptr;       // [busCap] meter of the bus slot, kNoSlot none
+  struct AnalysisShared* analysis = nullptr;
 };
 
 struct TransportPriv {  // core's UpdateTransport when no music system is present
@@ -788,6 +844,18 @@ base::rows::RemoveResult RemoveTransportRow(schema::Tables& t, SlotIndex slot) n
 base::rows::RemoveResult RemoveReservationRow(schema::Tables& t, SlotIndex slot) noexcept;
 base::rows::RemoveResult RemoveCategoryRow(schema::Tables& t, SlotIndex slot) noexcept;
 base::rows::RemoveResult RemoveSnapshotRow(schema::Tables& t, SlotIndex slot) noexcept;
+
+// --- Stage 3 (group 4) -------------------------------------------------------------------
+// Playback time (frames) of an action at ACTN.timeMs = `ms` (sys_event.cpp, D-145).
+std::uint64_t ActionFrame(const Impl& im, float ms) noexcept;
+// Analysis (analysis.cpp, D-147 / D-148): meters of the output and of kBusMeter buses.
+bool InitAnalysis(Impl& im) noexcept;                       // Create
+void AnalysisMixBus(Impl& im, SlotIndex bus, std::uint32_t d, const float* const* chans, std::uint32_t channels) noexcept;  // Render (MixBuses)
+void AnalysisMixOutput(Impl& im) noexcept;                  // Render (MixBuses, after the buses)
+void AnalysisMaintain(Impl& im) noexcept;                   // Render (MixBuses, before the buses)
+bool AnalysisLoudness(const Impl& im, SlotIndex bus, float* shortTerm, float* integrated) noexcept;  // Publish
+void AnalysisPublish(Impl& im) noexcept;                    // Publish
+void AnalysisSwap(Impl& im) noexcept;                       // Update (owner thread)
 
 }  // namespace snd::core
 

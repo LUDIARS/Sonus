@@ -414,6 +414,28 @@ snd_playback_handle System::Play(Id event, snd_emitter_handle emitter, const snd
   return snd_playback_handle{h.Value()};
 }
 
+// Stage 3 (group 4), D-146: Play with a fade-in, in Play.flags bits 16..31 (milliseconds,
+// rounded, 1..65535; 0 = none). NaN, infinite or negative: invalid handle.
+snd_playback_handle System::PlayFade(Id event, snd_emitter_handle emitter, const snd_when* when,
+                                     float fadeInSeconds) noexcept {
+  if (!(fadeInSeconds >= 0.0f) || !(fadeInSeconds < 1.0e9f)) return snd_playback_handle{0};
+  SND_PRODUCER_OR(snd_playback_handle{0})
+  if (!ValidWhen(when)) return snd_playback_handle{0};
+  const HandleRef h = im.playbackSlots.Acquire();
+  if (h.generation == 0u) return snd_playback_handle{0};
+  cmd::Play c{};
+  c.playback = h;
+  c.emitter = Ref(emitter.value);
+  c.event = event;
+  float ms = fadeInSeconds * 1000.0f + 0.5f;
+  ms = ms > 65535.0f ? 65535.0f : ms;
+  c.flags = static_cast<std::uint32_t>(ms) << cmd::kPlayFadeInMsShift;
+  c.when = WhenOf(when);
+  c.priorityHint = PriorityHint(im, event);
+  RecordPlay(im, *pr, c, event, false);
+  return snd_playback_handle{h.Value()};
+}
+
 snd_result System::PlayOneShot(Id event, snd_emitter_handle emitter, const snd_when* when) noexcept {
   SND_PRODUCER_OR(SND_ERR_THREAD_NOT_REGISTERED)
   if (!ValidWhen(when)) return SND_ERR_INVALID_ARGUMENT;

@@ -468,6 +468,15 @@ snd_result CreateImpl(Impl& im) noexcept {
   }
   for (std::uint32_t r = 0; r < g.realTotal; ++r) rd.lastAssign[r] = 0xFFFFFFFFu;
   dsp::LoudnessMeterInit(*rd.loudness, g.outChannels, g.sampleRate);
+  // Stage 3 (group 4): D-143 layer weights, D-145 action children, D-146 fade-ins, analysis.
+  im.dp.layerGain = Arr<float>(im, g.maxVirtual, MemTag::Tables);
+  im.ap.playbackFadeIn = Arr<float>(im, g.maxPlaybacks, MemTag::Tables);
+  im.ap.actionChildCap = im.desc.limits.maxActionChildren;
+  im.ap.actionChildren = Arr<ApplyPriv::ActionChild>(im, im.ap.actionChildCap, MemTag::Tables);
+  if (im.dp.layerGain == nullptr || im.ap.playbackFadeIn == nullptr || im.ap.actionChildren == nullptr ||
+      !InitAnalysis(im)) {
+    return SND_ERR_OUT_OF_BUDGET;
+  }
   // RT workers (2.3).
   jobs::RtWorkerConfig rc;
   rc.workers = im.config.jobs.realtime_workers;
