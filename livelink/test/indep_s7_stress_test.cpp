@@ -199,8 +199,20 @@ SND_TEST(IndepS7Stress, ReconnectsDuringRequests) {
   // settle, then a final disconnect revert puts every structural edit back
   SND_CHECK(f.StepUntil([&] { return c->State() == ll::ClientState::Ready && f.server->Connected(); }, 10000));
   f.Steps(50);
-  const std::uint32_t seq = c->StopAuditions(true);
-  SND_CHECK(seq != 0u);
+  // the sender returns 0 while the client is not Ready (client.hpp): retry until queued
+  std::uint32_t seq = 0, zeros = 0;
+  SND_CHECK(f.StepUntil([&] {
+    seq = c->StopAuditions(true);
+    if (seq == 0u) ++zeros;
+    return seq != 0u;
+  }, 10000));
+  if (zeros != 0u) {
+    std::printf("[indep_s7] StopAuditions not queued %u time(s) after settling: state %u, disconnects %u, timeouts %u\n",
+                zeros, static_cast<unsigned>(c->State()), c->Stats().disconnects, c->Stats().timeouts);
+  }
+  std::int32_t res = 0;
+  SND_CHECK(f.StepUntil([&] { return c->TakeAck(seq, &res); }, 10000));
+  SND_CHECK_EQ(res, SND_OK);
   f.Steps(50);
   c->Stop();
   SND_CHECK(f.StepUntil([&] { return !f.server->Connected(); }));
