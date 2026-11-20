@@ -190,7 +190,11 @@ inline snd_id SEv(std::uint32_t m, std::uint32_t k) { return 0x5000u + m * 16u +
 //   >= passing and recording only actual requests, budget floor(carry + bps*dt) with only
 //   the fraction carried, Break first then impulse descending (array order on ties).
 // Event resolution of the model: single events only (`hasSingle[m]`); a group whose two
-// materials have no single event resolves to nothing (no default, no pair).
+// materials have no single event resolves to nothing (no default, no pair). Materials
+// >= hasSingle.size() are unknown (identity map): their sound material is 0xFFFF in the
+// grouping and cooldown keys, and only the known side's single plays (decision 1 of the
+// review). Cooldown table full: the oldest last request goes, the first inserted on ties
+// (decision 2 of the review).
 // ---------------------------------------------------------------------------
 struct ModelPlay {
   snd_id event;
@@ -223,8 +227,12 @@ struct CullModel {
     std::uint64_t last = 0;
     bool used = false;
     bool thisCall = false;
+    std::uint64_t order = 0;  // insertion order
   };
-  std::vector<CdRec> cd;  // fixed slots, in order of first use
+  std::vector<CdRec> cd;
+  std::uint64_t order = 0;
+  std::uint32_t Snd(std::uint16_t m) const { return m < hasSingle.size() ? m : 0xFFFFu; }
+  bool Has(std::uint16_t m) const { return m < hasSingle.size() && hasSingle[m]; }
   ModelStats st;
 
   static std::uint64_t Us(double s) { return static_cast<std::uint64_t>(std::llround(s * 1e6)); }
@@ -265,7 +273,8 @@ struct CullModel {
       const std::int64_t cx = static_cast<std::int64_t>(std::floor(c.position[0] / grid));
       const std::int64_t cy = static_cast<std::int64_t>(std::floor(c.position[1] / grid));
       const std::int64_t cz = static_cast<std::int64_t>(std::floor(c.position[2] / grid));
-      const std::uint32_t lo = std::min(c.material_a, c.material_b), hi = std::max(c.material_a, c.material_b);
+      const std::uint32_t lo = std::min(Snd(c.material_a), Snd(c.material_b));
+      const std::uint32_t hi = std::max(Snd(c.material_a), Snd(c.material_b));
       bool found = false;
       for (G& g : gs) {
         if (g.cx == cx && g.cy == cy && g.cz == cz && g.lo == lo && g.hi == hi && g.kind == c.kind) {
@@ -288,7 +297,7 @@ struct CullModel {
     std::vector<G> live;
     for (const G& g : gs) {
       const snd_contact& r = cs[g.rep];
-      const bool any = hasSingle[r.material_a] || hasSingle[r.material_b];
+      const bool any = Has(r.material_a) || Has(r.material_b);
       if (!any) {
         ++st.noEvent;
         continue;
@@ -334,8 +343,7 @@ struct CullModel {
       }
       --slots;
       ++st.requests;
-      // Record the cooldown. Full table: the oldest record goes; on equal times the
-      // implementer's tie rule is the lowest slot (records live in fixed slots).
+      // Record the cooldown. Full table: the oldest record goes, the first inserted on ties.
       if (hit != nullptr) {
         hit->last = now;
         hit->thisCall = true;
@@ -344,13 +352,13 @@ struct CullModel {
         if (cd.size() >= cooldownCap) {
           slot = 0;
           for (std::size_t j = 1; j < cd.size(); ++j) {
-            if (cd[j].last < cd[slot].last) slot = j;
+            if (cd[j].last < cd[slot].last || (cd[j].last == cd[slot].last && cd[j].order < cd[slot].order)) slot = j;
           }
           if (now - cd[slot].last < cooldownUs) ++st.evictions;
         } else {
           cd.push_back(CdRec{});
         }
-        cd[slot] = CdRec{oa, ob, g.lo, g.hi, g.kind, now, true, true};
+        cd[slot] = CdRec{oa, ob, g.lo, g.hi, g.kind, now, true, true, ++order};
       }
       auto emit = [&](std::uint16_t m) {
         ModelPlay p{EventOf(m, g.kind), g.kind, g.count, g.impulse, r.object_a, r.object_b,
@@ -362,8 +370,8 @@ struct CullModel {
           ++st.reqImpact;
         }
       };
-      if (hasSingle[r.material_a]) emit(r.material_a);
-      if (r.material_b != r.material_a && hasSingle[r.material_b]) emit(r.material_b);
+      if (Has(r.material_a)) emit(r.material_a);
+      if (r.material_b != r.material_a && Has(r.material_b)) emit(r.material_b);
     }
     return true;
   }

@@ -443,3 +443,43 @@ SND_TEST(IndepApi, CppWrapperAndC11) {
   SND_CHECK(snd::phys::ResetStats(p) == snd::Result::Ok);
   snd::phys::Destroy(p);
 }
+
+// Additional decision 1 of the review: a struct_size larger than sizeof (a newer minor's
+// longer struct) is accepted and only the known part is read; the rest is ignored.
+// (snd_create does the same.) Still refused: < 8, not a multiple of 4.
+SND_TEST(IndepApi, Defect_LargerStructSizeIsAccepted) {
+  Sys s;
+  alignas(16) unsigned char buf[sizeof(snd_physics_config) + 64];
+  std::memset(buf, 0xFF, sizeof buf);  // the unknown tail is garbage
+  snd_physics_config c = Cfg(nullptr);
+  c.budget_per_second = 10.0f;
+  c.cooldown_seconds = 0.0f;
+  c.struct_size = static_cast<std::uint32_t>(sizeof(snd_physics_config) + 64u);
+  std::memcpy(buf, &c, sizeof c);
+  snd_phys* p = nullptr;
+  SND_CHECK_EQ(snd_physics_create(s.sys, reinterpret_cast<const snd_physics_config*>(buf), nullptr, &p), SND_OK);
+  if (p != nullptr) {
+    // Table desc, larger too.
+    alignas(16) unsigned char tb[sizeof(snd_physics_table_desc) + 32];
+    std::memset(tb, 0xFF, sizeof tb);
+    std::vector<snd_id> single;
+    snd_physics_table_desc d = OneMaterial(&single);
+    d.struct_size = static_cast<std::uint32_t>(sizeof(snd_physics_table_desc) + 32u);
+    std::memcpy(tb, &d, sizeof d);
+    SND_CHECK_EQ(snd_physics_set_table(p, reinterpret_cast<const snd_physics_table_desc*>(tb)), SND_OK);
+    SND_CHECK_EQ(snd_physics_material_count(p), 1u);
+    std::vector<snd_contact> cs;
+    for (std::uint64_t i = 0; i < 3; ++i) {
+      cs.push_back(Contact(SND_CONTACT_IMPACT, i, i + 9, 0, 0, static_cast<float>(i), 0, 0, 1));
+    }
+    SND_CHECK_EQ(snd_phys_submit_contacts(p, cs.data(), 3, 0.1f), SND_OK);
+    SND_CHECK_EQ(phystest::Stats(p).group_requests, 1u);  // the known budget (10 / s) was read
+    snd_physics_destroy(p);
+  }
+  // Still refused: not a multiple of 4, smaller than 8.
+  c.struct_size = static_cast<std::uint32_t>(sizeof(snd_physics_config) + 2u);
+  std::memcpy(buf, &c, sizeof c);
+  p = nullptr;
+  SND_CHECK_EQ(snd_physics_create(s.sys, reinterpret_cast<const snd_physics_config*>(buf), nullptr, &p),
+               SND_ERR_INVALID_ARGUMENT);
+}

@@ -472,7 +472,7 @@ SND_TEST(IndepCull, ReferenceModelRandom) {
       const std::uint32_t n = rng.Below(30);
       for (std::uint32_t i = 0; i < n; ++i) {
         snd_contact x = Contact(rng.Below(8) == 0 ? SND_CONTACT_BREAK : SND_CONTACT_IMPACT, rng.Below(6), rng.Below(6),
-                                static_cast<std::uint16_t>(rng.Below(5)), static_cast<std::uint16_t>(rng.Below(5)),
+                                static_cast<std::uint16_t>(rng.Below(7)), static_cast<std::uint16_t>(rng.Below(7)),
                                 rng.Unit() * 2.0f - 1.0f, static_cast<float>(rng.Below(2)) * 0.5f, 0.0f,
                                 static_cast<float>(rng.Below(8)) * 0.25f);
         if (rng.Below(40) == 0) x.impulse = kNaN;
@@ -523,9 +523,11 @@ SND_TEST(IndepCull, ReferenceModelRandom) {
     SND_CHECK_EQ(st.requested_impact, m.st.reqImpact);
     SND_CHECK_EQ(st.requested_break, m.st.reqBreak);
     SND_CHECK_EQ(st.cooldown_evictions, m.st.evictions);
+    SND_CHECK_EQ(st.dropped_no_emitter, 0u);  // the model assumes emitters; none were missing
     // P41: accounting identities.
     SND_CHECK_EQ(st.contacts_received, st.dropped_invalid + st.dropped_threshold + st.dropped_work_overflow + st.merged +
                                            st.groups + st.slide_reports);
-    SND_CHECK_EQ(st.groups, st.dropped_no_event + st.dropped_cooldown + st.dropped_budget + st.group_requests);
+    SND_CHECK_EQ(st.groups, st.dropped_no_event + st.dropped_cooldown + st.dropped_budget + st.dropped_no_emitter +
+                                st.group_requests);
   }
 }

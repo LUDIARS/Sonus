@@ -141,10 +141,10 @@ SND_TEST(IndepResolve, MaterialMapUnknownToDefault) {
   Fx f;
   SND_REQUIRE_EQ(f.created, SND_OK);
   SND_REQUIRE_EQ(ThreeMaterials(f.phys), SND_OK);
-  // Identity: game 7 >= N = 3 is unknown -> default (the pair / single stages are skipped
-  // even though material 0 has a single event: undecided 6).
+  // Identity: game 7 >= N = 3 is unknown; material 0 is known and has a single event: that
+  // single plays (decision 1 of the review).
   SND_CHECK_EQ(f.Submit({Imp(0, 7)}), SND_OK);
-  SND_CHECK(f.PlayedEvents() == std::vector<snd_id>{kD});
+  SND_CHECK(f.PlayedEvents() == std::vector<snd_id>{kS0});
   const Rec play = f.rec.Of(SND_PHYSICS_RECORD_PLAY)[0];
   SND_CHECK(play.r.flags & SND_PHYSICS_RECORD_FLAG_UNKNOWN_MATERIAL);
   SND_CHECK_EQ(play.r.game_material_b, 7u);
@@ -274,8 +274,8 @@ SND_TEST(IndepResolve, CurvesOfSingleEvents) {
   c0.impulse_to_volume = phystest::Linear({{0.0f, 0.0f}, {10.0f, 2.0f}});
   c0.impulse_to_velocity = phystest::Linear({{0.0f, 0.0f}, {4.0f, 1.0f}});
   c0.mass_to_pitch = phystest::Linear({{1.0f, 1.0f}, {10.0f, 2.0f}});
-  c1.impulse_to_volume = phystest::Linear({{0.0f, 5000.0f}, {1.0f, 5000.0f}});  // clamps to 1000
-  c1.mass_to_pitch = phystest::Linear({{1.0f, 100.0f}, {10.0f, 0.001f}});       // [1/16, 16]
+  c1.impulse_to_volume = phystest::Linear({{0.0f, 1000.0f}, {1.0f, 1000.0f}});  // the largest volume
+  c1.mass_to_pitch = phystest::Linear({{1.0f, 16.0f}, {10.0f, 1.0f / 16.0f}});   // the pitch range
   SND_REQUIRE_EQ(snd_physics_set_curves(f.phys, 0, &c0), SND_OK);
   SND_REQUIRE_EQ(snd_physics_set_curves(f.phys, 1, &c1), SND_OK);
   SND_CHECK_EQ(f.Submit({Imp(0, 1, 2.5f, 5.5f, 20.0f)}), SND_OK);
@@ -290,7 +290,7 @@ SND_TEST(IndepResolve, CurvesOfSingleEvents) {
       SND_CHECK_EQ(r.Param(P(SND_PHYSICS_PARAM_MASS_NAME)), 5.5f);
     } else {
       SND_CHECK_EQ(r.r.volume, 1000.0f);
-      SND_CHECK_EQ(r.r.pitch, 1.0f / 16.0f);  // mass_b 20 -> 0.001 (end value) -> 1/16
+      SND_CHECK_EQ(r.r.pitch, 1.0f / 16.0f);  // mass_b 20 -> the end value 1/16
       SND_CHECK_EQ(r.r.mass, 20.0f);
     }
   }
@@ -314,15 +314,51 @@ SND_TEST(IndepResolve, CurvesOfSingleEvents) {
   SND_CHECK_EQ(snd_physics_set_curves(f.phys, 0, &bad), SND_ERR_INVALID_ARGUMENT);
   bad.mass_to_pitch.count = SND_PHYSICS_MAX_CURVE_POINTS + 1;
   SND_CHECK_EQ(snd_physics_set_curves(f.phys, 0, &bad), SND_ERR_INVALID_ARGUMENT);
+  // y ranges (decision 2 of the review): volume [0, 1000], pitch [1/16, 16], velocity |y| <= 1e6.
+  struct YCase {
+    int curve;  // 0 impulse_to_volume, 1 impulse_to_velocity, 2 mass_to_pitch, 3 speed_to_volume, 4 speed_to_pitch
+    float y;
+    bool ok;
+  };
+  const YCase ys[] = {{0, 1000.0f, true},  {0, 1000.5f, false}, {0, -0.001f, false}, {0, 0.0f, true},
+                      {3, 1000.0f, true},  {3, 1001.0f, false}, {1, 1.0e6f, true},   {1, -1.0e6f, true},
+                      {1, 1.1e6f, false},  {2, 16.0f, true},    {2, 16.5f, false},   {2, 1.0f / 16.0f, true},
+                      {2, 0.06f, false},   {4, 0.0f, false},    {4, 16.0f, true},    {4, kInf, false}};
+  for (const YCase& yc : ys) {
+    snd_physics_curves t{};
+    snd_physics_curve* cs[5] = {&t.impulse_to_volume, &t.impulse_to_velocity, &t.mass_to_pitch, &t.speed_to_volume,
+                                &t.speed_to_pitch};
+    *cs[yc.curve] = phystest::Linear({{0.0f, yc.curve == 2 || yc.curve == 4 ? 1.0f : 0.5f}, {1.0f, yc.y}});
+    const snd_result r1 = snd_physics_set_curves(f.phys, 1, &t);
+    SND_CHECK_MSG((r1 == SND_OK) == yc.ok, "set_curves curve %d y %g: %d", yc.curve, static_cast<double>(yc.y),
+                  static_cast<int>(r1));
+    // The same through set_table (default curves); a refused table leaves the old one.
+    snd_physics_table_desc d;
+    snd_physics_table_desc_init(&d);
+    d.material_count = 1;
+    d.default_curves = &t;
+    const snd_result r2 = snd_physics_set_table(f.phys, &d);
+    SND_CHECK_MSG((r2 == SND_OK) == yc.ok, "set_table curve %d y %g: %d", yc.curve, static_cast<double>(yc.y),
+                  static_cast<int>(r2));
+    if (r2 == SND_OK) SND_REQUIRE_EQ(ThreeMaterials(f.phys), SND_OK);
+    SND_CHECK_EQ(snd_physics_material_count(f.phys), 3u);
+    SND_REQUIRE_EQ(snd_physics_set_curves(f.phys, 0, &c2), SND_OK);
+  }
+  snd_physics_table_desc wd;
+  snd_physics_table_desc_init(&wd);
+  wd.weight_to_volume = phystest::Linear({{0.0f, 0.0f}, {1.0f, 1000.5f}});
+  SND_CHECK_EQ(snd_physics_set_table(f.phys, &wd), SND_ERR_INVALID_ARGUMENT);
+  SND_CHECK_EQ(snd_physics_material_count(f.phys), 3u);
   SND_CHECK_EQ(snd_physics_set_curves(f.phys, 3, &c0), SND_ERR_INVALID_ARGUMENT);
   // The rejected curves left c2 in place.
   SND_CHECK_EQ(f.Submit({Imp(0, 0, 2.5f)}), SND_OK);
   SND_CHECK_NEAR(f.rec.Of(SND_PHYSICS_RECORD_PLAY)[0].r.volume, 0.6f, 1e-6);
 }
 
-// Undecided 4 and 5: the curve fallback (material -> table default -> built-in) and the
-// lighter object's material / mass for pair and default events.
-SND_TEST(IndepResolve, Undecided_CurveFallbackAndLighterObject) {
+// Approved (decision 6 of the review; were undecided 4 and 5): the curve fallback
+// (material -> table default -> built-in) and the lighter object's material / mass for pair
+// and default events.
+SND_TEST(IndepResolve, CurveFallbackAndLighterObject) {
   Fx f;
   SND_REQUIRE_EQ(f.created, SND_OK);
   SND_REQUIRE_EQ(ThreeMaterials(f.phys), SND_OK);
@@ -337,7 +373,7 @@ SND_TEST(IndepResolve, Undecided_CurveFallbackAndLighterObject) {
   SND_CHECK_NEAR(f.rec.Of(SND_PHYSICS_RECORD_PLAY)[0].r.volume, 0.1f, 1e-6);
   // Pair (0, 2): the lighter object (B, 2 kg) decides material 2's curves and mass.
   snd_physics_curves c2{};
-  c2.mass_to_pitch = phystest::Linear({{0.0f, 0.0f}, {10.0f, 10.0f}});  // pitch = mass
+  c2.mass_to_pitch = phystest::Linear({{1.0f, 1.0f}, {10.0f, 10.0f}});  // pitch = mass on [1, 10]
   snd_physics_curves c0{};
   c0.mass_to_pitch = phystest::Linear({{0.0f, 4.0f}});
   SND_REQUIRE_EQ(snd_physics_set_curves(f.phys, 2, &c2), SND_OK);
@@ -413,4 +449,56 @@ SND_TEST(IndepResolve, ParameterIds) {
   snd_phys* p = reinterpret_cast<snd_phys*>(&bad);
   SND_CHECK_EQ(snd_physics_create(s.sys, &bad, nullptr, &p), SND_ERR_INVALID_ARGUMENT);
   SND_CHECK(p == nullptr);
+}
+
+// Decision 1 of the review: one material unknown -> the known side's single event (its
+// curves, its object's mass, its surface parameters), else the default; both unknown -> the
+// default; never the pair. Always fallback_unknown_material + the UNKNOWN_MATERIAL flag; the
+// stage statistics count the stage that decided.
+SND_TEST(IndepResolve, OneSideUnknownThreeCases) {
+  Fx f;
+  SND_REQUIRE_EQ(f.created, SND_OK);
+  SND_REQUIRE_EQ(ThreeMaterials(f.phys), SND_OK);
+  const snd_id W = 0x7101u;
+  snd_physics_material_entry e[4] = {};
+  e[0].sound_material = 0;
+  e[0].param_count = 1;
+  e[0].params[0] = snd_physics_param{W, 0.3f};
+  e[1].sound_material = SND_PHYSICS_UNMAPPED;
+  e[1].param_count = 1;
+  e[1].params[0] = snd_physics_param{W, 0.9f};
+  e[2].sound_material = 2;
+  e[3].sound_material = SND_PHYSICS_UNMAPPED;
+  SND_REQUIRE_EQ(snd_physics_set_material_map(f.phys, e, 4), SND_OK);
+  snd_physics_curves c0{};
+  c0.mass_to_pitch = phystest::Linear({{1.0f, 1.0f}, {10.0f, 10.0f}});
+  SND_REQUIRE_EQ(snd_physics_set_curves(f.phys, 0, &c0), SND_OK);
+  // (a) known A (game 0 -> 0, 5 kg) with unknown B (game 1, 2 kg): single of 0.
+  for (int swapped = 0; swapped < 2; ++swapped) {
+    SND_CHECK_EQ(f.Submit({swapped ? Imp(1, 0, 1.0f, 2.0f, 5.0f) : Imp(0, 1, 1.0f, 5.0f, 2.0f)}), SND_OK);
+    SND_REQUIRE_EQ(f.rec.Count(SND_PHYSICS_RECORD_PLAY), 1u);
+    const Rec r = f.rec.Of(SND_PHYSICS_RECORD_PLAY)[0];
+    SND_CHECK_EQ(r.r.event, kS0);
+    SND_CHECK_EQ(r.r.stage, SND_PHYSICS_STAGE_SINGLE);
+    SND_CHECK(r.r.flags & SND_PHYSICS_RECORD_FLAG_UNKNOWN_MATERIAL);
+    SND_CHECK_EQ(r.r.mass, 5.0f);
+    SND_CHECK_NEAR(r.r.pitch, 5.0f, 1e-6);  // material 0's curve, its own object's mass
+    SND_CHECK_EQ(r.Param(W), 0.3f);         // only the known side's surface parameters
+  }
+  // (b) known material 2 has no single event -> default.
+  SND_CHECK_EQ(f.Submit({Imp(2, 1)}), SND_OK);
+  SND_CHECK(f.PlayedEvents() == std::vector<snd_id>{kD});
+  SND_CHECK_EQ(f.rec.Of(SND_PHYSICS_RECORD_PLAY)[0].r.stage, SND_PHYSICS_STAGE_DEFAULT);
+  SND_CHECK(f.rec.Of(SND_PHYSICS_RECORD_PLAY)[0].r.flags & SND_PHYSICS_RECORD_FLAG_UNKNOWN_MATERIAL);
+  // (c) both unknown -> default.
+  SND_CHECK_EQ(f.Submit({Imp(1, 3)}), SND_OK);
+  SND_CHECK(f.PlayedEvents() == std::vector<snd_id>{kD});
+  // Pair (0, 2) is only for two known materials: game 0 with game 2 still uses it.
+  SND_CHECK_EQ(f.Submit({Imp(0, 2)}), SND_OK);
+  SND_CHECK(f.PlayedEvents() == std::vector<snd_id>{kPA});
+  const snd_physics_stats st = phystest::Stats(f.phys);
+  SND_CHECK_EQ(st.fallback_unknown_material, 4u);
+  SND_CHECK_EQ(st.fallback_pair_to_single, 2u);
+  SND_CHECK_EQ(st.fallback_single_to_default, 2u);
+  SND_CHECK_EQ(st.resolved_pair, 1u);
 }

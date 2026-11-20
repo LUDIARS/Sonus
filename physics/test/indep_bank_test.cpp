@@ -144,7 +144,10 @@ SND_TEST(IndepBank, CreateDescRules) {
   SND_CHECK_EQ(st.group_requests, 1u);
   SND_CHECK_EQ(st.dropped_budget, 1u);
   SND_CHECK_EQ(st.tracking_started, 1u);
-  SND_CHECK_EQ(st.tracking_dropped, 1u);
+  // Decision 3 of the review: the second new key overflows the new-key area (capacity =
+  // max_tracked_pairs = 1) -> dropped_work_overflow, not tracking_dropped.
+  SND_CHECK_EQ(st.dropped_work_overflow, 1u);
+  SND_CHECK_EQ(st.tracking_dropped, 0u);
   snd_phys_destroy(p);
 }
 
@@ -203,6 +206,13 @@ SND_TEST(IndepBank, CorruptValuesInPhys) {
       {"NaN dB", [](PhysBuilder& b) { b.curves[0].speedToVolumeDb[1] = kNaN; }, SND_ERR_CORRUPT},
       {"decreasing thresholds", [](PhysBuilder& b) { b.curves[0].impulseToVelocity[1] = 0.01f; }, SND_ERR_CORRUPT},
       {"5 materials > 4", [](PhysBuilder& b) { b = PhysBuilder(5); }, SND_ERR_LIMIT_REACHED},
+      // Ranges (decision 5 of the review): |cents| <= 4800, |dB| <= 200.
+      {"cents +-4800", [](PhysBuilder& b) { b.curves[0].massToPitchCents[0] = -4800.0f; b.curves[1].massToPitchCents[1] = 4800.0f; }, SND_OK},
+      {"cents 4800.5", [](PhysBuilder& b) { b.curves[1].massToPitchCents[1] = 4800.5f; }, SND_ERR_CORRUPT},
+      {"cents -4801", [](PhysBuilder& b) { b.curves[0].massToPitchCents[0] = -4801.0f; }, SND_ERR_CORRUPT},
+      {"dB +-200", [](PhysBuilder& b) { b.curves[0].speedToVolumeDb[0] = -200.0f; b.curves[0].speedToVolumeDb[1] = 200.0f; }, SND_OK},
+      {"dB 200.1", [](PhysBuilder& b) { b.curves[1].speedToVolumeDb[1] = 200.1f; }, SND_ERR_CORRUPT},
+      {"dB -201", [](PhysBuilder& b) { b.curves[1].speedToVolumeDb[0] = -201.0f; }, SND_ERR_CORRUPT},
   };
   std::uint32_t id = 0x5000u;
   for (const Case& k : cases) {
@@ -222,8 +232,8 @@ SND_TEST(IndepBank, CorruptValuesInPhys) {
   snd_physics_destroy(p);
 }
 
-// P08: extreme but finite curve values in PHYS: either refused, or every value the
-// module produces stays finite (2^(c/1200) and 10^(d/20) overflow float for big c / d).
+// P08: extreme but finite curve values in PHYS are refused (decision 5 of the review); at
+// the limits of the ranges every value the module produces stays finite and in range.
 SND_TEST(IndepBank, ExtremeFiniteCurves) {
   Sys s;
   snd_physics_config c = Cfg(nullptr);
@@ -240,6 +250,15 @@ SND_TEST(IndepBank, ExtremeFiniteCurves) {
   b.curves[0].massToPitchCents[1] = -1.0e30f;
   b.curves[0].speedToVolumeDb[0] = -3.0e38f;
   b.curves[0].speedToVolumeDb[1] = 3.0e38f;
+  {
+    snd_bank_handle big{};
+    SND_REQUIRE(s.LoadBank("big.sndb", PhysOnlyBank(b.Build(), 0x6000u), &big));
+    SND_CHECK_EQ(snd_physics_load_bank_table(p, big, b.id), SND_ERR_CORRUPT);
+  }
+  b.curves[0].massToPitchCents[0] = 4800.0f;
+  b.curves[0].massToPitchCents[1] = -4800.0f;
+  b.curves[0].speedToVolumeDb[0] = -200.0f;
+  b.curves[0].speedToVolumeDb[1] = 200.0f;
   b.curves[0].impulseToVelocity[0] = 0.0f;
   b.curves[0].impulseToVelocity[1] = 0.0f;
   b.curves[0].impulseToVelocity[2] = 0.0f;
@@ -247,7 +266,7 @@ SND_TEST(IndepBank, ExtremeFiniteCurves) {
   snd_bank_handle bank{};
   SND_REQUIRE(s.LoadBank("x.sndb", PhysOnlyBank(b.Build(), 0x6001u), &bank));
   const snd_result r = snd_physics_load_bank_table(p, bank, b.id);
-  snd::test::Note("extreme curves: load_bank_table -> %d", static_cast<int>(r));
+  SND_CHECK_EQ(r, SND_OK);
   if (r == SND_OK) {
     SND_CHECK_EQ(Submit(s, rec, p, {C(SND_CONTACT_IMPACT, 0, 0, 1.0f, 1, 1.0f, 1.0f), C(SND_CONTACT_IMPACT, 0, 0, 1.0f, 2, 50.0f, 50.0f),
                                     C(SND_CONTACT_SLIDE, 0, 0, 0, 3, 1, 1, 0.05f), C(SND_CONTACT_SLIDE, 0, 0, 0, 4, 1, 1, 50.0f),
