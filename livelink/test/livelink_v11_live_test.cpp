@@ -621,3 +621,49 @@ SND_TEST(LivelinkV11, RemovingALiveBusTakesItsLiveEffectsAndTheLogIsReserved) {
   SND_CHECK_EQ(ed.calls.size(), 0u);  // nothing left to undo
   SND_CHECK_EQ(t.f.rt->Drops().structLog, 0u);
 }
+
+// D-170: the client keeps kClientCellsKept CellValue answers; untaken ones pushed out are counted.
+SND_TEST(LivelinkV11, ClientKeepsAFixedNumberOfAnswersAndCountsTheLost) {
+  Session s;
+  SND_REQUIRE(s.Ready());
+  std::vector<std::uint32_t> seqs;
+  const std::uint32_t n = ll::kClientCellsKept + 44u;
+  for (std::uint32_t i = 0; i < n; ++i) {
+    std::uint32_t q = 0;
+    SND_REQUIRE(s.f.StepUntil([&] { return (q = s.client->ReadCell(BusVolumeCell("Sfx"))) != 0u; }));
+    seqs.push_back(q);
+    if (i % 16u == 0u) s.f.Step();
+  }
+  SND_REQUIRE(s.f.StepUntil([&] { return s.client->Sequences().cells == n; }, 20000));
+  ll::CellValue v{};
+  SND_CHECK(!s.client->TakeCell(seqs.front(), &v));  // pushed out
+  SND_CHECK(s.client->TakeCell(seqs.back(), &v));
+  SND_CHECK_EQ(s.client->Stats().cellsLost, 44u);
+  // Taken answers do not count when pushed out later.
+  for (std::uint32_t i = n - ll::kClientCellsKept; i < n - 1u; ++i) SND_CHECK(s.client->TakeCell(seqs[i], &v));
+  const std::uint32_t q = s.client->ReadCell(BusVolumeCell("Sfx"));
+  SND_REQUIRE(s.WaitCellValue(q, &v));
+  SND_CHECK_EQ(s.client->Stats().cellsLost, 44u);
+}
+
+// D-170: one started Server per LiveRuntime.
+SND_TEST(LivelinkV11, ASecondServerOnTheSameRuntimeCannotStart) {
+  Fixture f;
+  f.Load(DevBank());
+  SND_REQUIRE_EQ(f.StartServer(), SND_OK);
+  ll::MemoryLink link2;
+  SND_REQUIRE(link2.Init(snd::base::DefaultAllocator(), 1u << 16));
+  ll::ServerDesc sd;
+  sd.system = f.sys;
+  sd.runtime = f.rt;
+  sd.allocator = &snd::base::DefaultAllocator();
+  sd.acceptor = &link2.acceptor();
+  ll::Server* second = nullptr;
+  SND_REQUIRE_EQ(ll::Server::Create(sd, &second), SND_OK);
+  SND_CHECK_EQ(second->Start(), SND_ERR_LIMIT_REACHED);
+  f.StopServer();  // the first one goes away: the second one may start
+  SND_CHECK_EQ(second->Start(), SND_OK);
+  second->Stop();
+  SND_CHECK_EQ(second->Start(), SND_OK);  // and again after its own Stop
+  ll::Server::Destroy(second);
+}
