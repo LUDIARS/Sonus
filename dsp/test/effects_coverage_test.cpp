@@ -195,17 +195,19 @@ SND_TEST(EffectsCoverage, ReverbLevelsDelaysAndFilters) {
     const std::vector<float> h = ImpulseResponse(er, n);
     // Early reflections only: 8 taps over 17.1 ms from ReflectionsDelay (20 ms), nothing after.
     SND_CHECK(Energy(h) > 0.1);
-    SND_CHECK(Energy(h, static_cast<std::size_t>(0.045 * kSr)) < 1e-12);
+    // (Reverb -10000 mB is 1e-5 of amplitude, not off: -100 dB is left of the late part.)
+    SND_CHECK(Energy(h, static_cast<std::size_t>(0.045 * kSr)) < Energy(h) * 1e-8);
     // ReflectionsDelay: the first reflection at 20 ms.
     SND_CHECK_NEAR(double(FirstAbove(h, 1e-6f)), 0.02 * kSr, 2.0);
   }
   // ReverbDelay moves the late onset by itself; Density shortens the delay lines.
   {
     Fx a = Reverb({{7, 0.0f}, {9, 0.0f}}), b = Reverb({{7, 0.0f}, {9, 0.05f}});
-    const std::size_t oa = FirstAbove(ImpulseResponse(a, n), 1e-6f), ob = FirstAbove(ImpulseResponse(b, n), 1e-6f);
+    // Reflections at -10000 mB still leave 1e-5 of amplitude: the late onset is above 1e-4.
+    const std::size_t oa = FirstAbove(ImpulseResponse(a, n), 1e-4f), ob = FirstAbove(ImpulseResponse(b, n), 1e-4f);
     SND_CHECK_NEAR(double(ob) - double(oa), 0.05 * kSr, 3.0);
     Fx d0 = Reverb({{7, 0.0f}, {9, 0.0f}, {11, 0.0f}});
-    const std::size_t od = FirstAbove(ImpulseResponse(d0, n), 1e-6f);
+    const std::size_t od = FirstAbove(ImpulseResponse(d0, n), 1e-4f);
     snd::test::Note("late onset: density 100 %zu, density 0 %zu frames", oa, od);
     SND_CHECK(od + 400 < oa);  // shortest line 1031 -> ~516 frames
   }
@@ -214,13 +216,15 @@ SND_TEST(EffectsCoverage, ReverbLevelsDelaysAndFilters) {
     auto density = [&](float diffusion) {
       Fx fx = Reverb({{10, diffusion}});
       const std::vector<float> h = ImpulseResponse(fx, n);
-      const std::size_t o = FirstAbove(h, 1e-6f);
+      const std::size_t o = FirstAbove(h, 1e-4f);
+      float peak = 0.0f;
+      for (float v : h) peak = std::max(peak, std::fabs(v));
       std::size_t count = 0;
-      for (std::size_t i = o; i < o + 960 && i < h.size(); ++i) count += std::fabs(h[i]) > 1e-3f ? 1u : 0u;
+      for (std::size_t i = o; i < o + 960 && i < h.size(); ++i) count += std::fabs(h[i]) > 1e-2f * peak ? 1u : 0u;
       return count;
     };
     const std::size_t sparse = density(0.0f), dense = density(100.0f);
-    snd::test::Note("samples above -60 dB in the first 20 ms of the tail: diffusion 0 %zu, 100 %zu", sparse, dense);
+    snd::test::Note("samples above -40 dB of the peak in the first 20 ms of the tail: diffusion 0 %zu, 100 %zu", sparse, dense);
     SND_CHECK(dense > sparse * 2u);
   }
   // RoomHF at HFReference and RoomLF below LFReference (early path, linear: ratios exact).
