@@ -11,7 +11,11 @@ set(SND_DSP_TEST_SOURCES
   indep_filter_test.cpp
   indep_pan_meter_test.cpp
   indep_effects_test.cpp
-  indep_effects_behaviour_test.cpp)
+  indep_effects_behaviour_test.cpp
+  # Stage 7-D: FFT, time stretch, convolution (D-208..D-215).
+  fft_test.cpp
+  time_stretch_test.cpp
+  convolution_test.cpp)
 
 snd_add_test(dsp_test
   SOURCES ${SND_DSP_TEST_SOURCES}
