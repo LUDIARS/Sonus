@@ -407,8 +407,9 @@ SND_API snd_result SND_CALL snd_set_event_voice_effect(snd_system* sys, snd_id e
  * sounding voice from the next block (interpolated inside the block), a voice that takes
  * a slot later from its first block. Kept for the playback's life. SND_ERR_INVALID_HANDLE:
  * 0 or stale; SND_ERR_INVALID_ARGUMENT: slot out of range, param_index >= 16, value not
- * finite. Reported when applied: an [init] parameter of the stage's kind (warning
- * SND_ERR_INVALID_ARGUMENT, object = playback, dropped); the per-playback value table
+ * finite. Reported when applied: an [init] parameter of the kind the playback's Event
+ * has set now in that stage (warning SND_ERR_INVALID_ARGUMENT, object = playback, dropped;
+ * a sounding voice's slot also never takes [init] values of its own kind); the per-playback value table
  * (snd_config voice_effect_settings) full (warning SND_ERR_LIMIT_REACHED, object =
  * playback, dropped). */
 SND_API snd_result SND_CALL snd_set_playback_effect_param(snd_system* sys, snd_playback_handle playback,

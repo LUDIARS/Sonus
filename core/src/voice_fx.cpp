@@ -20,8 +20,11 @@
 //        snd_set_playback_effect_param values of the voice's playback override the
 //        Event's: from the first block of a slot (no ramp from the Event's value), and
 //        for a sounding voice from the next block, interpolated inside it (D-26).
-//        [init] parameters (kParamInitOnly) are read by the effect's init only: a
-//        playback value for one is refused with a warning when applied.
+//        [init] parameters (kParamInitOnly) are read by the effect's init only. A playback
+//        value is judged when applied by the kind the playback's Event has set NOW in that
+//        stage: an [init] parameter of it is refused with a warning (object = playback).
+//        When values are put into a slot that is sounding, [init] parameters of the
+//        slot's own kind are skipped (the slot may hold an older kind).
 // D-133  No free slot, or a chain whose state does not fit voice_effect_bytes: the voice
 //        plays dry (no heavy effects) for this real assignment; never refused. Counted
 //        (System::GetVoiceFxStats) and reported once per assignment as a warning
