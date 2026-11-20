@@ -41,3 +41,18 @@ set_tests_properties(buildtool_build_edge_test PROPERTIES TIMEOUT 600)
 snd_add_test(buildtool_source_patch_test
   SOURCES source_patch_test.cpp
   LINK sonus_buildtool sonus_mocks)
+
+# Independent tests of group M (tool/test/indep_s7_model_properties.md, G1..G5): patch
+# compilation order, invalid graphs and the provisional XPCH chunk.
+snd_add_test(buildtool_indep_s7_patch_test
+  SOURCES indep_s7_patch_test.cpp
+  LINK sonus_buildtool sonus_mocks)
+
+# Defects found by those tests: they fail on purpose, one CTest test each.
+snd_add_test(buildtool_indep_s7_defects_test
+  SOURCES indep_s7_defects_test.cpp
+  LINK sonus_buildtool sonus_mocks)
+set_tests_properties(buildtool_indep_s7_defects_test PROPERTIES DISABLED TRUE)  # run per defect below
+foreach(_d Defect_ReadPatchChunkAcceptsOutOfRangeIndices)
+  add_test(NAME buildtool_indep_s7_${_d} COMMAND buildtool_indep_s7_defects_test --filter ${_d})
+endforeach()
