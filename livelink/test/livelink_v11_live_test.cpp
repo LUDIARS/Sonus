@@ -497,6 +497,7 @@ SND_TEST(LivelinkV11, ReloadFinishesWhenTheToolGoesAway) {
   ll::ReloadStatus st[4];
   SND_REQUIRE(s.f.StepUntil([&] { return s.client->CopyReloadStatus(st, 4) >= 1u; }));  // the game started it
   s.client->Disconnect();
+  SND_REQUIRE(s.f.StepUntil([&] { return !s.f.server->Connected(); }));
   SND_CHECK(s.f.StepUntil([&] { return s.f.server->Stats().reloadsDone == 1u; }));
   SND_REQUIRE(s.Ready());  // the client reconnects
   s.client->QueryBanks();

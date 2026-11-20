@@ -723,7 +723,15 @@ struct Server::Impl final : FrameReader::Handler {
   void PollReload() noexcept {
     if (!reload.active) return;
     switch (sys->GetBankState(reload.bank)) {
-      case SND_BANK_STATE_LOADED: return FinishReload(ReloadPhase::Done, SND_OK);
+      case SND_BANK_STATE_LOADED: {
+        // Done once the audio side published the new registration too (BankList / the
+        // override layer see it from then on).
+        RefreshBanks();
+        for (std::uint32_t i = 0; i < bankCount; ++i) {
+          if (banks[i].handle.Value() == reload.bank.value) return FinishReload(ReloadPhase::Done, SND_OK);
+        }
+        return;
+      }
       case SND_BANK_STATE_FAILED: return FinishReload(ReloadPhase::Failed, SND_ERR_IO);
       case SND_BANK_STATE_UNLOADED:
       case SND_BANK_STATE_UNLOADING: return FinishReload(ReloadPhase::Failed, SND_ERR_INVALID_HANDLE);
