@@ -119,3 +119,90 @@ SND_TEST(IndepDefects, Defect_TimeStretchAntiPhaseStereoLosesAlignment) {
     SND_CHECK_MSG(rs < 2.0 * rm + 0.02, "speed %g: anti-phase stereo residual %g vs mono %g", speed, rs, rm);
   }
 }
+
+namespace {
+
+std::vector<float> DecayNoise(std::uint32_t n, std::uint32_t seed, double tau) {
+  dsptest::Noise nz(seed);
+  std::vector<float> v(n);
+  for (std::uint32_t i = 0; i < n; ++i) v[i] = static_cast<float>(nz.Next(1.0f) * 0.4 * std::exp(-i / tau));
+  return v;
+}
+
+struct PreparedIr {
+  dsptest::AlignedMem mem;
+  const ConvolutionIr* ir = nullptr;
+  std::uint32_t slot = 0;
+  PreparedIr(const std::vector<float>& h, std::uint32_t b) {
+    const float* p[1] = {h.data()};
+    const ConvolutionIrDesc d{p, 1, static_cast<std::uint32_t>(h.size()), kRate, 1.0f};
+    const std::size_t bytes = ConvolutionIrBytes(d, kRate, b);
+    mem.Reset(bytes);
+    ir = ConvolutionPrepareIr(mem.get(), bytes, d, kRate, b);
+    if (ir != nullptr) slot = ConvolutionRegisterIr(ir);
+  }
+  ~PreparedIr() {
+    if (slot != 0u) ConvolutionUnregisterIr(slot);
+  }
+};
+
+struct ConvFx {
+  dsptest::AlignedMem mem;
+  float params[kMaxEffectParams] = {};
+  snd::EffectDesc desc{};
+  ConvFx(std::uint32_t slot, std::uint32_t b) {
+    EffectDefaultParams(EffectKind::Convolution, params);
+    params[kConvIrSlot] = static_cast<float>(slot);
+    params[kConvPartitionFrames] = static_cast<float>(b);
+    params[kConvMaxIrMs] = 100.0f;
+    desc.effect_type = kEffectConvolution;
+    desc.channels = 1;
+    desc.max_frames = 256;
+    desc.param_count = kConvParamCount;
+    desc.initial_params = params;
+    mem.Reset(EffectStateBytes(desc, kRate), dsptest::kDirty);
+    EffectInit(mem.get(), mem.size(), desc, kRate);
+  }
+  void Process(float* buf, std::uint32_t n, float slotEnd) {
+    float s[1] = {slotEnd}, e[1] = {slotEnd};
+    snd::ParamBlock pb{s, e, 1, 1, nullptr};
+    float* p[1] = {buf};
+    EffectProcess(mem.get(), p, p, 1, n, &pb, nullptr);
+  }
+};
+
+}  // namespace
+
+// D-215 / convolution.hpp: "Changing IrSlot swaps the IR at the call boundary;
+// the input history (FDL) is kept, so the new IR applies to the recent input at
+// once". The direct head switches at the call boundary, but the FDL output of
+// the partition period in progress was computed at the end of the previous
+// period with the OLD IR (fx_convolution.cpp Step writes OutBuf for the next
+// period; ConvolutionProcess adds it without re-resolving). So for up to B
+// frames after the switch the output is head(new IR) + tail(old IR); after an
+// unregister the old IR's tail is still heard for up to B frames. Calls aligned
+// to B (block 256, B 64): the first 64 frames after the switch are wrong.
+SND_TEST(IndepDefects, Defect_ConvolutionIrSwitchLagsOnePartition) {
+  const std::uint32_t b = 64;
+  const std::vector<float> h1 = DecayNoise(600, 1, 150.0), h2 = DecayNoise(600, 2, 150.0);
+  PreparedIr a(h1, b), c(h2, b);
+  SND_REQUIRE(a.slot != 0u && c.slot != 0u);
+  ConvFx fx(a.slot, b);
+  std::vector<float> x(2048);
+  dsptest::Noise nz(4);
+  for (float& v : x) v = nz.Next(0.5f);
+  std::vector<float> y(x);
+  fx.Process(y.data(), 1024, static_cast<float>(a.slot));
+  fx.Process(y.data() + 1024, 1024, static_cast<float>(c.slot));
+  double worst = 0.0;
+  std::size_t at = 0;
+  for (std::size_t i = 1024; i < 2048; ++i) {
+    double want = 0.0;
+    for (std::size_t k = 0; k < h2.size() && k <= i; ++k) want += static_cast<double>(h2[k]) * x[i - k];
+    if (std::fabs(y[i] - want) > worst) {
+      worst = std::fabs(y[i] - want);
+      at = i;
+    }
+  }
+  SND_CHECK_MSG(worst < 1e-4, "after the switch at frame 1024: error %g at frame %zu (old IR tail)", worst, at);
+}
