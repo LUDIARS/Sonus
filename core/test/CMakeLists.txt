@@ -62,3 +62,7 @@ set_tests_properties(core_fx_load_test PROPERTIES TIMEOUT 600)
 # Repeat under TSan / Release: ctest --repeat until-fail:20 -R indep_g2_
 snd_add_test(indep_g2_fxparam_test SOURCES indep_g2_fxparam_test.cpp LINK ${_core_test_link})
 set_tests_properties(indep_g2_fxparam_test PROPERTIES TIMEOUT 600)
+snd_add_test(indep_g2_voicefx_test SOURCES indep_g2_voicefx_test.cpp LINK ${_core_test_link})
+set_tests_properties(indep_g2_voicefx_test PROPERTIES TIMEOUT 600)
+snd_add_test(indep_g2_kinds_test SOURCES indep_g2_kinds_test.cpp LINK ${_core_test_link})
+set_tests_properties(indep_g2_kinds_test PROPERTIES TIMEOUT 900)

@@ -34,6 +34,7 @@ inline snd_config G2Config() {
   snd_config c = indep::Config();
   c.tuning.lod_down_blocks = 0x7FFFFFFFu;  // never lower the quality (2.5 condition)
   c.tuning.lod_up_blocks = 1u;
+  c.tuning.rt_spin_microseconds = 5000000u;  // no late chunk (2.3) in bit-identity runs
   return c;
 }
 
@@ -138,8 +139,100 @@ inline snd_dsp_effect ProbePlugin() {
   return e;
 }
 
+// --- G2Kind: analytic signals at the output rate (no resampler on the voice path) -----------
+// SYNP frequency f selects the signal (the voice's channels all get it unless stated):
+//   0 < f < 1000          DC of level f / 1000, endless
+//   1000 <= f < 2000      one impulse at frame 0, then zeros, endless: amplitude 1 for f == 1000,
+//                         (f - 1000) / 1000 otherwise
+//   2000 <= f < 1e6       DC 1.0 for (f - 2000) frames, then the voice ends
+//   1e6 <= f < 2e6        sine of (f - 1e6) Hz, amplitude 1, endless
+//   f == 2e6              stereo: channel 0 sine 300 Hz, channel 1 sine 700 Hz, amplitude 0.5
+//   f == 3e6              stereo: impulse 1.0 on channel 0 at frame 0, channel 1 silent
+struct G2Inst {
+  float f;
+  std::uint32_t live;
+};
+class G2Kind final : public snd::source::ISourceKind {
+ public:
+  snd::SourceKind Kind() const noexcept override { return snd::SourceKind::Oscillator; }
+  bool RendersAtOutputRate() const noexcept override { return true; }
+  std::size_t PoolBytes(const snd::source::SourceLimits& l) const noexcept override { return sizeof(G2Inst) * l.maxVoices; }
+  bool Init(void* pool, std::size_t, const snd::source::SourceLimits& l, const snd::source::SourceServices&) noexcept override {
+    inst_ = static_cast<G2Inst*>(pool);
+    n_ = l.maxVoices;
+    for (std::uint32_t i = 0; i < n_; ++i) inst_[i] = G2Inst{0, 0};
+    return true;
+  }
+  void Shutdown() noexcept override {}
+  void Start(const snd::source::SourceStartRequest* r, std::uint32_t n, snd::source::SourceStartResult* res) noexcept override {
+    for (std::uint32_t i = 0; i < n; ++i) {
+      res[i] = snd::source::SourceStartResult{snd::kInvalidSlot, 0, 0, 0};
+      const auto* p = static_cast<const snd::source::OscillatorParams*>(r[i].params);
+      if (r[i].voiceSlot >= n_) continue;
+      inst_[r[i].voiceSlot] = G2Inst{p != nullptr ? p->frequencyHz : 500.0f, 1};
+      res[i].sourceSlot = r[i].voiceSlot;
+    }
+  }
+  void Release(const SlotIndex* s, std::uint32_t n) noexcept override {
+    for (std::uint32_t i = 0; i < n; ++i) {
+      if (s[i] < n_) inst_[s[i]].live = 0;
+    }
+  }
+  void Control(const snd::source::SourceControlOp*, std::uint32_t) noexcept override {}
+  void QueryReady(const SlotIndex*, std::uint32_t n, std::uint8_t* ready) const noexcept override {
+    for (std::uint32_t i = 0; i < n; ++i) ready[i] = 1;
+  }
+  static float Value(float f, std::uint64_t frame, std::uint32_t ch) noexcept {
+    constexpr double kTwoPi = 6.283185307179586;
+    if (f < 1000.0f) return f / 1000.0f;
+    if (f < 2000.0f) return frame == 0u ? (f == 1000.0f ? 1.0f : (f - 1000.0f) / 1000.0f) : 0.0f;
+    if (f < 1e6f) return 1.0f;
+    if (f < 2e6f) return static_cast<float>(std::sin(kTwoPi * double(f - 1e6f) * double(frame) / 48000.0));
+    if (f == 2e6f) return 0.5f * static_cast<float>(std::sin(kTwoPi * (ch == 0u ? 300.0 : 700.0) * double(frame) / 48000.0));
+    return (ch == 0u && frame == 0u) ? 1.0f : 0.0f;
+  }
+  void RenderBatch(const snd::source::RenderBatch& b, snd::VoiceRenderStatus* st) noexcept override {
+    for (std::uint32_t i = 0; i < b.count; ++i) {
+      const auto& it = b.items[i];
+      st[i] = snd::VoiceRenderStatus{};
+      if (it.sourceSlot >= n_ || inst_[it.sourceSlot].live == 0u) continue;
+      const float f = inst_[it.sourceSlot].f;
+      const bool finite = f >= 2000.0f && f < 1e6f;
+      const std::uint64_t len = finite ? static_cast<std::uint64_t>(f - 2000.0f) : 0u;
+      std::uint64_t frame = it.playhead->frame;
+      std::uint32_t written = 0;
+      for (std::uint32_t k = 0; k < it.framesRequested; ++k) {
+        if (finite && frame >= len) break;
+        for (std::uint32_t c = 0; c < it.channels; ++c) it.out[c][it.frameOffset + k] = Value(f, frame, c);
+        ++frame;
+        ++written;
+      }
+      if (finite && frame >= len) st[i].ended = 1;
+      it.playhead->frame = frame;
+      st[i].framesRendered = written;
+    }
+  }
+  void AdvanceVirtual(const snd::source::AdvanceItem* items, std::uint32_t n, snd::VoiceRenderStatus* st) noexcept override {
+    for (std::uint32_t i = 0; i < n; ++i) {
+      st[i] = snd::VoiceRenderStatus{};
+      const SlotIndex s = items[i].sourceSlot;
+      if (s >= n_) continue;
+      items[i].playhead->frame += items[i].outputFrames;
+      const float f = inst_[s].f;
+      if (f >= 2000.0f && f < 1e6f && items[i].playhead->frame >= static_cast<std::uint64_t>(f - 2000.0f)) st[i].ended = 1;
+      st[i].framesRendered = items[i].outputFrames;
+    }
+  }
+  void ScheduleBackground(const snd::source::BlockInfo&) noexcept override {}
+  std::uint32_t PrimeFrames(const snd::source::SourceAsset&, std::uint64_t) const noexcept override { return 0; }
+
+ private:
+  G2Inst* inst_ = nullptr;
+  std::uint32_t n_ = 0;
+};
+
 // --- Raw command injection (variant checks) ---------------------------------------------
-// A System like indep::Fx whose LiveTap::replay hands ApplyCommands one arena of raw commands
+// A System like indep::Fx (with G2Kind as the oscillator kind) whose LiveTap::replay hands ApplyCommands one arena of raw commands
 // (header + payload) at the block the test chooses (the arena is applied like a producer's).
 class RawFx {
  public:
@@ -154,7 +247,7 @@ class RawFx {
     d.rtWorkerRealtimePriority = false;
     d.liveTap.user = this;
     d.liveTap.replay = &Replay;
-    snd::core::System::Create(d, &sys);
+    created = snd::core::System::Create(d, &sys);
     if (sys != nullptr) {
       snd_callbacks cb{};
       cb.user = this;
@@ -199,10 +292,15 @@ class RawFx {
 
   snd::mock::MemoryFileSystem fs;
   snd::mock::DeterministicJobSystem jobs;
-  IndepKind kind;
+  G2Kind kind;
   snd::core::System* sys = nullptr;
+  snd_result created = SND_ERR_INVALID_ARGUMENT;
   std::vector<Err> errors;
   std::vector<float> out, all;
+
+  std::uint32_t Ch() const { return sys->OutputChannels(); }
+  std::size_t Total() const { return all.size() / Ch(); }
+  float At(std::size_t frame, std::uint32_t c = 0) const { return all[frame * Ch() + c]; }
 
  private:
   static bool Replay(void* user, snd::BlockIndex block, snd::core::LiveArenaView* next) noexcept {
