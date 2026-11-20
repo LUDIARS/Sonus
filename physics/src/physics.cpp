@@ -862,7 +862,8 @@ bool ReadConfig(const snd_physics_config* in, snd_physics_config* out) noexcept 
   // A larger struct_size (a newer header) is accepted and only the known part is read, like
   // snd_create (NormalizeConfig); a shorter one gets defaults for the rest.
   if (in->struct_size < 8u || (in->struct_size % 4u) != 0u) return false;
-  if (in->version == 0u) return false;  // a newer version: its known part is read (as a larger struct_size)
+  // version changes only with an incompatible change (additions grow struct_size): it must match.
+  if (in->version != SND_PHYSICS_CONFIG_VERSION) return false;
   std::memcpy(out, in, std::min<std::size_t>(in->struct_size, sizeof(snd_physics_config)));
   out->struct_size = static_cast<std::uint32_t>(sizeof(snd_physics_config));
   out->version = SND_PHYSICS_CONFIG_VERSION;

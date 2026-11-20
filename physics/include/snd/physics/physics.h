@@ -291,7 +291,9 @@ typedef struct snd_physics_config {
                            older header) gets defaults for the fields it does not cover; a larger
                            one (a newer header) is accepted and only the known part is read (as
                            snd_create does with snd_config) */
-  uint32_t version;     /* = SND_PHYSICS_CONFIG_VERSION (>= 1; a newer one: the known part is read) */
+  uint32_t version;     /* = SND_PHYSICS_CONFIG_VERSION, exactly. Raised only for an incompatible
+                           change; fields are added by growing struct_size, not by a new version
+                           (as snd_create refuses another major and accepts longer structs) */
   float budget_per_second;         /* 9.4 step 4, default 300 (>= 0, finite) */
   float grid_size;                 /* 9.4 step 2 (m), default 0.5 (> 0, finite) */
   float cooldown_seconds;          /* 9.4 step 3, default 0.05 (>= 0, finite) */
