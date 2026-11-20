@@ -811,6 +811,11 @@ void LiveRuntime::RecordStartState(core::System& sys) noexcept {
     cells += bankOf(editScratch_[i].bankSlot, &id) ? 1u : 0u;
   }
   lost += edits - cells;
+  {  // D-175: playbacks alive in core at the start are state the recording does not carry (C-04)
+    snd_stats st{};
+    sys.LiveStats(&st);
+    lost += st.playbacks;
+  }
   const RecordBegin b{kRecordBegin,
                       static_cast<std::uint16_t>(arenasSeen_ == 0u ? RecordOrigin::FromCreation : RecordOrigin::MidRun),
                       static_cast<std::uint16_t>(lost < 0xFFFFu ? lost : 0xFFFFu), block_};
