@@ -82,7 +82,7 @@ SND_TEST(IndepG2Impl, Defect_VoiceBackFromVirtualLosesItsSettingWhenTheEventStag
   r.h.Steps(10);
   const float early = r.h.Mean(f0 + 300, f0 + kDelay);  // H's short fade is over; A delayed: silence
   const float mid = r.h.Mean(f0 + 700, f0 + 1400);
-  std::printf("  A after its return: early %.4f, 700..1400 %.4f, warnings %zu\n", early, mid, r.h.errors.size());
+  std::printf("  A after its return: early %.4f, 700..1400 %.4f, warnings %llu\n", early, mid, static_cast<unsigned long long>(r.h.errors.size()));
   SND_CHECK_NEAR(early, 0.0f, 1e-4);
   SND_CHECK_NEAR(mid, 0.5f * kCenter, 1e-3);
 }
@@ -152,7 +152,7 @@ SND_TEST(IndepG2Impl, Defect_EventVoiceEffectRefusedForAFullArenaIsPartlyApplied
   h.sys->Play(HashId("E"), NoEmitter(), nullptr);
   h.Steps(4);
   // Nothing of the refused call may apply: E plays dry (heard at once), no warning either.
-  std::printf("  warnings: %zu\n", h.errors.size());
+  std::printf("  warnings: %llu\n", static_cast<unsigned long long>(h.errors.size()));
   std::printf("  E after the refused call: first frames %.4f (dry %.4f, wet: 0)\n", h.Mean(f0 + 8, f0 + kDelay),
               0.5f * kCenter);
   SND_CHECK_NEAR(h.Mean(f0 + 8, f0 + kDelay), 0.5f * kCenter, 1e-4);
@@ -228,9 +228,9 @@ SND_TEST(IndepG2Impl, SpecHole_InitOnlyParameterAtRunTime) {
   h.sys->Play(HashId("D"), NoEmitter(), nullptr);
   h.Steps(24);
   const std::size_t on = FirstAbove(h, f0, 0.1f);
-  std::printf("  [spec hole] MaxDelay set at run time: %zu warnings; the echo comes after %zu frames (480 = MaxDelay "
+  std::printf("  [spec hole] MaxDelay set at run time: %llu warnings; the echo comes after %llu frames (480 = MaxDelay "
               "kept, 4800 = taken)\n",
-              h.errors.size(), on == static_cast<std::size_t>(-1) ? 0 : on - f0);
+              static_cast<unsigned long long>(h.errors.size()), static_cast<unsigned long long>(on == static_cast<std::size_t>(-1) ? 0 : on - f0));
   SND_CHECK(AllFinite(h.all));
 }
 
@@ -251,7 +251,7 @@ SND_TEST(IndepG2Impl, SpecHole_PlaybackValueTableFull) {
   for (auto& x : p) SND_CHECK_EQ(h.sys->SetPlaybackEffectParam(x, 0, 3, 0.0f), SND_OK);  // WetMix 0
   h.Steps(4);
   std::printf("  [spec hole] third playback's value with a 2-entry table: level %.4f (0 = applied, %.4f = dropped), "
-              "%zu warnings (code %d)\n",
-              h.LastMean(0), 0.5f * kCenter, h.errors.size(), h.errors.empty() ? 0 : h.errors[0].code);
+              "%llu warnings (code %d)\n",
+              h.LastMean(0), 0.5f * kCenter, static_cast<unsigned long long>(h.errors.size()), h.errors.empty() ? 0 : h.errors[0].code);
   SND_CHECK(AllFinite(h.all));
 }

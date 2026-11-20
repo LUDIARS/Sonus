@@ -14,8 +14,8 @@ SND_TEST(IndepG2Config, OutOfScope_ConfigOfThePreviousLayout) {
   // The previous layout ended after output_kind; its sizeof rounds up to the struct alignment.
   const std::size_t endOfOld = offsetof(snd_config, output_kind) + sizeof(snd_output_kind);
   const std::size_t oldSize = (endOfOld + alignof(snd_config) - 1u) / alignof(snd_config) * alignof(snd_config);
-  std::printf("  previous sizeof = %zu, offsetof(max_voice_effects) = %zu, new sizeof = %zu\n", oldSize,
-              offsetof(snd_config, max_voice_effects), sizeof(snd_config));
+  std::printf("  previous sizeof = %llu, offsetof(max_voice_effects) = %llu, new sizeof = %llu\n", static_cast<unsigned long long>(oldSize),
+              static_cast<unsigned long long>(offsetof(snd_config, max_voice_effects)), static_cast<unsigned long long>(sizeof(snd_config)));
   // The first new field sits inside the old struct's tail padding: a copy of `oldSize` bytes
   // carries the caller's padding into max_voice_effects instead of the default.
   if (offsetof(snd_config, max_voice_effects) < oldSize) {
