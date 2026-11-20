@@ -24,6 +24,19 @@
 //            (in the block it was registered; written before the arenas of the
 //            next block).
 //
+// 1.1 (livelink_protocol.hpp kRecord*; constants, not RecordKind enumerators):
+//   LiveData RecordLiveData{kind=5, fourcc, key, bankId, bytes} + data padded to 8:
+//            the data of a LiveReplaceChunk (a table chunk, or StructEdit + args with
+//            fourcc kStructEditTag) whose command is in the NEXT Arena record; `key`
+//            is the command's `prepared` pointer value in the recording process.
+//   Begin    RecordBegin{kind=6, origin, lostState, block} (16 bytes): right
+//            after the first Lod and the BankMap records of the start. origin
+//            FromCreation: no command had been applied before the recording started;
+//            MidRun: the state before it is only partly in the recording (what follows).
+//   Cell     RecordCell{kind=7, ...}: one override-layer cell at the start (`cells` of them).
+//   Override RecordOverride{kind=8, ...}: one live override at the start.
+// A 1.0 recording has no Begin record (the replay reports it).
+//
 // Records are platform specific (commands contain pointers, commands.hpp).
 // A reader rejects unknown kinds and anything that does not fit.
 #ifndef SND_LIVELINK_RECORD_FORMAT_HPP
@@ -90,7 +103,14 @@ struct RecordItem {
   RecordLod lod{};
   RecordStall stall{};
   RecordBankMap bankMap{};
+  // 1.1 (kind == static_cast<RecordKind>(kRecord*))
+  RecordLiveData liveData{};
+  const std::uint8_t* data = nullptr;  // LiveData: `liveData.bytes` bytes
+  RecordBegin begin{};
+  RecordCell cell{};
+  RecordOverride override_{};
 };
+inline bool IsKind(const RecordItem& it, std::uint32_t kind) noexcept { return static_cast<std::uint32_t>(it.kind) == kind; }
 
 enum class RecordError : std::uint8_t {
   None = 0,
