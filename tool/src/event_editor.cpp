@@ -182,13 +182,16 @@ SequenceKind EventEditor::sequence() const {
 }
 bool EventEditor::SetSequence(SequenceKind k) {
   if (!valid()) return false;
-  if (k == SequenceKind::Polyphonic && event()->Find("sequence") != nullptr) return doc_.Erase(guid_, "sequence");
+  if (k == SequenceKind::Polyphonic) return event()->Find("sequence") == nullptr || doc_.Erase(guid_, "sequence");
   return doc_.Set(guid_, "sequence", String(SequenceName(k)));
 }
 
 static bool SetRef(ProjectDocument& doc, const std::string& guid, const char* member, const std::string& ref,
                    const char* kind) {
-  if (ref.empty()) return doc.Erase(guid, member);
+  if (ref.empty()) {  // D-177b: already absent is success
+    const DocObject* self = doc.Find(guid);
+    return self != nullptr && (FindPath(self->doc, member) == nullptr || doc.Erase(guid, member));
+  }
   const DocObject* o = doc.Find(ref);
   if (o == nullptr || o->kind() != kind) return false;
   return doc.Set(guid, member, String(o->guid));
@@ -213,7 +216,7 @@ double EventEditor::NumberOf(EventNumber n) const {
 bool EventEditor::SetFlag(EventFlag f, bool on) {
   if (!valid()) return false;
   if (!on && event()->Find(FlagKey(f)) != nullptr) return doc_.Erase(guid_, FlagKey(f));
-  if (!on) return false;
+  if (!on) return true;  // already off
   return doc_.Set(guid_, FlagKey(f), Bool(true));
 }
 bool EventEditor::Flag(EventFlag f) const {

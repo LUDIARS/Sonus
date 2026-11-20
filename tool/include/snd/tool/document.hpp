@@ -21,8 +21,9 @@
 //   - New objects: "<folder>/<name>.json" (FileNameFor): the folder per kind (KindFolder:
 //     "events", "buses", ...), '/' in the name makes sub-folders, characters that are not
 //     portable in file names become '_', a name part starting with '.' gets a '_' prefix
-//     (the loader skips hidden directories), "_2", "_3", ... on a clash with any other file
-//     (case-insensitive, Windows). Rename moves the file to the new name's path only when
+//     (the loader skips hidden directories), a Windows reserved device name (CON, PRN, AUX, NUL,
+//     COM1..9, LPT1..9, any case, the part before the first '.') gets a '_' prefix (D-176f),
+//     "_2", "_3", ... on a clash with any other file (case-insensitive for ASCII letters only). Rename moves the file to the new name's path only when
 //     the file is at the old name's path (RenameOptions::moveFile), else it stays. Remove
 //     deletes the file on Save.
 //
@@ -114,6 +115,18 @@ struct FileChange {
   std::string text;  // Write: the new content
 };
 
+// Result of Save / SaveTo (D-176d, e).
+struct SaveFailure {
+  std::string path;    // project-relative file
+  std::string reason;
+};
+struct SaveResult {
+  bool ok = false;
+  std::vector<SaveFailure> failures;   // writes, copies or deletions that did not happen
+  std::vector<std::string> outside;    // SaveTo: referenced files outside the project (not copied)
+  std::vector<std::string> missing;    // SaveTo: referenced files that could not be read (not copied)
+};
+
 struct RenameOptions {
   bool keepAlias = true;   // old name into "aliases" (10.1)
   bool moveFile = true;    // follow the name with the file (only if at the old name's path)
@@ -162,7 +175,9 @@ class ProjectDocument {
   // Removes the object (its file is deleted on Save). Refused while referenced, unless `force`.
   bool Remove(std::string_view guid, bool force = false);
   // Sets the value at `path` (members are created in spec order; array elements must exist,
-  // or index == size appends). No step if the value does not change. false: no object / bad path.
+  // or index == size appends). A value equal to the current one: true, no step, not dirty
+  // (D-177b). false only for a refused edit: no object, bad path, a non-finite number (Number()
+  // of NaN / Inf, D-176c), or a rule of the object. The same holds for every editor's setters.
   bool Set(std::string_view guid, std::string_view path, json::Value value, std::uint32_t mergeKey = 0);
   bool SetNumber(std::string_view guid, std::string_view path, double v, std::uint32_t mergeKey = 0) {
     return Set(guid, path, Number(v), mergeKey);
@@ -197,16 +212,30 @@ class ProjectDocument {
   std::vector<Reference> BrokenReferences() const;
 
   // --- GUIDs -----------------------------------------------------------------------------
-  // The generator new GUIDs come from (version 4 layout). Tests replace it.
+  // The generator new GUIDs come from (version 4 layout). Tests replace it. NewGuid gives up
+  // after 16 values that are taken ("", D-177c; Create then fails and changes nothing).
   void SetRandom(RandomFn fn) { random_ = std::move(fn); }
   std::string NewGuid();
 
   // --- saving ----------------------------------------------------------------------------
   std::vector<FileChange> PendingChanges() const;
   bool IsDirty() const { return !PendingChanges().empty(); }
-  // Applies PendingChanges to directory() (or `dir`). Afterwards the document is clean.
+  // Applies PendingChanges to directory() (D-176d): new and changed files are written to a
+  // temporary file and renamed over; then, only if every write succeeded, files no object uses
+  // any more are deleted (a moved object's old file goes after its new file is written). Any
+  // failure: false, `error` / lastSave() name the paths, and what did not happen stays pending
+  // (the document stays dirty; the next Save tries the failed deletions again).
   bool Save(std::string* error = nullptr);
+  // "Save as" (D-176e): writes every object to `dir`, copies the files the project reads from
+  // inside its directory (asset files and language files, effect blobs, and the *.json files
+  // that could not be read) to the same relative paths, and from then on works in `dir`. Files
+  // outside the project directory are not copied (lastSave().outside); a referenced file that
+  // cannot be read is listed in lastSave().missing. A failed write or copy: false, directory()
+  // unchanged.
   bool SaveTo(const std::string& dir, std::string* error = nullptr);
+  const SaveResult& lastSave() const { return lastSave_; }
+  // Project-relative files the objects name (asset "file" / "languages", effect "blob").
+  std::vector<std::string> ReferencedFiles() const;
   // Marks the current state as saved without writing (an in-memory project).
   void MarkSaved();
 
@@ -247,6 +276,7 @@ class ProjectDocument {
   std::map<std::string, std::vector<std::uint8_t>> binary_;
   std::vector<std::string> otherFiles_;           // files on disk that are not objects (never touched)
   std::vector<DocLoadIssue> loadIssues_;
+  SaveResult lastSave_;
   RandomFn random_;
 
   std::uint32_t groupDepth_ = 0;

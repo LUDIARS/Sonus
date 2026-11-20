@@ -1,6 +1,7 @@
 #include "project.hpp"
 
 #include "detail/file_io.hpp"
+#include "snd/buildtool/schema.hpp"
 
 #include <algorithm>
 #include <cstdio>
@@ -193,7 +194,61 @@ std::string Describe(const json::Value& v) {
   return v.IsString() ? "'" + v.text + "'" : std::string("(non-string)");
 }
 
+// Members whose value is an array (of objects or scalars) in the schema.
+bool IsArrayKey(const std::string& k) {
+  static const char* const kArrays[] = {"tracks", "clips", "actions", "curves", "sends", "effects", "values", "states",
+                                        "transitions", "stingers", "tempo", "markers", "stems", "entries", "pairs",
+                                        "nodes", "connections", "aliases", "dependsOn", "languagesList", "params",
+                                        "points", "layer", "materials", "scope", "position"};
+  for (const char* a : kArrays) {
+    if (k == a) return true;
+  }
+  return false;
+}
+
+void Walk(const Schema* s, const std::string& prefix, bool topLevel, std::vector<std::string>* out) {
+  if (s == nullptr) return;
+  if (s->freeKeys) {
+    const std::string p = prefix.empty() ? "*" : prefix + ".*";
+    out->push_back(p);
+    Walk(s->freeChild, p, false, out);
+    return;
+  }
+  for (const Field* f = s->fields; f->key != nullptr; ++f) {
+    std::string key = f->key;
+    std::string p = prefix.empty() ? key : prefix + "." + key;
+    // "languages" is an array of names in project, a free-key object in asset; "params" an
+    // array in effects, an object in patch nodes: decided by the child schema.
+    const bool array = IsArrayKey(key) && !(key == "params" && f->child != nullptr) && !(key == "languages" && f->child != nullptr);
+    if (key == "languages" && topLevel && f->child == nullptr) {
+      out->push_back(p);
+      out->push_back(p + "[]");
+      continue;
+    }
+    out->push_back(p);
+    if (array) {
+      p += "[]";
+      out->push_back(p);
+    }
+    Walk(f->child, p, false, out);
+  }
+}
+
 }  // namespace
+
+std::vector<std::string> SchemaKindList() {
+  std::vector<std::string> out;
+  for (int i = 0; i < static_cast<int>(Kind::Count); ++i) out.push_back(kKindNames[i]);
+  return out;
+}
+
+std::vector<std::string> SchemaMemberList(const std::string& kind) {
+  std::vector<std::string> out;
+  for (int i = 0; i < static_cast<int>(Kind::Count); ++i) {
+    if (kind == kKindNames[i]) Walk(&kKindSchemas[i], std::string(), true, &out);
+  }
+  return out;
+}
 
 const char* KindName(Kind k) { return kKindNames[static_cast<int>(k)]; }
 
@@ -503,3 +558,8 @@ std::uint32_t Project::Enum(const Object& o, const json::Value& parent, const ch
 }
 
 }  // namespace snd::buildtool::detail
+
+namespace snd::buildtool {
+std::vector<std::string> SchemaKinds() { return detail::SchemaKindList(); }
+std::vector<std::string> SchemaMembers(const std::string& kind) { return detail::SchemaMemberList(kind); }
+}  // namespace snd::buildtool

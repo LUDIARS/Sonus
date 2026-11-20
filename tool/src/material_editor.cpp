@@ -58,6 +58,10 @@ const char* ContactName(ContactKind k) { return kKinds[static_cast<int>(k)]; }
 
 StrengthResult EvaluateStrength(const StrengthCurves& c, float impulse, float massKg, float speed) {
   StrengthResult r;
+  // D-180b: non-finite inputs count as 0, so the result is always finite.
+  if (!std::isfinite(impulse)) impulse = 0.0f;
+  if (!std::isfinite(massKg)) massKg = 0.0f;
+  if (!std::isfinite(speed)) speed = 0.0f;
   const float* t = c.impulseToVelocity;
   if (!(impulse >= t[0])) {
     r.layer = -1;
@@ -110,7 +114,7 @@ bool MaterialEditor::AddMaterial(const std::string& name, std::uint32_t at, Renu
 bool MaterialEditor::RemoveMaterial(const std::string& name, Renumbering* r) {
   const std::vector<std::string> before = Materials();
   const int i = IndexOf(name);
-  if (i < 0) return false;
+  if (i < 0 || before.size() <= 1u) return false;  // D-177d: the last material stays (the build needs one)
   const bool ok = doc_.Modify(guid_, [&](Value& d) {
     Value* m = Member(d, "materials");
     m->items.erase(m->items.begin() + i);
@@ -155,7 +159,7 @@ bool MaterialEditor::SetSingle(const std::string& material, ContactKind k, const
   if (ev.empty()) {
     const Value* s = doc_.Find(guid_)->doc.Find("single");
     const Value* m = s != nullptr ? s->Find(material) : nullptr;
-    if (m == nullptr || m->Find(ContactName(k)) == nullptr) return false;
+    if (m == nullptr || m->Find(ContactName(k)) == nullptr) return true;  // already clear (D-177b)
     return doc_.Modify(guid_, [&](Value& d) {
       Value* mm = Member(*Member(d, "single"), material);
       EraseMember(*mm, ContactName(k));
@@ -193,7 +197,7 @@ bool MaterialEditor::SetPair(const std::string& a, const std::string& b, const s
   return doc_.Modify(guid_, [&](Value& d) {
     Value* pairs = Member(d, "pairs");
     if (pairs == nullptr) {
-      if (g.empty()) return false;
+      if (g.empty()) return true;  // nothing to clear (D-177b)
       SetMember(d, "pairs", json::MakeArray(), SpecMemberOrder("materialTable", ""));
       pairs = Member(d, "pairs");
     }
@@ -211,7 +215,7 @@ bool MaterialEditor::SetPair(const std::string& a, const std::string& b, const s
       }
     }
     if (!found) {
-      if (g.empty()) return false;
+      if (g.empty()) return true;  // nothing to clear (D-177b)
       Value v = json::MakeObject();
       json::Add(v, "a", String(a));
       json::Add(v, "b", String(b));
@@ -225,7 +229,7 @@ bool MaterialEditor::SetFootstep(const std::string& material, const std::string&
   if (IndexOf(material) < 0) return false;
   if (ev.empty()) {
     const Value* f = doc_.Find(guid_)->doc.Find("footsteps");
-    if (f == nullptr || f->Find(material) == nullptr) return false;
+    if (f == nullptr || f->Find(material) == nullptr) return true;  // already clear
     return doc_.Modify(guid_, [&](Value& d) {
       EraseMember(*Member(d, "footsteps"), material);
       return true;
@@ -247,7 +251,7 @@ bool MaterialEditor::SetFootstep(const std::string& material, const std::string&
 bool MaterialEditor::SetDefault(ContactKind k, const std::string& ev) {
   if (!valid()) return false;
   const std::string path = std::string("defaults.") + ContactName(k);
-  if (ev.empty()) return FindPath(doc_.Find(guid_)->doc, path) != nullptr && doc_.Erase(guid_, path);
+  if (ev.empty()) return FindPath(doc_.Find(guid_)->doc, path) == nullptr || doc_.Erase(guid_, path);
   const DocObject* e = doc_.Find(ev);
   return e != nullptr && e->kind() == "event" && doc_.Set(guid_, path, String(e->guid));
 }
