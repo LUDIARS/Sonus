@@ -178,7 +178,9 @@ class ProjectDocument {
   bool Remove(std::string_view guid, bool force = false);
   // Sets the value at `path` (members are created in spec order; array elements must exist,
   // or index == size appends). A value equal to the current one: true, no step, not dirty
-  // (D-177b). false only for a refused edit: no object, bad path, a non-finite number (Number()
+  // (D-177b; compared by meaning: numbers by value, so the text stays as written; in the editors'
+  // setters an explicit default equals an absent member, and a move to the same place is success).
+  // false only for a refused edit: no object, bad path, a non-finite number (Number()
   // of NaN / Inf, D-176c), or a rule of the object. The same holds for every editor's setters.
   bool Set(std::string_view guid, std::string_view path, json::Value value, std::uint32_t mergeKey = 0);
   bool SetNumber(std::string_view guid, std::string_view path, double v, std::uint32_t mergeKey = 0) {
