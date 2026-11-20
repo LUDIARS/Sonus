@@ -67,7 +67,7 @@ struct Server::Impl final : FrameReader::Handler {
   // 1.1: one hot reload at a time (ReloadBank).
   struct Reload {
     bool active = false;
-    std::uint32_t seq = 0, conn = 0, bankId = 0;
+    std::uint32_t seq = 0, conn = 0, bankId = 0, languageId = 0;
     bool wantAck = false;
     snd_bank_handle bank{0};
   };
@@ -695,6 +695,7 @@ struct Server::Impl final : FrameReader::Handler {
     reload.seq = h.seq;
     reload.conn = connGen;
     reload.bankId = m.bankId;
+    reload.languageId = m.languageId;
     reload.wantAck = wantAck;
     if (old != nullptr) {
       r = sys->UnloadBank(snd_bank_handle{old->handle.Value()}, SND_UNLOAD_STOP_AND_UNLOAD);
@@ -715,7 +716,8 @@ struct Server::Impl final : FrameReader::Handler {
     SendReloadStatus(ph, r);
     (ph == ReloadPhase::Done ? reloadsDone : reloadsFailed).Add();
     if (conn != nullptr && reload.conn == connGen) {
-      Reply(reload.seq, reload.wantAck, r, "ReloadBank failed");
+      Reply(reload.seq, reload.wantAck, r,
+            r == SND_ERR_INVALID_ARGUMENT ? "ReloadBank: the file holds another bank" : "ReloadBank failed");
     }
     reload.active = false;
   }
@@ -729,7 +731,14 @@ struct Server::Impl final : FrameReader::Handler {
         // override layer see it from then on).
         RefreshBanks();
         for (std::uint32_t i = 0; i < bankCount; ++i) {
-          if (banks[i].handle.Value() == reload.bank.value) return FinishReload(ReloadPhase::Done, SND_OK);
+          if (banks[i].handle.Value() != reload.bank.value) continue;
+          // D-173: the file held another bank (id or language): it is not kept (unloaded again);
+          // the bank asked for stays unloaded, as when the load fails.
+          if (banks[i].bankId != reload.bankId || banks[i].languageId != reload.languageId) {
+            if (registered) sys->UnloadBank(reload.bank, SND_UNLOAD_STOP_AND_UNLOAD);
+            return FinishReload(ReloadPhase::Failed, SND_ERR_INVALID_ARGUMENT);
+          }
+          return FinishReload(ReloadPhase::Done, SND_OK);
         }
         return;
       }
