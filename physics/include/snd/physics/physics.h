@@ -76,12 +76,19 @@
  *   parameters, a pair override or default event both materials' (the larger
  *   value when an id appears in both), as playback-scope parameters.
  *
- * Positioned one-shots: Impact / Break are played with snd_create_emitter ->
- *   snd_set_transform -> snd_play -> parameters, volume, pitch ->
- *   snd_destroy_emitter (the playback keeps the last transform). When no emitter
- *   slot is free (or the transform is refused) the request falls back to
- *   snd_play_at without parameters, volume or pitch (counted in
- *   play_at_fallbacks, flag SND_PHYSICS_RECORD_FLAG_POSITION_ONLY).
+ * Positioned one-shots: an Impact / Break group is played with snd_create_emitter ->
+ *   snd_set_transform -> snd_play (each event) -> parameters, volume, pitch. The emitter is
+ *   destroyed by a later snd_phys_submit_contacts, once emitter_hold_seconds of physics time
+ *   have passed (the playbacks keep the last transform). It is not destroyed at once because
+ *   the runtime computes an emitter's 3D values only at a block where it is alive: an emitter
+ *   created, moved and destroyed in the same command batch plays at the listener
+ *   (spec/handoff/parallel/requests/A-004.md). At most max_held_emitters are held; when full
+ *   the oldest is destroyed early (held_emitters_released_early), or, when all of them were
+ *   created in the current call, the group falls back to snd_play_at. When no emitter slot is
+ *   free (or the transform is refused) the group falls back to snd_play_at without parameters,
+ *   volume or pitch (play_at_fallbacks, flag SND_PHYSICS_RECORD_FLAG_POSITION_ONLY). Note that
+ *   snd_play_at takes its implicit emitter from the same pool: with none free it plays without
+ *   a position (A-004).
  *
  * Footsteps (9.2): surfaces with weight > 0 (finite) are candidates; the two
  *   largest (first on ties) play. volume = weight_to_volume(w / (w1 + w2))
@@ -248,12 +255,14 @@ typedef struct snd_physics_config {
   float tracking_timeout_seconds;  /* 9.5, default 0.2 (>= 0, finite) */
   float tracking_fade_seconds;     /* 9.5 fade of a stop, default 0.1 (>= 0, finite) */
   float max_dt_seconds;            /* dt clamp, default 0.1 (> 0, finite) */
+  float emitter_hold_seconds;      /* one-shot emitters are destroyed this long after their play
+                                      (at a later submit), default 0.1 (>= 0, finite) */
   uint32_t max_tracked_pairs;      /* 9.5 tracking table, default 64 */
   uint32_t max_cooldowns;          /* 9.4 cooldown table, default 256 */
   uint32_t max_groups_per_call;    /* work area of one call (groups + slide reports), default 2048 */
   uint32_t max_materials;          /* sound materials N, default 64 (1..SND_PHYSICS_MAX_MATERIALS_LIMIT) */
   uint32_t max_game_materials;     /* game -> sound material map entries, default 1024 */
-  uint32_t reserved;               /* 0 */
+  uint32_t max_held_emitters;      /* one-shot emitters held at once, default 64 */
   snd_physics_param_ids params;    /* parameter ids (defaults: hashes of the names above) */
   snd_physics_observer observer;   /* NULL = none */
   void* observer_user;
@@ -272,12 +281,13 @@ static inline void snd_physics_config_init(snd_physics_config* c) {
   c->tracking_timeout_seconds = 0.2f;
   c->tracking_fade_seconds = 0.1f;
   c->max_dt_seconds = 0.1f;
+  c->emitter_hold_seconds = 0.1f;
   c->max_tracked_pairs = 64u;
   c->max_cooldowns = 256u;
   c->max_groups_per_call = 2048u;
   c->max_materials = 64u;
   c->max_game_materials = 1024u;
-  c->reserved = 0u;
+  c->max_held_emitters = 64u;
   c->params.impulse = snd_hash_id(SND_PHYSICS_PARAM_IMPULSE_NAME);
   c->params.velocity = snd_hash_id(SND_PHYSICS_PARAM_VELOCITY_NAME);
   c->params.count = snd_hash_id(SND_PHYSICS_PARAM_COUNT_NAME);
@@ -501,6 +511,7 @@ typedef struct snd_physics_stats {
   uint64_t requested_footstep;
   uint64_t requested_play_at;    /* snd_physics_play_at */
   uint64_t play_at_fallbacks;    /* one-shots played with snd_play_at for want of an emitter */
+  uint64_t held_emitters_released_early; /* one-shot emitters destroyed before emitter_hold_seconds */
   uint64_t resolved_pair;
   uint64_t fallback_pair_to_single;
   uint64_t fallback_single_to_default;
