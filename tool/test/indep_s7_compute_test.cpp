@@ -837,3 +837,24 @@ SND_TEST(IndepS7Calc, F17_StrengthCurvesProvisional) {
   snd::test::Note("NaN inputs: layer %d velocity %g pitch %g volume %g", rn.layer, rn.velocity, rn.pitchCents, rn.volumeDb);
   SND_CHECK_EQ(rn.layer, -1);
 }
+
+// Spec gap (decision 9 of the notes): a "compose" written on a volume / pitch / lowpass /
+// highpass / pan curve. The runtime ignores CURV.compose for those targets; the tool computes
+// the runtime's rule. Recorded: what ComposeEvent gives for two volume curves (-6 dB each)
+// with compose "multiply" written.
+SND_TEST(IndepS7Calc, F2_WrittenComposeOnARuntimeTargetIsRecorded) {
+  ProjectDocument doc;
+  SND_REQUIRE(LoadBase(doc));
+  const std::string all = ParamWithAllScopes(doc);
+  SND_REQUIRE(doc.Erase(kShot, "curves"));
+  SND_REQUIRE(AddEventCurve(doc, kShot, all, CurveTarget::Volume, {{0, -6, 0}, {10, -6, 0}}) >= 0);
+  SND_REQUIRE(AddEventCurve(doc, kShot, all, CurveTarget::Volume, {{0, -6, 0}, {10, -6, 0}}) >= 0);
+  CurveEditor c0(doc, kShot, "curves[0]");
+  CurveEditor c1(doc, kShot, "curves[1]");
+  const bool a = c0.SetCompose(CurveCompose::Multiply);
+  const bool b = c1.SetCompose(CurveCompose::Multiply);
+  const ComposeResult r = ComposeEvent(doc, kShot, {}, 0);
+  snd::test::Note("compose multiply on volume curves: SetCompose %d/%d, curve compose shown %d, volume %g dB", a ? 1 : 0,
+                  b ? 1 : 0, static_cast<int>(c0.compose()), r.volumeDb);
+  SND_CHECK(std::isfinite(r.volumeDb));
+}
