@@ -46,7 +46,8 @@ snd_add_test(dsp_indep_contract11_test SOURCES indep_contract11_dsp_test.cpp LIN
 # scalar SIMD path forced. Defect_ tests (currently failing) are a separate executable.
 set(SND_DSP_INDEP_S7D_SOURCES
   indep_fft_test.cpp
-  indep_time_stretch_test.cpp)
+  indep_time_stretch_test.cpp
+  indep_convolution_test.cpp)
 snd_add_test(dsp_indep_s7d_test
   SOURCES ${SND_DSP_INDEP_S7D_SOURCES}
   LINK sonus_dsp sonus_mocks)
