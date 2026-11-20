@@ -4,6 +4,7 @@
 // reach.
 #include <cmath>
 #include <cstdint>
+#include <string>
 #include <vector>
 
 #include "indep_phys_rig.hpp"
@@ -363,4 +364,166 @@ SND_TEST(IndepRecheck, RepeatedReportsOfTrackedKeysNeedNoArea) {
   SND_CHECK_EQ(st.merged, 498u);
   SND_CHECK_EQ(st.dropped_work_overflow, 4u);  // the impacts beyond the 1-group work area
   for (const Rec& r : f.rec.Of(SND_PHYSICS_RECORD_UPDATE)) SND_CHECK(r.r.speed >= 499.0f);  // the largest of each key
+}
+
+namespace {
+
+// A bank whose 3D events start their voice late: a clip at 100 ms, a streamed asset (the
+// playback primes first), a nested event behind a 100 ms action.
+struct LateBank {
+  std::vector<std::uint8_t> bank;
+  std::string streamName;
+  std::vector<std::uint8_t> stream;
+};
+const LateBank& BuildLateBank() {
+  static LateBank lb;
+  if (!lb.bank.empty()) return lb;
+  mini::Project proj("phys-indep-late");
+  proj.Add("banks/Late.json", "bank", "Late");
+  proj.Add("buses/Master.json", "bus", "Master", "\"master\": true, \"channels\": 2");
+  snd::buildtool::PcmData dc;
+  dc.channels = 1;
+  dc.sampleRate = 48000;
+  dc.frames = 24000;
+  dc.samples.assign(24000, 0.5f);
+  proj.Wav("audio/dc.wav", dc, snd::buildtool::WavSampleFormat::Float32);
+  proj.Add("assets/ldc.json", "asset", "ldc", "\"file\": \"audio/dc.wav\", \"convert\": {\"default\": {\"codec\": \"PCMF\"}}");
+  proj.Add("assets/sdc.json", "asset", "sdc",
+           "\"file\": \"audio/dc.wav\", \"loadForm\": \"stream\", \"convert\": {\"default\": {\"codec\": \"PCMF\"}}");
+  proj.Add("events/LateClip.json", "event", "L/LateClip",
+           "\"bank\": \"Late\", \"is3D\": true, \"tracks\": [{\"clips\": [{\"asset\": \"ldc\", \"startMs\": 100}]}]");
+  proj.Add("events/Stream.json", "event", "L/Stream",
+           "\"bank\": \"Late\", \"is3D\": true, \"tracks\": [{\"clips\": [{\"asset\": \"sdc\"}]}]");
+  proj.Add("events/Inner.json", "event", "L/Inner",
+           "\"bank\": \"Late\", \"is3D\": true, \"tracks\": [{\"clips\": [{\"asset\": \"ldc\"}]}]");
+  proj.Add("events/Outer.json", "event", "L/Outer",
+           "\"bank\": \"Late\", \"is3D\": true, \"tracks\": [{\"clips\": [{\"asset\": \"ldc\", \"volumeDb\": -120}], "
+           "\"actions\": [{\"timeMs\": 100, \"action\": \"play\", \"target\": \"L/Inner\"}]}]");
+  snd::buildtool::Diagnostics diag;
+  snd::buildtool::BuildResult res;
+  if (!proj.Build(&diag, &res)) {
+    snd::test::Note("late bank build failed:\n%s", mini::Dump(diag).c_str());
+    return lb;
+  }
+  lb.bank = mini::ReadBytes(proj.out() / "Late.sndb");
+  if (!res.streams.empty()) {
+    lb.streamName = res.streams[0];
+    lb.stream = mini::ReadBytes(proj.out() / res.streams[0]);
+  }
+  return lb;
+}
+
+}  // namespace
+
+namespace {
+void CheckHitPositioned(const LateBank& lb, const char* name);
+}  // namespace
+
+// The release rule assumes that a playback state other than NONE means its 3D values are
+// computed. Events whose voice starts later than the play (a clip at 100 ms, a streamed
+// asset, an action that plays a nested event at 100 ms) must still sound at the hit's
+// position after physics has released the emitter.
+SND_TEST(IndepRecheck, LateStartingVoicesKeepThePosition) {
+  const LateBank& lb = BuildLateBank();
+  SND_REQUIRE(!lb.bank.empty());
+  const char* names[] = {"L/LateClip", "L/Stream"};
+  for (const char* name : names) {
+    CheckHitPositioned(lb, name);
+  }
+}
+
+// Defect (decision D "Emitter を作って位置を与えて snd_play"; physics.h claims the release is
+// safe once the play is seen applied): an event whose action plays a nested event 100 ms
+// after the play. Physics releases the emitter after ~3 frames (the play is applied), the
+// nested playback starts afterwards without the emitter and sounds at the listener (centred,
+// no attenuation). Root cause in core (CoreNestedPlayAfterEmitterDestroyed below), but the
+// physics release rule does not hold for such events.
+SND_TEST(IndepRecheck, Defect_ReleasedEmitterLosesNestedActionPlay) {
+  const LateBank& lb = BuildLateBank();
+  SND_REQUIRE(!lb.bank.empty());
+  CheckHitPositioned(lb, "L/Outer");
+}
+
+namespace {
+void CheckHitPositioned(const LateBank& lb, const char* name) {
+  {
+    Sys s;
+    if (!lb.stream.empty()) s.fs.AddFile(lb.streamName, lb.stream);
+    snd_bank_handle bank{};
+    SND_REQUIRE(s.LoadBank("late.sndb", lb.bank, &bank));
+    SetListener(s.sys);
+    Recorder rec;
+    snd_physics_config c = Open();
+    c.observer = &Recorder::Fn;
+    c.observer_user = &rec;
+    snd_phys* p = nullptr;
+    SND_REQUIRE_EQ(snd_physics_create(s.sys, &c, nullptr, &p), SND_OK);
+    std::vector<snd_id> single(4, SND_ID_NONE);
+    single[SND_CONTACT_IMPACT] = snd_hash_id(name);
+    snd_physics_table_desc d;
+    snd_physics_table_desc_init(&d);
+    d.material_count = 1;
+    d.single = single.data();
+    SND_REQUIRE_EQ(snd_physics_set_table(p, &d), SND_OK);
+    s.Advance(2);
+    const snd_contact x = Hit(1, 2.0f);
+    SND_CHECK_EQ(snd_phys_submit_contacts(p, &x, 1, 1.0f / 60.0f), SND_OK);
+    const std::uint64_t from = s.Frames();
+    std::uint32_t releasedAt = 0;
+    for (int frame = 0; frame < 120; ++frame) {
+      s.Advance(1);
+      SND_CHECK_EQ(snd_phys_submit_contacts(p, nullptr, 0, 1.0f / 60.0f), SND_OK);
+      if (releasedAt == 0u && s.Frames() > 0) {
+        // The game can create max_emitters (128) again once physics released its one.
+        std::vector<snd_emitter_handle> mine;
+        for (int i = 0; i < 128; ++i) mine.push_back(snd_create_emitter(s.sys));
+        bool all = true;
+        for (const snd_emitter_handle e : mine) {
+          all = all && e.value != 0u;
+          if (e.value != 0u) snd_destroy_emitter(s.sys, e);
+        }
+        if (all) releasedAt = static_cast<std::uint32_t>(frame + 1);
+      }
+    }
+    double l = 0, r = 0;
+    Energy(s, from, &l, &r);
+    snd::test::Note("%s: emitter back after %u frames (%u samples of audio), |L| %.2f |R| %.2f", name, releasedAt,
+                    releasedAt * 256u, l, r);
+    SND_CHECK_MSG(r > 1.0, "%s: nothing heard", name);
+    SND_CHECK_MSG(l < 1e-3 * r, "%s: |L| %.2f against |R| %.2f: heard off its position", name, l, r);
+    snd_physics_destroy(p);
+  }
+}
+}  // namespace
+
+// Core (outside physics), public API only: an event whose action plays a nested event at
+// 100 ms. variant 0: the game keeps the emitter; variant 1: destroys it 3 frames after the
+// play (after the play was applied, like physics' release). sonus.h: "Playbacks on the
+// emitter keep the last transform" -- the nested playback started by the action after the
+// destroy: recorded here (which result core gives).
+SND_TEST(IndepRecheck, CoreNestedPlayAfterEmitterDestroyed) {
+  const LateBank& lb = BuildLateBank();
+  SND_REQUIRE(!lb.bank.empty());
+  double res[2][2] = {};
+  for (int variant = 0; variant < 2; ++variant) {
+    Sys s;
+    snd_bank_handle bank{};
+    SND_REQUIRE(s.LoadBank("late.sndb", lb.bank, &bank));
+    SetListener(s.sys);
+    s.Advance(2);
+    const snd_emitter_handle e = snd_create_emitter(s.sys);
+    const snd_vec3 right{2.0f, 0.0f, 0.0f};
+    SND_CHECK_EQ(snd_set_transform(s.sys, e, &right, nullptr, nullptr), SND_OK);
+    const snd_playback_handle h = snd_play(s.sys, snd_hash_id("L/Outer"), e, nullptr);
+    SND_REQUIRE(h.value != 0u);
+    const std::uint64_t from = s.Frames();
+    s.Advance(3);
+    SND_CHECK(snd_get_playback_state(s.sys, h) != SND_PLAYBACK_STATE_NONE);
+    if (variant == 1) SND_CHECK_EQ(snd_destroy_emitter(s.sys, e), SND_OK);
+    s.Advance(80);
+    Energy(s, from, &res[variant][0], &res[variant][1]);
+    snd::test::Note("nested play at 100 ms, %s: |L| %.2f |R| %.2f", variant == 0 ? "emitter kept" : "emitter destroyed at 3 frames",
+                    res[variant][0], res[variant][1]);
+  }
+  SND_CHECK(res[0][1] > 1.0 && res[0][0] < 1e-3 * res[0][1]);
 }
