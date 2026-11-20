@@ -208,7 +208,7 @@ SND_TEST(EffectsCoverage, ReverbLevelsDelaysAndFilters) {
     SND_CHECK_NEAR(double(ob) - double(oa), 0.05 * kSr, 3.0);
     Fx d0 = Reverb({{7, 0.0f}, {9, 0.0f}, {11, 0.0f}});
     const std::size_t od = FirstAbove(ImpulseResponse(d0, n), 1e-4f);
-    snd::test::Note("late onset: density 100 %zu, density 0 %zu frames", oa, od);
+    snd::test::Note("late onset: density 100 %u, density 0 %u frames", unsigned(oa), unsigned(od));
     SND_CHECK(od + 400 < oa);  // shortest line 1031 -> ~516 frames
   }
   // Diffusion: more distinct samples (echo density) early in the late part.
@@ -224,7 +224,7 @@ SND_TEST(EffectsCoverage, ReverbLevelsDelaysAndFilters) {
       return count;
     };
     const std::size_t sparse = density(0.0f), dense = density(100.0f);
-    snd::test::Note("samples above -40 dB of the peak in the first 20 ms of the tail: diffusion 0 %zu, 100 %zu", sparse, dense);
+    snd::test::Note("samples above -40 dB of the peak in the first 20 ms of the tail: diffusion 0 %u, 100 %u", unsigned(sparse), unsigned(dense));
     SND_CHECK(dense > sparse * 2u);
   }
   // RoomHF at HFReference and RoomLF below LFReference (early path, linear: ratios exact).
