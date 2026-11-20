@@ -109,9 +109,9 @@ SND_TEST(IndepS7Calc, F2_ComposeRulesOf43) {
   SND_CHECK_EQ(r.pan, 0.0);
 }
 
-// Spec gap (notes, decision 9): 4.3 says "other targets multiply"; pan is added by the
-// runtime and by the tool. Recorded, not decided here.
-SND_TEST(IndepS7Calc, F2_PanCompositionIsRecorded) {
+// D-179a: the tool computes what the runtime does: pan curves are added (4.3's "multiply" for
+// other targets is the gap C-13 takes to B).
+SND_TEST(IndepS7Calc, F2_PanCompositionIsAdded_D179a) {
   ProjectDocument doc;
   SND_REQUIRE(LoadBase(doc));
   const std::string all = ParamWithAllScopes(doc);
@@ -120,8 +120,7 @@ SND_TEST(IndepS7Calc, F2_PanCompositionIsRecorded) {
   SND_REQUIRE(AddEventCurve(doc, kShot, all, CurveTarget::Pan, {{0, 0.5, 0}, {10, 0.5, 0}}) >= 0);
   std::map<std::string, ParamScopeValues> v;
   const ComposeResult r = ComposeEvent(doc, kShot, v, 0);
-  snd::test::Note("pan of two curves 0.5 and 0.5: %g (4.3 multiply would give 0.25, add gives 1)", r.pan);
-  SND_CHECK(std::fabs(r.pan - 1.0) < 1e-6 || std::fabs(r.pan - 0.25) < 1e-6);
+  SND_CHECK_NEAR(r.pan, 1.0, 1e-6);
 }
 
 SND_TEST(IndepS7Calc, F3_F4_ScopePriority) {
@@ -427,26 +426,24 @@ SND_TEST(IndepS7Calc, F10_TempoMapRoundTrips) {
   }
 }
 
-// Spec gap: a time-signature point that is not on a bar line. The bar position is continuous
-// (fractional at the point), so what "bar / beat / tick" means after it is not defined by 8.1.
-// Recorded: the round trip error of the current answer.
-SND_TEST(IndepS7Calc, F10_MidBarSignatureChangeIsRecorded) {
-  TempoMap m({{0, 120, 4, 4}, {5000, 120, 3, 4}});
-  double worst = 0;
-  for (double t = 0; t < 20000; t += 37) worst = std::max(worst, std::fabs(m.TickOfMusical(m.Musical(t)) - t));
-  snd::test::Note("mid-bar signature change: worst |TickOfMusical(Musical(t)) - t| = %g ticks", worst);
-  SND_CHECK(std::isfinite(worst));
-}
+// D-179c: a signature change inside a bar (loaded that way) is computed as the runtime's
+// Timeline does: compared with music's Timeline in indep_s7_recheck_test.cpp
+// (IndepS7Recheck.D179c_MidBarChangeIsTheRuntimes).
 
-// Spec gap: with a beat longer than a quarter (beatUnit 1 or 2) the position inside a beat
-// reaches 1919 ticks, but snd_musical_time.tick is 0 .. SND_TICKS_PER_BEAT - 1 (959, types.h)
-// and the runtime's Timeline::Musical clamps it there, as the tool does. Recorded.
-SND_TEST(IndepS7Calc, F10_HalfNoteBeatsAreRecorded) {
+// D-179d: with a beat longer than a quarter the tick within the beat is capped at 959 as in the
+// runtime (snd_musical_time), and MusicalIsApproximate says so.
+SND_TEST(IndepS7Calc, F10_HalfNoteBeatsAreApproximate_D179d) {
   TempoMap m({{0, 120, 3, 2}});
   const MusicalPosition mp = m.Musical(1500);  // bar 0, beat 0, 1500 ticks into the half-note beat
-  snd::test::Note("3/2, tick 1500 -> bar %d beat %d tick %d (back: %g)", mp.bar, mp.beat, mp.tick, m.TickOfMusical(mp));
   SND_CHECK_EQ(mp.bar, 0);
   SND_CHECK_EQ(mp.beat, 0);
+  SND_CHECK_EQ(mp.tick, 959);
+  SND_CHECK(m.MusicalIsApproximate(1500));
+  TempoMap q({{0, 120, 4, 4}, {3840, 120, 3, 8}});
+  for (double t : {0.0, 500.0, 3839.0, 3840.0, 9000.0}) SND_CHECK(!q.MusicalIsApproximate(t));
+  TempoMap w({{0, 120, 4, 4}, {3840, 120, 2, 1}});
+  SND_CHECK(!w.MusicalIsApproximate(100));
+  SND_CHECK(w.MusicalIsApproximate(3840 + 100));
 }
 
 SND_TEST(IndepS7Calc, F11_TapTempoAndGrid) {
@@ -832,17 +829,23 @@ SND_TEST(IndepS7Calc, F17_StrengthCurvesProvisional) {
     const StrengthResult r = EvaluateStrength(d, x, x, x);
     SND_CHECK(std::isfinite(r.velocity) && std::isfinite(r.pitchCents) && std::isfinite(r.volumeDb));
   }
-  // NaN impulse: no crash; recorded (the velocity is NaN: std::clamp passes NaN through).
-  const StrengthResult rn = EvaluateStrength(d, kNaNf, kNaNf, kNaNf);
-  snd::test::Note("NaN inputs: layer %d velocity %g pitch %g volume %g", rn.layer, rn.velocity, rn.pitchCents, rn.volumeDb);
-  SND_CHECK_EQ(rn.layer, -1);
+  // D-180b: non-finite inputs count as 0 (results always finite, the same as for 0).
+  const float inf = std::numeric_limits<float>::infinity();
+  for (float x : {kNaNf, inf, -inf}) {
+    const StrengthResult rn = EvaluateStrength(d, x, x, x);
+    const StrengthResult r0 = EvaluateStrength(d, 0, 0, 0);
+    SND_CHECK(std::isfinite(rn.velocity) && std::isfinite(rn.pitchCents) && std::isfinite(rn.volumeDb));
+    SND_CHECK_EQ(rn.layer, r0.layer);
+    SND_CHECK_EQ(rn.velocity, r0.velocity);
+    SND_CHECK_EQ(rn.pitchCents, r0.pitchCents);
+    SND_CHECK_EQ(rn.volumeDb, r0.volumeDb);
+  }
 }
 
-// Spec gap (decision 9 of the notes): a "compose" written on a volume / pitch / lowpass /
-// highpass / pan curve. The runtime ignores CURV.compose for those targets; the tool computes
-// the runtime's rule. Recorded: what ComposeEvent gives for two volume curves (-6 dB each)
-// with compose "multiply" written.
-SND_TEST(IndepS7Calc, F2_WrittenComposeOnARuntimeTargetIsRecorded) {
+// D-179b: a "compose" written on a volume / pitch / lowpass / highpass / pan curve is accepted
+// but the runtime ignores it: the result is the runtime's rule and the curve is reported in
+// composeIgnored / ComposeIgnored().
+SND_TEST(IndepS7Calc, F2_WrittenComposeOnARuntimeTarget_D179b) {
   ProjectDocument doc;
   SND_REQUIRE(LoadBase(doc));
   const std::string all = ParamWithAllScopes(doc);
@@ -851,10 +854,22 @@ SND_TEST(IndepS7Calc, F2_WrittenComposeOnARuntimeTargetIsRecorded) {
   SND_REQUIRE(AddEventCurve(doc, kShot, all, CurveTarget::Volume, {{0, -6, 0}, {10, -6, 0}}) >= 0);
   CurveEditor c0(doc, kShot, "curves[0]");
   CurveEditor c1(doc, kShot, "curves[1]");
-  const bool a = c0.SetCompose(CurveCompose::Multiply);
-  const bool b = c1.SetCompose(CurveCompose::Multiply);
+  SND_CHECK(!c0.ComposeIgnored());  // nothing written yet
+  SND_CHECK(c0.SetCompose(CurveCompose::Multiply));
+  SND_CHECK(c1.SetCompose(CurveCompose::Multiply));
+  SND_CHECK(c0.compose() == CurveCompose::Multiply);
+  SND_CHECK(c0.ComposeIgnored());
   const ComposeResult r = ComposeEvent(doc, kShot, {}, 0);
-  snd::test::Note("compose multiply on volume curves: SetCompose %d/%d, curve compose shown %d, volume %g dB", a ? 1 : 0,
-                  b ? 1 : 0, static_cast<int>(c0.compose()), r.volumeDb);
-  SND_CHECK(std::isfinite(r.volumeDb));
+  SND_CHECK_NEAR(r.volumeDb, -12.0, 1e-5);  // the runtime's dB addition
+  SND_CHECK(r.composeIgnored.size() == 2u);
+  // Which targets the runtime ignores compose for.
+  for (CurveTarget t : {CurveTarget::Volume, CurveTarget::Pitch, CurveTarget::Lowpass, CurveTarget::Highpass, CurveTarget::Pan})
+    SND_CHECK(ComposeIgnored(t));
+  // A compose on a target the runtime leaves to it is used and not reported.
+  SND_REQUIRE(AddEventCurve(doc, kShot, all, CurveTarget::Spread, {{0, 0.5, 0}, {10, 0.5, 0}}) >= 0);
+  CurveEditor c2(doc, kShot, "curves[2]");
+  SND_REQUIRE(c2.SetCompose(CurveCompose::Max));
+  SND_CHECK(!c2.ComposeIgnored());
+  const ComposeResult r2 = ComposeEvent(doc, kShot, {}, 0);
+  SND_CHECK_EQ(r2.composeIgnored.size(), 2u);
 }

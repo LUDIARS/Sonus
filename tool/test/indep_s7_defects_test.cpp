@@ -14,6 +14,8 @@
 #include "snd/tool/doc_build.hpp"
 #include "snd/tool/document.hpp"
 #include "snd/tool/material_editor.hpp"
+#include "snd/tool/mixer_editor.hpp"
+#include "snd/tool/curve_editor.hpp"
 #include "snd/tool/music_editor.hpp"
 
 using namespace indep_s7;
@@ -151,18 +153,81 @@ SND_TEST(IndepS7Defect, Defect_SaveIgnoresAFailedDeletion) {
   SND_CHECK(doc.IsDirty());
 }
 
-// A material table without materials (the material editor makes one when every material is
-// removed) is built through `put(vec.data(), 0)` in buildtool/src/build.cpp (PHYS): memcpy with a
-// null source, undefined behaviour (UBSan: "null pointer passed as argument 2"). Fails only in
-// the -DSND_SANITIZE=address,undefined build; IndepS7Build.E1_CheckAgreesWithBuildOverRandomEdits
-// hits the same line there. Expected: no undefined behaviour (skip the copy for 0 bytes).
+// (Former defect 4.) D-177d: the editor refuses to remove the last material (the document does
+// not change); D-180d: a table with no materials, written straight into the document, is a
+// build error reached without undefined behaviour (memcpy from null; run under UBSan).
 SND_TEST(IndepS7Defect, Defect_EmptyMaterialTableBuildIsUndefinedBehaviour) {
   ProjectDocument doc;
   SND_REQUIRE(LoadBase(doc));
   MaterialEditor m(doc, kPhys);
-  while (!m.Materials().empty()) SND_REQUIRE(m.RemoveMaterial(m.Materials()[0]));
+  while (m.Materials().size() > 1u) SND_REQUIRE(m.RemoveMaterial(m.Materials()[0]));
+  const auto image = Image(doc);
+  const std::size_t steps = doc.UndoCount();
+  SND_CHECK(!m.RemoveMaterial(m.Materials()[0]));
+  SND_CHECK(Image(doc) == image);
+  SND_CHECK_EQ(doc.UndoCount(), steps);
+  // Zero materials through the raw document (not an editor rule).
+  SND_REQUIRE(doc.Set(kPhys, "materials", json::MakeArray()));
   const DocBuild b = BuildDocument(doc);
-  // (Whether an empty table builds is not the point here: the build reports it as an error;
-  // the defect is the undefined behaviour on the way, seen only by UBSan.)
-  for (const auto& i : b.issues) snd::test::Note("%s", i.text.c_str());
+  SND_CHECK(!b.ok);
+  bool reported = false;
+  for (const auto& i : IssuesOf(b.issues, kPhys)) reported |= i.error;
+  SND_CHECK(reported);
+}
+
+// Found in the re-check. D-177b: "値が変わらない Set は成功（true）。履歴に手を足さず、dirty にもしない。
+// 全エディタの設定関数で揃える." Setting the value a member already has, where the file writes it
+// explicitly at its default ("preFader": false, "kind": "continuous", a marker's "kind": "user", a
+// rule's "late": "nextGrid"), erases the member: the document changes (a step, dirty) although no
+// value does. Moving a material to its own position returns false.
+SND_TEST(IndepS7Defect, Defect_SameValueSettersRewriteExplicitDefaults) {
+  ProjectDocument doc;
+  SND_REQUIRE(LoadBase(doc));
+  const auto image = Image(doc);
+  MixerEditor mx(doc);
+  ParameterEditor speed(doc, kSpeed);
+  SegmentEditor seg(doc, kSegA);
+  MusicEditor music(doc, kBgm);
+  MaterialEditor mat(doc, kPhys);
+  const struct {
+    const char* name;
+    bool ok;
+  } r[] = {{"SetSendPreFader(false)", mx.SetSendPreFader(kSfx, 0, false)},
+           {"SetSwitch(false)", speed.SetSwitch(false)},
+           {"SetMarker(same)", seg.SetMarker(0, seg.Markers()[0])},
+           {"SetRule(same)", music.SetRule(0, music.Rules()[0])},
+           {"MoveMaterial(1, 1)", mat.MoveMaterial(1, 1)}};
+  for (const auto& x : r) {
+    if (!x.ok) {
+      snd::test::Note("%s returned false", x.name);
+      SND_CHECK(false);
+    }
+  }
+  SND_CHECK_EQ(doc.UndoCount(), 0u);
+  SND_CHECK(doc.PendingChanges().empty());
+  SND_CHECK(Image(doc) == image);
+}
+
+// Found in the re-check. D-176e: SaveTo the project's own directory is a save (R2''). The test
+// `dir == dir_` compares text, so the same directory spelled otherwise ("dir/", "dir/.",
+// "dir/../name") takes the "save as" path: it writes every object and copies, but does not delete
+// the files of removed objects nor the old files of moved ones, and reports success with the
+// document clean. On disk the removed object comes back and a moved object is there twice (the
+// next Load drops one as a duplicate GUID).
+SND_TEST(IndepS7Defect, Defect_SaveToSameDirectoryOtherSpellingLeavesStaleFiles) {
+  for (const char* suffix : {"/", "/."}) {
+    const std::string dir = TempDir("defect_same");
+    WriteBaseProject(dir);
+    ProjectDocument doc;
+    SND_REQUIRE(doc.Load(dir));
+    SND_REQUIRE(doc.Remove(kCatUi));
+    SND_REQUIRE(doc.Rename(kReverb, "Hall"));
+    SND_REQUIRE(doc.SaveTo(dir + suffix));
+    SND_CHECK(!fs::exists(dir + "/categories/UI.json"));
+    SND_CHECK(!fs::exists(dir + "/buses/Reverb.json"));
+    ProjectDocument back;
+    SND_REQUIRE(back.Load(dir));
+    SND_CHECK(back.loadIssues().empty());
+    SND_CHECK_EQ(back.objects().size(), doc.objects().size());
+  }
 }
