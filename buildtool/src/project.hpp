@@ -11,6 +11,7 @@
 
 #include "snd/buildtool/diagnostics.hpp"
 #include "snd/buildtool/json.hpp"
+#include "snd/buildtool/source.hpp"
 #include "snd/id.hpp"
 
 namespace snd::buildtool::detail {
@@ -29,6 +30,7 @@ enum class Kind : std::uint8_t {
   Segment,
   Playlist,
   MaterialTable,
+  Patch,  // waveform synthesis patch (design.md 5.1; project-format.md "patch")
   Count,
 };
 const char* KindName(Kind k);  // JSON "type" value
@@ -50,6 +52,10 @@ class Project {
  public:
   // Loads every *.json under `root` (sorted), skipping `skipDirs` (absolute).
   bool Load(const std::string& root, const std::vector<std::string>& skipDirs, Diagnostics& diag);
+  // Loads the objects of an in-memory project (source.hpp); `name` is root().
+  bool Load(const ProjectSource& source, const std::string& name, Diagnostics& diag);
+  // A project-relative file (WAV, blob): from the source, or from the directory.
+  bool ReadProjectFile(const std::string& rel, std::vector<std::uint8_t>* out) const;
 
   const std::string& root() const { return root_; }
   const std::vector<Object>& objects() const { return objects_; }
@@ -76,7 +82,9 @@ class Project {
   void WarnAt(const Object& o, const json::Value& v, const std::string& msg, Diagnostics& d) const;
 
  private:
+  bool LoadFiles(const std::vector<std::string>& files, Diagnostics& diag);
   std::string root_;
+  const ProjectSource* source_ = nullptr;
   std::vector<Object> objects_;
   const Object* project_ = nullptr;
   std::map<std::string, std::size_t> byGuid_;
