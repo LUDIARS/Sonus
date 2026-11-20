@@ -108,7 +108,9 @@ class Server {
 
   // Starts listening and the live link thread.
   //   SND_ERR_IO            could not listen (port in use)
-  //   SND_ERR_LIMIT_REACHED the thread could not be created
+  //   SND_ERR_LIMIT_REACHED the thread could not be created, or (D-170) another Server is
+  //                         started on the same LiveRuntime (one consumer of its channels);
+  //                         once that one is stopped or destroyed, Start succeeds
   int Start() noexcept;
   void Stop() noexcept;
 
