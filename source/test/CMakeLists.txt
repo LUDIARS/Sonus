@@ -70,3 +70,8 @@ set_tests_properties(source_osc_test PROPERTIES TIMEOUT 600)
 snd_add_test(source_noise_test SOURCES source_noise_test.cpp LINK sonus_source sonus_base sonus_mocks)
 target_include_directories(source_noise_test PRIVATE ${PROJECT_SOURCE_DIR}/source/src)
 set_tests_properties(source_noise_test PROPERTIES TIMEOUT 900)
+snd_add_test(source_input_test SOURCES source_input_test.cpp LINK sonus_source sonus_base sonus_mocks)
+set_tests_properties(source_input_test PROPERTIES TIMEOUT 600)
+# Voice limit: RT scope, no allocation after Init, time per block (printed).
+snd_add_test(source_synth_load_test SOURCES source_synth_load_test.cpp LINK sonus_source sonus_base sonus_mocks)
+set_tests_properties(source_synth_load_test PROPERTIES TIMEOUT 900)

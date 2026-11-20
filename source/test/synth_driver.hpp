@@ -1,10 +1,13 @@
 // Drives one of the stage 7-D kinds (Oscillator, Noise, Input) directly, without
 // core: a source::Runtime, the kind's pool, and RenderBatch with items the way core
 // makes them (zeroed buffers, output-rate items get the pitch ramp, source-rate
-// items frameOffset 0). Plus small analysis helpers (FFT, Goertzel, band power).
+// items frameOffset 0). Every call into the kind after Init runs inside an RT scope
+// (rt_check.hpp: allocation, locks, IO fail the test); renderUs sums the time spent
+// in RenderBatch. Plus small analysis helpers (FFT, Goertzel, band power).
 #ifndef SND_SOURCE_TEST_SYNTH_DRIVER_HPP
 #define SND_SOURCE_TEST_SYNTH_DRIVER_HPP
 
+#include <chrono>
 #include <cmath>
 #include <complex>
 #include <cstdint>
@@ -14,6 +17,7 @@
 #include <vector>
 
 #include "snd/base/allocator.hpp"
+#include "snd/internal/rt_check.hpp"
 #include "snd/source/runtime.hpp"
 
 namespace synthtest {
@@ -92,7 +96,10 @@ class Driver {
     rq.seed = seed;
     rq.startFrame = startFrame;
     src::SourceStartResult res{};
-    kind_->Start(&rq, 1, &res);
+    {
+      snd::rt::RtScope rt;
+      kind_->Start(&rq, 1, &res);
+    }
     v.slot = res.sourceSlot;
     v.channels = channels;
     v.reserved = res.reserved;
@@ -101,7 +108,10 @@ class Driver {
     return res.sourceSlot != snd::kInvalidSlot;
   }
   void Release(Voice& v) {
-    kind_->Release(&v.slot, 1);
+    {
+      snd::rt::RtScope rt;
+      kind_->Release(&v.slot, 1);
+    }
     v.slot = snd::kInvalidSlot;
   }
   void Control(Voice& v, src::ControlOp op, std::uint64_t frame = 0) {
@@ -109,6 +119,7 @@ class Driver {
     c.sourceSlot = v.slot;
     c.op = op;
     c.frame = frame;
+    snd::rt::RtScope rt;
     kind_->Control(&c, 1);
   }
   // One block for every voice in `vs` (one batch). frames = output frames (output-rate
@@ -151,7 +162,12 @@ class Driver {
     b.block.sampleRate = opt_.sampleRate;
     b.block.clock = clock_;
     b.scratch = nullptr;
-    kind_->RenderBatch(b, st.data());
+    const auto t0 = std::chrono::steady_clock::now();
+    {
+      snd::rt::RtScope rt;
+      kind_->RenderBatch(b, st.data());
+    }
+    renderUs += std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count();
     clock_ += bf;
     for (std::size_t i = 0; i < vs.size(); ++i) {
       vs[i]->last = st[i];
@@ -176,11 +192,13 @@ class Driver {
   void Advance(Voice& v, std::uint32_t frames, float pitch = 1.0f) {
     src::AdvanceItem a{0, v.slot, frames, pitch, &v.ph};
     snd::VoiceRenderStatus st{};
+    snd::rt::RtScope rt;
     kind_->AdvanceVirtual(&a, 1, &st);
     v.last = st;
   }
 
   src::Runtime runtime;
+  double renderUs = 0.0;
 
  private:
   Opt opt_;
