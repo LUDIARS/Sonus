@@ -66,18 +66,17 @@ SND_TEST(PhysicsApi, ConfigVersionsAndRanges) {
     b.struct_size = size;
     SND_CHECK_MSG(CreateWith(sys.sys, b) == SND_ERR_INVALID_ARGUMENT, "struct_size %u", size);
   }
-  {
+  for (std::uint32_t v : {0u, SND_PHYSICS_CONFIG_VERSION + 1u}) {
     snd_physics_config b = c;
-    b.version = 0u;
+    b.version = v;
     SND_CHECK_EQ(CreateWith(sys.sys, b), SND_ERR_INVALID_ARGUMENT);
   }
-  // A newer header (larger struct_size, newer version): the known part is read, the rest ignored.
+  // A newer header (larger struct_size, the same version): the known part is read, the rest ignored.
   {
     alignas(16) unsigned char buf[sizeof(snd_physics_config) + 32];
     std::memset(buf, 0xFF, sizeof buf);
     snd_physics_config b = c;
     b.struct_size = static_cast<std::uint32_t>(sizeof(snd_physics_config) + 32u);
-    b.version = SND_PHYSICS_CONFIG_VERSION + 1u;
     std::memcpy(buf, &b, sizeof b);
     snd_phys* q = nullptr;
     SND_CHECK_EQ(snd_physics_create(sys.sys, reinterpret_cast<const snd_physics_config*>(buf), nullptr, &q), SND_OK);
