@@ -347,17 +347,28 @@ SND_TEST(IndepLivelinkRecord, SkippedCommandsAreCountedExactly) {
   RecordWithBankMidway(rec, true);
   SND_REQUIRE(!rec.bytes.empty());
   std::uint32_t total = 0, skip = 0, replace = 0, reg = 0, unload = 0;
+  std::vector<std::uint64_t> liveDataKeys;  // D-170（プロトコル 1.1）: 差し替えのデータ（RecordLiveData）の鍵
   ll::RecordReader rr(rec.bytes.data(), rec.bytes.size());
   ll::RecordItem it;
   while (rr.Next(&it)) {
+    if (ll::IsKind(it, ll::kRecordLiveData)) liveDataKeys.push_back(it.liveData.key);  // D-170（プロトコル 1.1）
     if (it.kind != ll::RecordKind::Arena) continue;
-    auto count = [&](const snd::cmd::CommandHeader& h, const std::uint8_t*) {
+    auto count = [&](const snd::cmd::CommandHeader& h, const std::uint8_t* payload) {  // D-170: payload で鍵を見る
       using CT = snd::cmd::CommandType;
       ++total;
       switch (static_cast<CT>(h.type)) {
         case CT::BankRegister: ++reg; ++skip; break;
         case CT::BankUnload: ++unload; ++skip; break;
-        case CT::LiveReplaceChunk: ++replace; ++skip; break;
+        case CT::LiveReplaceChunk: {  // D-170（プロトコル 1.1）: データが記録にあれば再生する（skipped に数えない）
+          ++replace;
+          snd::cmd::LiveReplaceChunk c;
+          std::memcpy(&c, payload, sizeof(c));
+          const auto key = static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(c.prepared));
+          bool hasData = false;
+          for (const std::uint64_t k : liveDataKeys) hasData = hasData || k == key;
+          if (!hasData) ++skip;
+          break;
+        }
         case CT::PlaySynth: case CT::PlayInput: case CT::PlayUserBuffer: case CT::CreateUserBuffer:
         case CT::DestroyUserBuffer: ++skip; break;
         default: break;
