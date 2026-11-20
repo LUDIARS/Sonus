@@ -71,7 +71,8 @@ struct RuntimeDesc {
   // 1.1
   std::uint32_t maxAuditions = 32;     // auditions tracked at once (more: Audition answers LIMIT_REACHED)
   std::uint32_t detailEntries = 1024;  // BlockDetail channel
-  std::uint32_t maxStructLog = 64;     // applied structural edits remembered for the revert
+  std::uint32_t maxStructLog = 64;     // structural edits remembered for the revert (D-172: an edit that
+                                       // would not fit is refused at acceptance, LIMIT_REACHED)
   IStructEditor* structEditor = nullptr;  // null: structural edits answer SND_ERR_UNSUPPORTED (C-01)
 };
 
@@ -108,7 +109,7 @@ struct RuntimeDrops {
   std::uint32_t readings = 0;    // CellReading channel full
   std::uint32_t auditions = 0;   // auditions not tracked (table / stop channel full)
   std::uint32_t details = 0;     // BlockDetail channel full
-  std::uint32_t structLog = 0;   // applied structural edits that could not be remembered (no undo)
+  std::uint32_t structLog = 0;   // D-172: never expected (a log place is reserved at acceptance); a bug if not 0
   std::uint32_t structUndo = 0;  // undo refused by the editor during a revert
 };
 
@@ -158,6 +159,13 @@ class LiveRuntime {
   // A new session number for a Server (never 0, never reused while the runtime lives).
   // The newest session is the only one whose edits are applied: edits recorded by an
   // earlier Server and applied after a newer Server started are dropped (D-87).
+  // D-170: one started Server per runtime. Server::Start claims the runtime (false: another
+  // Server is started on it); Server::Stop gives it back.
+  bool ClaimServer() noexcept {
+    std::uint32_t expected = 0u;
+    return serverClaimed_.compare_exchange_strong(expected, 1u, std::memory_order_acq_rel);
+  }
+  void ReleaseServer() noexcept { serverClaimed_.store(0u, std::memory_order_release); }
   std::uint32_t NewSession() noexcept {
     const std::uint32_t s = nextSession_.fetch_add(1u, std::memory_order_relaxed);
     latestSession_.store(s, std::memory_order_release);
@@ -199,6 +207,13 @@ class LiveRuntime {
   snd_result ReserveStruct(const StructCost& cost) noexcept;
   void ReleaseStruct(const StructCost& cost) noexcept;
   DevReserveUsage ReserveUsage() const noexcept;
+  // D-172: one place of the structural-edit log (maxStructLog), taken by the live link thread
+  // when it accepts an edit (false: full, the edit is refused with SND_ERR_LIMIT_REACHED and
+  // takes nothing). The audio thread gives it back unless the applied edit stays in the log
+  // (a refused / stale / cancelled edit, a remove that cancels a live add, an undo).
+  bool ReserveStructLog() noexcept;
+  void ReleaseStructLog(std::uint32_t n = 1) noexcept;
+  std::uint32_t StructLogPlaces() const noexcept { return structLogTaken_.load(std::memory_order_relaxed); }
   bool HasStructEditor() const noexcept { return structEditor_ != nullptr; }
 
   // --- ReplaceChunk slots (live link thread) -------------------------------------------
@@ -264,6 +279,7 @@ class LiveRuntime {
   std::atomic<std::uint32_t> meterEvery_{1};
   std::atomic<std::uint32_t> recordRequest_{0};
   std::atomic<std::uint32_t> recording_{0};
+  std::atomic<std::uint32_t> serverClaimed_{0};
   std::atomic<std::uint32_t> nextSession_{1};
   std::atomic<std::uint32_t> latestSession_{0};
   std::atomic<std::uint32_t> dropStale_{0};
@@ -309,6 +325,7 @@ class LiveRuntime {
     std::uint64_t args[4];
   };
   StructLogEntry* structLog_ = nullptr;  // [structLogCap_] audio thread, oldest first
+  std::atomic<std::uint32_t> structLogTaken_{0};  // places taken (accepted edits in flight + entries)
   std::uint32_t structLogCap_ = 0, structLogCount_ = 0;
   // 1.1 profiler / recording (audio thread)
   std::uint32_t maxStreams_ = 0;

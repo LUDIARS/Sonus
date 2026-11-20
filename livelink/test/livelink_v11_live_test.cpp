@@ -382,9 +382,10 @@ SND_TEST(LivelinkV11, StructEditsCountTheDevReserveAndAreRevertedNewestFirst) {
   // Over the reserve: OUT_OF_BUDGET (the tool rebuilds and hot reloads); the editor is not asked.
   SND_CHECK_EQ(s.Ack(s.client->StructEdit(ll::StructOp::AddBus, HashId("New2"), addBus, 2)), SND_ERR_OUT_OF_BUDGET);
   const std::uint64_t addFx[4] = {0xABCDu, ~0u, Bits(0.5f), Bits(1.0f)};
-  SND_CHECK_EQ(s.Ack(s.client->StructEdit(ll::StructOp::AddEffect, HashId("New"), addFx, 4)), SND_OK);
-  const std::uint64_t send[3] = {HashId("Sfx"), Bits(-12.0f), 1u};
-  SND_CHECK_EQ(s.Ack(s.client->StructEdit(ll::StructOp::AddSend, HashId("New"), send, 3)), SND_OK);
+  // On a bank bus (Sfx), so that removing the live bus "New" does not take them away (D-172).
+  SND_CHECK_EQ(s.Ack(s.client->StructEdit(ll::StructOp::AddEffect, HashId("Sfx"), addFx, 4)), SND_OK);
+  const std::uint64_t send[3] = {HashId("Master"), Bits(-12.0f), 1u};
+  SND_CHECK_EQ(s.Ack(s.client->StructEdit(ll::StructOp::AddSend, HashId("Sfx"), send, 3)), SND_OK);
   u = s.f.rt->ReserveUsage();
   SND_CHECK_EQ(u.effects, 1u);
   SND_CHECK_EQ(u.bytes, 3u * ll::kStructEditBaseBytes + 8u * (3u + 4u + 3u));
@@ -565,4 +566,58 @@ SND_TEST(LivelinkV11, UpdateNumbersTellNewAndMissedEntries) {
   SND_CHECK(first > last + 1u);           // missed entries
   SND_CHECK(first + 120u >= now + 1u);    // the oldest one kept
   SND_CHECK(n >= 120u);
+}
+
+// D-172: removing a live bus also takes away the live effects on it and the live sends from it
+// (their whole cost comes back, they leave the revert log, the editor gets no undo for them);
+// an edit the revert log cannot hold is refused at acceptance (LIMIT_REACHED, takes nothing).
+SND_TEST(LivelinkV11, RemovingALiveBusTakesItsLiveEffectsAndTheLogIsReserved) {
+  snd_config cfg = Config();
+  cfg.dev_reserve.buses = 4;
+  cfg.dev_reserve.effects = 4;
+  FakeEditor ed;
+  ll::RuntimeDesc rd;
+  rd.structEditor = &ed;
+  rd.maxStructLog = 3;
+  ll::ServerDesc sd;
+  sd.revertOnDisconnect = true;
+  Session s(cfg, rd, sd);
+  SND_REQUIRE(s.Ready());
+  const std::uint64_t addBus[2] = {HashId("Master"), 2u};
+  const std::uint64_t fx[2] = {0xABCDu, ~0u};
+  const std::uint64_t send[2] = {HashId("Master"), Bits(-6.0f)};
+  SND_CHECK_EQ(s.Ack(s.client->StructEdit(ll::StructOp::AddBus, HashId("B1"), addBus, 2)), SND_OK);
+  SND_CHECK_EQ(s.Ack(s.client->StructEdit(ll::StructOp::AddEffect, HashId("B1"), fx, 2)), SND_OK);
+  SND_CHECK_EQ(s.Ack(s.client->StructEdit(ll::StructOp::AddSend, HashId("B1"), send, 2)), SND_OK);
+  SND_CHECK_EQ(s.f.rt->StructLogPlaces(), 3u);
+  // The log is full: refused before the reserve and the editor.
+  const ll::DevReserveUsage full = s.f.rt->ReserveUsage();
+  const std::size_t calls = ed.calls.size();
+  SND_CHECK_EQ(s.Ack(s.client->StructEdit(ll::StructOp::AddBus, HashId("B2"), addBus, 2)), SND_ERR_LIMIT_REACHED);
+  SND_CHECK_EQ(ed.calls.size(), calls);
+  SND_CHECK_EQ(s.f.rt->ReserveUsage().buses, full.buses);
+  SND_CHECK_EQ(s.f.rt->ReserveUsage().bytes, full.bytes);
+  SND_CHECK_EQ(s.f.rt->Drops().structLog, 0u);
+  // Make room: the log holds 3, a remove needs a place too, so first an edit is refused...
+  SND_CHECK_EQ(s.Ack(s.client->StructEdit(ll::StructOp::RemoveBus, HashId("B1"), nullptr, 0)), SND_ERR_LIMIT_REACHED);
+  // ...with a larger log, removing B1 frees everything that went with it.
+  ll::RuntimeDesc rd2 = rd;
+  rd2.maxStructLog = 4;
+  Session t(cfg, rd2, sd);
+  SND_REQUIRE(t.Ready());
+  SND_CHECK_EQ(t.Ack(t.client->StructEdit(ll::StructOp::AddBus, HashId("B1"), addBus, 2)), SND_OK);
+  SND_CHECK_EQ(t.Ack(t.client->StructEdit(ll::StructOp::AddEffect, HashId("B1"), fx, 2)), SND_OK);
+  SND_CHECK_EQ(t.Ack(t.client->StructEdit(ll::StructOp::AddSend, HashId("B1"), send, 2)), SND_OK);
+  SND_CHECK_EQ(t.Ack(t.client->StructEdit(ll::StructOp::RemoveBus, HashId("B1"), nullptr, 0)), SND_OK);
+  const ll::DevReserveUsage u = t.f.rt->ReserveUsage();
+  SND_CHECK_EQ(u.buses, 0u);
+  SND_CHECK_EQ(u.effects, 0u);
+  SND_CHECK_EQ(u.bytes, 0u);
+  SND_CHECK_EQ(t.f.rt->StructLogPlaces(), 0u);
+  ed.calls.clear();
+  t.client->Disconnect();
+  SND_REQUIRE(t.f.StepUntil([&] { return !t.f.server->Connected(); }));
+  t.f.Steps(16);
+  SND_CHECK_EQ(ed.calls.size(), 0u);  // nothing left to undo
+  SND_CHECK_EQ(t.f.rt->Drops().structLog, 0u);
 }
