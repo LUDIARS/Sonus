@@ -204,6 +204,7 @@ tool/
 | `tool_music_editor_test` | 音楽: テンポマップ（解析値）、タップテンポとグリッド、Segment / Playlist の編集と規則、State・ルール・Stinger（照合、到達できない行がビルドの警告と一致、自動の並べ替え）、最小先読み、遷移の試聴、保存の往復 |
 | `tool_material_editor_test` | マテリアル表: 番号の付け替え、対称な組、9.3 の代替順と代替の一覧、強さのカーブ、`PHYS` の中身 |
 | `tool_patch_editor_test` | パッチ: ノードと接続の規則、上限、ビルドと同じ検査、依存順、`XPCH` の中身、位置はバンクに届かない |
+| `tool_decisions_test` | 差し戻しの決定（D-176〜D-180）: 負のゼロ、非有限の拒否、値が変わらない設定は成功、GUID の諦め、予約名、保存の失敗と保留・やり直し、名前を付けて保存、スキーマの全メンバの分類、LocateField と DiffBuilds の一致（無い列は live でない）、ビルド結果を複数スレッドで読む、最後の材質、stem の範囲、拍子は小節線、AutoSort の拒否、近似の位置、効かない compose、強さの有限性 |
 | `tool_runtime_compare_test` | ランタイムとの一致: カーブの評価（core の `EvaluateCurve` とビット一致）、3D のプレビューとパラメータの合成（本物の core の出力と比べる）、テンポマップ（music の `Timeline`）、ルールの照合（music の `FindRule`） |
 | `tool_ui_declaration_test` | ストリップの数と並び、ID の安定（フレーム・値の変更・画面の往復）、ボタンがモデルを動かす、ページ |
 | `tool_ui_gesture_test` | ドラッグ量と値（端で飽和）、宣言の差し替えをまたぐドラッグ、Shift、ダブルクリック、ホイールの併合、ノブ（線形・対数）、取り消し・フォーカス喪失 |
