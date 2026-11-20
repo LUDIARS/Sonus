@@ -121,19 +121,19 @@ SND_TEST(IndepPlay, ImpactIsPositioned) {
   }
 }
 
-// Undecided 2 (weakness): the hold is measured in physics time, not in snd_update calls.
-// A game that sub-steps (two submits of 0.1 s before one snd_update) releases the emitter
-// in the same command batch as its play -> the A-004 situation. Reported, the test records
-// what happens (it asserts the position, so it fails while the weakness exists).
+// Undecided 2 (weakness) -> defect of decision D ("Emitter を作って位置を与えて snd_play"):
+// the hold is measured in physics time, not in snd_update calls. A fixed-step game that
+// catches up after a hitch runs several sub-steps before one snd_update (here 7 x 1/60 s);
+// the hold (0.1 s) passes inside the same command batch, the emitter is destroyed in the
+// batch that plays on it -> the A-004 situation: the hit 2 m to the right is centred.
 SND_TEST(IndepPlay, Defect_HoldInPhysicsTimeSubstepsLosePosition) {
   Fx f;
   SND_REQUIRE(f.Ok());
   f.s.Advance(2);
-  SND_CHECK_EQ(f.Submit({ImpactAt(1, 2.0f)}, 0.1f), SND_OK);
-  SND_CHECK_EQ(f.Submit({}, 0.1f), SND_OK);  // second sub-step of the same frame
+  SND_CHECK_EQ(f.Submit({ImpactAt(1, 2.0f)}), SND_OK);
+  for (int i = 0; i < 6; ++i) SND_CHECK_EQ(f.Submit({}), SND_OK);  // catch-up sub-steps, no snd_update
   const Lr m = Measure(f.s, 6, 8);
-  snd::test::Note("sub-stepped: L %.4f R %.4f (held_emitters_released_early %llu)", m.l, m.r,
-                  static_cast<unsigned long long>(phystest::Stats(f.phys).held_emitters_released_early));
+  snd::test::Note("sub-stepped: L %.4f R %.4f", m.l, m.r);
   SND_CHECK_MSG(m.l < 0.02, "L %.4f: the impact 2 m to the right is heard on the left", m.l);
 }
 

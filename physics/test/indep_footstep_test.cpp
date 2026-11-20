@@ -63,7 +63,7 @@ SND_TEST(IndepFootstep, TwoLargestAndEventChain) {
   SND_REQUIRE_EQ(f.created, SND_OK);
   SND_REQUIRE_EQ(f.tableResult, SND_OK);
   // Material 2 0.2 (first of the tie), 1 0.6, 0 0.2 (tie, later: ignored).
-  SND_CHECK_EQ(f.Step({W(2, 0.2f), W(1, 0.6f), W(0, 0.2f)}, SND_MOTION_WALK), SND_OK);
+  SND_CHECK_EQ(f.Step({W(2, 0.2f), W(1, 0.6f), W(0, 0.2f)}, SND_MOTION_WALK, 1), SND_OK);
   SND_CHECK_EQ(f.rec.Count(SND_PHYSICS_RECORD_PLAY), 2u);
   const Rec* a = f.PlayOf(kF1Walk);  // 1: footstep[1][walk]
   const Rec* d = f.PlayOf(kFD);      // 2: nothing set -> footstep_default
@@ -75,7 +75,7 @@ SND_TEST(IndepFootstep, TwoLargestAndEventChain) {
   SND_CHECK_NEAR(d->r.volume, 0.25f, 1e-6);
   SND_CHECK_EQ(d->r.game_material_a, 2u);
   SND_CHECK_EQ(a->Param(P(SND_PHYSICS_PARAM_MOTION_NAME)), static_cast<float>(SND_MOTION_WALK));
-  SND_CHECK_EQ(a->Param(P(SND_PHYSICS_PARAM_FOOT_MATERIAL_NAME)), 9.0f);
+  SND_CHECK_EQ(a->Param(P(SND_PHYSICS_PARAM_FOOT_MATERIAL_NAME)), 1.0f);  // foot material 1
   SND_CHECK_NEAR(a->Param(P(SND_PHYSICS_PARAM_SURFACE_WEIGHT_NAME)), 0.75f, 1e-6);
   SND_CHECK_EQ(a->r.emitter.value, 0u);  // 2D
   // Run on material 0: motion column; walk on material 0: the any-motion column.
@@ -110,12 +110,7 @@ SND_TEST(IndepFootstep, IgnoredWeights) {
   SND_CHECK_EQ(f.Step({W(0, 0.0f)}, SND_MOTION_WALK), SND_OK);
   SND_CHECK_EQ(f.rec.Count(SND_PHYSICS_RECORD_PLAY), 0u);
   SND_CHECK_EQ(f.Step({}, SND_MOTION_WALK), SND_OK);
-  // Very large weights: w / (w1 + w2) must not become NaN (inf / inf).
-  SND_CHECK_EQ(f.Step({W(0, 3.0e38f), W(1, 3.0e38f)}, SND_MOTION_RUN), SND_OK);
-  for (const Rec& r : f.rec.Of(SND_PHYSICS_RECORD_PLAY)) {
-    SND_CHECK(std::isfinite(r.r.volume));
-    SND_CHECK_NEAR(r.r.volume, 0.5f, 1e-6);
-  }
+  // (Very large weights: IndepReview.Defect_FootstepHugeWeightsOverflow.)
 }
 
 // P29: weight_to_volume curve; P30 errors.
