@@ -117,6 +117,9 @@ ScriptResult RunScript(bool parallel, snd::IAllocator* alloc, bool rtScope, Prob
   cfg.jobs.realtime_workers = parallel ? 2u : 0u;
   cfg.jobs.voices_per_chunk = 2;
   cfg.tuning.rt_spin_microseconds = 200000;  // no late chunk (D-43 holds change the output)
+  // Bit identity is promised with the load LOD off (2.5): a slow build (TSan) would
+  // otherwise lower the real-voice limit / resampler mid-script, at a time-dependent block.
+  cfg.tuning.lod_down_blocks = 0;
   Harness h(cfg, {}, nullptr, 0, alloc);
   h.Load("b", ScriptBank().Build(HashId("B")));
   h.Steps(2);
@@ -147,6 +150,10 @@ ScriptResult RunScript(bool parallel, snd::IAllocator* alloc, bool rtScope, Prob
   }
   h.sys->Update();
   h.sys->GetMeter(HashId("Meter"), &r.meter);
+  snd_stats st{};
+  h.sys->GetStats(&st);
+  SND_CHECK_EQ(st.lod_level, 0u);
+  SND_CHECK_EQ(st.late_chunks, 0u);
   r.out = h.all;
   return r;
 }
