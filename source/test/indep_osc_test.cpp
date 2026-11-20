@@ -291,19 +291,20 @@ SND_TEST(IndepOsc, ExtremeFrequenciesAndRatiosStayFinite) {
   double err = 0.0;
   for (std::size_t i = 0; i < 400; ++i) err = std::fmax(err, std::fabs(x[i] - std::sin(kTwoPi * 0.4999 * double(i))));
   SND_CHECK_MSG(err < 1e-4, "clamped dt: max error %g", err);
-  // A zero ratio holds the phase: the sine stays at its value.
+  // D-198 (1): a zero ratio is silence and the phase waits; the next block goes on from it.
   Driver d(snd::SourceKind::Oscillator, Driver::Opt{});
   Driver::Voice v;
   const src::OscillatorParams p = Osc(bf::Waveform::Sine, 1000.0f);
   SND_REQUIRE(d.Start(v, &p, 1));
   d.Render(v, 100);
-  const float held = v.out[0].back();
   Driver::Mod z;
   z.pitch = snd::Ramp{0.0f, 0.0f};
   d.Block({&v}, z);
-  const float expect = static_cast<float>(std::sin(kTwoPi * 100.0 * 1000.0 / kRate));
-  for (std::size_t i = 100; i < v.out[0].size(); ++i) SND_CHECK_NEAR(v.out[0][i], expect, 1e-5);
-  SND_CHECK(std::fabs(held - expect) > 1e-3);
+  for (std::size_t i = 100; i < 356; ++i) SND_CHECK_EQ(v.out[0][i], 0.0f);
+  d.Block({&v});
+  for (std::size_t i = 0; i < 256; ++i) {
+    SND_CHECK_NEAR(v.out[0][356 + i], std::sin(kTwoPi * double(100 + i) * 1000.0 / kRate), 2e-5);
+  }
 }
 
 // O9: the pulse duty is OscillatorParams::duty + dutyOffset per sample. A 1024-sample
@@ -617,39 +618,131 @@ SND_TEST(IndepOsc, SlotReuseLeavesNothingBehind) {
 }
 
 // ---------------------------------------------------------------------------------------
-// Spec gaps (reported for a decision). These tests RECORD the current behaviour only.
+// D-198 (decisions on the former spec gaps).
 // ---------------------------------------------------------------------------------------
 
-// Gap: a frequency of 0 (also negative / NaN / -Inf, which D-190 maps to 0) holds the phase
-// at its start: the square outputs a constant +1, the pulse 2 - 2 duty - full-scale DC into
-// the mix. Sine, saw and triangle give 0. (Recommendation: silence, or the start values of
-// the band-limited edge, i.e. 0.)
-SND_TEST(IndepOsc, SpecGap_ZeroFrequencyGivesDc) {
-  const std::vector<float> q = Render(Osc(bf::Waveform::Square, 0.0f), 512);
-  SND_CHECK_NEAR(isrc::Mean(q, 1), 1.0, 1e-6);  // current behaviour
-  const std::vector<float> p = Render(Osc(bf::Waveform::Pulse, std::nanf(""), 0.25f), 512);
-  SND_CHECK_NEAR(isrc::Mean(p, 1), 1.5, 1e-6);  // current behaviour
-  const std::vector<float> s = Render(Osc(bf::Waveform::Sine, -5.0f), 512);
-  SND_CHECK_NEAR(isrc::MaxAbs(s), 0.0, 1e-9);
+// D-198 (1): an effective frequency of 0 (0, negative, NaN, -Inf frequency) is silence for
+// every waveform (no DC). A pitch ramp crossing 0 inside a block: the samples with a
+// positive ratio advance the phase by the per-sample sum, the others are 0 and hold it;
+// the phase goes on from where it stopped.
+SND_TEST(IndepOsc, ZeroFrequencyIsSilentAndKeepsThePhase) {
+  for (bf::Waveform w : {bf::Waveform::Sine, bf::Waveform::Saw, bf::Waveform::Square, bf::Waveform::Triangle,
+                         bf::Waveform::Pulse}) {
+    for (float f : {0.0f, -5.0f, std::nanf(""), -INFINITY, INFINITY}) {
+      const std::vector<float> x = Render(Osc(w, f, 0.25f), 512);
+      SND_REQUIRE_EQ(x.size(), std::size_t{512});
+      SND_CHECK_MSG(isrc::MaxAbs(x) == 0.0, "wave %u f %g: peak %g", unsigned(w), double(f), isrc::MaxAbs(x));
+    }
+  }
+  const double dt = 1000.0 / kRate;
+  Driver d(snd::SourceKind::Oscillator, Driver::Opt{});
+  Driver::Voice v;
+  const src::OscillatorParams p = Osc(bf::Waveform::Sine, 1000.0f);
+  SND_REQUIRE(d.Start(v, &p, 1));
+  Driver::Mod down, up;
+  down.pitch = snd::Ramp{1.0f, -1.0f};
+  up.pitch = snd::Ramp{-1.0f, 1.0f};
+  d.Block({&v}, down);
+  d.Block({&v}, up);
+  d.Block({&v});
+  SND_REQUIRE_EQ(v.out[0].size(), std::size_t{768});
+  double ph = 0.0, err = 0.0;
+  for (std::size_t i = 0; i < 768; ++i) {
+    const double a = double(i % 256) / 256.0;
+    const double r = i < 256 ? 1.0 - 2.0 * a : (i < 512 ? -1.0 + 2.0 * a : 1.0);
+    const double want = r > 0.0 ? std::sin(kTwoPi * ph) : 0.0;
+    err = std::fmax(err, std::fabs(v.out[0][i] - want));
+    if (r > 0.0) ph += dt * r;
+  }
+  SND_CHECK_MSG(err < 2e-5, "ramp through 0: max error %g", err);
 }
 
-// Gap: D-192 takes the table length from a loop (loopEnd - loopStart) but does not say where
-// the tables start; with loopStart > 0 table 0 starts at frame 0 (not at loopStart).
-SND_TEST(IndepOsc, SpecGap_WavetableLoopNotAtFrameZero) {
-  std::vector<float> s(3000);
-  for (std::uint32_t j = 0; j < 3000; ++j) s[j] = static_cast<float>(j / 1000);
-  src::SourceAsset b{};
-  b.codec.codec = SND_CODEC_PCM_F32;
-  b.codec.channels = 1;
-  b.codec.sample_rate = 48000;
-  b.codec.total_frames = 3000;
-  b.data = reinterpret_cast<const std::uint8_t*>(s.data());
-  b.dataBytes = s.size() * 4u;
-  b.form = src::LoadForm::PcmResident;
-  b.loopStart = 1000;
-  b.loopEnd = 2000;
-  src::OscillatorParams q = Osc(bf::Waveform::Sine, 48.0f);
-  q.wavetable = &b;
-  const std::vector<float> x = Render(q, 500);
-  SND_CHECK_EQ(x[10], 0.0f);  // current behaviour: table 0 = frames 0 .. 999 (not 1000 .. 1999)
+// D-198 (3): RenderItem inputs that are not finite are made safe per block: a pitch with a
+// non-finite end -> 0 for the block (silence, phase held), offsets -> 0. No NaN out, no
+// undefined conversion (UBSan); a virtual advance with a non-finite pitch holds the phase.
+SND_TEST(IndepOsc, NonFiniteRenderInputsAreSafe) {
+  const float nan = std::nanf("");
+  const float bad[] = {nan, INFINITY, -INFINITY};
+  for (float b : bad) {
+    for (int which = 0; which < 2; ++which) {
+      Driver d(snd::SourceKind::Oscillator, Driver::Opt{});
+      Driver::Voice v;
+      const src::OscillatorParams p = Osc(bf::Waveform::Sine, 1000.0f);
+      SND_REQUIRE(d.Start(v, &p, 1));
+      d.Render(v, 256);
+      Driver::Mod m;
+      m.pitch = which == 0 ? snd::Ramp{b, 1.0f} : snd::Ramp{1.0f, b};
+      d.Block({&v}, m);
+      for (std::size_t i = 256; i < 512; ++i) SND_CHECK_EQ(v.out[0][i], 0.0f);
+      d.Advance(v, 1000, b);
+      d.Block({&v});
+      for (std::size_t i = 0; i < 256; ++i) {
+        SND_CHECK_NEAR(v.out[0][512 + i], std::sin(kTwoPi * double(256 + i) * 1000.0 / kRate), 2e-5);
+      }
+    }
+    // Pulse duty offset and wavetable position offset: as if 0.
+    const std::vector<float> ref = Render(Osc(bf::Waveform::Pulse, 375.0f, 0.3f), 256);
+    Driver::Mod md;
+    md.duty = snd::Ramp{0.1f, b};
+    SND_CHECK(Render(Osc(bf::Waveform::Pulse, 375.0f, 0.3f), 256, md) == ref);
+  }
+  std::vector<float> pcm(4096);
+  for (std::uint32_t j = 0; j < 4096; ++j) pcm[j] = j < 2048 ? 0.25f : -0.75f;
+  src::SourceAsset a{};
+  a.codec.codec = SND_CODEC_PCM_F32;
+  a.codec.channels = 1;
+  a.codec.sample_rate = 48000;
+  a.codec.total_frames = 4096;
+  a.data = reinterpret_cast<const std::uint8_t*>(pcm.data());
+  a.dataBytes = pcm.size() * 4u;
+  a.form = src::LoadForm::PcmResident;
+  src::OscillatorParams q = Osc(bf::Waveform::Sine, 375.0f);
+  q.wavetable = &a;
+  for (float b : bad) {
+    Driver::Mod m;
+    m.table = snd::Ramp{b, 0.5f};
+    const std::vector<float> x = Render(q, 256, m);
+    for (float y : x) SND_CHECK_EQ(y, 0.25f);  // position 0
+  }
+}
+
+// D-198 (2): with a loop the tables start at loopStart (table k at loopStart + k x length);
+// tables = (frames - loopStart) / length, a remainder is not read (exact-size buffers:
+// ASan sees any read past the asset). Without a loop they start at frame 0.
+SND_TEST(IndepOsc, WavetableTablesStartAtLoopStart) {
+  struct Case {
+    std::uint32_t frames, loopStart, loopEnd;
+    std::uint32_t tables;
+  };
+  for (const Case c : {Case{3000, 1000, 2000, 2}, Case{3500, 700, 1700, 2}, Case{1999, 999, 1999, 1},
+                       Case{4000, 1, 1001, 3}}) {
+    std::vector<float> s(c.frames);  // exact size
+    for (std::uint32_t j = 0; j < c.frames; ++j) s[j] = static_cast<float>(j);
+    src::SourceAsset b{};
+    b.codec.codec = SND_CODEC_PCM_F32;
+    b.codec.channels = 1;
+    b.codec.sample_rate = 48000;
+    b.codec.total_frames = c.frames;
+    b.data = reinterpret_cast<const std::uint8_t*>(s.data());
+    b.dataBytes = s.size() * 4u;
+    b.form = src::LoadForm::PcmResident;
+    b.loopStart = c.loopStart;
+    b.loopEnd = c.loopEnd;
+    const std::uint32_t len = c.loopEnd - c.loopStart;
+    // len frames per cycle at 48 Hz -> len / 1000 frames per sample; read where it lands
+    // on whole frames (every 1000th sample of a cycle of 1000) to avoid interpolation.
+    src::OscillatorParams q = Osc(bf::Waveform::Sine, 48.0f);
+    q.wavetable = &b;
+    for (float pos : {0.0f, 1.0f}) {
+      Driver::Mod m;
+      m.table = snd::Ramp{pos, pos};
+      const std::vector<float> x = Render(q, 1000, m);
+      SND_REQUIRE_EQ(x.size(), std::size_t{1000});
+      const std::uint32_t k = pos == 0.0f ? 0u : c.tables - 1u;
+      // Sample 0 is phase 0 exactly: frame loopStart + k len.
+      SND_CHECK_MSG(x[0] == static_cast<float>(c.loopStart + k * len), "frames %u loop %u..%u pos %g: %f", c.frames,
+                    c.loopStart, c.loopEnd, double(pos), double(x[0]));
+      SND_CHECK(isrc::MaxAbs(x) <= static_cast<double>(c.frames));
+    }
+  }
 }
