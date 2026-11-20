@@ -452,12 +452,12 @@ SND_TEST(IndepG4Loop, NLoopsWithPitch) {
 
 // Loop points [200, 800) with 3 loops: records what is played (the spec does not say
 // whether the material after loopEnd follows the last loop).
-SND_TEST(IndepG4Loop, SpecHole_NLoopsWithLoopPoints) {
+SND_TEST(IndepG4Loop, NLoopsWithLoopPointsEndAtTheLoopEnd) {
   const LoopRun p = RunLoop(1000, 3, 0, 80, 200, 800);
   snd::test::Note("loop points [200, 800) x 3: end %llu, count %llu (2200 = tail played after the last loop, "
                   "2000 = stops at loopEnd)", static_cast<unsigned long long>(p.end), static_cast<unsigned long long>(p.count));
   SND_CHECK_EQ(p.ends, 1u);
-  SND_CHECK(p.end >= 1999 && p.end <= 2201);
+  SND_CHECK(p.end >= 1999 && p.end <= 2001);  // decision 4: no tail after the N-th loop end
 }
 
 // A pause in the middle does not change the number of loops: the played frames stay 3 x length.
@@ -512,9 +512,8 @@ SND_TEST(IndepG4Loop, NLoopsAcrossAVirtualPhase) {
   const std::size_t endHeard = r.EndAbove(t0, r.Now(), 0.4f * kC);
   snd::test::Note("ended at block %llu (clock %llu); last loud frame %llu; expected 14400",
                   static_cast<unsigned long long>(e->block), static_cast<unsigned long long>(std::size_t(e->block) * 256u - t0), static_cast<unsigned long long>(endHeard - t0));
-  // +-24: the resampler's look-ahead (16 source frames read ahead of the output) is lost or
-  // kept across the virtual phase; the loops themselves are not lost or added (+-4800).
-  SND_CHECK(endHeard - t0 >= 14400 - 24 && endHeard - t0 <= 14400 + 24);
+  // Decision 2: "continue" does not skip the resampler's look-ahead: the end stays on time.
+  SND_CHECK(endHeard - t0 >= 14400 - 1 && endHeard - t0 <= 14400 + 1);
   SND_CHECK_EQ(r.CountEnds(h.value), 1u);
   SND_CHECK_EQ(e->reason, SND_END_COMPLETED);
 }
@@ -584,11 +583,9 @@ SND_TEST(IndepG4Loop, ClipFadeOutWithNLoopsFadesTheLastLoopOnly) {
   SND_CHECK(r.EndAbove(t0, r.Now(), 1e-3f) - t0 <= 7210);
 }
 
-// DEFECT: the clip fade-out (CLIP.fadeOutMs) is evaluated per block: it starts up to a block
-// before `clip end - fadeOutMs` and has not reached 0 at the clip's end (the clip then stops
-// with a step of about fade slope x the rest of the block). Expected: the fade runs over the
-// clip's last fadeOutMs frames and reaches 0 at the last frame (a fade towards the end).
-SND_TEST(IndepG4Loop, Defect_ClipFadeOutIsNotSampleAligned) {
+// Former Defect_ClipFadeOutIsNotSampleAligned (fixed). Decision 4: the clip's last
+// fadeOutMs frames fade linearly sample by sample, 0 on the last frame.
+SND_TEST(IndepG4Loop, ClipFadeOutIsSampleAligned) {
   Rig r;
   B bk;
   TClip c = B::AssetClip(bk.Asset("a", Constant(4800, 1.0f)));
@@ -604,6 +601,14 @@ SND_TEST(IndepG4Loop, Defect_ClipFadeOutIsNotSampleAligned) {
                   double(before), double(last));
   SND_CHECK(before > 0.995f);
   SND_CHECK(std::fabs(last) < 0.01f);
+  SND_CHECK_NEAR(r.At(t0 + 4799) / kC, 0.0f, 1e-3f);
+  double maxErr = 0;  // linear (1 - (f - 2400) / 2400 ... 0 at 4799), the resampler is exact at ratio 1 inside
+  for (std::size_t f = 2400; f < 4800; ++f) {
+    const double want = double(4799 - f) / 2399.0;
+    maxErr = std::max(maxErr, std::fabs(double(r.At(t0 + f)) / kC - want));
+  }
+  snd::test::Note("max |error| vs the line %g", maxErr);
+  SND_CHECK(maxErr < 2.0 / 2400.0 + 1e-4);
 }
 
 // ---------------------------------------------------------------------------
@@ -906,7 +911,7 @@ SND_TEST(IndepG4Nest, ChildLimitGroupFullRefusesTheSecondChild) {
 // records whether the playback ends (STOLEN, child silenced) or only loses that voice.
 // 4.1 lists "stolen" as a playback end; 4.4 steals voices. Not decided for a playback
 // with several voices.
-SND_TEST(IndepG4Nest, SpecHole_StealOfOneVoiceOfAMultiVoiceParent) {
+SND_TEST(IndepG4Nest, StealOfOneVoiceOfAMultiVoiceParentKeepsThePlayback) {
   Rig r;
   B bk = NestBank();
   bk.b.groups.push_back(TGroup{HashId("G"), 1, 0});
@@ -923,8 +928,9 @@ SND_TEST(IndepG4Nest, SpecHole_StealOfOneVoiceOfAMultiVoiceParent) {
   const float after = r.Mean(r.Now() - 256, r.Now()) / kC;
   snd::test::Note("one parent %g, after the second %g; first parent ends %u (1.1 = only its own voice stolen, "
                   "0.6 = the whole first playback stolen)", double(one), double(after), r.CountEnds(a.value));
-  SND_CHECK(r.CountEnds(a.value) <= 1u);
+  SND_CHECK_EQ(r.CountEnds(a.value), 0u);  // decision 6: the playback goes on
   SND_CHECK_EQ(r.CountEnds(b.value), 0u);
+  SND_CHECK_NEAR(after, 1.1f, 2e-3f);
 }
 
 namespace {
@@ -1060,10 +1066,9 @@ SND_TEST(IndepG4Action, StopEventStopsTheChild) {
   SND_CHECK_EQ(r.ends.size(), 0u);
 }
 
-// DEFECT (D-145 "時刻のサンプルで正確に効く"): a StopEvent action at 30 ms (frame 1440, inside
-// block 5 = 1280..1535) starts the stop fade at the block's first frame (1280), 160 frames
-// before its time. Expected: full level up to frame 1439, the fade from 1440.
-SND_TEST(IndepG4Action, Defect_StopEventActionTakesEffectBeforeItsTime) {
+// Former Defect_StopEventActionTakesEffectBeforeItsTime (fixed): a StopEvent action at 30 ms
+// (1440, inside block 1280..1535) keeps the target at full level up to frame 1439.
+SND_TEST(IndepG4Action, StopEventActionAtItsTime) {
   Rig r;
   B bk = ActionBank({Act(10.0f, kPlay, HashId("X")), Act(30.0f, kStopA, HashId("X"))});
   r.Load("b", bk.Build("B"));
@@ -1123,19 +1128,20 @@ SND_TEST(IndepG4Action, SetParamActsOnItsOwnPlayback) {
   const std::size_t t0 = r.Now();
   r.sys->Play(HashId("P"), NoEm(), nullptr);
   r.Steps(8);
-  SND_CHECK_NEAR(r.At(t0 + 767) / kC, 0.5f, 1e-3f);
-  SND_CHECK_NEAR(r.At(t0 + 1279) / kC, 0.05f, 1e-3f);  // in effect within a block after it
+  // Decision 7 (D-145 rev.): from the first block that starts at or after the action (1024),
+  // ramping within that block like snd_set_param; settled in the next block.
+  SND_CHECK_NEAR(r.At(t0 + 1023) / kC, 0.5f, 1e-3f);
+  SND_CHECK_NEAR(r.At(t0 + 1300) / kC, 0.05f, 1e-3f);
   // Another playback started now is not affected (not Global).
   const std::size_t t1 = r.Now();
   r.sys->Play(HashId("P"), NoEm(), nullptr);
   r.Steps(2);
-  SND_CHECK_NEAR(r.At(t1 + 100) / kC - r.At(t0 + 1279) / kC, 0.5f, 2e-3f);
+  SND_CHECK_NEAR(r.At(t1 + 100) / kC - r.At(t0 + 1300) / kC, 0.5f, 2e-3f);
 }
 
-// DEFECT (D-145): the SetParam action at 20 ms (frame 960, block 3 = 768..1023) ramps the
-// volume over the whole block 3: at frame 959 the level is already 0.16 instead of 0.5.
-// Expected: no effect before frame 960.
-SND_TEST(IndepG4Action, Defect_SetParamActionTakesEffectBeforeItsTime) {
+// Former Defect_SetParamActionTakesEffectBeforeItsTime (fixed in af89e2e): the SetParam
+// action at 20 ms (960) has no effect before the block that starts at or after it (1024).
+SND_TEST(IndepG4Action, SetParamActionNotBeforeItsTime) {
   Rig r;
   B bk = SetParamBank();
   r.Load("b", bk.Build("B"));
@@ -1145,6 +1151,8 @@ SND_TEST(IndepG4Action, Defect_SetParamActionTakesEffectBeforeItsTime) {
   snd::test::Note("P at 800 %g, 959 %g, 960 %g, 1023 %g", double(r.At(t0 + 800) / kC), double(r.At(t0 + 959) / kC),
                   double(r.At(t0 + 960) / kC), double(r.At(t0 + 1023) / kC));
   SND_CHECK_NEAR(r.At(t0 + 959) / kC, 0.5f, 1e-3f);
+  SND_CHECK_NEAR(r.At(t0 + 1023) / kC, 0.5f, 1e-3f);
+  SND_CHECK(r.At(t0 + 1100) / kC < 0.5f);
 }
 
 // After the parent stopped, its actions do not fire.
@@ -1162,11 +1170,10 @@ SND_TEST(IndepG4Action, StopCancelsTheActions) {
   }
 }
 
-// DEFECT (D-145 "一時停止中は時刻が進まない"): the parent is paused at frame 256, before its
-// action at 10 ms (480), and resumed 10 blocks later; the action fires at 480 while the
-// parent is paused. Expected: the child starts 224 frames of track time after the resume
-// (3040, a short fade of slack).
-SND_TEST(IndepG4Action, Defect_PausedParentStillFiresItsActions) {
+// Former Defect_PausedParentStillFiresItsActions (fixed): the parent is paused at frame 256,
+// before its action at 10 ms (480), and resumed 10 blocks later: the child starts 224 frames
+// of track time after the resume (3040, a short fade of slack).
+SND_TEST(IndepG4Action, PausedParentHoldsItsActions) {
   {
     Rig r;
     B bk = ActionBank({Act(10.0f, kPlay, HashId("X"))});
@@ -1268,9 +1275,9 @@ SND_TEST(IndepG4Action, SpecHole_TrackTimeOfALoopingOrPitchedParent) {
   }
 }
 
-// DEFECT (D-145): ApplySnapshot at 20 ms (frame 960) already lowers the bus over block 3
-// (768..1023): 0.16 at frame 959. Expected: the level is unchanged before frame 960 (and lower after).
-SND_TEST(IndepG4Action, Defect_SnapshotActionTakesEffectBeforeItsTime) {
+// Former Defect_SnapshotActionTakesEffectBeforeItsTime (fixed): ApplySnapshot at 20 ms (960)
+// does nothing before the block that starts at or after it (1024).
+SND_TEST(IndepG4Action, SnapshotActionNotBeforeItsTime) {
   Rig r;
   B bk;
   TSnapshot sn;
@@ -1286,6 +1293,7 @@ SND_TEST(IndepG4Action, Defect_SnapshotActionTakesEffectBeforeItsTime) {
   snd::test::Note("level at 959 %g, 1279 %g, end %g", double(r.At(t0 + 959) / kC), double(r.At(t0 + 1279) / kC),
                   double(r.At(r.Now() - 1) / kC));
   SND_CHECK_NEAR(r.At(t0 + 959) / kC, 0.5f, 1e-3f);
+  SND_CHECK_NEAR(r.At(t0 + 1023) / kC, 0.5f, 1e-3f);
   SND_CHECK(r.At(r.Now() - 1) / kC < 0.4f);
 }
 
@@ -1293,10 +1301,9 @@ SND_TEST(IndepG4Action, Defect_SnapshotActionTakesEffectBeforeItsTime) {
 // Added after reading the implementation (step 3)
 // ---------------------------------------------------------------------------
 
-// DEFECT (D-145 "停止後は発火しない"): actions are taken one block ahead; a Stop of the parent
-// that arrives in the block before the action's time does not cancel it. The parent is
-// stopped at frame 256; its action at 10 ms (480) still starts X at 480.
-SND_TEST(IndepG4Action, Defect_ActionFiresAfterTheParentStopped) {
+// Former Defect_ActionFiresAfterTheParentStopped (fixed): a parent stopped at frame 256 does
+// not fire its action at 10 ms (480), though it was taken one block ahead.
+SND_TEST(IndepG4Action, ActionDoesNotFireAfterTheParentStopped) {
   Rig r;
   B bk = ActionBank({Act(10.0f, kPlay, HashId("X"))});
   r.Load("b", bk.Build("B"));
@@ -1309,10 +1316,9 @@ SND_TEST(IndepG4Action, Defect_ActionFiresAfterTheParentStopped) {
   SND_CHECK_NEAR(r.MaxAbs(t0, r.Now()), 0.0f, 1e-6f);
 }
 
-// DEFECT (D-145 "時刻のサンプルで正確に効く", "予約付き開始"): a parent scheduled at frame 1000
-// (inside block 3) with actions at 0 ms and 2 ms: the children start at the next block's
-// first frame (1024) instead of 1000 and 1096.
-SND_TEST(IndepG4Action, Defect_ScheduledParentFirstBlockActionsAreLate) {
+// Former Defect_ScheduledParentFirstBlockActionsAreLate (fixed): a parent scheduled at frame
+// 1000 (inside block 3) with actions at 0 ms and 2 ms: children at 1000 and 1096.
+SND_TEST(IndepG4Action, ScheduledParentFirstBlockActionsOnTime) {
   for (float ms : {0.0f, 2.0f}) {
     Rig r;
     B bk = ActionBank({Act(ms, kPlay, HashId("X"))});
@@ -1328,10 +1334,9 @@ SND_TEST(IndepG4Action, Defect_ScheduledParentFirstBlockActionsAreLate) {
   }
 }
 
-// DEFECT (D-145; a play that does not start has no actions: ActionsOfARefusedPlayAreCancelled
-// cancels its Play children): a refused play (limit group full, "never") still applies its
-// first-block ApplySnapshot: the bus drops by 20 dB although the parent never started.
-SND_TEST(IndepG4Action, Defect_RefusedPlayStillAppliesItsFirstBlockSnapshot) {
+// Former Defect_RefusedPlayStillAppliesItsFirstBlockSnapshot (fixed): a refused play (limit
+// group full, "never") leaves no trace of its first-block ApplySnapshot.
+SND_TEST(IndepG4Action, RefusedPlayLeavesNoSnapshot) {
   Rig r;
   B bk;
   bk.b.groups.push_back(TGroup{HashId("G"), 1, 3});
@@ -1356,35 +1361,55 @@ SND_TEST(IndepG4Action, Defect_RefusedPlayStillAppliesItsFirstBlockSnapshot) {
   SND_CHECK_NEAR(after, before, 1e-3f);
 }
 
-// Many action children in one block beyond CoreLimits.maxActionChildren (first block) and the
-// deferred queue (later blocks): bounded; records how many sound and whether a warning is posted.
-SND_TEST(IndepG4Action, SpecHole_ActionChildrenBeyondTheLimits) {
-  snd_config cfg = Config(128);
-  cfg.max_virtual_voices = 512;
-  cfg.max_playbacks = 1024;
-  Rig r(cfg);
-  B bk;
-  std::vector<TAction> acts;
-  for (int i = 0; i < 100; ++i) acts.push_back(Act(10.0f, kPlay, HashId("Z")));
-  for (int k = 0; k < 3; ++k) {
-    char n[8];
-    std::snprintf(n, sizeof n, "P%d", k);
-    TEvent& p = bk.Event(n, {B::SynthClip(bk.Synth(0.0f))});
-    p.tracks[0].actions = acts;
+// Decision 7: action children beyond the limits (CoreLimits.maxActionChildren in the first
+// block, the queue later) are dropped with a warning SND_ERR_LIMIT_REACHED whose object is
+// the parent, at most one per parent and block.
+SND_TEST(IndepG4Action, ActionChildrenBeyondTheLimitsWarn) {
+  for (float ms : {0.0f, 10.0f}) {
+    snd_config cfg = Config(128);
+    cfg.max_virtual_voices = 512;
+    cfg.max_playbacks = 1024;
+    Rig r(cfg);
+    B bk;
+    std::vector<TAction> acts;
+    for (int i = 0; i < 100; ++i) acts.push_back(Act(ms, kPlay, HashId("Z")));
+    for (int k = 0; k < 3; ++k) {
+      char n[8];
+      std::snprintf(n, sizeof n, "P%d", k);
+      TEvent& p = bk.Event(n, {B::SynthClip(bk.Synth(0.0f))});
+      p.tracks[0].actions = acts;
+    }
+    bk.Event("Z", {B::SynthClip(bk.Synth(1.0f))});  // DC 0.001
+    r.Load("b", bk.Build("B"));
+    std::vector<std::uint64_t> parents;
+    for (int k = 0; k < 3; ++k) {
+      char n[8];
+      std::snprintf(n, sizeof n, "P%d", k);
+      parents.push_back(r.sys->Play(HashId(n), NoEm(), nullptr).value);
+    }
+    const std::size_t errs = r.errors.size();
+    r.Steps(6);
+    const float n = r.Mean(r.Now() - 256, r.Now()) / kC / 0.001f;
+    std::uint32_t limit = 0, otherObject = 0, dup = 0;
+    for (std::size_t e = errs; e < r.errors.size(); ++e) {
+      if (r.errors[e].code != SND_ERR_LIMIT_REACHED) continue;
+      ++limit;
+      if (std::find(parents.begin(), parents.end(), r.errors[e].object) == parents.end()) ++otherObject;
+      for (std::size_t f = errs; f < e; ++f) {
+        dup += (r.errors[f].code == SND_ERR_LIMIT_REACHED && r.errors[f].object == r.errors[e].object &&
+                r.errors[f].block == r.errors[e].block)
+                   ? 1u
+                   : 0u;
+      }
+    }
+    snd::test::Note("300 actions at %.0f ms: %.1f children sound, LIMIT_REACHED %u (object not a parent %u, "
+                    "same parent and block twice %u)", double(ms), double(n), limit, otherObject, dup);
+    SND_CHECK(n <= 300.5f);
+    SND_CHECK(n >= 63.5f);
+    SND_CHECK(limit >= 1u);
+    SND_CHECK_EQ(otherObject, 0u);
+    SND_CHECK_EQ(dup, 0u);
   }
-  bk.Event("Z", {B::SynthClip(bk.Synth(1.0f))});  // DC 0.001
-  r.Load("b", bk.Build("B"));
-  for (int k = 0; k < 3; ++k) {
-    char n[8];
-    std::snprintf(n, sizeof n, "P%d", k);
-    r.sys->Play(HashId(n), NoEm(), nullptr);
-  }
-  const std::size_t errs = r.errors.size();
-  r.Steps(6);
-  const float n = r.Mean(r.Now() - 256, r.Now()) / kC / 0.001f;
-  snd::test::Note("300 actions at 10 ms in one block: %.1f children sound (real voices 128), warnings +%llu", double(n),
-                  static_cast<unsigned long long>(r.errors.size() - errs));
-  SND_CHECK(n <= 300.5f);
 }
 
 // Shuffle: several plays of the same event in one block still take a permutation (7 clips of
@@ -1410,15 +1435,16 @@ SND_TEST(IndepG4Seq, ShuffleRoundsPlayedWithinOneBlock) {
 
 // loopCount 1 ("既定") on an asset with loop points: records whether it loops endlessly
 // (D-142 says 1 = default without saying what the default is for an asset with loop points).
-SND_TEST(IndepG4Loop, SpecHole_LoopCountOneOnAnAssetWithLoopPoints) {
+SND_TEST(IndepG4Loop, LoopCountOneOnAnAssetWithLoopPointsIsTheAssetDefault) {
   const LoopRun one = RunLoop(1000, 1, 0, 80, 200, 800);
   snd::test::Note("loopCount 1, loop points [200, 800): end %llu, ends %u (endless: end = 20480)", static_cast<unsigned long long>(one.end), one.ends);
-  SND_CHECK(one.ends <= 1u);
+  SND_CHECK_EQ(one.ends, 0u);  // decision 4: 1 = the asset's default (its loop points loop)
+  SND_CHECK(one.end >= 20480u - 2u);
 }
 
 // Nested: the child event's own instance limit (EVNT.maxInstances) - D-144 says the child uses
 // its own limits; records whether a second parent's child is refused.
-SND_TEST(IndepG4Nest, SpecHole_ChildEventInstanceLimit) {
+SND_TEST(IndepG4Nest, ChildEventInstanceLimitIsNotApplied) {
   Rig r;
   B bk = NestBank();
   bk.Event("P", {NestClip(1)});
@@ -1428,6 +1454,180 @@ SND_TEST(IndepG4Nest, SpecHole_ChildEventInstanceLimit) {
   r.Steps(2);
   r.sys->Play(HashId("P"), NoEm(), nullptr);
   r.Steps(4);
-  snd::test::Note("two parents, child maxInstances 1: level %g (0.3 = limited, 0.6 = not applied)",
-                  double(r.Mean(r.Now() - 256, r.Now()) / kC));
+  // Decision 6: event-level limits are not applied to nested children.
+  SND_CHECK_NEAR(r.Mean(r.Now() - 256, r.Now()) / kC, 0.6f, 2e-3f);
+}
+
+// ---------------------------------------------------------------------------
+// Re-check 1 (af89e2e): decisions of the acceptance side
+// ---------------------------------------------------------------------------
+
+// Decision 7 (added): an event with actions and no clip plays until its last action took
+// effect: a Play at 10 ms and a Play at 50 ms (2400, many blocks later) both start, and the
+// playback does not end before 2400. A Stop before 50 ms cancels the rest.
+SND_TEST(IndepG4Action, Defect_ActionOnlyEventEndsBeforeItsLaterActions) {
+  {
+    Rig r;
+    B bk;
+    TEvent& p = bk.Event("P", {});
+    p.tracks[0].actions = {Act(10.0f, kPlay, HashId("X")), Act(50.0f, kPlay, HashId("Y"))};
+    bk.Event("X", {B::SynthClip(bk.Synth(500.0f))});
+    bk.Event("Y", {B::SynthClip(bk.Synth(250.0f))});
+    r.Load("b", bk.Build("B"));
+    const std::size_t t0 = r.Now();
+    const snd_playback_handle h = r.sys->Play(HashId("P"), NoEm(), nullptr);
+    r.Steps(16);
+    const End* e = r.EndOf(h.value);
+    snd::test::Note("action-only event: X at %llu, level at 2399 %g, 2400 %g; ended at block %lld",
+                    static_cast<unsigned long long>(r.FirstAbove(t0, r.Now(), 0.25f * kC) - t0),
+                    double(r.At(t0 + 2399) / kC), double(r.At(t0 + 2400) / kC),
+                    e != nullptr ? static_cast<long long>(e->block) : -1ll);
+    SND_CHECK_NEAR(r.At(t0 + 480) / kC, 0.5f, 1e-4f);
+    SND_CHECK_NEAR(r.At(t0 + 2399) / kC, 0.5f, 1e-4f);
+    SND_CHECK_NEAR(r.At(t0 + 2400) / kC, 0.75f, 1e-4f);
+    SND_CHECK(e == nullptr || e->block * 256u >= t0 + 2400);
+    SND_CHECK(r.CountEnds(h.value) <= 1u);
+  }
+  {
+    Rig r;
+    B bk;
+    TEvent& p = bk.Event("P", {});
+    p.tracks[0].actions = {Act(10.0f, kPlay, HashId("X")), Act(50.0f, kPlay, HashId("Y"))};
+    bk.Event("X", {B::SynthClip(bk.Synth(500.0f))});
+    bk.Event("Y", {B::SynthClip(bk.Synth(250.0f))});
+    r.Load("b", bk.Build("B"));
+    const snd_playback_handle h = r.sys->Play(HashId("P"), NoEm(), nullptr);
+    r.Steps(4);
+    r.sys->Stop(h, 0.0f, nullptr);
+    r.Steps(16);
+    SND_CHECK_NEAR(r.Mean(r.Now() - 256, r.Now()) / kC, 0.5f, 1e-4f);  // X only, Y never
+    SND_CHECK_EQ(r.CountEnds(h.value), 1u);
+  }
+}
+
+namespace {
+// Plays P (silent) with actions at track frames 300, 767, 768, 769, 1500 that start C0..C4
+// (levels 2^k / 64), pausing and resuming P six times; `pattern` 0: pause and resume in the
+// same block, 1: paused one block, 2: paused three blocks. Checks each child once, in order,
+// at distinct frames (the known limit: at most one block late after a resume).
+void PauseResumeCycles(int pattern) {
+  const std::uint32_t frames[] = {300, 767, 768, 769, 1500};
+  {
+    Rig r;
+    B bk;
+    std::vector<TAction> acts;
+    for (int k = 0; k < 5; ++k) {
+      char n[8];
+      std::snprintf(n, sizeof n, "C%d", k);
+      acts.push_back(Act((float(frames[k]) + 0.5f) / 48.0f, kPlay, HashId(n)));
+    }
+    TEvent& p = bk.Event("P", {B::SynthClip(bk.Synth(0.0f))});
+    p.tracks[0].actions = acts;
+    for (int k = 0; k < 5; ++k) {
+      char n[8];
+      std::snprintf(n, sizeof n, "C%d", k);
+      bk.Event(n, {B::SynthClip(bk.Synth(1000.0f * float(1 << k) / 64.0f))});
+    }
+    r.Load("b", bk.Build("B"));
+    const std::size_t t0 = r.Now();
+    const snd_playback_handle h = r.sys->Play(HashId("P"), NoEm(), nullptr);
+    for (int cycle = 0; cycle < 6; ++cycle) {
+      r.Steps(1);
+      r.sys->Pause(h, 0.0f);
+      if (pattern == 0) {
+        r.sys->ResumePlayback(h, 0.0f);  // same block
+      } else {
+        r.Steps(pattern == 1 ? 1u : 3u);
+        r.sys->ResumePlayback(h, 0.0f);
+      }
+    }
+    r.Steps(20);
+    // Steps up of the output: which child (by its level) and when.
+    std::vector<int> order;
+    std::vector<std::size_t> at;
+    for (std::size_t f = t0 + 1; f < r.Now(); ++f) {
+      const float d = (r.At(f) - r.At(f - 1)) / kC * 64.0f;
+      if (d > 0.5f) {
+        order.push_back(int(std::lround(std::log2(d))));
+        at.push_back(f - t0);
+      }
+    }
+    char buf[256] = {0};
+    for (std::size_t i = 0; i < order.size() && i < 8; ++i) {
+      char one[32];
+      std::snprintf(one, sizeof one, " C%d@%llu", order[i], static_cast<unsigned long long>(at[i]));
+      std::strncat(buf, one, sizeof buf - std::strlen(buf) - 1);
+    }
+    snd::test::Note("pattern %d:%s", pattern, buf);
+    SND_CHECK_EQ(order.size(), 5u);  // five separate starts (not one burst)
+    for (std::size_t i = 0; i < order.size() && i < 5; ++i) SND_CHECK_EQ(order[i], int(i));
+    if (pattern == 0) {
+      for (std::size_t i = 0; i < at.size() && i < 5; ++i) SND_CHECK_EQ(at[i], std::size_t(frames[i]));
+    }
+    SND_CHECK_NEAR(r.Mean(r.Now() - 256, r.Now()) / kC, 31.0f / 64.0f, 1e-4f);
+  }
+}
+
+}  // namespace
+
+// Pause and resume in the same block, six times: each action once, in order, exactly on time
+// (767, 768, 769 one frame apart).
+SND_TEST(IndepG4Action, PauseAndResumeInTheSameBlockFireEachActionOnce) { PauseResumeCycles(0); }
+
+// DEFECT (D-145 rev.: the track time stops while paused, an action in a resume block is at
+// most one block late): with the parent paused and resumed in alternate blocks (1 block
+// played, 1 or 3 paused), an action that falls into a resume block is put off to the next
+// block, cancelled there by the next pause and taken again at the next resume ... so no action
+// fires during the cycles and all five fire in one burst after the last resume (pattern 1:
+// all at 3328, pattern 2: all at 6400). Expected: five starts in order, each at most one
+// block after its track time.
+SND_TEST(IndepG4Action, Defect_ActionsStarveWhilePauseAndResumeAlternate) {
+  PauseResumeCycles(1);
+  PauseResumeCycles(2);
+}
+
+// The tentative snapshot of the start frame: two plays in one block, the first starts and
+// the second is refused (group max 1, "never"): the snapshot is in effect once (from the
+// started play), at its weight.
+SND_TEST(IndepG4Action, StartFrameSnapshotOfTwoPlaysInOneBlock) {
+  Rig r;
+  B bk;
+  bk.b.groups.push_back(TGroup{HashId("G"), 1, 3});
+  TSnapshot sn;
+  sn.id = HashId("Quiet");
+  sn.values.push_back(TSnapshot::Value{0, 0, 0, -20.0f});
+  bk.b.snapshots.push_back(sn);
+  TEvent& p = bk.Event("P", {B::SynthClip(bk.Synth(500.0f))});
+  p.group = 0;
+  p.tracks[0].actions = {Act(0.0f, kSnap, HashId("Quiet"), 1.0f)};
+  r.Load("b", bk.Build("B"));
+  const snd_playback_handle a = r.sys->Play(HashId("P"), NoEm(), nullptr);
+  const snd_playback_handle b = r.sys->Play(HashId("P"), NoEm(), nullptr);
+  r.Steps(30);
+  SND_CHECK_EQ(r.CountEnds(a.value), 0u);
+  SND_CHECK(r.Ended(b.value, SND_END_REJECTED));
+  SND_CHECK_NEAR(r.Mean(r.Now() - 256, r.Now()) / kC, 0.05f, 1e-3f);
+}
+
+// Decision 7: a parent scheduled with DELAY_US counts its track time from its own start too:
+// the child of a 2 ms action starts 96 frames after the parent's first frame.
+SND_TEST(IndepG4Action, DelayedParentCountsFromItsStart) {
+  for (std::uint64_t us : {10000ull, 21000ull}) {
+    Rig r;
+    B bk;
+    TEvent& p = bk.Event("P", {B::SynthClip(bk.Synth(100.0f))});  // DC 0.1: shows the parent's start
+    p.tracks[0].actions = {Act(2.0f, kPlay, HashId("X"))};
+    bk.Event("X", {B::SynthClip(bk.Synth(500.0f))});
+    r.Load("b", bk.Build("B"));
+    const std::size_t t0 = r.Now();
+    snd_when w{};
+    w.kind = SND_WHEN_DELAY_US;
+    w.value = us;
+    r.sys->Play(HashId("P"), NoEm(), &w);
+    r.Steps(12);
+    const std::size_t ps = r.FirstAbove(t0, r.Now(), 0.05f * kC), cs = r.FirstAbove(t0, r.Now(), 0.3f * kC);
+    snd::test::Note("DELAY_US %llu: parent from %llu, child from %llu", static_cast<unsigned long long>(us),
+                    static_cast<unsigned long long>(ps - t0), static_cast<unsigned long long>(cs - t0));
+    SND_CHECK_EQ(cs - ps, 96u);
+  }
 }

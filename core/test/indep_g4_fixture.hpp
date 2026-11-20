@@ -222,6 +222,7 @@ struct Err {
   snd_result code;
   std::uint32_t detail;
   std::uint64_t object;
+  std::uint64_t block;  // rig block index when delivered
 };
 
 struct MarkerTable {
@@ -271,7 +272,8 @@ class Rig {
       };
       cb.on_bank_loaded = [](void* u, snd_bank_handle, snd_result r) { static_cast<Rig*>(u)->loads.push_back(r); };
       cb.on_error = [](void* u, snd_result r, std::uint32_t det, std::uint64_t o) {
-        static_cast<Rig*>(u)->errors.push_back(Err{r, det, o});
+        Rig* g = static_cast<Rig*>(u);
+        g->errors.push_back(Err{r, det, o, g->block});
       };
       sys->SetCallbacks(&cb);
       out.resize(std::size_t{sys->BlockFrames()} * sys->OutputChannels());

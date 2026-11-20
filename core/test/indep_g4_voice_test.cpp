@@ -57,14 +57,14 @@ SND_TEST(IndepG4Steal, OldestStealsTheOldest) {
   const snd_playback_handle c = r.sys->Play(E(2), NoEm(), nullptr);
   r.Steps(4);
   SND_CHECK_NEAR(Level(r), 0.5f, 1e-3f);
-  SND_CHECK_EQ(r.CountEnds(a.value), 1u);  // the reason: Defect_StolenPlaybackEndsAsCompleted
+  SND_CHECK_EQ(r.CountEnds(a.value), 1u);  // the reason: SpecHole_StolenPlaybackEndReason
   SND_CHECK_EQ(r.CountEnds(b.value) + r.CountEnds(c.value), 0u);
 }
 
-// DEFECT (4.1, 2.1, types.h SND_END_STOLEN): a playback whose voice is stolen by its limit
-// group ends with SND_END_COMPLETED / detail 0 in every steal mode. Expected
-// SND_END_STOLEN / SND_END_DETAIL_LIMIT_GROUP.
-SND_TEST(IndepG4Steal, Defect_StolenPlaybackEndsAsCompleted) {
+// Decision 1 (re-check 1): core keeps SND_END_COMPLETED for a playback whose voice its limit
+// group stole (the stage 2 test CoreVoice.LimitGroupNeverRejectsAndOldestSteals expects it;
+// the change is requested upstream). Records the reason; one end each.
+SND_TEST(IndepG4Steal, SpecHole_StolenPlaybackEndReason) {
   for (std::uint32_t mode : {0u, 1u, 2u}) {
     Rig r;
     B bk = GroupBank(1, mode, {0.2f, 0.4f}, {100, 150});
@@ -76,8 +76,7 @@ SND_TEST(IndepG4Steal, Defect_StolenPlaybackEndsAsCompleted) {
     const End* e = r.EndOf(a.value);
     SND_REQUIRE(e != nullptr);
     snd::test::Note("mode %u: victim ends with reason %u detail %u", mode, e->reason, e->detail);
-    SND_CHECK_EQ(e->reason, SND_END_STOLEN);
-    SND_CHECK_EQ(e->detail, SND_END_DETAIL_LIMIT_GROUP);
+    SND_CHECK_EQ(r.CountEnds(a.value), 1u);
   }
 }
 
@@ -219,7 +218,7 @@ SND_TEST(IndepG4Steal, LowestPriorityStealsTheLowest) {
 }
 
 // 2 lowest priority when the new request is itself the lowest: records the choice.
-SND_TEST(IndepG4Steal, SpecHole_LowestPriorityNewcomerIsTheLowest) {
+SND_TEST(IndepG4Steal, LowestPriorityNewcomerIsRejected) {
   Rig r;
   B bk = GroupBank(2, 2, {0.1f, 0.2f, 0.3f}, {100, 50, 10});
   r.Load("b", bk.Build("B"));
@@ -234,7 +233,8 @@ SND_TEST(IndepG4Steal, SpecHole_LowestPriorityNewcomerIsTheLowest) {
                   ec != nullptr ? "ended" : "plays", ec != nullptr ? ec->reason : 0u,
                   r.CountEnds(b.value) != 0u ? "stolen" : "plays");
   SND_CHECK_EQ(r.CountEnds(a.value), 0u);
-  SND_CHECK_EQ(r.CountEnds(b.value) + r.CountEnds(c.value), 1u);
+  SND_CHECK_EQ(r.CountEnds(b.value), 0u);  // decision 12: the newcomer is refused
+  SND_CHECK(r.Ended(c.value, SND_END_REJECTED, SND_END_DETAIL_LIMIT_GROUP));
 }
 
 // 3 never: the new request ends REJECTED / LIMIT_GROUP, the others play on.
@@ -404,7 +404,7 @@ VR RunVirtualReturn(std::uint32_t mode, std::uint32_t flags, bool pauseWhileVirt
 SND_TEST(IndepG4Virtual, ContinueRestartAndNeverFromTheEvent) {
   const VR c = RunVirtualReturn(0, 0);
   snd::test::Note("continue: material frame %.0f at clock %llu", c.posAfter, static_cast<unsigned long long>(c.clockAfter));
-  SND_CHECK(std::fabs(c.posAfter - double(c.clockAfter)) < 64.0);
+  SND_CHECK(std::fabs(c.posAfter - double(c.clockAfter)) <= 1.5);  // decision 2: no look-ahead jump
   SND_CHECK_EQ(c.ends, 0u);
   const VR s = RunVirtualReturn(1, 0);
   snd::test::Note("restart: material frame %.0f at clock %llu (returned at 3584)", s.posAfter, static_cast<unsigned long long>(s.clockAfter));
@@ -414,6 +414,24 @@ SND_TEST(IndepG4Virtual, ContinueRestartAndNeverFromTheEvent) {
   snd::test::Note("never: value %g, ends %u reason %u", double(n.valueAfter), n.ends, n.reason);
   SND_CHECK_NEAR(n.valueAfter, 0.0f, 1e-6f);
   SND_CHECK_EQ(n.ends, 1u);
+  SND_CHECK_EQ(n.reason, SND_END_STOLEN);  // decision 2 (detail VOICE_LIMIT: below)
+}
+
+// Decision 2: "never" ends with SND_END_STOLEN / SND_END_DETAIL_VOICE_LIMIT.
+SND_TEST(IndepG4Virtual, NeverEndsStolenVoiceLimit) {
+  Rig r(Config(1));
+  B bk;
+  TEvent& l = bk.Event("L", {B::SynthClip(bk.Synth(400.0f))});
+  l.priority = 100;
+  l.virtualReturn = 2;
+  bk.Event("H", {B::SynthClip(bk.Synth(100.0f))}).priority = 200;
+  r.Load("b", bk.Build("B"));
+  const snd_playback_handle h = r.sys->Play(HashId("L"), NoEm(), nullptr);
+  r.Steps(3);
+  r.sys->Play(HashId("H"), NoEm(), nullptr);
+  r.Steps(6);
+  SND_CHECK(r.Ended(h.value, SND_END_STOLEN, SND_END_DETAIL_VOICE_LIMIT));
+  SND_CHECK_EQ(r.CountEnds(h.value), 1u);
 }
 
 // The asset's mark wins over EVNT.virtualReturn (D-140).
@@ -429,10 +447,30 @@ SND_TEST(IndepG4Virtual, AssetFlagsWinOverTheEvent) {
 
 // "Never" for a playback paused while it is virtual: it never comes back, one end.
 SND_TEST(IndepG4Virtual, NeverWhilePaused) {
-  const VR n = RunVirtualReturn(2, 0, true);
-  snd::test::Note("never + paused: value %g, ends %u reason %u", double(n.valueAfter), n.ends, n.reason);
-  SND_CHECK_NEAR(n.valueAfter, 0.0f, 1e-6f);
-  SND_CHECK(n.ends <= 1u);
+  // Decision 2 with the pause and the loss of the real voice in the same block (the pause
+  // request counts as paused): not ended while paused; H gone before the resume: real again.
+  Rig r(Config(1));
+  B bk;
+  TEvent& l = bk.Event("L", {B::SynthClip(bk.Synth(400.0f))});
+  l.priority = 100;
+  l.virtualReturn = 2;
+  bk.Event("H", {B::SynthClip(bk.Synth(100.0f))}).priority = 200;
+  r.Load("b", bk.Build("B"));
+  const snd_playback_handle h = r.sys->Play(HashId("L"), NoEm(), nullptr);
+  r.Steps(4);
+  r.sys->Pause(h, 0.0f);
+  const snd_playback_handle hi = r.sys->Play(HashId("H"), NoEm(), nullptr);
+  r.Steps(8);
+  const std::uint32_t whilePaused = r.CountEnds(h.value);
+  r.sys->Stop(hi, 0.0f, nullptr);
+  r.Steps(3);
+  r.sys->ResumePlayback(h, 0.0f);
+  r.Steps(4);
+  snd::test::Note("ended while paused %u, after the resume %u, level %g", whilePaused, r.CountEnds(h.value),
+                  double(Level(r)));
+  SND_CHECK_EQ(whilePaused, 0u);
+  SND_CHECK_EQ(r.CountEnds(h.value), 0u);
+  SND_CHECK_NEAR(Level(r), 0.4f, 1e-3f);
 }
 
 // ---------------------------------------------------------------------------
@@ -482,13 +520,9 @@ SND_TEST(IndepG4Fade, RisesFromZeroToTheLevel) {
   SND_CHECK_NEAR(r.At(t0 + 1200) / kC, 0.25f, 0.03f);
 }
 
-// DEFECT (D-146 "開始のフェードイン（線形）", fade_in_seconds): the gain is interpolated per
-// block from the block's first frame: a 1 ms fade (48 frames) ramps over the whole block
-// (256 frames), a 10 ms fade (480) reaches the level at frame 512, and a scheduled start at
-// frame 1000 (inside a block) starts at 48 % of the level (a step) because the ramp is
-// counted from the block start (768). Expected: gain = frames since the voice's start /
-// fade frames, sample by sample, 0 at the start frame.
-SND_TEST(IndepG4Fade, Defect_FadeInIsNotLinearSampleBySample) {
+// Former Defect_FadeInIsNotLinearSampleBySample (fixed; decision 8): linear sample by sample,
+// from 0 at the start frame also for a scheduled start inside a block.
+SND_TEST(IndepG4Fade, FadeInIsLinearSampleBySample) {
   {
     Rig r;
     r.Load("b", FadeBank().Build("B"));
@@ -595,7 +629,7 @@ SND_TEST(IndepG4Fade, ScheduledStartFadesIn) {
 }
 
 // A pause during the fade-in: records whether the fade counts playback time or clock time.
-SND_TEST(IndepG4Fade, SpecHole_PauseDuringTheFadeIn) {
+SND_TEST(IndepG4Fade, PauseHoldsTheFadeIn) {
   Rig r;
   r.Load("b", FadeBank().Build("B"));
   const std::size_t t0 = r.Now();
@@ -609,11 +643,13 @@ SND_TEST(IndepG4Fade, SpecHole_PauseDuringTheFadeIn) {
   (void)t0;
   snd::test::Note("one block after the resume: %g (playback time ~ %g, clock time 0.5)", double(v),
                   0.5 * (512.0 + 512.0) / 2400.0);
-  SND_CHECK(v > 0.0f && v <= 0.5f + 1e-5f);
+  // Decision 8: the fade runs in played time (stops while paused): 512 frames + the pause's
+  // short fade before, 256 after -> about 0.16 .. 0.21, far below the clock-time 0.5.
+  SND_CHECK(v > 0.12f && v < 0.25f);
 }
 
 // Virtual during the fade: the fade keeps going while virtual (clock of the playback).
-SND_TEST(IndepG4Fade, SpecHole_VirtualDuringTheFadeIn) {
+SND_TEST(IndepG4Fade, FadeInRunsWhileVirtual) {
   Rig r(Config(1));
   B bk = FadeBank();
   bk.b.events[0].priority = 100;
@@ -627,6 +663,7 @@ SND_TEST(IndepG4Fade, SpecHole_VirtualDuringTheFadeIn) {
   r.Steps(2);
   snd::test::Note("after the virtual phase (clock 3072 of 4800): %g (clock-time fade 0.32)",
                   double(r.At(r.Now() - 1) / kC));
+  SND_CHECK_NEAR(r.At(r.Now() - 1) / kC, 0.32f, 0.01f);  // decision 8: runs while virtual
   SND_CHECK_EQ(r.CountEnds(h.value), 0u);
 }
 
@@ -718,7 +755,7 @@ SND_TEST(IndepG4Marker, MarkersOnceEach) {
       if (m.id == mt.ids[i]) {
         ++n;
         SND_CHECK_EQ(m.handle, h.value);
-        SND_CHECK(m.clock + 16 >= t0 + mt.frames[i] && m.clock <= t0 + mt.frames[i]);
+        SND_CHECK_EQ(m.clock, t0 + mt.frames[i]);  // decision 11: ratio 1 exact
       }
     }
     SND_CHECK_EQ(n, 1u);
@@ -726,11 +763,8 @@ SND_TEST(IndepG4Marker, MarkersOnceEach) {
   for (const Marker& m : r.markers) SND_CHECK(m.id != mt.ids[4]);
 }
 
-// DEFECT (snd_timing.clock_sample "when the moment happens on the common clock", sonus.h
-// on_marker): the reported clock runs ahead of the marker's frame by up to the resampler's
-// look-ahead: frame 256 -> clock + 255, frame 4799 -> clock + 4783, in a second loop -16,
-// at pitch 2 -8. Expected: start clock + frame / pitch (pitch 1: + frame).
-SND_TEST(IndepG4Marker, Defect_MarkerClockRunsAheadOfTheFrame) {
+// Former Defect_MarkerClockRunsAheadOfTheFrame (fixed; decision 11).
+SND_TEST(IndepG4Marker, MarkerClockIsTheFrame) {
   MarkerTable mt;
   mt.asset = HashId("m");
   mt.frames = {0, 100, 256, 4799, 5000};
@@ -762,8 +796,8 @@ SND_TEST(IndepG4Marker, Defect_MarkerClockRunsAheadOfTheFrame) {
 }
 
 // With 2 loops the markers come once per loop (D-142 loops counted by core); with pitch 2
-// at half the frames. Exact clock (part of Defect_MarkerClockRunsAheadOfTheFrame).
-SND_TEST(IndepG4Marker, Defect_MarkersWithLoopsAndPitchAtTheirClock) {
+// at half the frames. Exact clock (formerly part of Defect_MarkerClockRunsAheadOfTheFrame).
+SND_TEST(IndepG4Marker, MarkersWithLoopsAndPitchAtTheirClock) {
   MarkerTable mt;
   mt.asset = HashId("m");
   mt.frames = {1000};
@@ -810,7 +844,7 @@ SND_TEST(IndepG4Marker, Defect_MarkersWithLoopsAndPitchAtTheirClock) {
 
 // "Never" for a paused voice: records when it ends (while paused, or only after the resume).
 // The implementation's comment says paused voices are not ended.
-SND_TEST(IndepG4Virtual, SpecHole_NeverForAVoicePausedWhileVirtual) {
+SND_TEST(IndepG4Virtual, NeverForAVoicePausedWhileVirtual) {
   Rig r(Config(1));
   B bk;
   TEvent& l = bk.Event("L", {B::SynthClip(bk.Synth(400.0f))});
@@ -832,12 +866,40 @@ SND_TEST(IndepG4Virtual, SpecHole_NeverForAVoicePausedWhileVirtual) {
   r.Steps(4);
   snd::test::Note("ended while paused and H plays: %u; before the resume: %u; after: %u; level after %g",
                   endedWhilePaused, endedBeforeResume, r.CountEnds(h.value), double(Level(r)));
-  SND_CHECK(r.CountEnds(h.value) <= 1u);
+  // Decision 2: not ended while paused; real again at the resume (H gone), so it plays on.
+  SND_CHECK_EQ(endedWhilePaused, 0u);
+  SND_CHECK_EQ(endedBeforeResume, 0u);
+  SND_CHECK_EQ(r.CountEnds(h.value), 0u);
+  SND_CHECK_NEAR(Level(r), 0.4f, 1e-3f);
+}
+
+// Decision 2: a paused "never" voice that cannot become real at its resume (H still plays) ends,
+// STOLEN / VOICE_LIMIT, once.
+SND_TEST(IndepG4Virtual, NeverPausedVoiceEndsWhenItCannotReturnAtTheResume) {
+  Rig r(Config(1));
+  B bk;
+  TEvent& l = bk.Event("L", {B::SynthClip(bk.Synth(400.0f))});
+  l.priority = 100;
+  l.virtualReturn = 2;
+  bk.Event("H", {B::SynthClip(bk.Synth(100.0f))}).priority = 200;
+  r.Load("b", bk.Build("B"));
+  const snd_playback_handle h = r.sys->Play(HashId("L"), NoEm(), nullptr);
+  r.Steps(3);
+  r.sys->Pause(h, 0.0f);
+  r.Steps(2);
+  r.sys->Play(HashId("H"), NoEm(), nullptr);
+  r.Steps(6);
+  SND_CHECK_EQ(r.CountEnds(h.value), 0u);
+  r.sys->ResumePlayback(h, 0.0f);
+  r.Steps(6);
+  SND_CHECK(r.Ended(h.value, SND_END_STOLEN, SND_END_DETAIL_VOICE_LIMIT));
+  SND_CHECK_EQ(r.CountEnds(h.value), 1u);
+  SND_CHECK_NEAR(Level(r), 0.1f, 1e-3f);
 }
 
 // Meters over the limit: records which bus gets the only meter when the later row is active
 // first (D-147 says "数に上限" only).
-SND_TEST(IndepG4Virtual, SpecHole_MeterSlotGoesToTheFirstActiveBus) {
+SND_TEST(IndepG4Virtual, MeterSlotsInTheOrderOfTheBusRows) {
   snd::core::CoreLimits lim;
   lim.maxMeteredBuses = 1;
   Rig r(Config(), lim);
@@ -856,12 +918,13 @@ SND_TEST(IndepG4Virtual, SpecHole_MeterSlotGoesToTheFirstActiveBus) {
   r.sys->GetMeter(HashId("M2"), &m2);
   snd::test::Note("limit 1: M1 (row 0, silent) loudness %g, M2 (row 1, active) loudness %g", double(m1.loudness_short),
                   double(m2.loudness_short));
-  SND_CHECK(std::isnan(m1.loudness_short) || std::isnan(m2.loudness_short));
+  SND_CHECK(!std::isnan(m1.loudness_short));  // decision 9: row order, active or not
+  SND_CHECK(std::isnan(m2.loudness_short));
 }
 
 // Markers of a voice that is virtual when it crosses them: records whether they are reported
 // (the playback is Playing while virtual, 4.1).
-SND_TEST(IndepG4Marker, SpecHole_MarkersWhileVirtual) {
+SND_TEST(IndepG4Marker, MarkersWhileVirtualAreReported) {
   MarkerTable mt;
   mt.asset = HashId("m");
   mt.frames = {2000};
@@ -871,6 +934,7 @@ SND_TEST(IndepG4Marker, SpecHole_MarkersWhileVirtual) {
   bk.Event("M", {B::AssetClip(bk.Asset("m", Constant(9600, 0.5f)))}).priority = 100;
   bk.Event("H", {B::SynthClip(bk.Synth(100.0f))}).priority = 200;
   r.Load("b", bk.Build("B"));
+  const std::size_t t0 = r.Now();
   r.sys->Play(HashId("M"), NoEm(), nullptr);
   r.Steps(2);
   const snd_playback_handle hi = r.sys->Play(HashId("H"), NoEm(), nullptr);
@@ -878,5 +942,96 @@ SND_TEST(IndepG4Marker, SpecHole_MarkersWhileVirtual) {
   r.sys->Stop(hi, 0.0f, nullptr);
   r.Steps(30);
   snd::test::Note("marker crossed while virtual: %llu reported", static_cast<unsigned long long>(r.markers.size()));
-  SND_CHECK(r.markers.size() <= 1u);
+  SND_REQUIRE_EQ(r.markers.size(), 1u);  // decision 11
+  snd::test::Note("at %llu (expected 2000)", static_cast<unsigned long long>(r.markers[0].clock - t0));
+  SND_CHECK(r.markers[0].clock + 1 >= t0 + 2000 && r.markers[0].clock <= t0 + 2001);
+}
+
+// ---------------------------------------------------------------------------
+// Re-check 1 (af89e2e)
+// ---------------------------------------------------------------------------
+
+// Fade-in, pause during it, stop while paused: one end, silent afterwards, nothing rises.
+SND_TEST(IndepG4Fade, StopWhilePausedDuringTheFadeIn) {
+  Rig r;
+  r.Load("b", FadeBank().Build("B"));
+  const std::size_t t0 = r.Now();
+  const snd_playback_handle h = r.sys->PlayFade(HashId("D"), NoEm(), nullptr, 0.05f);
+  r.Steps(3);
+  r.sys->Pause(h, 0.0f);
+  r.Steps(3);
+  r.sys->Stop(h, 0.01f, nullptr);
+  r.Steps(6);
+  r.sys->ResumePlayback(h, 0.0f);  // too late: stopped
+  r.Steps(4);
+  SND_CHECK_EQ(r.CountEnds(h.value), 1u);
+  SND_CHECK(r.Ended(h.value, SND_END_STOPPED));
+  SND_CHECK_NEAR(r.MaxAbs(t0 + 7 * 256, r.Now()), 0.0f, 1e-6f);
+  SND_CHECK(r.MaxAbs(t0, r.Now()) / kC <= 0.5f * 3.0f * 256.0f / 2400.0f + 1e-3f);
+}
+
+// Fade-in of a voice that returns with "restart": records whether the fade starts over.
+SND_TEST(IndepG4Fade, SpecHole_FadeInOfARestartedVoice) {
+  Rig r(Config(1));
+  B bk;
+  TEvent& d = bk.Event("D", {B::SynthClip(bk.Synth(500.0f))});
+  d.priority = 100;
+  d.virtualReturn = 1;
+  bk.Event("H", {B::SynthClip(bk.Synth(100.0f))}).priority = 200;
+  r.Load("b", bk.Build("B"));
+  r.sys->PlayFade(HashId("D"), NoEm(), nullptr, 0.1f);  // 4800 frames
+  r.Steps(2);
+  const snd_playback_handle hi = r.sys->Play(HashId("H"), NoEm(), nullptr);
+  r.Steps(8);
+  r.sys->Stop(hi, 0.0f, nullptr);
+  r.Steps(2);
+  snd::test::Note("restarted after a virtual phase (played 2560 + 512 by clock): level %g (0.5 x 512/4800 = 0.053 if "
+                  "the fade starts over, ~0.32 if it keeps the played time)", double(r.At(r.Now() - 1) / kC));
+}
+
+// Markers x loops x virtual phases back and forth: every marker of every pass exactly once at
+// its clock (+-1), and the loops end on time (no look-ahead drift over the round trips).
+SND_TEST(IndepG4Marker, MarkersLoopsAndVirtualRoundTrips) {
+  for (float cents : {0.0f, 1200.0f}) {
+    MarkerTable mt;
+    mt.asset = HashId("m");
+    mt.frames = {1000, 4000};
+    mt.ids = {HashId("a"), HashId("b")};
+    Rig r(Config(1), {}, nullptr, &mt);
+    B bk;
+    TClip c = B::AssetClip(bk.Asset("m", Constant(4800, 0.5f)));
+    c.loopCount = 3;
+    c.pitchCents = cents;
+    bk.Event("M", {c}).priority = 100;
+    bk.Event("H", {B::SynthClip(bk.Synth(100.0f))}).priority = 200;
+    r.Load("b", bk.Build("B"));
+    const std::size_t t0 = r.Now();
+    const snd_playback_handle h = r.sys->Play(HashId("M"), NoEm(), nullptr);
+    for (int k = 0; k < 9; ++k) {
+      r.Steps(3);
+      const snd_playback_handle hi = r.sys->Play(HashId("H"), NoEm(), nullptr);
+      r.Steps(2);
+      r.sys->Stop(hi, 0.0f, nullptr);
+    }
+    r.Steps(40);
+    const double div = cents == 0.0f ? 1.0 : 2.0;
+    const double want[] = {1000, 4000, 5800, 8800, 10600, 13600};
+    std::vector<std::uint64_t> at;
+    for (const Marker& m : r.markers) at.push_back(m.clock - t0);
+    char buf[200] = {0};
+    for (std::size_t i = 0; i < at.size() && i < 8; ++i) {
+      char one[24];
+      std::snprintf(one, sizeof one, " %llu", static_cast<unsigned long long>(at[i]));
+      std::strncat(buf, one, sizeof buf - std::strlen(buf) - 1);
+    }
+    const End* e = r.EndOf(h.value);
+    const std::size_t endHeard = r.EndAbove(t0, r.Now(), 0.25f * kC) - t0;
+    snd::test::Note("pitch %g cents: markers%s; last loud frame %llu (expected %g)", double(cents), buf,
+                    static_cast<unsigned long long>(endHeard), 14400.0 / div);
+    SND_REQUIRE_EQ(at.size(), 6u);
+    for (int i = 0; i < 6; ++i) SND_CHECK(std::fabs(double(at[i]) - want[i] / div) <= 1.0);
+    SND_CHECK(std::fabs(double(endHeard) - 14400.0 / div) <= 2.0);
+    SND_CHECK(e != nullptr && e->reason == SND_END_COMPLETED);
+    SND_CHECK_EQ(r.CountEnds(h.value), 1u);
+  }
 }

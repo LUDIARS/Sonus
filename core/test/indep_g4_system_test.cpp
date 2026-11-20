@@ -153,6 +153,7 @@ Run RunScript(std::uint32_t workers, CountingAllocator* alloc = nullptr, std::ui
     if (rt) snd::test::rt::Reset();
     std::vector<snd_playback_handle> live;
     const snd_emitter_handle em = r.sys->CreateEmitter();
+    snd_playback_handle actH{0};
     for (int b = 0; b < 160; ++b) {
       switch ((caseMask >> (b % 16)) & 1u ? b % 16 : 99) {
         case 0: live.push_back(r.sys->Play(HashId("Nest"), em, nullptr)); break;
@@ -164,7 +165,7 @@ Run RunScript(std::uint32_t workers, CountingAllocator* alloc = nullptr, std::ui
           live.push_back(h);
           break;
         }
-        case 4: r.sys->Play(HashId("Act"), NoEm(), nullptr); break;
+        case 4: actH = r.sys->Play(HashId("Act"), NoEm(), nullptr); break;
         case 5:
           for (int k = 0; k < 6; ++k) {
             char n[16];
@@ -203,6 +204,12 @@ Run RunScript(std::uint32_t workers, CountingAllocator* alloc = nullptr, std::ui
           r.sys->SetTransform(em, &p, nullptr, nullptr);
           break;
         }
+        case 14:  // re-check 1: pause an action parent mid-track, a fade-in on a looping clip
+          r.sys->Pause(actH, 0.0f);
+          live.push_back(r.sys->PlayFade(HashId("Loop"), NoEm(), nullptr, 0.02f));
+          live.push_back(r.sys->PlayFade(HashId("Nest"), em, nullptr, 0.005f));
+          break;
+        case 15: r.sys->ResumePlayback(actH, 0.0f); break;
         default: break;
       }
       r.sys->Update();
