@@ -23,7 +23,7 @@ B GroupBank(std::uint32_t max, std::uint32_t mode, const std::vector<float>& lev
   bk.b.groups.push_back(TGroup{HashId("G"), max, mode});
   for (std::size_t i = 0; i < level.size(); ++i) {
     char name[32];
-    std::snprintf(name, sizeof name, "E%zu", i);
+    std::snprintf(name, sizeof name, "E%llu", static_cast<unsigned long long>(i));
     const TClip c = level[i] > 0.0f ? B::SynthClip(bk.Synth(500.0f), 20.0f * std::log10(level[i] / 0.5f))
                                     : B::SynthClip(bk.Synth(0.0f));
     TEvent& e = bk.Event(name, {c});
@@ -279,7 +279,7 @@ SND_TEST(IndepG4Steal, ManyRequestsInOneBlockEveryMode) {
     r.Steps(4);
     std::uint32_t notOnce = 0;
     for (const snd_playback_handle& h : hs) notOnce += r.CountEnds(h.value) != 1u ? 1u : 0u;
-    snd::test::Note("mode %u: %zu playbacks, %u without exactly one end", mode, hs.size(), notOnce);
+    snd::test::Note("mode %u: %llu playbacks, %u without exactly one end", mode, static_cast<unsigned long long>(hs.size()), notOnce);
     SND_CHECK_EQ(notOnce, 0u);
     SND_CHECK_EQ(r.ends.size(), hs.size());
     SND_CHECK_NEAR(r.MaxAbs(r.Now() - 256, r.Now()), 0.0f, 1e-6f);
@@ -403,11 +403,11 @@ VR RunVirtualReturn(std::uint32_t mode, std::uint32_t flags, bool pauseWhileVirt
 
 SND_TEST(IndepG4Virtual, ContinueRestartAndNeverFromTheEvent) {
   const VR c = RunVirtualReturn(0, 0);
-  snd::test::Note("continue: material frame %.0f at clock %zu", c.posAfter, c.clockAfter);
+  snd::test::Note("continue: material frame %.0f at clock %llu", c.posAfter, static_cast<unsigned long long>(c.clockAfter));
   SND_CHECK(std::fabs(c.posAfter - double(c.clockAfter)) < 64.0);
   SND_CHECK_EQ(c.ends, 0u);
   const VR s = RunVirtualReturn(1, 0);
-  snd::test::Note("restart: material frame %.0f at clock %zu (returned at 3584)", s.posAfter, s.clockAfter);
+  snd::test::Note("restart: material frame %.0f at clock %llu (returned at 3584)", s.posAfter, static_cast<unsigned long long>(s.clockAfter));
   SND_CHECK(s.posAfter < 768.0 + 64.0 && s.valueAfter > 0.2f);
   SND_CHECK_EQ(s.ends, 0u);
   const VR n = RunVirtualReturn(2, 0);
@@ -419,7 +419,7 @@ SND_TEST(IndepG4Virtual, ContinueRestartAndNeverFromTheEvent) {
 // The asset's mark wins over EVNT.virtualReturn (D-140).
 SND_TEST(IndepG4Virtual, AssetFlagsWinOverTheEvent) {
   const VR s = RunVirtualReturn(0, bf::kAssetVirtualRestart);
-  snd::test::Note("event continue + asset restart: material frame %.0f at clock %zu", s.posAfter, s.clockAfter);
+  snd::test::Note("event continue + asset restart: material frame %.0f at clock %llu", s.posAfter, static_cast<unsigned long long>(s.clockAfter));
   SND_CHECK(s.posAfter < 768.0 + 64.0 && s.valueAfter > 0.2f);
   const VR n = RunVirtualReturn(1, bf::kAssetVirtualKill);
   snd::test::Note("event restart + asset kill: value %g ends %u", double(n.valueAfter), n.ends);
@@ -655,7 +655,7 @@ SND_TEST(IndepG4Ends, CommandOverflowEndsExactlyOnce) {
     notOnce += r.CountEnds(h.value) != 1u ? 1u : 0u;
     overflow += r.Ended(h.value, SND_END_REJECTED, SND_END_DETAIL_COMMAND_OVERFLOW) ? 1u : 0u;
   }
-  snd::test::Note("%zu handles, %u overflowed, %u without exactly one end", hs.size(), overflow, notOnce);
+  snd::test::Note("%llu handles, %u overflowed, %u without exactly one end", static_cast<unsigned long long>(hs.size()), overflow, notOnce);
   SND_CHECK(overflow > 0u);
   SND_CHECK_EQ(notOnce, 0u);
 }
@@ -780,7 +780,7 @@ SND_TEST(IndepG4Marker, Defect_MarkersWithLoopsAndPitchAtTheirClock) {
     r.Steps(44);
     std::vector<std::uint64_t> at;
     for (const Marker& m : r.markers) at.push_back(m.clock - t0);
-    snd::test::Note("2 loops: %zu markers (%llu, %llu)", at.size(), at.empty() ? 0ull : (unsigned long long)at[0],
+    snd::test::Note("2 loops: %llu markers (%llu, %llu)", static_cast<unsigned long long>(at.size()), at.empty() ? 0ull : (unsigned long long)at[0],
                     at.size() < 2 ? 0ull : (unsigned long long)at[1]);
     SND_CHECK_EQ(at.size(), 2u);
     if (at.size() == 2u) {
@@ -877,6 +877,6 @@ SND_TEST(IndepG4Marker, SpecHole_MarkersWhileVirtual) {
   r.Steps(16);  // the marker at 2000 passes while M is virtual
   r.sys->Stop(hi, 0.0f, nullptr);
   r.Steps(30);
-  snd::test::Note("marker crossed while virtual: %zu reported", r.markers.size());
+  snd::test::Note("marker crossed while virtual: %llu reported", static_cast<unsigned long long>(r.markers.size()));
   SND_CHECK(r.markers.size() <= 1u);
 }

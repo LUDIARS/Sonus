@@ -248,9 +248,9 @@ SND_TEST(IndepG4System, SameScriptSameBitsSerialAndParallel) {
   for (float v : a.out) energy += double(v) * v;
   std::size_t diff = 0;
   for (std::size_t i = 0; i < a.out.size(); ++i) diff += std::memcmp(&a.out[i], &c.out[i], sizeof(float)) != 0 ? 1u : 0u;
-  snd::test::Note("energy %g, ends %llu, markers %llu, spectra read %llu; serial vs parallel: %zu samples differ",
+  snd::test::Note("energy %g, ends %llu, markers %llu, spectra read %llu; serial vs parallel: %llu samples differ",
                   energy, static_cast<unsigned long long>(a.ends), static_cast<unsigned long long>(a.markers),
-                  static_cast<unsigned long long>(a.spectra), diff);
+                  static_cast<unsigned long long>(a.spectra), static_cast<unsigned long long>(diff));
   SND_CHECK(energy > 1.0);
   SND_CHECK(a.markers > 0u);
   SND_CHECK(a.spectra > 100u);

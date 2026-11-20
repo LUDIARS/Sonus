@@ -228,7 +228,7 @@ SND_TEST(IndepG4Spectrum, SineOnABinReadsItsAmplitude) {
   SND_REQUIRE_EQ(r.sys->GetSpectrum(HashId("Master"), 1, byId.data(), kBins), SND_OK);
   SND_CHECK(std::memcmp(master.data(), byId.data(), kBins * sizeof(float)) == 0);
   const std::size_t peak = std::size_t(std::max_element(out.begin(), out.end()) - out.begin());
-  snd::test::Note("peak bin %zu = %g (expected 64 = %g); bins 10 %g, 200 %g", peak, double(out[peak]),
+  snd::test::Note("peak bin %llu = %g (expected 64 = %g); bins 10 %g, 200 %g", static_cast<unsigned long long>(peak), double(out[peak]),
                   double(0.8f * kC), double(out[10]), double(out[200]));
   SND_CHECK_EQ(peak, 64u);
   SND_CHECK_NEAR(out[64], 0.8f * kC, 0.8f * kC * 0.02f);
