@@ -200,3 +200,74 @@ SND_TEST(RuntimeCompare, ParameterCompositionMatchesTheCoreOutput) {
   }
   h.sys->Stop(pb, 0.0f, nullptr);
 }
+
+// --- music: the tool's tempo map and rule lookup against the music module's ------------------
+#include "rules.hpp"
+#include "timeline.hpp"
+#include "snd/tool/music_editor.hpp"
+
+SND_TEST(RuntimeCompare, TempoMapIsTheMusicTimeLine) {
+  const std::vector<TempoPointDesc> pts = {{0, 120, 4, 4}, {7680, 97.5, 3, 4}, {16320, 60, 6, 8}, {16320 + 2 * 2880, 140, 5, 4}};
+  const TempoMap tool(pts);
+  snd::music::detail::Timeline tl;
+  tl.Reset(48000.0, pts[0].bpm, static_cast<std::uint16_t>(pts[0].beatsPerBar), static_cast<std::uint16_t>(pts[0].beatUnit));
+  for (std::size_t i = 1; i < pts.size(); ++i) {
+    SND_REQUIRE(tl.AddPoint(pts[i].tick, pts[i].bpm, static_cast<std::uint16_t>(pts[i].beatsPerBar),
+                            static_cast<std::uint16_t>(pts[i].beatUnit)));
+  }
+  tl.StartAt(0, 0.0);
+  std::uint32_t n = 0;
+  for (double tick = 0; tick < 40000; tick += 137.25) {
+    double clock = 0;
+    SND_REQUIRE(tl.ClockAtTick(tick, &clock));
+    SND_CHECK_MSG(std::fabs(clock / 48000.0 - tool.SecondsAtTick(tick)) < 1e-9, "tick %g", tick);
+    SND_CHECK_NEAR(tl.TickAtClock(clock), tool.TickAtSeconds(clock / 48000.0), 1e-6);
+    SND_CHECK_NEAR(tl.BarPosition(tick), tool.BarPosition(tick), 1e-12);
+    const snd_musical_time a = tl.Musical(tick);
+    const MusicalPosition b = tool.Musical(tick);
+    SND_CHECK_MSG(a.bar == b.bar && a.beat == b.beat && a.tick == b.tick, "tick %g: %d.%d.%d vs %d.%d.%d", tick, a.bar,
+                  a.beat, a.tick, b.bar, b.beat, b.tick);
+    SND_CHECK_NEAR(tl.TickOfMusical(a), tool.TickOfMusical(b), 1e-9);
+    SND_CHECK_NEAR(tl.NextBeat(tick), tool.NextBeat(tick), 1e-9);
+    SND_CHECK_NEAR(tl.NextBar(tick), tool.NextBar(tick), 1e-9);
+    SND_CHECK_NEAR(tl.BarsAfter(tick, 3), tool.BarsAfter(tick, 3), 1e-9);
+    for (std::uint32_t div : {4u, 8u, 12u, 16u}) SND_CHECK_NEAR(tl.NextGrid(tick, div), tool.NextGrid(tick, div), 1e-9);
+    ++n;
+  }
+  SND_CHECK(n > 200u);
+}
+
+SND_TEST(RuntimeCompare, RuleMatchIsTheMusicLookup) {
+  std::map<std::string, std::string> f = BaseFiles();
+  f["assets/m.json"] = "{\"type\": \"asset\", \"guid\": \"" + G(90) + "\", \"name\": \"m\", \"file\": \"audio/tone.wav\"}";
+  f["segments/S.json"] = "{\"type\": \"segment\", \"guid\": \"" + G(91) + "\", \"name\": \"S\", \"asset\": \"m\", \"bars\": 1}";
+  f["playlists/P.json"] = "{\"type\": \"playlist\", \"guid\": \"" + G(92) + "\", \"name\": \"P\", \"entries\": [{\"segment\": \"S\"}]}";
+  f["events/M.json"] =
+      "{\"type\": \"event\", \"guid\": \"" + G(93) + "\", \"name\": \"M\", \"bank\": \"Main\", \"music\": {\"states\": ["
+      "{\"name\": \"A\", \"playlist\": \"P\"}, {\"name\": \"B\", \"playlist\": \"P\"}, {\"name\": \"C\", \"playlist\": \"P\"}],"
+      "\"transitions\": [{\"from\": \"A\", \"to\": \"B\"}, {\"from\": \"*\", \"to\": \"C\"}, {\"from\": \"B\", \"to\": \"*\"},"
+      " {\"from\": \"A\", \"to\": \"C\"}, {\"from\": \"C\", \"to\": \"A\"}]}}";
+  ProjectDocument doc;
+  LoadBase(doc, f);
+  const DocBuild b = BuildDocument(doc);
+  SND_REQUIRE_MSG(b.ok, "%s", Dump(b.issues).c_str());
+  const ParsedBank* v = b.FindBank("Main")->view();
+  SND_REQUIRE(v != nullptr);
+  snd::music::detail::BankTables tb;
+  std::uint64_t bytes = 0;
+  const std::uint8_t* mtrn = v->Chunk(bf::chunk::MTRN, &bytes);
+  tb.mtrn.Bind(bf::chunk::MTRN, mtrn, bytes);
+  const std::uint8_t* mseg = v->Chunk(bf::chunk::MSEG, &bytes);
+  tb.mseg.Bind(bf::chunk::MSEG, mseg, bytes);
+  const std::uint32_t eventRow = v->FindId(bf::chunk::EVNT, snd::HashId("M"));
+  SND_REQUIRE(eventRow != bf::kNone);
+  MusicEditor m(doc, G(93));
+  for (const char* from : {"A", "B", "C", "X"}) {
+    for (const char* to : {"A", "B", "C", "X"}) {
+      const snd::music::detail::Rule r = snd::music::detail::FindRule(tb, eventRow, snd::HashId(from), snd::HashId(to));
+      const int tool = m.Match(from, to);
+      const int runtime = r.row == bf::kNone ? -1 : static_cast<int>(r.row);
+      SND_CHECK_MSG(tool == runtime, "%s -> %s: tool %d runtime %d", from, to, tool, runtime);
+    }
+  }
+}
