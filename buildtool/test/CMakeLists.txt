@@ -36,3 +36,8 @@ target_compile_definitions(buildtool_build_edge_test PRIVATE
   SND_BUILD_EXE="$<TARGET_FILE:sonus-build>")
 add_dependencies(buildtool_build_edge_test sonus-build)
 set_tests_properties(buildtool_build_edge_test PROPERTIES TIMEOUT 600)
+
+# In-memory project / output (ProjectSource, memoryOutput) and patches (patch.hpp).
+snd_add_test(buildtool_source_patch_test
+  SOURCES source_patch_test.cpp
+  LINK sonus_buildtool sonus_mocks)
