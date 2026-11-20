@@ -127,8 +127,18 @@ std::vector<CurvePoint> CurveEditor::Points() const {
   return out;
 }
 
+// D-177b: the same points (a shape 0 written or not) leave "points" as written.
+static bool SamePoints(const std::vector<CurvePoint>& a, const std::vector<CurvePoint>& b) {
+  if (a.size() != b.size()) return false;
+  for (std::size_t i = 0; i < a.size(); ++i) {
+    if (a[i].x != b[i].x || a[i].y != b[i].y || a[i].shape != b[i].shape) return false;
+  }
+  return true;
+}
+
 bool CurveEditor::SetPoints(const std::vector<CurvePoint>& pts) {
   if (!valid() || !ValidPoints(pts)) return false;
+  if (SamePoints(Points(), pts)) return true;
   return doc_.Set(guid_, path_ + ".points", PointsJson(pts));
 }
 
@@ -145,6 +155,7 @@ bool CurveEditor::MovePoint(std::uint32_t i, double x, double y, std::uint32_t m
   std::vector<CurvePoint> p = Points();
   if (i >= p.size()) return false;
   if ((i > 0 && x < p[i - 1].x) || (i + 1 < p.size() && x > p[i + 1].x)) return false;  // keeps the order
+  if (p[i].x == x && p[i].y == y) return std::isfinite(x) && std::isfinite(y);
   p[i].x = x;
   p[i].y = y;
   if (!ValidPoints(p)) return false;
@@ -154,6 +165,7 @@ bool CurveEditor::MovePoint(std::uint32_t i, double x, double y, std::uint32_t m
 bool CurveEditor::SetShape(std::uint32_t i, double shape) {
   std::vector<CurvePoint> p = Points();
   if (i >= p.size()) return false;
+  if (p[i].shape == shape) return true;
   p[i].shape = shape;
   return ValidPoints(p) && doc_.Set(guid_, path_ + ".points", PointsJson(p));
 }
@@ -170,13 +182,17 @@ bool CurveEditor::SetParameter(const std::string& ref) {
   if (ref == "distance") return doc_.Set(guid_, path_ + ".parameter", String("distance"));
   const DocObject* p = doc_.Find(ref);
   if (p == nullptr || p->kind() != "parameter") return false;
+  const DocObject* cur = doc_.Resolve("parameter", StringAt(doc_.Find(guid_)->doc, path_ + ".parameter"));
+  if (cur != nullptr && cur->guid == p->guid) return true;  // D-177b
   return doc_.Set(guid_, path_ + ".parameter", String(p->guid));
 }
 bool CurveEditor::SetTarget(CurveTarget t) {
-  return valid() && !IsDistanceCurve() && doc_.Set(guid_, path_ + ".target", String(CurveTargetName(t)));
+  return valid() && !IsDistanceCurve() && doc_.SetDefaulted(guid_, path_ + ".target", String(CurveTargetName(t)), String("volume"));
 }
 bool CurveEditor::SetCompose(CurveCompose c) {
-  return valid() && !IsDistanceCurve() && doc_.Set(guid_, path_ + ".compose", String(CurveComposeName(c)));
+  if (!valid() || IsDistanceCurve()) return false;
+  if (FindPath(doc_.Find(guid_)->doc, path_ + ".compose") == nullptr && c == DefaultCompose(target())) return true;  // D-177b
+  return doc_.Set(guid_, path_ + ".compose", String(CurveComposeName(c)));
 }
 CurveTarget CurveEditor::target() const {
   CurveTarget t = CurveTarget::Volume;
@@ -249,7 +265,8 @@ double ParameterEditor::rampRate() const { return valid() ? NumberAt(doc_.Find(g
 
 bool ParameterEditor::SetSwitch(bool s) {
   if (!valid()) return false;
-  if (!s) return doc_.Find(guid_)->doc.Find("kind") == nullptr || doc_.Erase(guid_, "kind");  // D-177b
+  if (isSwitch() == s) return true;  // D-177b (an explicit "continuous" stays)
+  if (!s) return doc_.Erase(guid_, "kind");
   return doc_.Set(guid_, "kind", String("switch"));
 }
 std::uint32_t ParameterEditor::scope() const {
@@ -265,6 +282,7 @@ std::uint32_t ParameterEditor::scope() const {
 }
 bool ParameterEditor::SetScope(std::uint32_t mask) {
   if (!valid() || mask == 0u || mask > 7u) return false;
+  if (scope() == mask) return true;  // D-177b (absent = all three)
   Value a = json::MakeArray();
   if ((mask & 1u) != 0u) a.items.push_back(String("global"));
   if ((mask & 2u) != 0u) a.items.push_back(String("emitter"));
@@ -274,6 +292,7 @@ bool ParameterEditor::SetScope(std::uint32_t mask) {
 bool ParameterEditor::SetRange(double lo, double hi) {
   if (!valid() || !std::isfinite(lo) || !std::isfinite(hi) || lo > hi || (lo == hi && !isSwitch())) return false;
   const double def = std::clamp(defaultValue(), lo, hi);
+  if (minValue() == lo && maxValue() == hi && defaultValue() == def) return true;  // D-177b
   return doc_.Modify(guid_, [&](Value& v) {
     const char* const* order = SpecMemberOrder("parameter", "");
     SetMember(v, "min", Number(lo), order);
@@ -284,10 +303,10 @@ bool ParameterEditor::SetRange(double lo, double hi) {
 }
 bool ParameterEditor::SetDefault(double v) {
   if (!valid() || !std::isfinite(v) || v < minValue() || v > maxValue()) return false;
-  return doc_.SetNumber(guid_, "default", v);
+  return doc_.SetDefaulted(guid_, "default", Number(v), Number(minValue()));
 }
 bool ParameterEditor::SetRampRate(double r) {
-  return valid() && std::isfinite(r) && r >= 0 && doc_.SetNumber(guid_, "rampRate", r);
+  return valid() && std::isfinite(r) && r >= 0 && doc_.SetDefaulted(guid_, "rampRate", Number(r), Number(0));
 }
 
 // --- composition ------------------------------------------------------------------------------
