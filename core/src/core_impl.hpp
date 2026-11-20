@@ -35,6 +35,7 @@
 #include "snd/internal/notify.hpp"
 #include "snd/internal/schema.hpp"
 #include "snd/jobs/rt_workers.hpp"
+#include "fx_control.hpp"
 
 namespace snd::core {
 
@@ -139,6 +140,11 @@ struct EffectInstance {
   std::uint32_t channels = 0;
   std::uint32_t ok = 0;      // 1 when initialised
   std::uint32_t reserved = 0;
+  // D-130: runtime control ([kMaxEffectParams] each, bank record memory). `params` stays the
+  // bank value (base); the ParamBlock of a block is blockStart -> blockEnd (Render).
+  EffectParamControl* ctl = nullptr;
+  float* blockStart = nullptr;
+  float* blockEnd = nullptr;
 };
 
 struct EventState {  // RunEventLogic private, per EVNT row (4.2, 4.4)
@@ -183,6 +189,12 @@ struct BankRecord {
   std::uint8_t* dspMemory = nullptr;
   std::uint64_t dspBytes = 0;
   void* memory = nullptr;  // one block for everything above except dspMemory
+  // D-131: previous-block output of the source bus of each DUCK row of kind 0 (sidechain),
+  // used when the source bus is mixed after the target bus. [duckCount] index into
+  // sidechainPrev (kNoSlot: not a sidechain row), [n * kMaxChannels * blockFrames], channels.
+  std::uint32_t* sidechainIndex = nullptr;
+  float* sidechainPrev = nullptr;
+  std::uint32_t* sidechainChannels = nullptr;
 };
 
 enum class BankAudioState : std::uint8_t { Free = 0, Registered = 1, Unloading = 2, AwaitEpoch = 3 };
@@ -481,6 +493,7 @@ struct ItemInput {
   // Outputs (chunk writes):
   float tail[kMaxChannels];  // last output frame per bus channel (late-chunk fade, D-15)
   VoiceRenderStatus status;
+  std::uint32_t vfxSlot;     // D-132: voice-effect slot + 1 (0 = no heavy voice effect this block)
 };
 enum ItemFlags : std::uint32_t {
   kItemSourceRate = 1u << 0,
@@ -700,6 +713,9 @@ struct System::Impl {
   // Render(out, frames) FIFO.
   float* fifo = nullptr;  // [blockFrames * outChannels]
   std::uint32_t fifoPos = 0, fifoFill = 0;
+
+  // Stage 3 group 2 (fx_control.hpp): voice effects (D-132..D-134).
+  VoiceFxPriv vfx;
 };
 
 // ---------------------------------------------------------------------------
@@ -788,6 +804,46 @@ base::rows::RemoveResult RemoveTransportRow(schema::Tables& t, SlotIndex slot) n
 base::rows::RemoveResult RemoveReservationRow(schema::Tables& t, SlotIndex slot) noexcept;
 base::rows::RemoveResult RemoveCategoryRow(schema::Tables& t, SlotIndex slot) noexcept;
 base::rows::RemoveResult RemoveSnapshotRow(schema::Tables& t, SlotIndex slot) noexcept;
+
+// ---------------------------------------------------------------------------
+// Stage 3 group 2: runtime effect control (fx_control.cpp, voice_fx.cpp)
+// ---------------------------------------------------------------------------
+// D-130. Audio thread, ApplyCommands or a later system of the same block before Render.
+// Effect instance `effectIndex` of the chain of bus `busSlot` (in its defining bank), or null.
+EffectInstance* BusEffectInstance(Impl& im, SlotIndex busSlot, std::uint32_t effectIndex) noexcept;
+// Sets the value parameter `param` heads to: from its current set value at the block start,
+// linearly over `fadeSeconds` (0: this block). Clamped to the parameter range (standard
+// effects); parameters past the instance's count are ignored. Contributions
+// (EffectParamControl::contrib) add on top.
+void SetEffectParam(Impl& im, EffectInstance& e, std::uint32_t param, float value, float fadeSeconds) noexcept;
+// Clamps `v` to parameter `param`'s range (standard effects; plugins: unchanged).
+float ClampEffectParam(const EffectInstance& e, std::uint32_t param, float v) noexcept;
+// Render (MixBuses): this block's ParamBlock values of `e` from its controls; returns the mask.
+std::uint32_t StepEffectParams(Impl& im, EffectInstance& e) noexcept;
+// ApplyCommands: SetBusVolume variant 1 (bus effect parameter, D-130).
+void ApplyBusEffectParam(Impl& im, const cmd::SetBusVolume& c) noexcept;
+// D-131 (MixBuses): sidechain source of bus `s` (defining bank `rec`) for this block.
+struct SidechainSource {
+  const float* channels[kMaxChannels];
+  std::uint32_t count;
+  std::uint32_t prevRow;  // DUCK row whose previous-block buffer the source refreshes after its mix (kNoSlot: none)
+};
+bool FindSidechain(Impl& im, const BankRecord& rec, SlotIndex s, std::uint32_t orderIndex, SidechainSource* out) noexcept;
+// After bus `s` was mixed: refresh the previous-block buffers that take it as their source.
+void StoreSidechainSources(Impl& im, SlotIndex s, std::uint32_t orderIndex, const float* buf, std::uint32_t ch) noexcept;
+
+// D-132..D-134 (voice_fx.cpp).
+bool InitVoiceFx(Impl& im) noexcept;  // Create
+void ApplyVoiceFxSwitch(Impl& im, const cmd::SetSwitch& c) noexcept;  // SetSwitch variant 1
+void ApplyVoiceFxParam(Impl& im, const cmd::SetParam& c) noexcept;    // SetParam variant 1
+// Render, serial: the voice started this block (captures its Event's voice effects).
+void VfxCaptureVoice(Impl& im, SlotIndex voice, std::uint32_t dense, const VoiceStatic& vs) noexcept;
+// Render, serial, before the items: frees the slots of voices that left their real assignment.
+void VfxReleaseStale(Impl& im) noexcept;
+// Render, serial, per item: binds / keeps a slot and writes this block's parameters (in.vfxSlot).
+void VfxPrepareItem(Impl& im, const source::RenderItem& it, ItemInput& in) noexcept;
+// Chunk: runs the voice's effect chain in place.
+void VfxProcess(Impl& im, std::uint32_t slot, float* const* voiceOut, std::uint32_t channels) noexcept;
 
 }  // namespace snd::core
 

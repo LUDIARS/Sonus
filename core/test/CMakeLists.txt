@@ -47,3 +47,12 @@ function(snd_indep_core_fixed2 name key)
 endfunction()
 snd_indep_core_fixed2(core_reregistered_thread_reorders_its_commands reregister)
 snd_indep_core_fixed2(core_timed_stop_of_paused_playback_sounds paused_timed_stop)
+
+# Stage 3 group 2: runtime bus-effect parameters, sidechain, voice effects (D-130..D-134).
+# Repeat under TSan / Release: ctest --repeat until-fail:20 -R core_fx_test
+snd_add_test(core_fx_test SOURCES core_fx_test.cpp LINK ${_core_test_link})
+set_tests_properties(core_fx_test PROPERTIES TIMEOUT 600)
+snd_add_test(core_fx_kinds_test SOURCES core_fx_kinds_test.cpp LINK ${_core_test_link})
+set_tests_properties(core_fx_kinds_test PROPERTIES TIMEOUT 600)
+snd_add_test(core_fx_load_test SOURCES core_fx_load_test.cpp LINK ${_core_test_link})
+set_tests_properties(core_fx_load_test PROPERTIES TIMEOUT 600)
