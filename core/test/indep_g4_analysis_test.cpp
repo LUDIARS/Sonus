@@ -142,6 +142,7 @@ SND_TEST(IndepG4Meter, UnmeteredBusDoesNotReportTheOutputLoudness) {
   snd::test::Note("Plain loudness short %g integrated %g; Master %g", double(p.loudness_short),
                   double(p.loudness_integrated), double(m.loudness_short));
   SND_CHECK(!(std::fabs(p.loudness_short - m.loudness_short) < 0.05f));
+  SND_CHECK(std::isnan(p.loudness_short) && std::isnan(p.loudness_integrated));  // decision 9 / sonus.h
 }
 
 // Constant then silence: the short-term loudness falls after the signal stops (3 s window),
@@ -325,7 +326,10 @@ SND_TEST(IndepG4Spectrum, NotReadyProtocol) {
   }
   snd::test::Note("ready after %d update(s) (comment: from the next snd_update())", updates);
   SND_CHECK_EQ(res, SND_OK);
-  SND_CHECK(updates <= 6);
+  // sonus.h (af89e2e): "the data is there from the first snd_update() that follows a rendered
+  // block": the Update right after the NOT_READY call (no block rendered since) is not enough,
+  // the one after the next block is.
+  SND_CHECK_EQ(updates, 2);
   SND_CHECK_NEAR(out[64], 0.8f * kC, 0.02f);
   // Read every block for 2 s: always OK.
   int notOk = 0;
