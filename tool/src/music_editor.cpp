@@ -106,6 +106,7 @@ MusicalPosition TempoMap::Musical(double tick) const {
   if (rest >= kTicksPerQuarter) rest = kTicksPerQuarter - 1.0;
   return MusicalPosition{static_cast<std::int32_t>(bar), static_cast<std::int32_t>(beat), static_cast<std::int32_t>(rest)};
 }
+bool TempoMap::MusicalIsApproximate(double tick) const { return BeatTicks(PointAt(tick)) > kTicksPerQuarter; }
 double TempoMap::TickOfMusical(const MusicalPosition& m) const {
   std::uint32_t i = 0;
   while (i + 1u < points_.size() && bars_[i + 1u] <= static_cast<double>(m.bar) + kEps) ++i;
@@ -234,7 +235,7 @@ bool SegmentEditor::SetExitFrame(std::uint64_t f) {
 }
 bool SegmentEditor::SetEntryPreload(bool on) {
   if (!valid()) return false;
-  if (!on) return doc_.Find(guid_)->doc.Find("entryPreload") != nullptr && doc_.Erase(guid_, "entryPreload");
+  if (!on) return doc_.Find(guid_)->doc.Find("entryPreload") == nullptr || doc_.Erase(guid_, "entryPreload");
   return doc_.Set(guid_, "entryPreload", Bool(true));
 }
 std::vector<TempoPointDesc> SegmentEditor::Tempo() const {
@@ -272,18 +273,57 @@ bool SegmentEditor::WriteTempo(const std::vector<TempoPointDesc>& t) {
   }
   return doc_.Set(guid_, "tempo", a);
 }
+// D-179c: a change of time signature at point i must sit on a bar line of the signature
+// before it (points that keep the signature may sit anywhere).
+static bool SignatureOnBarLine(const std::vector<TempoPointDesc>& t, std::size_t i) {
+  if (i == 0 || i >= t.size()) return true;
+  if (t[i].beatsPerBar == t[i - 1].beatsPerBar && t[i].beatUnit == t[i - 1].beatUnit) return true;
+  const TempoMap before(std::vector<TempoPointDesc>(t.begin(), t.begin() + static_cast<std::ptrdiff_t>(i)));
+  const double pos = before.BarPosition(static_cast<double>(t[i].tick));
+  return std::fabs(pos - std::round(pos)) < 1e-6;
+}
 bool SegmentEditor::AddTempo(const TempoPointDesc& p) {
   std::vector<TempoPointDesc> t = Tempo();
   std::size_t at = 0;
   while (at < t.size() && t[at].tick < p.tick) ++at;
   t.insert(t.begin() + static_cast<std::ptrdiff_t>(at), p);
+  if (!SignatureOnBarLine(t, at) || !SignatureOnBarLine(t, at + 1)) return false;
   return WriteTempo(t);
 }
 bool SegmentEditor::SetTempo(std::uint32_t i, const TempoPointDesc& p) {
   std::vector<TempoPointDesc> t = Tempo();
   if (i >= t.size()) return false;
   t[i] = p;
+  if (!SignatureOnBarLine(t, i) || !SignatureOnBarLine(t, i + 1)) return false;
   return WriteTempo(t);
+}
+std::vector<std::string> SegmentEditor::Problems() const {
+  std::vector<std::string> out;
+  if (!valid()) return out;
+  const std::vector<TempoPointDesc> t = Tempo();
+  for (std::size_t i = 1; i < t.size(); ++i) {
+    if (!SignatureOnBarLine(t, i)) {
+      out.push_back(Idx("tempo", static_cast<std::uint32_t>(i)) + ": the time signature changes inside a bar");
+    }
+  }
+  const Value* stems = doc_.Find(guid_)->doc.Find("stems");
+  for (std::size_t i = 0; stems != nullptr && stems->IsArray() && i < stems->items.size(); ++i) {
+    const std::string asset = StringAt(stems->items[i], "asset");
+    if (StemChannels(asset) < 0) {
+      out.push_back(Idx("stems", static_cast<std::uint32_t>(i)) + ": the material cannot be read (channels not checked)");
+    }
+  }
+  return out;
+}
+int SegmentEditor::StemChannels(const std::string& assetRef) const {
+  if (!valid()) return -1;
+  const DocObject* a = doc_.Resolve("asset", assetRef.empty() ? StringAt(doc_.Find(guid_)->doc, "asset") : assetRef);
+  if (a == nullptr) return -1;
+  std::vector<std::uint8_t> b;
+  buildtool::PcmData pcm;
+  std::string err;
+  if (!doc_.ReadBinaryFile(StringAt(a->doc, "file"), &b) || !buildtool::ReadWav(b, &pcm, &err)) return -1;
+  return static_cast<int>(pcm.channels);
 }
 bool SegmentEditor::RemoveTempo(std::uint32_t i) {
   std::vector<TempoPointDesc> t = Tempo();
@@ -333,13 +373,12 @@ bool SegmentEditor::SetMarker(std::uint32_t i, const MarkerDesc& m) {
 bool SegmentEditor::RemoveMarker(std::uint32_t i) { return i < Markers().size() && doc_.Erase(guid_, Idx("markers", i)); }
 bool SegmentEditor::AddStem(const StemDesc& s) {
   if (!valid() || s.channelCount == 0u) return false;
-  AssetLength l;
-  double ch = 0;
   const DocObject* mat = s.asset.empty() ? nullptr : doc_.Find(s.asset);
   if (!s.asset.empty() && (mat == nullptr || mat->kind() != "asset")) return false;
-  if (s.asset.empty() && MaterialOf(doc_, *doc_.Find(guid_), &l, &ch) && ch > 0 && s.channelFirst + s.channelCount > ch) {
-    return false;
-  }
+  // D-177d: inside the stem's material (its own file, else the segment's); unreadable: allowed,
+  // reported by Problems().
+  const int ch = StemChannels(mat != nullptr ? mat->guid : std::string());
+  if (ch >= 0 && std::uint64_t{s.channelFirst} + s.channelCount > static_cast<std::uint64_t>(ch)) return false;
   Value v = json::MakeObject();
   json::Add(v, "channelFirst", Number(s.channelFirst));
   json::Add(v, "channelCount", Number(s.channelCount));
@@ -360,6 +399,8 @@ bool SegmentEditor::SetStem(std::uint32_t i, const StemDesc& s) {
     if (a == nullptr || a->kind() != "asset") return false;
     SetMember(v, "asset", String(a->guid), order);
   }
+  const int ch = StemChannels(StringAt(v, "asset"));
+  if (ch >= 0 && std::uint64_t{s.channelFirst} + s.channelCount > static_cast<std::uint64_t>(ch)) return false;
   return doc_.Set(guid_, Idx("stems", i), v);
 }
 bool SegmentEditor::RemoveStem(std::uint32_t i) {
@@ -576,10 +617,21 @@ bool MusicEditor::SetRule(std::uint32_t i, const TransitionRule& r) {
 }
 bool MusicEditor::RemoveRule(std::uint32_t i) { return i < Rules().size() && doc_.Erase(guid_, Idx("music.transitions", i)); }
 bool MusicEditor::MoveRule(std::uint32_t from, std::uint32_t to) { return doc_.MoveElement(guid_, "music.transitions", from, to); }
-bool MusicEditor::AutoSort() {
+bool MusicEditor::AutoSort(std::string* why) {
   const Value* m = Music();
   const Value* t = m != nullptr ? m->Find("transitions") : nullptr;
-  if (t == nullptr || !t->IsArray()) return false;
+  if (t == nullptr || !t->IsArray()) {
+    if (why != nullptr) *why = "no transition rules";
+    return false;
+  }
+  // D-179e: sorting could raise a row nothing reaches and change which rule matches.
+  if (const auto un = Unreachable(); !un.empty()) {
+    if (why != nullptr) {
+      *why = "transitions[" + std::to_string(un[0].first) + "] can never match (covered by transitions[" +
+             std::to_string(un[0].second) + "]): fix or remove the unreachable rows first";
+    }
+    return false;
+  }
   std::vector<Value> rows = t->items;
   auto score = [](const Value& v) {
     return (StringAt(v, "from", "*") != "*" ? 1 : 0) + (StringAt(v, "to", "*") != "*" ? 1 : 0);

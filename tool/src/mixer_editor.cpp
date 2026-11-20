@@ -233,7 +233,7 @@ bool MixerEditor::SetFlag(const std::string& bus, BusFlag f, bool on) {
   const DocObject* b = Bus(bus);
   if (b == nullptr) return false;
   const char* key = f == BusFlag::Output ? "output" : f == BusFlag::LodBypassable ? "lodBypassable" : "meter";
-  if (!on) return b->doc.Find(key) != nullptr && doc_.Erase(bus, key);
+  if (!on) return b->doc.Find(key) == nullptr || doc_.Erase(bus, key);
   return doc_.Set(bus, key, Bool(true));
 }
 bool MixerEditor::SetLodPriority(const std::string& bus, std::uint32_t priority) {
@@ -264,7 +264,7 @@ bool MixerEditor::SetSendLevel(const std::string& bus, std::uint32_t i, double d
 bool MixerEditor::SetSendPreFader(const std::string& bus, std::uint32_t i, bool preFader) {
   const DocObject* b = Bus(bus);
   if (b == nullptr || i >= ArraySize(b->doc, "sends")) return false;
-  if (!preFader) return FindPath(b->doc, P("sends", i, ".preFader")) != nullptr && doc_.Erase(bus, P("sends", i, ".preFader"));
+  if (!preFader) return FindPath(b->doc, P("sends", i, ".preFader")) == nullptr || doc_.Erase(bus, P("sends", i, ".preFader"));
   return doc_.Set(bus, P("sends", i, ".preFader"), Bool(true));
 }
 bool MixerEditor::SetSendTarget(const std::string& bus, std::uint32_t i, const std::string& target) {
@@ -346,7 +346,7 @@ bool MixerEditor::SetEffectFlags(const std::string& bus, std::uint32_t e, std::u
 bool MixerEditor::SetEffectBlob(const std::string& bus, std::uint32_t e, const std::string& path) {
   const DocObject* b = Bus(bus);
   if (b == nullptr || e >= ArraySize(b->doc, "effects")) return false;
-  if (path.empty()) return FindPath(b->doc, P("effects", e, ".blob")) != nullptr && doc_.Erase(bus, P("effects", e, ".blob"));
+  if (path.empty()) return FindPath(b->doc, P("effects", e, ".blob")) == nullptr || doc_.Erase(bus, P("effects", e, ".blob"));
   return doc_.Set(bus, P("effects", e, ".blob"), String(path));
 }
 
@@ -565,7 +565,7 @@ bool MixerEditor::SetCategoryParent(const std::string& cat, const std::string& p
   const DocObject* c = doc_.Find(cat);
   if (c == nullptr || c->kind() != "category") return false;
   const std::string cg = c->guid;
-  if (parentGuid.empty()) return c->doc.Find("parent") != nullptr && doc_.Erase(cg, "parent");
+  if (parentGuid.empty()) return c->doc.Find("parent") == nullptr || doc_.Erase(cg, "parent");
   const DocObject* p = doc_.Find(parentGuid);
   if (p == nullptr || p->kind() != "category") return false;
   // Walk up from the new parent: reaching `cat` is a cycle.

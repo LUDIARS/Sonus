@@ -93,6 +93,16 @@
     ノードは警告して除く。既存の「patch は段階 6 まで不可」は `synth.patch` の無いときのエラーとして残した（既存テストは不変で通る）。
 18. **ProjectDocument のファイル名の衝突判定**は、ディスクにあって読めなかったファイルも含める（上書きしない）。
 
+### 差し戻しで決まったこと（D-176〜D-180、受け入れ側の決定）と変えた点
+
+| 決定 | 元の案 | 差し戻しで変えたこと |
+| --- | --- | --- |
+| D-176 文書の保存 | 1、2、18 | 負のゼロは `-0`（`FormatNumber`）。`Number()` は非有限を JSON にならないリテラルにし、`Set` / `Insert` / `Modify` / `Create` が拒否（`FormatNumber` の 0 は最後の守り）。`Save` は一時ファイル＋rename で書き、全部書けてから削除。失敗は `false` と `lastSave()`（`SaveResult`）、残りは保留（dirty）で次の `Save` がやり直す。`SaveTo` は名前を付けて保存（素材・blob・読めなかった *.json を写す、外は `outside`、読めないものは `missing`）。Windows の予約名に `_`、大文字小文字の比較は ASCII だけ |
+| D-177 編集の規則と履歴 | 3、4、5 | 値が変わらない設定は true（手を足さない）。全エディタの「すでにその状態」の設定も true。`NewGuid` は 16 回で諦めて ""（`Create` は失敗）。最後の材質の削除は拒否。stem のチャンネルは自分の素材（別ファイルならそのファイル）で確かめ、読めなければ受け入れて `SegmentEditor::Problems()` に出す |
+| D-178 検査・分類・対応表 | 6、7、8 | `MemberTable()`（全メンバ: Column / NotInBank / Structure）と `ClassifyMember`、`FieldColumns()` はその Column の分。MTRN / MSTG / MTMP / MMRK / MSEG / MSTM / 距離カーブ（compose と点）/ Stem のカーブ / SYNP / ASST.flags / SNPV.paramIndex を足した。buildtool に `SchemaKinds` / `SchemaMembers`（schema.hpp）を足し、全メンバに分類が付くことをテスト。バンクに無い列は `liveWritable = false`。`BankImage::view()` はビルド時に作り、コピーは共有、遅延生成は錠の下 |
+| D-179 計算はランタイムに | 9〜15 | `ComposeIgnored(target)` と `CurveEditor::ComposeIgnored()`、`ComposeResult::composeIgnored`。拍子の変化は直前の拍子の小節線だけ（`AddTempo` / `SetTempo` が拒否、読み込んだ小節の途中の変化は `Problems()`）。`TempoMap::MusicalIsApproximate`。到達できない行がある表の `AutoSort` は理由付きで拒否 |
+| D-180 マテリアルとパッチ | 16、17 | `EvaluateStrength` は非有限の入力を 0 に。`ReadPatchChunk` はプログラムの連続、ノードの種類、入力（同じプログラムの前のノード）、対応表のプログラム番号を確かめる。buildtool の PHYS の `put` は大きさ 0 で写さない（同じ形はほかに無い） |
+
 ## 契約の変更点
 
 - 契約（`contract/`）は変えていない。livelink のプロトコルも変えていない。
@@ -152,12 +162,35 @@ UI に依存せず使えるモデル（`Sonus::tool_core` だけで動く）:
   af8f4e7 では構成 2・3・5 で組 M のテストを含む tool / buildtool のテストを回している。af8f4e7 での構成 8 の全テストは回していない。
 - TSan（構成 4）は回していない（組 M のモデルはスレッドを使わない）。並行性の繰り返しテストも対象が無いので回していない。
 
+### 差し戻しの後（D-176〜D-180）
+
+| 構成 | コミット | テスト | 結果 |
+| --- | --- | --- | --- |
+| 8: TOOL_CORE、gcc Debug | 0e2852f | 全部 | 241 件中 238 通過。失敗 3 件は下の「決定と食い違う独立テスト」だけ。`tool_live_mixer_test` は通過 |
+| 3 ＋ TOOL_CORE（ASan/UBSan） | 37d9176 | `-R 'tool\|buildtool'` | 35 件中 32 通過（同じ 3 件）。UB の報告なし（`tool_indep_s7_build_test` の E1 も通過） |
+| 5 ＋ TOOL_CORE（Release） | 37d9176 | 同上 | 35 件中 32 通過（同じ 3 件） |
+| clang ＋ TOOL_CORE | 37d9176 | 同上 | 35 件中 32 通過（同じ 3 件） |
+| 9（Tela） | 37d9176 | `-R tool` | 49 件中 46 通過（同じ 3 件） |
+| MinGW 構文検査 | 37d9176 | 変えた .cpp | 通過（`buildtool/src/build.cpp`・`project.cpp` は前からの `detail/file_io.hpp` のエラーで止まる） |
+
+0e2852f と 37d9176 の差は文書だけ。`Defect_*` は 8 件中 7 件が通過。通らない 1 件は決定 D-177d と食い違う（下）。
+
+決定と食い違って落ちる独立テスト（変更していない。独立テスト担当が直す）:
+- `tool_indep_s7_Defect_EmptyMaterialTableBuildIsUndefinedBehaviour`: 材質を全部消せる前提（`SND_REQUIRE(m.RemoveMaterial(...))`）。
+  D-177d で最後の材質の削除は拒否。UB の元（`build.cpp` の PHYS の `put`）は D-180d で直した。
+- `tool_indep_s7_document_test` の `IndepS7Doc.C1_NewGuidLayoutAndDeterminism`: 999 回同じ値を返す生成器で `Create` が成功する前提。
+  D-177c で 16 回の衝突で諦める。
+- `tool_indep_s7_editors_test` の `IndepS7Edit.D14_MusicRules`（813、817、820 行）: 直前の拍子の小節線に当たらない位置での拍子の変化
+  （tick 3840×u で beatUnit を変える、tick 7・8 で beatUnit 32 と 4/4 の後）を受け入れる前提。D-179c で拒否。
+
 ## 未検証の箇所
 
 - TSan の構成（4）は回していない。
 - Windows / macOS での実行（MinGW の構文検査だけ。テストの `doc_fixture.hpp` は `getpid` を使うが MinGW の構文検査は通った）。`buildtool/src/detail/file_io.hpp`（変えていない）が MinGW で通らないため、
   それを含む `build.cpp` / `project.cpp` の MinGW 検査は既存のエラーで止まる（`std::fopen(path.c_str())` が wchar_t）。
-- 文書の保存のファイル操作は 1 段（一時ファイルと rename を使っていない）。途中で失敗すると一部だけ書かれる。
+- 保存は一時ファイル＋rename（D-176d）。rename が途中で失敗した場合、それより前のファイルは新しく、後は古い（失敗は返す）。
+  Windows での rename による上書き（既存ファイルへの `std::filesystem::rename`）は確かめていない。
+- `BankImage::view()` を複数スレッドから読むテストは通常の構成で回した。TSan では回していない。
 - `SpatialPreview` の複数リスナー（ランタイムも最も近いリスナーだけ）と Doppler（ランタイム未実装）。
 - 音楽の遷移の試聴は 1 つの Segment の上の計算。プレイリストを進む・Segment をまたぐテンポ変化・ストール・割り込み中の要求は扱わない。
   ランタイムとの比較はテンポマップ（`Timeline`）と照合（`FindRule`）だけで、遷移の発火の全体（`transition.cpp`）とは比べていない。

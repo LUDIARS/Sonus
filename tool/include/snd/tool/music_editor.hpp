@@ -9,17 +9,19 @@
 // bar / grid" fire at the point itself when exactly on it (>=, D-69).
 //
 // SegmentEditor / PlaylistEditor / MusicEditor edit the objects (undoable). Rules:
-// tempo points with distinct ticks (sorted), bpm 1e-3 .. 1e5 (D-85), beatsPerBar >= 1,
+// tempo points with distinct ticks (sorted), a change of time signature only on a bar line of
+// the signature before it (D-179c), bpm 1e-3 .. 1e5 (D-85), beatsPerBar >= 1,
 // beatUnit 1, 2, 4, 8, 16 or 32; marker names unique in the segment, frames inside the
-// material; entryFrame < exitFrame <= frames; bars >= 1; stems inside the material's
-// channels; playlist weights >= 0, repeat >= 1; state names unique and not "*" (the
+// material; entryFrame < exitFrame <= frames; bars >= 1; stems inside their material's
+// channels (a separate-file stem: that file; unreadable: allowed and listed by Problems, D-177d); playlist weights >= 0, repeat >= 1; state names unique and not "*" (the
 // wildcard), a state's playlist exists; transitions name states of the event or "*".
 // RenameState renames the state in the transitions and the initial state too.
 //
 // Transition rule table (8.5): Match = the first row that matches from top to bottom (the
 // runtime's FindRule; -1 = none: the built-in default, next bar, 1 beat fades);
 // Unreachable = rows an earlier row covers (the build's warning, same rule); AutoSort =
-// stable sort by specificity (exact from and to, then one exact, then * -> *).
+// stable sort by specificity (exact from and to, then one exact, then * -> *), refused while a
+// row is unreachable (D-179e: sorting could then change which rule matches).
 //
 // Minimum lookahead (8.2), per reservation target: one block (blockFrames / sampleRate)
 // plus the target's prime time:
@@ -81,6 +83,9 @@ class TempoMap {
   double TickAtFrame(double frame, double sampleRate) const { return TickAtSeconds(frame / sampleRate); }
   double BarPosition(double tick) const;
   MusicalPosition Musical(double tick) const;
+  // D-179d: with a beat longer than a quarter note (beatUnit 1 or 2) the tick within the beat
+  // is capped at 959 (snd_musical_time, as the runtime): Musical is then approximate.
+  bool MusicalIsApproximate(double tick) const;
   double TickOfMusical(const MusicalPosition& m) const;
   double TickAtBar(double bar) const;
   double NextBeat(double from) const;
@@ -159,6 +164,11 @@ class SegmentEditor {
   // 8.7: sets one tempo point (bpm, signature) at tick 0, entryFrame = offsetFrame and the
   // bars that fit the material after the entry (at least 1). One undo step.
   bool ApplyGrid(double bpm, std::uint64_t offsetFrame, std::uint32_t beatsPerBar, std::uint32_t beatUnit);
+  // Problems the screen shows (warnings): a time signature that changes inside a bar (loaded
+  // that way; the editor refuses to make one, D-179c), a stem whose material cannot be read.
+  std::vector<std::string> Problems() const;
+  // Channels of a stem's material ("" = the segment's), -1 if it cannot be read.
+  int StemChannels(const std::string& assetRef) const;
 
  private:
   bool ValidTempo(const std::vector<TempoPointDesc>& t) const;
@@ -264,7 +274,8 @@ class MusicEditor {
   bool SetRule(std::uint32_t i, const TransitionRule& r);
   bool RemoveRule(std::uint32_t i);
   bool MoveRule(std::uint32_t from, std::uint32_t to);
-  bool AutoSort();
+  // Refused (with the reason) while some row is unreachable (D-179e).
+  bool AutoSort(std::string* why = nullptr);
   std::vector<std::pair<std::uint32_t, std::uint32_t>> Unreachable() const;  // (row, earlier row covering it)
   int Match(const std::string& from, const std::string& to) const;
   // --- stingers --------------------------------------------------------------------------
