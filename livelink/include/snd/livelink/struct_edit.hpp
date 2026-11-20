@@ -46,13 +46,18 @@ class IStructEditor {
   virtual snd_result Apply(core::System& sys, const StructEditRequest& edit) noexcept = 0;
   // Undoes an edit this editor applied earlier (disconnect revert, newest first). For a
   // Remove the editor restores what it removed if it can; the result is only counted.
+  // Effects and sends that went away with a removed live bus are never undone.
   virtual snd_result Undo(core::System& sys, const StructEditRequest& edit) noexcept = 0;
 };
 
 // What an edit takes from Config.dev_reserve (LiveRuntime::StructCostOf).
 //   AddBus: 1 bus, AddEffect: 1 effect, AddSend: no unit; every Add takes
 //   kStructEditBaseBytes + 8 * argCount bytes. Removes take nothing; removing an object
-//   a live edit added gives its units back once the remove is applied.
+//   a live edit added gives the whole cost of that Add back (units and bytes) once the
+//   remove is applied, and removing a live bus also gives back the live effects on it and
+//   the live sends from it: they leave the revert log with it (D-172, no Undo is asked for
+//   them). Every edit also takes one place of the revert log at acceptance
+//   (RuntimeDesc::maxStructLog); an edit that does not fit is refused (LIMIT_REACHED).
 inline constexpr std::uint32_t kStructEditBaseBytes = 64;
 struct StructCost {
   std::uint32_t buses = 0;

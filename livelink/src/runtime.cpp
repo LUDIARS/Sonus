@@ -252,6 +252,24 @@ void LiveRuntime::ReleaseStruct(const StructCost& c) noexcept {
   usedBytes_.fetch_sub(c.bytes, std::memory_order_acq_rel);
 }
 
+bool LiveRuntime::ReserveStructLog() noexcept {
+  std::uint32_t v = structLogTaken_.load(std::memory_order_relaxed);
+  do {
+    if (v >= structLogCap_) return false;
+  } while (!structLogTaken_.compare_exchange_weak(v, v + 1u, std::memory_order_acq_rel));
+  return true;
+}
+
+void LiveRuntime::ReleaseStructLog(std::uint32_t n) noexcept {
+  std::uint32_t v = structLogTaken_.load(std::memory_order_relaxed);
+  do {
+    if (v < n) {
+      Bump(dropStructLog_);  // more given back than taken: a bug
+      n = v;
+    }
+  } while (!structLogTaken_.compare_exchange_weak(v, v - n, std::memory_order_acq_rel));
+}
+
 DevReserveUsage LiveRuntime::ReserveUsage() const noexcept {
   DevReserveUsage u;
   u.buses = usedBuses_.load(std::memory_order_acquire);
@@ -384,13 +402,16 @@ void LiveRuntime::OnCommand(core::System& sys, cmd::CommandType type, const void
     // 1.1: a structural edit that is not applied gives its dev reserve back.
     const bool structEdit = ours && p->fourcc == kStructEditTag;
     const StructCost cost = structEdit ? StructCost{p->costBuses, p->costEffects, p->costBytes} : StructCost{};
+    const std::uint32_t logPlace = structEdit ? p->structLogPlace : 0u;
     if (ours && StaleProducer() && (st == PendingChunk::kQueued || st == PendingChunk::kCancelled)) {
       Bump(dropStale_);  // D-87: not applied; the slot goes back to the pool
       if (structEdit) ReleaseStruct(cost);
+      if (logPlace != 0u) ReleaseStructLog();
       p->state.store(PendingChunk::kFree, std::memory_order_release);
       r.result = SND_ERR_INVALID_HANDLE;
     } else if (st == PendingChunk::kCancelled) {
       if (structEdit) ReleaseStruct(cost);
+      if (logPlace != 0u) ReleaseStructLog();
       p->state.store(PendingChunk::kFree, std::memory_order_release);  // its Server is gone
       r.result = SND_ERR_INVALID_HANDLE;
     } else if (st != PendingChunk::kQueued) {
@@ -666,9 +687,11 @@ void LiveRuntime::ScanArena(const core::LiveArenaView& a) noexcept {
 
 void LiveRuntime::ApplyStruct(core::System& sys, PendingChunk& p, std::uint32_t session, ApplyResult* r) noexcept {
   const StructCost cost{p.costBuses, p.costEffects, p.costBytes};
+  const std::uint32_t logPlace = p.structLogPlace;
   StructEdit h{};
   if (p.bytes < sizeof(h)) {
     ReleaseStruct(cost);
+    if (logPlace != 0u) ReleaseStructLog();
     r->result = SND_ERR_INVALID_ARGUMENT;
     return;
   }
@@ -680,24 +703,44 @@ void LiveRuntime::ApplyStruct(core::System& sys, PendingChunk& p, std::uint32_t 
   r->cells = res == SND_OK ? 1u : 0u;
   if (res != SND_OK) {
     ReleaseStruct(cost);
+    if (logPlace != 0u) ReleaseStructLog();
     return;
   }
-  // A remove of what a live edit added cancels both (the reserve comes back, nothing to undo).
+  // A remove of what a live edit added cancels both (the whole cost of the add comes back,
+  // nothing to undo, D-172). Removing a live bus also takes away the live effects on it and
+  // the live sends from it (they go with the bus: their cost comes back, no undo is asked).
   const bool removeBus = q.op == StructOp::RemoveBus, removeFx = q.op == StructOp::RemoveEffect;
   if (removeBus || removeFx) {
-    for (std::uint32_t i = structLogCount_; i-- > 0u;) {
-      StructLogEntry& e = structLog_[i];
+    std::uint32_t found = ~0u;
+    for (std::uint32_t i = structLogCount_; i-- > 0u && found == ~0u;) {
+      const StructLogEntry& e = structLog_[i];
       const bool match = removeBus ? (e.op == static_cast<std::uint32_t>(StructOp::AddBus) && e.targetId == q.targetId)
                                    : (e.op == static_cast<std::uint32_t>(StructOp::AddEffect) && e.targetId == q.targetId);
-      if (!match) continue;
-      ReleaseStruct(StructCost{e.buses, e.effects, e.bytes});
-      for (std::uint32_t k = i; k + 1u < structLogCount_; ++k) structLog_[k] = structLog_[k + 1u];
-      --structLogCount_;
+      if (match) found = i;
+    }
+    if (found != ~0u) {
+      std::uint32_t freed = 0;
+      for (std::uint32_t i = 0; i < structLogCount_; ++i) {
+        StructLogEntry& e = structLog_[i];
+        const bool onBus = removeBus && i > found && e.targetId == q.targetId &&
+                           (e.op == static_cast<std::uint32_t>(StructOp::AddEffect) ||
+                            e.op == static_cast<std::uint32_t>(StructOp::AddSend));
+        if (i != found && !onBus) continue;
+        ReleaseStruct(StructCost{e.buses, e.effects, e.bytes});
+        e.used = 0u;
+        ++freed;
+      }
+      std::uint32_t kept = 0;
+      for (std::uint32_t i = 0; i < structLogCount_; ++i) {
+        if (structLog_[i].used != 0u) structLog_[kept++] = structLog_[i];
+      }
+      structLogCount_ = kept;
+      ReleaseStructLog(freed + (logPlace != 0u ? 1u : 0u));  // the entries and the remove's own place
       return;
     }
   }
-  if (structLogCount_ >= structLogCap_) {
-    Bump(dropStructLog_);  // applied, but a revert cannot undo it; its reserve stays taken
+  if (logPlace == 0u || structLogCount_ >= structLogCap_) {
+    Bump(dropStructLog_);  // cannot happen: a place was reserved at acceptance (D-172)
     return;
   }
   StructLogEntry& e = structLog_[structLogCount_++];
@@ -729,6 +772,7 @@ void LiveRuntime::UndoStructs(core::System& sys, std::uint32_t session) noexcept
   for (std::uint32_t i = 0; i < structLogCount_; ++i) {
     if (structLog_[i].used != 0u) structLog_[kept++] = structLog_[i];
   }
+  if (structLogCount_ > kept) ReleaseStructLog(structLogCount_ - kept);
   structLogCount_ = kept;
 }
 
@@ -767,6 +811,11 @@ void LiveRuntime::RecordStartState(core::System& sys) noexcept {
     cells += bankOf(editScratch_[i].bankSlot, &id) ? 1u : 0u;
   }
   lost += edits - cells;
+  {  // D-175: playbacks alive in core at the start are state the recording does not carry (C-04)
+    snd_stats st{};
+    sys.LiveStats(&st);
+    lost += st.playbacks;
+  }
   const RecordBegin b{kRecordBegin,
                       static_cast<std::uint16_t>(arenasSeen_ == 0u ? RecordOrigin::FromCreation : RecordOrigin::MidRun),
                       static_cast<std::uint16_t>(lost < 0xFFFFu ? lost : 0xFFFFu), block_};

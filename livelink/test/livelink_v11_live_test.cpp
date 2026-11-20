@@ -382,9 +382,10 @@ SND_TEST(LivelinkV11, StructEditsCountTheDevReserveAndAreRevertedNewestFirst) {
   // Over the reserve: OUT_OF_BUDGET (the tool rebuilds and hot reloads); the editor is not asked.
   SND_CHECK_EQ(s.Ack(s.client->StructEdit(ll::StructOp::AddBus, HashId("New2"), addBus, 2)), SND_ERR_OUT_OF_BUDGET);
   const std::uint64_t addFx[4] = {0xABCDu, ~0u, Bits(0.5f), Bits(1.0f)};
-  SND_CHECK_EQ(s.Ack(s.client->StructEdit(ll::StructOp::AddEffect, HashId("New"), addFx, 4)), SND_OK);
-  const std::uint64_t send[3] = {HashId("Sfx"), Bits(-12.0f), 1u};
-  SND_CHECK_EQ(s.Ack(s.client->StructEdit(ll::StructOp::AddSend, HashId("New"), send, 3)), SND_OK);
+  // On a bank bus (Sfx), so that removing the live bus "New" does not take them away (D-172).
+  SND_CHECK_EQ(s.Ack(s.client->StructEdit(ll::StructOp::AddEffect, HashId("Sfx"), addFx, 4)), SND_OK);
+  const std::uint64_t send[3] = {HashId("Master"), Bits(-12.0f), 1u};
+  SND_CHECK_EQ(s.Ack(s.client->StructEdit(ll::StructOp::AddSend, HashId("Sfx"), send, 3)), SND_OK);
   u = s.f.rt->ReserveUsage();
   SND_CHECK_EQ(u.effects, 1u);
   SND_CHECK_EQ(u.bytes, 3u * ll::kStructEditBaseBytes + 8u * (3u + 4u + 3u));
@@ -560,9 +561,173 @@ SND_TEST(LivelinkV11, UpdateNumbersTellNewAndMissedEntries) {
   SND_CHECK(again == 0u || first == last + 1u);
   // More than the history holds (120): the oldest are missed.
   SND_REQUIRE(s.f.StepUntil([&] { return s.client->Sequences().timings > last + 130u; }, 30000));
+  s.client->SetProfilerMask(0u, 30);  // stop the stream, then let it settle
+  std::uint64_t prev = ~0ull;
+  SND_REQUIRE(s.f.StepUntil([&] {
+    const std::uint64_t q = s.client->Sequences().timings;
+    s.f.Steps(2);
+    std::this_thread::sleep_for(std::chrono::milliseconds(60));
+    const bool still = q == prev && q == s.client->Sequences().timings;
+    prev = q;
+    return still;
+  }));
   const std::uint64_t now = s.client->Sequences().timings;
   n = s.client->CopyTimingsSince(last, t, 256, &first);
-  SND_CHECK(first > last + 1u);           // missed entries
-  SND_CHECK(first + 120u >= now + 1u);    // the oldest one kept
-  SND_CHECK(n >= 120u);
+  SND_CHECK_EQ(n, 120u);                  // what the history keeps (1 s x kClientTimingsPerSecond)
+  SND_CHECK_EQ(first + n - 1u, now);      // up to the newest
+  SND_CHECK_EQ(first - last - 1u, now - last - 120u);  // exactly the missed ones
+  SND_CHECK_EQ(s.client->Stats().timingsLost, now - 120u);
+}
+
+// D-172: removing a live bus also takes away the live effects on it and the live sends from it
+// (their whole cost comes back, they leave the revert log, the editor gets no undo for them);
+// an edit the revert log cannot hold is refused at acceptance (LIMIT_REACHED, takes nothing).
+SND_TEST(LivelinkV11, RemovingALiveBusTakesItsLiveEffectsAndTheLogIsReserved) {
+  snd_config cfg = Config();
+  cfg.dev_reserve.buses = 4;
+  cfg.dev_reserve.effects = 4;
+  FakeEditor ed;
+  ll::RuntimeDesc rd;
+  rd.structEditor = &ed;
+  rd.maxStructLog = 3;
+  ll::ServerDesc sd;
+  sd.revertOnDisconnect = true;
+  Session s(cfg, rd, sd);
+  SND_REQUIRE(s.Ready());
+  const std::uint64_t addBus[2] = {HashId("Master"), 2u};
+  const std::uint64_t fx[2] = {0xABCDu, ~0u};
+  const std::uint64_t send[2] = {HashId("Master"), Bits(-6.0f)};
+  SND_CHECK_EQ(s.Ack(s.client->StructEdit(ll::StructOp::AddBus, HashId("B1"), addBus, 2)), SND_OK);
+  SND_CHECK_EQ(s.Ack(s.client->StructEdit(ll::StructOp::AddEffect, HashId("B1"), fx, 2)), SND_OK);
+  SND_CHECK_EQ(s.Ack(s.client->StructEdit(ll::StructOp::AddSend, HashId("B1"), send, 2)), SND_OK);
+  SND_CHECK_EQ(s.f.rt->StructLogPlaces(), 3u);
+  // The log is full: refused before the reserve and the editor.
+  const ll::DevReserveUsage full = s.f.rt->ReserveUsage();
+  const std::size_t calls = ed.calls.size();
+  SND_CHECK_EQ(s.Ack(s.client->StructEdit(ll::StructOp::AddBus, HashId("B2"), addBus, 2)), SND_ERR_LIMIT_REACHED);
+  SND_CHECK_EQ(ed.calls.size(), calls);
+  SND_CHECK_EQ(s.f.rt->ReserveUsage().buses, full.buses);
+  SND_CHECK_EQ(s.f.rt->ReserveUsage().bytes, full.bytes);
+  SND_CHECK_EQ(s.f.rt->Drops().structLog, 0u);
+  // Make room: the log holds 3, a remove needs a place too, so first an edit is refused...
+  SND_CHECK_EQ(s.Ack(s.client->StructEdit(ll::StructOp::RemoveBus, HashId("B1"), nullptr, 0)), SND_ERR_LIMIT_REACHED);
+  // ...with a larger log, removing B1 frees everything that went with it.
+  ll::RuntimeDesc rd2 = rd;
+  rd2.maxStructLog = 4;
+  Session t(cfg, rd2, sd);
+  SND_REQUIRE(t.Ready());
+  SND_CHECK_EQ(t.Ack(t.client->StructEdit(ll::StructOp::AddBus, HashId("B1"), addBus, 2)), SND_OK);
+  SND_CHECK_EQ(t.Ack(t.client->StructEdit(ll::StructOp::AddEffect, HashId("B1"), fx, 2)), SND_OK);
+  SND_CHECK_EQ(t.Ack(t.client->StructEdit(ll::StructOp::AddSend, HashId("B1"), send, 2)), SND_OK);
+  SND_CHECK_EQ(t.Ack(t.client->StructEdit(ll::StructOp::RemoveBus, HashId("B1"), nullptr, 0)), SND_OK);
+  const ll::DevReserveUsage u = t.f.rt->ReserveUsage();
+  SND_CHECK_EQ(u.buses, 0u);
+  SND_CHECK_EQ(u.effects, 0u);
+  SND_CHECK_EQ(u.bytes, 0u);
+  SND_CHECK_EQ(t.f.rt->StructLogPlaces(), 0u);
+  ed.calls.clear();
+  t.client->Disconnect();
+  SND_REQUIRE(t.f.StepUntil([&] { return !t.f.server->Connected(); }));
+  t.f.Steps(16);
+  SND_CHECK_EQ(ed.calls.size(), 0u);  // nothing left to undo
+  SND_CHECK_EQ(t.f.rt->Drops().structLog, 0u);
+}
+
+// D-170: the client keeps kClientCellsKept CellValue answers; untaken ones pushed out are counted.
+SND_TEST(LivelinkV11, ClientKeepsAFixedNumberOfAnswersAndCountsTheLost) {
+  Session s;
+  SND_REQUIRE(s.Ready());
+  std::vector<std::uint32_t> seqs;
+  const std::uint32_t n = ll::kClientCellsKept + 44u;
+  for (std::uint32_t i = 0; i < n; ++i) {
+    std::uint32_t q = 0;
+    SND_REQUIRE(s.f.StepUntil([&] { return (q = s.client->ReadCell(BusVolumeCell("Sfx"))) != 0u; }));
+    seqs.push_back(q);
+    if (i % 16u == 0u) s.f.Step();
+  }
+  SND_REQUIRE(s.f.StepUntil([&] { return s.client->Sequences().cells == n; }, 20000));
+  ll::CellValue v{};
+  SND_CHECK(!s.client->TakeCell(seqs.front(), &v));  // pushed out
+  SND_CHECK(s.client->TakeCell(seqs.back(), &v));
+  SND_CHECK_EQ(s.client->Stats().cellsLost, 44u);
+  // Taken answers do not count when pushed out later.
+  for (std::uint32_t i = n - ll::kClientCellsKept; i < n - 1u; ++i) SND_CHECK(s.client->TakeCell(seqs[i], &v));
+  const std::uint32_t q = s.client->ReadCell(BusVolumeCell("Sfx"));
+  SND_REQUIRE(s.WaitCellValue(q, &v));
+  SND_CHECK_EQ(s.client->Stats().cellsLost, 44u);
+}
+
+// D-170: one started Server per LiveRuntime.
+SND_TEST(LivelinkV11, ASecondServerOnTheSameRuntimeCannotStart) {
+  Fixture f;
+  f.Load(DevBank());
+  SND_REQUIRE_EQ(f.StartServer(), SND_OK);
+  ll::MemoryLink link2;
+  SND_REQUIRE(link2.Init(snd::base::DefaultAllocator(), 1u << 16));
+  ll::ServerDesc sd;
+  sd.system = f.sys;
+  sd.runtime = f.rt;
+  sd.allocator = &snd::base::DefaultAllocator();
+  sd.acceptor = &link2.acceptor();
+  ll::Server* second = nullptr;
+  SND_REQUIRE_EQ(ll::Server::Create(sd, &second), SND_OK);
+  SND_CHECK_EQ(second->Start(), SND_ERR_LIMIT_REACHED);
+  f.StopServer();  // the first one goes away: the second one may start
+  SND_CHECK_EQ(second->Start(), SND_OK);
+  second->Stop();
+  SND_CHECK_EQ(second->Start(), SND_OK);  // and again after its own Stop
+  ll::Server::Destroy(second);
+}
+
+// D-173: a reload whose file holds another bank fails (INVALID_ARGUMENT); the other bank is not
+// kept and the bank asked for stays unloaded (as when the load fails).
+SND_TEST(LivelinkV11, ReloadWithAFileOfAnotherBankFails) {
+  Session s;
+  SND_REQUIRE(s.Ready());
+  indep::BankOpts two;
+  two.name = "Two";
+  s.f.fs.AddFile("two.sndb", indep::IndepBank(two));
+  SND_CHECK_EQ(s.Ack(s.client->ReloadBank(kBankId, 0, "two.sndb")), SND_ERR_INVALID_ARGUMENT);
+  ll::ReloadStatus st[8];
+  const std::uint32_t n = s.client->CopyReloadStatus(st, 8);
+  SND_REQUIRE(n >= 1u);
+  SND_CHECK_EQ(st[n - 1].phase, static_cast<std::uint32_t>(ll::ReloadPhase::Failed));
+  SND_CHECK_EQ(st[n - 1].result, SND_ERR_INVALID_ARGUMENT);
+  SND_REQUIRE(s.f.StepUntil([&] {
+    s.client->QueryBanks();
+    s.f.Steps(4);
+    ll::BankEntry b[4];
+    return s.client->Sequences().bankLists >= 1u && s.client->CopyBanks(b, 4) == 0u;
+  }));
+  SND_CHECK_EQ(s.f.server->Stats().reloadsFailed, 1u);
+}
+
+// The ReplaceChunk / StructEdit slots are shared (RuntimeDesc::chunkSlots, default 1): while one
+// waits for the audio thread, the other is refused LIMIT_REACHED and takes nothing.
+SND_TEST(LivelinkV11, SharedSlotIsLimitReachedAndArgCountIsCapped) {
+  FakeEditor ed;
+  ll::RuntimeDesc rd;
+  rd.structEditor = &ed;
+  Session s(Config(), rd);
+  SND_REQUIRE(s.Ready());
+  const std::vector<std::uint8_t> chunk = BussVolumes({-6.0f, 0.0f});
+  const std::uint64_t addBus[2] = {HashId("Master"), 2u};
+  // Nothing is rendered between the two: the first one holds the slot.
+  const std::uint32_t a = s.client->ReplaceChunk(kBankId, bf::chunk::BUSS, chunk.data(), chunk.size());
+  const std::uint32_t b = s.client->StructEdit(ll::StructOp::AddBus, HashId("New"), addBus, 2);
+  std::int32_t rb = 1;
+  SND_REQUIRE(s.client->WaitAck(b, 2000, &rb));
+  SND_CHECK_EQ(rb, SND_ERR_LIMIT_REACHED);
+  SND_CHECK_EQ(s.f.rt->ReserveUsage().buses, 0u);
+  SND_CHECK_EQ(s.f.rt->StructLogPlaces(), 0u);
+  SND_CHECK_EQ(s.Ack(a), SND_OK);
+  SND_CHECK_EQ(s.Ack(s.client->StructEdit(ll::StructOp::AddBus, HashId("New"), addBus, 2)), SND_OK);
+  // 65 arguments (the Client sends at most 64): refused by the game's rules.
+  std::vector<std::uint8_t> raw(sizeof(ll::StructEdit) + 65u * 8u, 0u);
+  const ll::StructEdit m{static_cast<std::uint32_t>(ll::StructOp::AddEffect), HashId("Sfx"), 65u, 0u};
+  std::memcpy(raw.data(), &m, sizeof(m));
+  const std::uint32_t q = s.client->SendRaw(static_cast<std::uint16_t>(ll::MessageType::StructEdit), ll::kFrameWantsAck, raw.data(),
+                                            static_cast<std::uint32_t>(raw.size()));
+  SND_CHECK_EQ(s.Ack(q), SND_ERR_INVALID_ARGUMENT);
+  SND_CHECK_EQ(ed.calls.size(), 1u);
 }

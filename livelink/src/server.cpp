@@ -67,7 +67,7 @@ struct Server::Impl final : FrameReader::Handler {
   // 1.1: one hot reload at a time (ReloadBank).
   struct Reload {
     bool active = false;
-    std::uint32_t seq = 0, conn = 0, bankId = 0;
+    std::uint32_t seq = 0, conn = 0, bankId = 0, languageId = 0;
     bool wantAck = false;
     snd_bank_handle bank{0};
   };
@@ -575,6 +575,7 @@ struct Server::Impl final : FrameReader::Handler {
       c.cells = 0;
       c.costBuses = c.costEffects = 0u;
       c.costBytes = 0u;
+      c.structLogPlace = 0u;
       c.state.store(PendingChunk::kQueued, std::memory_order_release);
       const cmd::LiveReplaceChunk cc{m.bankId, m.fourcc, &c};
       r = Record(cmd::CommandType::LiveReplaceChunk, &cc, sizeof(cc), h.seq, wantAck, slot, true);
@@ -694,6 +695,7 @@ struct Server::Impl final : FrameReader::Handler {
     reload.seq = h.seq;
     reload.conn = connGen;
     reload.bankId = m.bankId;
+    reload.languageId = m.languageId;
     reload.wantAck = wantAck;
     if (old != nullptr) {
       r = sys->UnloadBank(snd_bank_handle{old->handle.Value()}, SND_UNLOAD_STOP_AND_UNLOAD);
@@ -714,7 +716,8 @@ struct Server::Impl final : FrameReader::Handler {
     SendReloadStatus(ph, r);
     (ph == ReloadPhase::Done ? reloadsDone : reloadsFailed).Add();
     if (conn != nullptr && reload.conn == connGen) {
-      Reply(reload.seq, reload.wantAck, r, "ReloadBank failed");
+      Reply(reload.seq, reload.wantAck, r,
+            r == SND_ERR_INVALID_ARGUMENT ? "ReloadBank: the file holds another bank" : "ReloadBank failed");
     }
     reload.active = false;
   }
@@ -728,7 +731,14 @@ struct Server::Impl final : FrameReader::Handler {
         // override layer see it from then on).
         RefreshBanks();
         for (std::uint32_t i = 0; i < bankCount; ++i) {
-          if (banks[i].handle.Value() == reload.bank.value) return FinishReload(ReloadPhase::Done, SND_OK);
+          if (banks[i].handle.Value() != reload.bank.value) continue;
+          // D-173: the file held another bank (id or language): it is not kept (unloaded again);
+          // the bank asked for stays unloaded, as when the load fails.
+          if (banks[i].bankId != reload.bankId || banks[i].languageId != reload.languageId) {
+            if (registered) sys->UnloadBank(reload.bank, SND_UNLOAD_STOP_AND_UNLOAD);
+            return FinishReload(ReloadPhase::Failed, SND_ERR_INVALID_ARGUMENT);
+          }
+          return FinishReload(ReloadPhase::Done, SND_OK);
         }
         return;
       }
@@ -758,6 +768,11 @@ struct Server::Impl final : FrameReader::Handler {
       r = rt->ReserveStruct(cost);
       reserved = r == SND_OK;
     }
+    bool logPlace = false;  // D-172: an edit the revert log cannot hold is refused here
+    if (r == SND_OK) {
+      logPlace = rt->ReserveStructLog();
+      if (!logPlace) r = SND_ERR_LIMIT_REACHED;
+    }
     PendingChunk* slot = nullptr;
     const std::uint64_t bytes = sizeof(StructEdit) + std::uint64_t{m.argCount} * 8u;
     if (r == SND_OK && bytes > rt->ChunkBytes()) r = SND_ERR_OUT_OF_BUDGET;
@@ -779,6 +794,7 @@ struct Server::Impl final : FrameReader::Handler {
       c.costBuses = cost.buses;
       c.costEffects = cost.effects;
       c.costBytes = cost.bytes;
+      c.structLogPlace = 1u;
       c.state.store(PendingChunk::kQueued, std::memory_order_release);
       const cmd::LiveReplaceChunk cc{0u, kStructEditTag, &c};
       r = Record(cmd::CommandType::LiveReplaceChunk, &cc, sizeof(cc), h.seq, wantAck, slot, true, kOpStruct);
@@ -786,6 +802,7 @@ struct Server::Impl final : FrameReader::Handler {
     }
     if (r == SND_OK) return;  // answered when applied (the audio thread gives the reserve back on failure)
     if (reserved) rt->ReleaseStruct(cost);
+    if (logPlace) rt->ReleaseStructLog();
     structRefused.Add();
     if (!wantAck) return SendError(r, h.seq, StructWhy(r));
     Reply(h.seq, true, r, "StructEdit");
@@ -796,6 +813,7 @@ struct Server::Impl final : FrameReader::Handler {
       case SND_ERR_OUT_OF_BUDGET: return "dev reserve exhausted: rebuild and hot reload";
       case SND_ERR_UNSUPPORTED: return "structural edit: rebuild and hot reload";
       case SND_ERR_NOT_READY: return "hot reload running";
+      case SND_ERR_LIMIT_REACHED: return "structural edit log or chunk slots full";
       default: return "structural edit refused";
     }
   }
@@ -1225,14 +1243,21 @@ void Server::Destroy(Server* server) noexcept {
 int Server::Start() noexcept {
   Impl& im = *impl_;
   if (im.started) return SND_OK;
+  if (!im.rt->ClaimServer()) return SND_ERR_LIMIT_REACHED;  // D-170: one started Server per runtime
   if (im.d.acceptor != nullptr) {
     im.acceptor = im.d.acceptor;
   } else {
     const std::int32_t cfgPort = static_cast<std::int32_t>(im.rt->config().livelink.port);
     const std::int32_t port = im.d.port >= 0 ? im.d.port : cfgPort;
-    if (port < 0 || port > 65535) return SND_ERR_INVALID_ARGUMENT;
+    if (port < 0 || port > 65535) {
+      im.rt->ReleaseServer();
+      return SND_ERR_INVALID_ARGUMENT;
+    }
     const int r = im.tcp.Listen(im.d.bindAddress, static_cast<std::uint16_t>(port));
-    if (r != SND_OK) return r;
+    if (r != SND_OK) {
+      im.rt->ReleaseServer();
+      return r;
+    }
     im.port.store(im.tcp.Port(), std::memory_order_relaxed);
     im.acceptor = &im.tcp;
   }
@@ -1247,6 +1272,7 @@ int Server::Start() noexcept {
   im.registration.store(0, std::memory_order_relaxed);
   if (!im.thread.Start(td, &Impl::Main, &im)) {
     im.tcp.Close();
+    im.rt->ReleaseServer();
     return SND_ERR_LIMIT_REACHED;
   }
   im.started = true;
@@ -1271,6 +1297,7 @@ void Server::Stop() noexcept {
   im.rt->CancelAllChunks();
   im.tcp.Close();
   im.started = false;
+  im.rt->ReleaseServer();
 }
 
 std::uint16_t Server::Port() const noexcept { return impl_->port.load(std::memory_order_relaxed); }
