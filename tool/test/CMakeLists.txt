@@ -37,7 +37,7 @@ set_tests_properties(tool_indep_s7_defects_test PROPERTIES DISABLED TRUE)  # run
 foreach(_d Defect_NegativeZeroLosesItsSign Defect_SetSameValueReturnsFalse
         Defect_StemChannelsOutsideTheMaterialAccepted
         Defect_LocateFieldMissesMusicSegmentAndDistanceCurveMembers Defect_LocateFieldLiveWritableForAbsentColumn
-        Defect_SaveIgnoresAFailedDeletion)
+        Defect_SaveIgnoresAFailedDeletion Defect_EmptyMaterialTableBuildIsUndefinedBehaviour)
   add_test(NAME tool_indep_s7_${_d} COMMAND tool_indep_s7_defects_test --filter ${_d})
 endforeach()
 

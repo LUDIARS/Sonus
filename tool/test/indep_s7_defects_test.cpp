@@ -13,6 +13,7 @@
 #include "snd/test/test.hpp"
 #include "snd/tool/doc_build.hpp"
 #include "snd/tool/document.hpp"
+#include "snd/tool/material_editor.hpp"
 #include "snd/tool/music_editor.hpp"
 
 using namespace indep_s7;
@@ -148,4 +149,18 @@ SND_TEST(IndepS7Defect, Defect_SaveIgnoresAFailedDeletion) {
   SND_CHECK(!saved);
   SND_CHECK(!err.empty());
   SND_CHECK(doc.IsDirty());
+}
+
+// A material table without materials (the material editor makes one when every material is
+// removed) is built through `put(vec.data(), 0)` in buildtool/src/build.cpp (PHYS): memcpy with a
+// null source, undefined behaviour (UBSan: "null pointer passed as argument 2"). Fails only in
+// the -DSND_SANITIZE=address,undefined build; IndepS7Build.E1_CheckAgreesWithBuildOverRandomEdits
+// hits the same line there. Expected: no undefined behaviour (skip the copy for 0 bytes).
+SND_TEST(IndepS7Defect, Defect_EmptyMaterialTableBuildIsUndefinedBehaviour) {
+  ProjectDocument doc;
+  SND_REQUIRE(LoadBase(doc));
+  MaterialEditor m(doc, kPhys);
+  while (!m.Materials().empty()) SND_REQUIRE(m.RemoveMaterial(m.Materials()[0]));
+  const DocBuild b = BuildDocument(doc);
+  SND_CHECK(b.ok);
 }
