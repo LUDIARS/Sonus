@@ -45,15 +45,15 @@ inline ll::SetValue BusVolumeCell(const char* bus) { return Cell(HashId(bus), bf
 // absent, so a ReplaceChunk leaves them as they are). bt::TableBuilder always writes the
 // required columns, hence by hand.
 inline std::vector<std::uint8_t> BussVolumes(std::initializer_list<float> db) {
-  std::vector<std::uint8_t> b(64, 0u);
+  std::vector<std::uint8_t> b(64 + 4 * db.size(), 0u);
   const bf::TableChunkHeader th{static_cast<std::uint32_t>(db.size()), 1u, 0u, 0u};
   std::memcpy(b.data(), &th, sizeof(th));
   const bf::ColumnEntry ce{bf::col::BUSS_volumeDb, 4u, 0u, 64u};
   std::memcpy(b.data() + sizeof(th), &ce, sizeof(ce));
+  std::size_t at = 64;
   for (float v : db) {
-    const std::uint32_t x = Bits(v);
-    const auto* p = reinterpret_cast<const std::uint8_t*>(&x);
-    b.insert(b.end(), p, p + 4);
+    std::memcpy(b.data() + at, &v, 4);
+    at += 4;
   }
   return b;
 }
