@@ -357,7 +357,6 @@ void Render(Impl& im) noexcept {
       vPlayhead[d] = Playhead{vs.startFrame, 0u, 0u};
       vStatus[d] = VoiceRenderStatus{};
       vHold[d] = VoiceRenderHold{};
-      VfxCaptureVoice(im, v, d, vs);  // D-132: the Event's voice effects as of the voice start
       continue;
     }
     if (vHold[d].held != 0u) {

@@ -12,29 +12,19 @@
 
 #include "snd/dsp/effects.hpp"
 #include "snd/ext.h"
+#include "snd/internal/commands.hpp"
 #include "snd/internal/common.hpp"
 #include "snd/internal/schema.hpp"
 
 namespace snd::core {
 
-// Command variants (reserved fields, stage 3 group 2; the shared assignment table of the
-// coverage session). A variant of 0 is the command's original meaning.
-//  - SetBusVolume.reserved: bits 0-7 variant; variant 1 = bus effect parameter (D-130):
-//    bits 8-15 effect index in the bus chain, bits 16-23 parameter index; `volume` is the
-//    value and `fadeSeconds` the fade.
-//  - SetSwitch.reserved[0] = 1: voice effect of an Event (D-132): scope Global, `group` =
-//    event id, `value` = effect kind (0 = remove the stage), reserved[1] = stage,
-//    reserved[2] = number of parameter values that follow (SetParam variant 1, Global).
-//  - SetParam.reserved[0] = 1: voice effect parameter (D-132): reserved[1] = stage,
-//    reserved[2] = parameter index, `value`. Scope Global: of the Event `param` (its
-//    configuration for voices that start later). Scope Playback: of the playback `target`.
-inline constexpr std::uint32_t kBusVolumeVariantMask = 0xFFu;
-inline constexpr std::uint32_t kBusVolumeVariantEffectParam = 1u;
-inline constexpr std::uint8_t kSwitchVariantVoiceEffect = 1u;
-inline constexpr std::uint8_t kParamVariantVoiceEffect = 1u;
-constexpr std::uint32_t BusEffectParamReserved(std::uint32_t effect, std::uint32_t param) noexcept {
-  return kBusVolumeVariantEffectParam | ((effect & 0xFFu) << 8) | ((param & 0xFFu) << 16);
-}
+// Command variants (reserved fields): defined in the contract, snd/internal/commands.hpp
+// (end of the file, stage 3 group 2), so that the live link's rule table can use them.
+using cmd::BusEffectParamReserved;
+using cmd::kBusVolumeVariantEffectParam;
+using cmd::kBusVolumeVariantMask;
+using cmd::kParamVariantVoiceEffect;
+using cmd::kSwitchVariantVoiceEffect;
 
 // ---------------------------------------------------------------------------
 // D-130: one runtime-controlled parameter of a bus effect instance.
@@ -86,6 +76,7 @@ struct VfxSlot {
   SlotIndex voice;
   std::uint32_t voiceGen;
   std::uint32_t used;
+  std::uint32_t fresh;   // taken this block: the first ParamBlock starts at its target (no ramp)
   std::uint32_t stages;
   std::uint32_t playbackEntry;  // cached VfxPlaybackEntry index (kInvalidSlot = none)
   std::uint32_t channels;
@@ -113,8 +104,6 @@ struct VoiceFxPriv {
   std::uint8_t* memory = nullptr;         // [slotCount * slotBytes], MemTag::DspPool
   std::uint32_t* ofReal = nullptr;        // [realTotal] slot + 1 bound to the real slot (0 = none)
   std::uint32_t* triedAssign = nullptr;   // [realTotal] assignSeq whose acquisition was decided
-  std::uint32_t* voiceEntry = nullptr;    // [maxVirtual] event entry at the voice start (kInvalidSlot = none)
-  Id* voiceKinds = nullptr;               // [maxVirtual * kMaxVoiceEffectChain] stage kinds at the voice start
   // Statistics (audio thread): voices that got a slot / played dry for want of one (D-133).
   std::uint64_t acquired = 0;
   std::uint64_t dry = 0;

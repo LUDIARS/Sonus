@@ -20,6 +20,13 @@
 //        detector takes the peak over all channels of the source (dsp EffectSidechain),
 //        so the source's channels are passed as they are. The row keeps driving the
 //        threshold ducking of EvaluateDspParams too (both apply).
+//        Decisions (stage 3 re-check): the key is the source bus AFTER its fader (a muted
+//        or silenced key bus causes no compression); with several kind-0 rows on one
+//        target, only the first in row order is used.
+// D-130 decisions (stage 3 re-check): fade seconds -> frames are truncated (the rule of
+//        the bus volume); values set at run time live in the bus's effect instance, so
+//        unloading and loading again the bank that defines the bus starts from the bank's
+//        values; [init] parameters (kParamInitOnly) are refused with a warning.
 #include <cmath>
 #include <cstring>
 
@@ -62,8 +69,22 @@ float ClampEffectParam(const EffectInstance& e, std::uint32_t param, float v) no
   return v < p.minValue ? p.minValue : (v > p.maxValue ? p.maxValue : v);
 }
 
+bool EffectParamIsInitOnly(const snd_dsp_effect* plugin, Id type, std::uint32_t param) noexcept {
+  if (plugin != nullptr) return false;
+  const dsp::EffectInfo* info = dsp::FindEffect(type);
+  return info != nullptr && param < info->paramCount && (info->params[param].flags & dsp::kParamInitOnly) != 0u;
+}
+
+Id PlaybackEventId(Impl& im, HandleRef playback) noexcept {
+  constexpr schema::SystemId kSys = schema::SystemId::ApplyCommands;
+  schema::Tables& t = im.tables;
+  const std::uint32_t d = base::rows::DenseOf(t.Playback.rows, playback);
+  return d == kNoSlot ? 0u : SND_W(Playback_eventId)[d];
+}
+
 void SetEffectParam(Impl& im, EffectInstance& e, std::uint32_t param, float value, float fadeSeconds) noexcept {
   if (e.ctl == nullptr || param >= e.paramCount || !std::isfinite(value)) return;
+  if (EffectParamIsInitOnly(e.plugin, e.type, param)) return;  // the dsp reads it at init only
   value = ClampEffectParam(e, param, value);
   TimedRamp& r = e.ctl[param].set;
   const float from = RampValue(r, im.clock);
@@ -89,8 +110,8 @@ std::uint32_t StepEffectParams(Impl& im, EffectInstance& e) noexcept {
 }
 
 void ApplyBusEffectParam(Impl& im, const cmd::SetBusVolume& c) noexcept {
-  const std::uint32_t effect = (c.reserved >> 8) & 0xFFu;
-  const std::uint32_t param = (c.reserved >> 16) & 0xFFu;
+  const std::uint32_t effect = (c.reserved >> cmd::kBusVolumeEffectIndexShift) & cmd::kBusVolumeIndexMask;
+  const std::uint32_t param = (c.reserved >> cmd::kBusVolumeParamIndexShift) & cmd::kBusVolumeIndexMask;
   const Id id = c.bus == 0u && im.rd.masterSlot != kNoSlot ? im.busDefs[im.rd.masterSlot].id : c.bus;
   const std::uint32_t slot = im.busMap.Find(id);
   if (slot == IdMap::kNotFound || !base::rows::IsLive(im.tables.Bus.rows, slot)) {
@@ -100,6 +121,10 @@ void ApplyBusEffectParam(Impl& im, const cmd::SetBusVolume& c) noexcept {
   EffectInstance* e = BusEffectInstance(im, slot, effect);
   if (e == nullptr || param >= e->paramCount) {
     PostWarning(im, SND_ERR_NOT_FOUND, 0u, c.bus);
+    return;
+  }
+  if (EffectParamIsInitOnly(e->plugin, e->type, param)) {  // read at init only: refused, warned
+    PostWarning(im, SND_ERR_INVALID_ARGUMENT, 0u, c.bus);
     return;
   }
   SetEffectParam(im, *e, param, c.volume, c.fadeSeconds);

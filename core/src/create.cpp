@@ -145,8 +145,6 @@ bool InitVoiceFx(Impl& im) noexcept {
   x.slots = Arr<VfxSlot>(im, x.slotCount, MemTag::Tables);
   x.ofReal = Arr<std::uint32_t>(im, g.realTotal, MemTag::Tables);
   x.triedAssign = Arr<std::uint32_t>(im, g.realTotal, MemTag::Tables);
-  x.voiceEntry = Arr<std::uint32_t>(im, g.maxVirtual, MemTag::Tables);
-  x.voiceKinds = Arr<Id>(im, std::size_t{g.maxVirtual} * kMaxVoiceEffectChain, MemTag::Tables);
   if (x.slotCount != 0u && x.slotBytes != 0u) {
     if (im.allocationCount >= im.allocationCap) return false;
     const std::size_t bytes = std::size_t{x.slotCount} * x.slotBytes;
@@ -157,11 +155,10 @@ bool InitVoiceFx(Impl& im) noexcept {
     x.slotCount = 0u;
   }
   if (x.events == nullptr || x.playbacks == nullptr || x.slots == nullptr || x.ofReal == nullptr ||
-      x.triedAssign == nullptr || x.voiceEntry == nullptr || x.voiceKinds == nullptr) {
+      x.triedAssign == nullptr) {
     return false;
   }
   for (std::uint32_t r = 0; r < g.realTotal; ++r) x.triedAssign[r] = 0xFFFFFFFFu;
-  for (std::uint32_t v = 0; v < g.maxVirtual; ++v) x.voiceEntry[v] = kNoSlot;
   return true;
 }
 

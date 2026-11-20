@@ -802,6 +802,17 @@ Rec RecordVariant(Impl& im, Producer& pr, const P& payload) noexcept {
   if (r != Rec::Ok) im.reserveOverflows.fetch_add(1u, std::memory_order_relaxed);
   return r;
 }
+// True when `bytes` more must-deliver bytes fit the producer's current arena, all in the
+// normal region or all in the reserve (RecordRaw then writes every one of them). Only the
+// owning thread appends to its producer's current arena, so the answer holds until it
+// records (other threads record into their own arenas).
+bool ArenaFits(const Impl& im, Producer& pr, std::uint32_t bytes) noexcept {
+  const ArenaView& av = pr.arenas[pr.cycle.Current()];
+  const cmd::ArenaHeader& h = *av.header;
+  if ((h.flags & cmd::kArenaHasFallback) != 0u) return false;
+  if (h.reserveBytes == 0u && h.normalBytes + bytes <= im.cfg.arenaBytes) return true;
+  return h.reserveBytes + bytes <= im.cfg.reserveBytes;
+}
 bool EffectKindKnown(const Impl& im, Id kind) noexcept {
   for (std::uint32_t p = 0; p < im.config.plugins.effect_count; ++p) {
     if (im.config.plugins.effects[p].effect_type == kind) return true;
@@ -832,6 +843,14 @@ snd_result System::SetEventVoiceEffect(Id event, std::uint32_t slot, Id effectKi
     if (!std::isfinite(params[i])) return SND_ERR_INVALID_ARGUMENT;
   }
   if (effectKind != 0u && !EffectKindKnown(im, effectKind)) return SND_ERR_NOT_FOUND;
+  // All or nothing (the SetSwitch and its values): check the room for every command first.
+  const std::uint32_t values = effectKind != 0u ? paramCount : 0u;
+  const std::uint32_t bytes =
+      cmd::CommandTraits<cmd::SetSwitch>::kSize + values * cmd::CommandTraits<cmd::SetParam>::kSize;
+  if (!ArenaFits(im, *pr, bytes)) {
+    im.reserveOverflows.fetch_add(1u, std::memory_order_relaxed);
+    return SND_ERR_COMMAND_BUFFER_FULL;
+  }
   cmd::SetSwitch sw{};
   sw.scope = static_cast<std::uint8_t>(ParamScope::Global);
   sw.reserved[0] = kSwitchVariantVoiceEffect;
