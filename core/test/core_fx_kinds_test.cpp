@@ -27,12 +27,13 @@ double Db(double x) { return 20.0 * std::log10(x > 1e-30 ? x : 1e-30); }
 
 // Plays asset `data` on the "Sfx" bus whose chain is the one effect (kind, params).
 void RunOne(Harness& h, snd::Id kind, std::vector<float> params, std::vector<float> data, std::uint32_t blocks,
-            std::uint32_t busChannels = 0) {
+            std::uint32_t busChannels = 0, std::uint32_t assetChannels = 1) {
   TestBank b = BasicBank();
   b.effects.push_back(TEffect{kind, std::move(params)});
   b.buses[0].effects.assign(1, 0u);
   b.buses[0].channels = busChannels;
-  b.assets.push_back(TAsset{HashId("a"), 1, 48000, std::move(data), 0, 0});
+  if (busChannels > 2u) b.buses[1].channels = busChannels;  // master of the same layout (no downmix)
+  b.assets.push_back(TAsset{HashId("a"), assetChannels, 48000, std::move(data), 0, 0});
   b.events.push_back(SimpleEvent("E", 0));
   h.Load("b", b.Build(HashId("B")));
   h.Clear();
@@ -154,14 +155,19 @@ SND_TEST(CoreFxKinds, SurroundFeedsTheRearChannelsOfASixChannelBus) {
   snd_config cfg = SmallConfig();
   cfg.output_channels = 6;
   Harness h(cfg);
-  // Width 1, rear -6 dB, rear delay 10 ms, rear lowpass 20 kHz, centre off.
-  RunOne(h, snd::dsp::kEffectSurround, {1.0f, -6.0f, 10.0f, 20000.0f, -60.0f}, Tone(96000, 500.0, 0.5f), 24, 6u);
+  // Width 1, rear -6 dB, rear delay 10 ms, rear lowpass 20 kHz, centre off. A stereo source
+  // with the tone on the left only: rear left = -6 dB of (L - R / 2) = L, rear right = -6 dB of -L / 2.
+  std::vector<float> st(2 * 96000, 0.0f);
+  const std::vector<float> tone = Tone(96000, 500.0, 0.5f);
+  for (std::size_t i = 0; i < 96000; ++i) st[2 * i] = tone[i];
+  RunOne(h, snd::dsp::kEffectSurround, {1.0f, -6.0f, 10.0f, 20000.0f, -60.0f}, st, 24, 6u, 2u);
   SND_REQUIRE_EQ(h.Ch(), 6u);
   const double front = Amp(h, 2048, 4096, 500.0, 0);
   const double rearL = Amp(h, 2048, 4096, 500.0, 4), rearR = Amp(h, 2048, 4096, 500.0, 5);
   snd::test::Note("surround: front %.4f, rears %.4f %.4f", front, rearL, rearR);
   SND_CHECK(front > 0.1);
-  SND_CHECK(rearL > front * 0.2 && rearR > front * 0.2);
+  SND_CHECK_NEAR(Db(rearL / front), -6.0, 0.5);
+  SND_CHECK_NEAR(Db(rearR / front), -12.0, 0.5);
   // Nothing in the rears during the rear delay.
   SND_CHECK(MaxAbs(h, 0, 400, 4) < 1e-6 && MaxAbs(h, 0, 400, 5) < 1e-6);
   // A stereo bus has no rear channel: the effect only widens it.
