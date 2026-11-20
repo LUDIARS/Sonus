@@ -161,8 +161,9 @@ SND_TEST(IndepInput, OverrunAccounting) {
   SND_CHECK_EQ(Invariant(port), std::uint64_t{0});
 }
 
-// I4: the reader's latency bound. Above MaxLatencyFrames() buffered, the oldest are dropped
-// down to half of it, counted as skipped; the bound is clamped to [1, capacity], 0 = half.
+// I4 / D-197 (4): the reader's latency bound. Above MaxLatencyFrames() buffered, the oldest
+// are dropped down to half of it, counted as skipped; the bound is clamped to
+// [2 blocks, capacity] (blocks of 256 here), 0 = half the capacity.
 SND_TEST(IndepInput, ReaderLatencyBound) {
   Driver d(snd::SourceKind::Input, Ports(4096));
   SND_REQUIRE(d.Ok());
@@ -172,19 +173,30 @@ SND_TEST(IndepInput, ReaderLatencyBound) {
   SND_CHECK_EQ(port.MaxLatencyFrames(), 4096u);
   port.Configure(0, 0);
   SND_CHECK_EQ(port.MaxLatencyFrames(), 2048u);
+  for (std::uint32_t lo : {1u, 100u, 511u}) {
+    port.Configure(0, lo);
+    SND_CHECK_EQ(port.MaxLatencyFrames(), 512u);
+  }
+  port.Configure(0, 513);
+  SND_CHECK_EQ(port.MaxLatencyFrames(), 513u);
   src::InputParams p = In(0);
   Driver::Voice v;
   SND_REQUIRE(d.Start(v, &p, 2));
   std::uint64_t base = 0;
-  for (std::uint32_t bound : {2048u, 1000u, 301u, 64u}) {
+  auto drain = [&]() {
+    const std::uint32_t b = port.Buffered();
+    if (b != 0u) d.Block({&v}, Driver::Mod{}, b);
+  };
+  for (std::uint32_t bound : {2048u, 1000u, 601u, 512u}) {
     port.Configure(0, bound);
+    drain();
     // Exactly the bound: kept whole.
     SND_REQUIRE_EQ(WriteSeq(port, base, bound), bound);
     const std::size_t at = v.out[0].size();
     d.Block({&v}, Driver::Mod{}, 32);
     SND_CHECK_EQ(v.out[0][at], static_cast<float>(base + 1));
     base += bound;
-    d.Control(v, src::ControlOp::Resume);  // back to live
+    drain();
     // One more than the bound: everything but the newest bound / 2.
     const std::uint64_t skipped0 = port.Stats().skippedFrames;
     SND_REQUIRE_EQ(WriteSeq(port, base, bound + 1), bound + 1);
@@ -195,14 +207,18 @@ SND_TEST(IndepInput, ReaderLatencyBound) {
                   double(v.out[0][at2]));
     SND_CHECK_EQ(port.Stats().skippedFrames - skipped0, std::uint64_t{bound + 1 - keep});
     base += bound + 1;
-    d.Control(v, src::ControlOp::Resume);
     SND_CHECK_EQ(Invariant(port), std::uint64_t{0});
   }
+  // A port smaller than 2 blocks: the bound is the capacity (nothing can be trimmed).
+  Driver s(snd::SourceKind::Input, Ports(256));
+  s.runtime.InputPortOf(0)->Configure(0, 10);
+  SND_CHECK_EQ(s.runtime.InputPortOf(0)->MaxLatencyFrames(), 256u);
 }
 
-// I2 / C4: underruns. Before the voice ever delivered frames, empty blocks are silent and
-// not starved. Once it played, a short block is silent after the data, starved, and
-// counted once per block in the port and in RuntimeStats. Nothing ends the voice.
+// I2 / C4 / D-197 (3): underruns. A short block is `starved` / counted only when the
+// voice's previous block got every requested frame: not before the voice ever delivered,
+// not on its first short block, and during a sustained outage only its first block
+// (the following empty blocks follow a short one). Silence fills the gaps all the same.
 SND_TEST(IndepInput, UnderrunAccounting) {
   Driver d(snd::SourceKind::Input, Ports(4096));
   SND_REQUIRE(d.Ok());
@@ -217,22 +233,26 @@ SND_TEST(IndepInput, UnderrunAccounting) {
   d.Block({&v}, Driver::Mod{}, 256);
   SND_CHECK_EQ(v.starvedBlocks, 0u);
   SND_CHECK_EQ(WriteSeq(port, 256, 100), 100u);
-  d.Block({&v}, Driver::Mod{}, 256);  // 100 of 256
+  d.Block({&v}, Driver::Mod{}, 256);  // 100 of 256 after a full block: an underrun
   SND_CHECK_EQ(v.starvedBlocks, 1u);
-  for (int i = 0; i < 3; ++i) d.Block({&v}, Driver::Mod{}, 256);  // nothing
-  SND_CHECK_EQ(v.starvedBlocks, 4u);
+  for (int i = 0; i < 3; ++i) d.Block({&v}, Driver::Mod{}, 256);  // nothing, after short blocks
+  SND_CHECK_EQ(v.starvedBlocks, 1u);
   SND_CHECK_EQ(v.last.ended, 0u);
   SND_CHECK_EQ(v.last.framesRendered, 256u);
   for (std::size_t i = 0; i < 356; ++i) SND_CHECK_EQ(v.out[0][1280 + i], static_cast<float>(i + 1));
   for (std::size_t i = 1280 + 356; i < v.out[0].size(); ++i) SND_CHECK_EQ(v.out[0][i], 0.0f);
-  SND_CHECK_EQ(port.Stats().underruns, std::uint64_t{4});
-  SND_CHECK_EQ(d.runtime.Stats().inputUnderruns, std::uint64_t{4});
-  SND_CHECK_EQ(v.ph.frame, std::uint64_t{10 * 256});  // the playhead follows the requests
+  SND_CHECK_EQ(WriteSeq(port, 356, 256), 256u);
+  d.Block({&v}, Driver::Mod{}, 256);  // full again
+  d.Block({&v}, Driver::Mod{}, 256);  // empty after a full block: the second underrun
+  SND_CHECK_EQ(v.starvedBlocks, 2u);
+  SND_CHECK_EQ(port.Stats().underruns, std::uint64_t{2});
+  SND_CHECK_EQ(d.runtime.Stats().inputUnderruns, std::uint64_t{2});
+  SND_CHECK_EQ(v.ph.frame, std::uint64_t{12 * 256});  // the playhead follows the requests
 }
 
-// I5 / I6 / C2: one reader per port; unknown ports (count, max), no params: refused. A
-// released port starts again live: the backlog written while it was owned and while it
-// was free is skipped.
+// I5 / I6 / C2 / D-197 (2): one reader per port; unknown ports (count, max), no params:
+// refused. A released port starts again live: of the backlog written while it was owned
+// and while it was free only the newest block (256) is kept.
 SND_TEST(IndepInput, OneReaderPerPortAndRestartIsLive) {
   Driver d(snd::SourceKind::Input, Ports(1024, 3));
   SND_REQUIRE(d.Ok());
@@ -258,10 +278,10 @@ SND_TEST(IndepInput, OneReaderPerPortAndRestartIsLive) {
   SND_CHECK_EQ(WriteSeq(port, 350, 70), 70u);  // nobody reads
   SND_CHECK_EQ(port.Buffered(), 320u);
   SND_REQUIRE(d.Start(b, &p, 2));
-  SND_CHECK_EQ(port.Buffered(), 0u);
+  SND_CHECK_EQ(port.Buffered(), 256u);
   SND_CHECK_EQ(WriteSeq(port, 420, 10), 10u);
   d.Block({&b}, Driver::Mod{}, 10);
-  SND_CHECK_EQ(b.out[0][0], 421.0f);
+  SND_CHECK_EQ(b.out[0][0], 165.0f);  // 420 - 256 + 1
   SND_CHECK_EQ(b.starvedBlocks, 0u);
   SND_CHECK_EQ(d.runtime.Stats().inputInstances, 1u);
   SND_CHECK_EQ(Invariant(port), std::uint64_t{0});
@@ -269,8 +289,9 @@ SND_TEST(IndepInput, OneReaderPerPortAndRestartIsLive) {
   d.Control(a, src::ControlOp::Resume);
 }
 
-// I7 / I8: a virtual voice consumes outputFrames x pitch (rounded) without output and
-// without underruns; Seek / Resume / Devirtualize go live; Pause / Virtualize / SetLoop keep.
+// I7 / I8 / D-197 (1) (2): a virtual voice consumes outputFrames x pitch (rounded) without
+// output and without underruns; Seek / Resume go live keeping the newest block;
+// Devirtualize, Pause, Virtualize, SetLoop keep the position.
 SND_TEST(IndepInput, VirtualAndControls) {
   Driver d(snd::SourceKind::Input, Ports(4096));
   SND_REQUIRE(d.Ok());
@@ -289,19 +310,32 @@ SND_TEST(IndepInput, VirtualAndControls) {
   SND_CHECK_EQ(v.last.ended, 0u);
   SND_CHECK_EQ(port.Stats().underruns, std::uint64_t{0});
   SND_CHECK_EQ(port.Stats().readFrames, std::uint64_t{2000});
-  for (src::ControlOp op : {src::ControlOp::Seek, src::ControlOp::Resume, src::ControlOp::Devirtualize}) {
-    SND_CHECK_EQ(WriteSeq(port, 5000, 40), 40u);
+  std::uint64_t base = 10000;
+  for (src::ControlOp op : {src::ControlOp::Seek, src::ControlOp::Resume}) {
+    SND_CHECK_EQ(WriteSeq(port, base, 1000), 1000u);
     d.Control(v, op, 12);
-    SND_CHECK_EQ(port.Buffered(), 0u);
+    SND_CHECK_EQ(port.Buffered(), 256u);
+    const std::size_t at = v.out[0].size();
+    d.Block({&v}, Driver::Mod{}, 256);
+    SND_CHECK_EQ(v.out[0][at], static_cast<float>(base + 1000 - 256 + 1));
+    SND_CHECK_EQ(v.out[0][at + 255], static_cast<float>(base + 1000));
+    // Less than a block buffered: nothing dropped.
+    SND_CHECK_EQ(WriteSeq(port, base + 1000, 100), 100u);
+    d.Control(v, op, 12);
+    SND_CHECK_EQ(port.Buffered(), 100u);
+    d.Block({&v}, Driver::Mod{}, 100);
+    base += 2000;
   }
-  for (src::ControlOp op : {src::ControlOp::Pause, src::ControlOp::Virtualize, src::ControlOp::SetLoop}) {
-    SND_CHECK_EQ(WriteSeq(port, 6000, 40), 40u);
+  for (src::ControlOp op : {src::ControlOp::Devirtualize, src::ControlOp::Pause, src::ControlOp::Virtualize,
+                            src::ControlOp::SetLoop}) {
+    SND_CHECK_EQ(WriteSeq(port, 6000, 400), 400u);
     d.Control(v, op, 12);
   }
-  SND_CHECK_EQ(port.Buffered(), 120u);
-  d.Block({&v}, Driver::Mod{}, 120);
-  SND_CHECK_EQ(v.out[0][0], 6001.0f);
-  SND_CHECK_EQ(v.out[0][119], 6040.0f);
+  SND_CHECK_EQ(port.Buffered(), 1600u);
+  d.Block({&v}, Driver::Mod{}, 1600);
+  const std::size_t n = v.out[0].size();
+  SND_CHECK_EQ(v.out[0][n - 1600], 6001.0f);
+  SND_CHECK_EQ(v.out[0][n - 1], 6400.0f);
   SND_CHECK_EQ(Invariant(port), std::uint64_t{0});
 }
 
@@ -419,8 +453,12 @@ SND_TEST(IndepInput, ThreadedWriterExactAccounting) {
   }
   SND_CHECK_MSG(order == 0u, "%u frames out of order / duplicated", unsigned(order));
   SND_CHECK_MSG(foreign == 0u, "%u frames heard that were never accepted", unsigned(foreign));
-  SND_CHECK(s.droppedFrames > 0u);   // the small ring did overrun
-  SND_CHECK(s.skippedFrames > 0u);   // and the reader went live / trimmed
+  SND_CHECK(s.droppedFrames > 0u);  // the small ring did overrun
+  // D-197 (2) (4): the ring holds 256 frames = one block. The latency bound (at least 2
+  // blocks) is cut to the capacity, which can never be exceeded, and a skip to live keeps
+  // one block = everything buffered. So nothing is ever skipped here (by the decision,
+  // not by a fault; the skip itself is checked in VirtualAndControls / ReaderLatencyBound).
+  SND_CHECK_EQ(s.skippedFrames, std::uint64_t{0});
 }
 
 // I11 / D-43-like hand-over: the port's consumer moves between threads (Start / Control /
@@ -523,15 +561,12 @@ SND_TEST(IndepInput, TwoPortsTwoWritersOneBatch) {
 }
 
 // ---------------------------------------------------------------------------------------
-// Spec gaps (reported for a decision). These tests RECORD the current behaviour only; they
-// are not a statement that it is right. Rewrite them once the acceptance side decides.
+// D-197 (decisions on the former spec gaps 1 .. 4 and 10).
 // ---------------------------------------------------------------------------------------
 
-// Gap: Devirtualize (and Resume) "skip to live" (D-194) also drop what the writer wrote
-// just before, although a virtual voice already consumed everything up to "now". With a
-// game writing one block per update, the first real block after the return is then empty:
-// silence, `starved`, and an underrun counted although the writer kept pace.
-SND_TEST(IndepInput, SpecGap_DevirtualizeDropsTheFreshBlockAndCountsAnUnderrun) {
+// D-197 (1) (3): Devirtualize does not skip: with a writer in step, the block after the
+// return plays the frames just written, full, no underrun.
+SND_TEST(IndepInput, DevirtualizeKeepsReadingOn) {
   Driver d(snd::SourceKind::Input, Ports(4096));
   SND_REQUIRE(d.Ok());
   src::InputPort& port = *d.runtime.InputPortOf(0);
@@ -550,36 +585,62 @@ SND_TEST(IndepInput, SpecGap_DevirtualizeDropsTheFreshBlockAndCountsAnUnderrun) 
   WriteSeq(port, base, 256);  // the update that makes it real again
   d.Control(v, src::ControlOp::Devirtualize);
   d.Block({&v}, Driver::Mod{}, 256);
-  // Current behaviour: the fresh block was skipped.
-  SND_CHECK_EQ(v.last.starved, 1u);
-  SND_CHECK_EQ(port.Stats().underruns, std::uint64_t{1});
-  SND_CHECK_EQ(v.out[0][1024], 0.0f);
+  SND_CHECK_EQ(v.last.starved, 0u);
+  SND_CHECK_EQ(port.Stats().underruns, std::uint64_t{0});
+  for (std::size_t i = 0; i < 256; ++i) SND_CHECK_EQ(v.out[0][1024 + i], static_cast<float>(base + 1 + i));
+  // A virtual advance that found too little marks the voice as "not full": the first real
+  // block after it is not an underrun even if short.
+  d.Advance(v, 256, 1.0f);  // nothing written
+  WriteSeq(port, base + 256, 10);
+  d.Control(v, src::ControlOp::Devirtualize);
+  d.Block({&v}, Driver::Mod{}, 256);
+  SND_CHECK_EQ(v.last.starved, 0u);
+  SND_CHECK_EQ(port.Stats().underruns, std::uint64_t{0});
 }
 
-// Gap: a block that is the first to deliver frames but is short is already counted as an
-// underrun (`starved`), although the voice had not played before it ("once the voice had
-// played", D-194 / input_port.hpp).
-SND_TEST(IndepInput, SpecGap_FirstShortBlockCountsAsUnderrun) {
+// D-197 (2) (3): the start keeps the newest block written before it (a writer in step
+// is heard from the first block); the first block, short or empty, is not an underrun;
+// nor is the block after a Resume / Seek.
+SND_TEST(IndepInput, StartAndSkipsAreNotUnderruns) {
   Driver d(snd::SourceKind::Input, Ports(4096));
   SND_REQUIRE(d.Ok());
   src::InputPort& port = *d.runtime.InputPortOf(0);
+  WriteSeq(port, 0, 1000);
   src::InputParams p = In(0);
   Driver::Voice v;
   SND_REQUIRE(d.Start(v, &p, 2));
-  WriteSeq(port, 0, 100);
+  SND_CHECK_EQ(port.Buffered(), 256u);
   d.Block({&v}, Driver::Mod{}, 256);
-  SND_CHECK_EQ(v.last.starved, 1u);  // current behaviour
-  SND_CHECK_EQ(port.Stats().underruns, std::uint64_t{1});
+  SND_CHECK_EQ(v.out[0][0], 745.0f);
+  SND_CHECK_EQ(v.out[0][255], 1000.0f);
+  Driver::Voice w;
+  src::InputParams p1 = In(1);
+  SND_REQUIRE(d.Start(w, &p1, 2));
+  WriteSeq(*d.runtime.InputPortOf(1), 0, 100);
+  d.Block({&w}, Driver::Mod{}, 256);  // the first block is short
+  SND_CHECK_EQ(w.last.starved, 0u);
+  // Full, then Resume with too little: the block after the skip is not counted.
+  WriteSeq(port, 1000, 256);
+  d.Block({&v}, Driver::Mod{}, 256);
+  for (src::ControlOp op : {src::ControlOp::Resume, src::ControlOp::Seek}) {
+    WriteSeq(port, 2000, 256);
+    d.Block({&v}, Driver::Mod{}, 256);  // full
+    d.Control(v, op);
+    d.Block({&v}, Driver::Mod{}, 256);  // empty right after the skip
+    SND_CHECK_EQ(v.last.starved, 0u);
+  }
+  SND_CHECK_EQ(port.Stats().underruns, std::uint64_t{0});
+  SND_CHECK_EQ(d.runtime.Stats().inputUnderruns, std::uint64_t{0});
 }
 
-// Gap: InputPort::Configure accepts a latency bound below the frames a block needs; then
-// every block keeps only bound / 2 frames and starves even when the writer keeps pace.
-SND_TEST(IndepInput, SpecGap_LatencyBoundBelowABlockStarvesForever) {
+// D-197 (4): a bound configured below a block is raised to 2 blocks: a writer in step is
+// heard in full (the former gap starved forever).
+SND_TEST(IndepInput, LatencyBoundFloorKeepsAWriterInStep) {
   Driver d(snd::SourceKind::Input, Ports(4096));
   SND_REQUIRE(d.Ok());
   src::InputPort& port = *d.runtime.InputPortOf(0);
   port.Configure(0, 100);
-  SND_CHECK_EQ(port.MaxLatencyFrames(), 100u);
+  SND_CHECK_EQ(port.MaxLatencyFrames(), 512u);
   src::InputParams p = In(0);
   Driver::Voice v;
   SND_REQUIRE(d.Start(v, &p, 2));
@@ -587,20 +648,109 @@ SND_TEST(IndepInput, SpecGap_LatencyBoundBelowABlockStarvesForever) {
     WriteSeq(port, std::uint64_t(i) * 256u, 256);
     d.Block({&v}, Driver::Mod{}, 256);
   }
-  SND_CHECK_EQ(v.starvedBlocks, 10u);  // current behaviour: 50 of 256 frames per block
-  SND_CHECK_EQ(port.Stats().readFrames, std::uint64_t{500});
+  SND_CHECK_EQ(v.starvedBlocks, 0u);
+  SND_CHECK_EQ(port.Stats().readFrames, std::uint64_t{2560});
+  // A burst over the floor is trimmed to half of it (one block): still a full block.
+  WriteSeq(port, 2560, 600);
+  d.Block({&v}, Driver::Mod{}, 256);
+  SND_CHECK_EQ(v.out[0][2560], static_cast<float>(3160 - 256 + 1));
+  SND_CHECK_EQ(v.last.starved, 0u);
 }
 
-// Gap: a voice with more channels than its port (snd_input_desc::channels vs the port's
-// channels) is not specified for the reader; the extra channels repeat the port's last one.
-SND_TEST(IndepInput, SpecGap_VoiceWithMoreChannelsThanThePort) {
-  Driver d(snd::SourceKind::Input, Ports(256, 1, 2));
+// D-197 (5): a voice with more channels than its port repeats the port's last channel;
+// one with fewer reads the port's first ones.
+SND_TEST(IndepInput, VoiceChannelRules) {
+  Driver d(snd::SourceKind::Input, Ports(256, 2, 2));
   SND_REQUIRE(d.Ok());
   src::InputParams p = In(0, 4);
   Driver::Voice v;
   SND_REQUIRE(d.Start(v, &p, 4));
   WriteSeq(*d.runtime.InputPortOf(0), 0, 8);
   d.Block({&v}, Driver::Mod{}, 8);
-  SND_CHECK_EQ(v.out[2][3], -4.0f);  // current behaviour: channel 1 repeated
-  SND_CHECK_EQ(v.out[3][3], -4.0f);
+  for (std::size_t i = 0; i < 8; ++i) {
+    SND_CHECK_EQ(v.out[0][i], static_cast<float>(i + 1));
+    SND_CHECK_EQ(v.out[1][i], -static_cast<float>(i + 1));
+    SND_CHECK_EQ(v.out[2][i], -static_cast<float>(i + 1));
+    SND_CHECK_EQ(v.out[3][i], -static_cast<float>(i + 1));
+  }
+  src::InputParams q = In(1, 1);
+  Driver::Voice m;
+  SND_REQUIRE(d.Start(m, &q, 1));
+  WriteSeq(*d.runtime.InputPortOf(1), 0, 8);
+  d.Block({&m}, Driver::Mod{}, 8);
+  for (std::size_t i = 0; i < 8; ++i) SND_CHECK_EQ(m.out[0][i], static_cast<float>(i + 1));
+}
+
+// D-197 (6): Write turns NaN / +-Inf into 0 on every path: per channel, on a repeated
+// channel (fewer given than the port has), across the ring's wrap, with a partial
+// overrun; finite values (also denormals and -0) are kept bit for bit.
+SND_TEST(IndepInput, NonFiniteSamplesAreWrittenAsZero) {
+  Driver d(snd::SourceKind::Input, Ports(64, 1, 2));  // 64 frames: wraps quickly
+  SND_REQUIRE(d.Ok());
+  src::InputPort& port = *d.runtime.InputPortOf(0);
+  src::InputParams p = In(0);
+  Driver::Voice v;
+  SND_REQUIRE(d.Start(v, &p, 2));
+  const float nan = std::nanf("");
+  const float vals[] = {nan, INFINITY, -INFINITY, 1e-40f, -0.0f, 0.5f, -std::numeric_limits<float>::max()};
+  std::vector<float> sent;
+  std::size_t heard = 0, bad = 0;
+  for (int round = 0; round < 40; ++round) {
+    std::vector<float> a(50);
+    for (std::size_t i = 0; i < a.size(); ++i) a[i] = vals[(i + std::size_t(round)) % 7];
+    const float* one[1] = {a.data()};
+    const std::uint32_t ok = port.Write(one, 1, 50);  // mono into the stereo port: repeated
+    SND_CHECK_EQ(ok, 50u);
+    d.Block({&v}, Driver::Mod{}, 50);
+    for (std::uint32_t i = 0; i < ok; ++i) {
+      const float want = std::isfinite(a[i]) ? a[i] : 0.0f;
+      for (int c = 0; c < 2; ++c) {
+        if (std::memcmp(&v.out[std::size_t(c)][heard + i], &want, 4) != 0) ++bad;
+      }
+    }
+    heard += 50;
+  }
+  SND_CHECK_EQ(bad, std::size_t{0});
+  // A partial overrun with non-finite values: the accepted part is sanitised.
+  std::vector<float> big(100, nan);
+  const float* two[2] = {big.data(), big.data()};
+  SND_CHECK_EQ(port.Write(two, 2, 100), 64u);
+  d.Block({&v}, Driver::Mod{}, 64);
+  for (std::size_t i = 0; i < 64; ++i) {
+    SND_CHECK_EQ(v.out[0][heard + i], 0.0f);
+    SND_CHECK_EQ(v.out[1][heard + i], 0.0f);
+  }
+}
+
+// D-197 (3): a block with 0 frames requested is "full" (it got everything it asked for),
+// is silent, and is not starved.
+SND_TEST(IndepInput, ZeroFrameBlock) {
+  Driver d(snd::SourceKind::Input, Ports(4096));
+  SND_REQUIRE(d.Ok());
+  src::InputParams p = In(0);
+  Driver::Voice v;
+  SND_REQUIRE(d.Start(v, &p, 2));
+  float buf[2][8] = {};
+  float* ptrs[2] = {buf[0], buf[1]};
+  src::RenderItem it{};
+  it.sourceSlot = v.slot;
+  it.framesRequested = 0;
+  it.channels = 2;
+  it.pitch = snd::Ramp{1.0f, 1.0f};
+  it.playhead = &v.ph;
+  it.out = ptrs;
+  src::RenderBatch b{};
+  b.kind = snd::SourceKind::Input;
+  b.count = 1;
+  b.items = &it;
+  b.block.frames = 256;
+  b.block.sampleRate = 48000;
+  snd::VoiceRenderStatus st{};
+  {
+    snd::rt::RtScope rt;
+    d.Kind().RenderBatch(b, &st);
+  }
+  SND_CHECK_EQ(st.starved, 0u);
+  SND_CHECK_EQ(st.framesRendered, 0u);
+  SND_CHECK_EQ(v.ph.frame, std::uint64_t{0});
 }

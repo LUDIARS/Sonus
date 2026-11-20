@@ -22,31 +22,36 @@ namespace {
 
 constexpr double kRate = 48000.0;
 
-// Reference colours in double precision (D-193).
+// Reference colours in double precision (D-193, gains of D-199: pink and brown at RMS 0.2,
+// output samples cut to [-1, 1], the filter state never cut).
+constexpr double kPole[3] = {0.99765, 0.963, 0.57};
+constexpr double kGain[3] = {0.0990460, 0.2965164, 1.0526913};
+constexpr double kDirect = 0.1848;
 struct RefNoise {
   std::uint32_t color;
   double b[3] = {0, 0, 0};
   double brown = 0;
-  double pinkScale = 1.0;
+  double pinkScale = 1.0, brownScale = 1.0;
   explicit RefNoise(std::uint32_t c) : color(c) {
-    const double p[4] = {0.99765, 0.963, 0.57, 0.0};
-    const double g[4] = {0.0990460, 0.2965164, 1.0526913, 0.1848};
+    const double p[4] = {kPole[0], kPole[1], kPole[2], 0.0};
+    const double g[4] = {kGain[0], kGain[1], kGain[2], kDirect};
     double v = 0.0;  // variance gain of the parallel one-pole sum (white input)
     for (int i = 0; i < 4; ++i) {
       for (int j = 0; j < 4; ++j) v += g[i] * g[j] / (1.0 - p[i] * p[j]);
     }
-    pinkScale = 1.0 / std::sqrt(v);
+    // White input variance 1/3: output RMS 0.2 = scale x sqrt(v / 3).
+    pinkScale = 0.2 * std::sqrt(3.0) / std::sqrt(v);
+    brownScale = 0.2 * std::sqrt(3.0);  // the leaky integrator keeps the input variance
   }
+  static double Clip(double y) { return y > 1.0 ? 1.0 : (y < -1.0 ? -1.0 : y); }
   double Step(double w) {
     if (color == 1u) {
-      b[0] = 0.99765 * b[0] + 0.0990460 * w;
-      b[1] = 0.96300 * b[1] + 0.2965164 * w;
-      b[2] = 0.57000 * b[2] + 1.0526913 * w;
-      return (b[0] + b[1] + b[2] + 0.1848 * w) * pinkScale;
+      for (int i = 0; i < 3; ++i) b[i] = kPole[i] * b[i] + kGain[i] * w;
+      return Clip((b[0] + b[1] + b[2] + kDirect * w) * pinkScale);
     }
     if (color == 2u) {
       brown = 0.995 * brown + std::sqrt(1.0 - 0.995 * 0.995) * w;
-      return brown;
+      return Clip(brown * brownScale);
     }
     return w;
   }
@@ -60,6 +65,40 @@ std::vector<double> RefY(std::uint32_t color, std::uint32_t bankSeed, std::uint3
   std::vector<double> y(n);
   for (std::size_t k = 0; k < n; ++k) y[k] = f.Step(isrc::SpecWhite(ck, k));
   return y;
+}
+
+// D-199 (2) rebuild model: the filters restart from zero state at source sample
+// max(0, k - 1024) and run to k; returns Y'(k .. k + n). Also the bound of its distance to
+// the uninterrupted colour: the state left out (S = state after sample from - 1) decays
+// with the poles, so |Y'(m) - Y(m)| <= scale x |sum_i p_i^(m - from + 1) S_i| (the cut to
+// [-1, 1] only shrinks a difference).
+struct Rebuilt {
+  std::vector<double> y, bound;
+};
+Rebuilt RefRebuilt(std::uint32_t color, std::uint32_t bankSeed, std::uint32_t startSeed, std::uint64_t k,
+                   std::size_t n) {
+  const std::uint64_t ck = isrc::SpecChannelKey(isrc::SpecVoiceKey(bankSeed, startSeed), 0);
+  const std::uint64_t from = k > 1024u ? k - 1024u : 0u;
+  RefNoise full(color), part(color);
+  for (std::uint64_t j = 0; j < from; ++j) full.Step(isrc::SpecWhite(ck, j));
+  const double s[3] = {full.b[0], full.b[1], full.b[2]};
+  const double sb = full.brown;
+  Rebuilt r;
+  for (std::uint64_t j = from; j < k + n; ++j) {
+    const double v = part.Step(isrc::SpecWhite(ck, j));
+    if (j < k) continue;
+    r.y.push_back(v);
+    const double e = static_cast<double>(j - from + 1u);
+    double d = 0.0;
+    if (color == 1u) {
+      for (int i = 0; i < 3; ++i) d += std::pow(kPole[i], e) * s[i];
+      d = std::fabs(d) * part.pinkScale;
+    } else {
+      d = std::fabs(std::pow(0.995, e) * sb) * part.brownScale;
+    }
+    r.bound.push_back(d);
+  }
+  return r;
 }
 
 std::vector<std::vector<float>> Render(std::uint32_t color, std::uint32_t bankSeed, std::uint32_t startSeed,
@@ -147,8 +186,8 @@ SND_TEST(IndepNoise, WhiteIsTheSpecifiedCounterSequence) {
   }
 }
 
-// N2 / N3: pink and brown follow their filters (double precision reference, float in the
-// kind): the colour is the specified one, normalised to the white variance.
+// N2 / N3 / D-199 (1): pink and brown follow their filters (double precision reference,
+// float in the kind), at RMS 0.2 and cut to [-1, 1].
 SND_TEST(IndepNoise, ColoursFollowTheirFilters) {
   for (std::uint32_t color : {1u, 2u}) {
     const auto x = Render(color, 77, 88, 20000, 2);
@@ -157,14 +196,15 @@ SND_TEST(IndepNoise, ColoursFollowTheirFilters) {
       const std::vector<double> y = RefY(color, 77, 88, c, 20000);
       double err = 0;
       for (std::size_t k = 0; k < 20000; ++k) err = std::fmax(err, std::fabs(x[c][k] - y[k]));
-      SND_CHECK_MSG(err < 2e-4, "colour %u ch %u: max deviation from the filter %g", color, c, err);
+      SND_CHECK_MSG(err < 5e-5, "colour %u ch %u: max deviation from the filter %g", color, c, err);
     }
   }
 }
 
 // N2 / N3 / N10: spectra (Welch, 2^20 samples) per octave band 63 Hz .. 16 kHz against the
 // analytic response of the filter (+-0.5 dB), the fitted slope 250 Hz .. 8 kHz against the
-// nominal 0 / -3 / -6 dB per octave, the RMS (0.577, 3 %), no DC drift, peaks (reported).
+// nominal 0 / -3 / -6 dB per octave, the RMS (white 0.577, pink / brown 0.2: D-199, 3 %),
+// no DC drift, every sample within [-1, 1].
 SND_TEST(IndepNoise, SpectraLevelsAndDc) {
   const std::size_t n = 1u << 20, seg = 8192;
   const double nominal[3] = {0.0, -3.0103, -6.0206};
@@ -193,10 +233,11 @@ SND_TEST(IndepNoise, SpectraLevelsAndDc) {
     const double mean = 0.5 * (isrc::Mean(x[0]) + isrc::Mean(x[1]));
     std::printf("noise colour %u: rms %.4f mean %.5f peak %.3f\n", color, rms, mean,
                 std::fmax(isrc::MaxAbs(x[0]), isrc::MaxAbs(x[1])));
-    SND_CHECK_NEAR(rms, 1.0 / std::sqrt(3.0), 0.03 / std::sqrt(3.0));
+    const double wantRms = color == 0u ? 1.0 / std::sqrt(3.0) : 0.2;  // D-199 (1)
+    SND_CHECK_NEAR(rms, wantRms, 0.03 * wantRms);
     SND_CHECK_MSG(std::fabs(mean) < 0.02, "colour %u: mean %g", color, mean);
     SND_CHECK(isrc::AllFinite(x[0]) && isrc::AllFinite(x[1]));
-    SND_CHECK(isrc::MaxAbs(x[0]) < 4.0);
+    SND_CHECK(isrc::MaxAbs(x[0]) <= 1.0 && isrc::MaxAbs(x[1]) <= 1.0);  // D-199 (1)
   }
   // Brown over 2^22 samples: the mean of each quarter stays near 0 (leaky, no drift).
   const auto b = Render(2, 1, 2, 1u << 22, 1, 4096);
@@ -334,6 +375,9 @@ SND_TEST(IndepNoise, VirtualAdvanceSeekAndStartFrame) {
     for (std::size_t i = 0; i < 300; ++i) SND_CHECK_EQ(v.out[0][1800 + i], static_cast<float>(isrc::SpecWhite(ck, 1000300 + i)));
     SND_CHECK_EQ(v.last.ended, 0u);
   }
+  // D-199 (2): pink / brown rebuild from the last 1024 samples. The kind must equal the
+  // rebuild model; its distance to the uninterrupted colour must stay within the decay
+  // of the state left out (analytic bound per sample); before 1024 the rebuild is exact.
   for (std::uint32_t color : {1u, 2u}) {
     const std::vector<double> y = RefY(color, 31, 32, 0, 60000);
     Driver d(snd::SourceKind::Noise, Driver::Opt{});
@@ -342,21 +386,38 @@ SND_TEST(IndepNoise, VirtualAdvanceSeekAndStartFrame) {
     SND_REQUIRE(d.Start(v, &p, 1, 32));
     d.Render(v, 1000);
     d.Advance(v, 20000, 1.0f);
-    d.Render(v, 2000);
-    double err = 0;
-    for (std::size_t i = 0; i < 2000; ++i) err = std::fmax(err, std::fabs(v.out[0][1000 + i] - y[21000 + i]));
-    std::printf("noise colour %u: after a virtual advance max deviation %g\n", color, err);
-    SND_CHECK_MSG(err < 1e-3, "colour %u after virtual: %g", color, err);
+    d.Render(v, 3000);
     d.Control(v, src::ControlOp::Seek, 50000);
-    d.Render(v, 2000);
-    err = 0;
-    for (std::size_t i = 0; i < 2000; ++i) err = std::fmax(err, std::fabs(v.out[0][3000 + i] - y[50000 + i]));
-    SND_CHECK_MSG(err < 1e-3, "colour %u after seek: %g", color, err);
-    d.Control(v, src::ControlOp::Seek, 3000);  // inside the warm-up window: exact filter state
+    d.Render(v, 3000);
+    struct Part {
+      std::size_t at;
+      std::uint64_t k;
+    };
+    for (const Part part : {Part{1000, 21000}, Part{4000, 50000}}) {
+      const Rebuilt r = RefRebuilt(color, 31, 32, part.k, 3000);
+      double model = 0, over = 0, dev = 0, bound0 = r.bound[0];
+      for (std::size_t i = 0; i < 3000; ++i) {
+        const double x = v.out[0][part.at + i];
+        model = std::fmax(model, std::fabs(x - r.y[i]));
+        const double dv = std::fabs(x - y[part.k + i]);
+        dev = std::fmax(dev, dv);
+        over = std::fmax(over, dv - r.bound[i] - 5e-5);
+      }
+      std::printf("noise colour %u at %llu: model error %.2g, deviation from the continuous colour %.2g "
+                  "(analytic bound at the return %.2g)\n",
+                  color, static_cast<unsigned long long>(part.k), model, dev, bound0);
+      SND_CHECK_MSG(model < 5e-5, "colour %u at %llu: differs from the 1024-sample rebuild by %g", color,
+                    static_cast<unsigned long long>(part.k), model);
+      SND_CHECK_MSG(over <= 0.0, "colour %u at %llu: deviation exceeds the analytic bound by %g", color,
+                    static_cast<unsigned long long>(part.k), over);
+      // The bound itself decays with the slowest pole: after 3000 samples it is tiny.
+      SND_CHECK(r.bound[2999] < 1e-3 * (bound0 + 1e-12) + 1e-6);
+    }
+    d.Control(v, src::ControlOp::Seek, 700);  // before 1024: rebuilt from 0, exact
     d.Render(v, 1000);
-    err = 0;
-    for (std::size_t i = 0; i < 1000; ++i) err = std::fmax(err, std::fabs(v.out[0][5000 + i] - y[3000 + i]));
-    SND_CHECK_MSG(err < 2e-4, "colour %u after an early seek: %g", color, err);
+    double err = 0;
+    for (std::size_t i = 0; i < 1000; ++i) err = std::fmax(err, std::fabs(v.out[0][7000 + i] - y[700 + i]));
+    SND_CHECK_MSG(err < 5e-5, "colour %u after an early seek: %g", color, err);
   }
   // startFrame: the voice starts at source sample startFrame.
   const auto s = Render(0, 31, 32, 200, 1, 256, {}, 777);
@@ -434,15 +495,30 @@ SND_TEST(IndepNoise, RefusalsSlotReuseAndFrameOffset) {
   SND_CHECK_EQ(c.ph.frame, std::uint64_t{156});
 }
 
-// Gap (recorded, not asserted as right): the colours share the RMS of the uniform white
-// noise (D-193), so pink and brown, close to Gaussian, peak far above full scale (about
-// +9 dB over white's peak of 1) while white never reaches 1. The headroom of a noise
-// synth then depends on its colour.
-SND_TEST(IndepNoise, SpecGap_ColouredPeaksExceedFullScale) {
-  const auto w = Render(0, 1, 1, 1u << 18);
-  const auto p = Render(1, 1, 1, 1u << 18);
-  const auto b = Render(2, 1, 1, 1u << 18);
-  SND_CHECK(isrc::MaxAbs(w[0]) <= 1.0);
-  SND_CHECK(isrc::MaxAbs(p[0]) > 1.5);  // current behaviour
-  SND_CHECK(isrc::MaxAbs(b[0]) > 1.5);  // current behaviour
+// D-199 (1): every colour stays within [-1, 1]: white is uniform below 1, pink and brown at
+// RMS 0.2 are cut at full scale (rarely reached); the cut does not enter the filter state
+// (after a sample at the limit the output follows the uncut filter again).
+SND_TEST(IndepNoise, PeaksWithinFullScale) {
+  for (std::uint32_t color : {0u, 1u, 2u}) {
+    const auto x = Render(color, 1, 1, 1u << 18);
+    SND_CHECK(isrc::MaxAbs(x[0]) <= 1.0);
+    const std::vector<double> y = RefY(color, 1, 1, 0, 1u << 18);
+    double err = 0;
+    for (std::size_t k = 0; k < y.size(); ++k) err = std::fmax(err, std::fabs(x[0][k] - y[k]));
+    SND_CHECK_MSG(err < 1e-4, "colour %u: %g from the reference", color, err);
+  }
+  // A seed search for a pink run that hits the cut, to see the state is not cut.
+  std::size_t clipped = 0;
+  for (std::uint32_t seed = 0; seed < 64 && clipped == 0; ++seed) {
+    const auto x = Render(2, seed, 7, 1u << 16);
+    const std::vector<double> y = RefY(2, seed, 7, 0, 1u << 16);
+    for (std::size_t k = 0; k < y.size(); ++k) {
+      if (std::fabs(y[k]) >= 1.0) {
+        ++clipped;
+        SND_CHECK(std::fabs(x[0][k]) == 1.0f);
+      }
+      SND_CHECK(std::fabs(x[0][k] - y[k]) < 1e-4);
+    }
+  }
+  std::printf("noise: samples at the cut found in the brown search: %u\n", unsigned(clipped));
 }
