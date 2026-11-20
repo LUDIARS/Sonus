@@ -83,3 +83,12 @@ set_tests_properties(source_synth_e2e_test PROPERTIES TIMEOUT 900)
 # snd_write_input through the C API (MANUAL output device; the driver's audio thread reads).
 snd_add_test(source_input_api_test SOURCES source_input_api_test.cpp LINK sonus sonus_source sonus_base sonus_mocks)
 set_tests_properties(source_input_api_test PROPERTIES TIMEOUT 600)
+
+# Independent tests of the stage 7-D kinds, group 1 (Oscillator, Noise, Input; D-190 .. D-196),
+# written from the specification by a separate tester. indep_defects_src1_test holds the
+# Defect_ tests (they fail until the defects are fixed).
+#   ctest --repeat until-fail:20 -R 'indep_input_test|indep_src1_core_test'   (TSan -j1 and Release)
+snd_add_test(indep_osc_test SOURCES indep_osc_test.cpp LINK sonus_source sonus_base sonus_mocks)
+set_tests_properties(indep_osc_test PROPERTIES TIMEOUT 900)
+snd_add_test(indep_noise_test SOURCES indep_noise_test.cpp LINK sonus_source sonus_base sonus_mocks)
+set_tests_properties(indep_noise_test PROPERTIES TIMEOUT 900)
