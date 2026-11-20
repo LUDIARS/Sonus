@@ -803,3 +803,80 @@ SND_TEST(IndepG4Marker, Defect_MarkersWithLoopsAndPitchAtTheirClock) {
     SND_CHECK(r.markers[0].clock - t0 >= 499 && r.markers[0].clock - t0 <= 501);
   }
 }
+
+// ---------------------------------------------------------------------------
+// Added after reading the implementation (step 3)
+// ---------------------------------------------------------------------------
+
+// "Never" for a paused voice: records when it ends (while paused, or only after the resume).
+// The implementation's comment says paused voices are not ended.
+SND_TEST(IndepG4Virtual, SpecHole_NeverForAVoicePausedWhileVirtual) {
+  Rig r(Config(1));
+  B bk;
+  TEvent& l = bk.Event("L", {B::SynthClip(bk.Synth(400.0f))});
+  l.priority = 100;
+  l.virtualReturn = 2;
+  bk.Event("H", {B::SynthClip(bk.Synth(100.0f))}).priority = 200;
+  r.Load("b", bk.Build("B"));
+  const snd_playback_handle h = r.sys->Play(HashId("L"), NoEm(), nullptr);
+  r.Steps(3);
+  r.sys->Pause(h, 0.0f);
+  r.Steps(2);
+  const snd_playback_handle hi = r.sys->Play(HashId("H"), NoEm(), nullptr);
+  r.Steps(6);
+  const std::uint32_t endedWhilePaused = r.CountEnds(h.value);
+  r.sys->Stop(hi, 0.0f, nullptr);
+  r.Steps(3);
+  const std::uint32_t endedBeforeResume = r.CountEnds(h.value);
+  r.sys->ResumePlayback(h, 0.0f);
+  r.Steps(4);
+  snd::test::Note("ended while paused and H plays: %u; before the resume: %u; after: %u; level after %g",
+                  endedWhilePaused, endedBeforeResume, r.CountEnds(h.value), double(Level(r)));
+  SND_CHECK(r.CountEnds(h.value) <= 1u);
+}
+
+// Meters over the limit: records which bus gets the only meter when the later row is active
+// first (D-147 says "数に上限" only).
+SND_TEST(IndepG4Virtual, SpecHole_MeterSlotGoesToTheFirstActiveBus) {
+  snd::core::CoreLimits lim;
+  lim.maxMeteredBuses = 1;
+  Rig r(Config(), lim);
+  B bk;
+  bk.b.buses.clear();
+  bk.b.buses.push_back(TBus{HashId("M1"), 2u, 0, bf::kBusMeter, 0.0f, {}, {}});
+  bk.b.buses.push_back(TBus{HashId("M2"), 2u, 0, bf::kBusMeter, 0.0f, {}, {}});
+  bk.b.buses.push_back(TBus{HashId("Master"), kNone, 2, bf::kBusMaster, 0.0f, {}, {}});
+  bk.Event("On2", {B::SynthClip(bk.Synth(300.0f))}, 0, 1);
+  r.Load("b", bk.Build("B"));
+  r.sys->Play(HashId("On2"), NoEm(), nullptr);
+  r.Steps(20);
+  snd_meter m1{}, m2{};
+  r.sys->Update();
+  r.sys->GetMeter(HashId("M1"), &m1);
+  r.sys->GetMeter(HashId("M2"), &m2);
+  snd::test::Note("limit 1: M1 (row 0, silent) loudness %g, M2 (row 1, active) loudness %g", double(m1.loudness_short),
+                  double(m2.loudness_short));
+  SND_CHECK(std::isnan(m1.loudness_short) || std::isnan(m2.loudness_short));
+}
+
+// Markers of a voice that is virtual when it crosses them: records whether they are reported
+// (the playback is Playing while virtual, 4.1).
+SND_TEST(IndepG4Marker, SpecHole_MarkersWhileVirtual) {
+  MarkerTable mt;
+  mt.asset = HashId("m");
+  mt.frames = {2000};
+  mt.ids = {HashId("mk")};
+  Rig r(Config(1), {}, nullptr, &mt);
+  B bk;
+  bk.Event("M", {B::AssetClip(bk.Asset("m", Constant(9600, 0.5f)))}).priority = 100;
+  bk.Event("H", {B::SynthClip(bk.Synth(100.0f))}).priority = 200;
+  r.Load("b", bk.Build("B"));
+  r.sys->Play(HashId("M"), NoEm(), nullptr);
+  r.Steps(2);
+  const snd_playback_handle hi = r.sys->Play(HashId("H"), NoEm(), nullptr);
+  r.Steps(16);  // the marker at 2000 passes while M is virtual
+  r.sys->Stop(hi, 0.0f, nullptr);
+  r.Steps(30);
+  snd::test::Note("marker crossed while virtual: %zu reported", r.markers.size());
+  SND_CHECK(r.markers.size() <= 1u);
+}

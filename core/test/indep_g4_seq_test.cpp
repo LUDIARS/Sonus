@@ -1288,3 +1288,146 @@ SND_TEST(IndepG4Action, Defect_SnapshotActionTakesEffectBeforeItsTime) {
   SND_CHECK_NEAR(r.At(t0 + 959) / kC, 0.5f, 1e-3f);
   SND_CHECK(r.At(r.Now() - 1) / kC < 0.4f);
 }
+
+// ---------------------------------------------------------------------------
+// Added after reading the implementation (step 3)
+// ---------------------------------------------------------------------------
+
+// DEFECT (D-145 "停止後は発火しない"): actions are taken one block ahead; a Stop of the parent
+// that arrives in the block before the action's time does not cancel it. The parent is
+// stopped at frame 256; its action at 10 ms (480) still starts X at 480.
+SND_TEST(IndepG4Action, Defect_ActionFiresAfterTheParentStopped) {
+  Rig r;
+  B bk = ActionBank({Act(10.0f, kPlay, HashId("X"))});
+  r.Load("b", bk.Build("B"));
+  const std::size_t t0 = r.Now();
+  const snd_playback_handle h = r.sys->Play(HashId("P"), NoEm(), nullptr);
+  r.Steps(1);
+  r.sys->Stop(h, 0.0f, nullptr);  // applied at frame 256
+  r.Steps(10);
+  snd::test::Note("child heard from %zu (expected never)", r.FirstAbove(t0, r.Now(), 0.25f * kC) - t0);
+  SND_CHECK_NEAR(r.MaxAbs(t0, r.Now()), 0.0f, 1e-6f);
+}
+
+// DEFECT (D-145 "時刻のサンプルで正確に効く", "予約付き開始"): a parent scheduled at frame 1000
+// (inside block 3) with actions at 0 ms and 2 ms: the children start at the next block's
+// first frame (1024) instead of 1000 and 1096.
+SND_TEST(IndepG4Action, Defect_ScheduledParentFirstBlockActionsAreLate) {
+  for (float ms : {0.0f, 2.0f}) {
+    Rig r;
+    B bk = ActionBank({Act(ms, kPlay, HashId("X"))});
+    r.Load("b", bk.Build("B"));
+    const std::size_t t0 = r.Now();
+    const snd_when w = AtClock(t0 + 1000);
+    r.sys->Play(HashId("P"), NoEm(), &w);
+    r.Steps(10);
+    const std::size_t first = r.FirstAbove(t0, r.Now(), 0.25f * kC) - t0;
+    snd::test::Note("scheduled at 1000, action at %.0f ms: child from %zu (expected %zu)", double(ms), first,
+                    std::size_t(1000 + ms * 48.0f));
+    SND_CHECK_EQ(first, std::size_t(1000 + ms * 48.0f));
+  }
+}
+
+// DEFECT (D-145; a play that does not start has no actions: ActionsOfARefusedPlayAreCancelled
+// cancels its Play children): a refused play (limit group full, "never") still applies its
+// first-block ApplySnapshot: the bus drops by 20 dB although the parent never started.
+SND_TEST(IndepG4Action, Defect_RefusedPlayStillAppliesItsFirstBlockSnapshot) {
+  Rig r;
+  B bk;
+  bk.b.groups.push_back(TGroup{HashId("G"), 1, 3});
+  TSnapshot sn;
+  sn.id = HashId("Quiet");
+  sn.values.push_back(TSnapshot::Value{0, 0, 0, -20.0f});
+  bk.b.snapshots.push_back(sn);
+  TEvent& p = bk.Event("P", {B::SynthClip(bk.Synth(500.0f))});
+  p.group = 0;
+  p.tracks[0].actions = {Act(0.0f, kSnap, HashId("Quiet"), 1.0f)};
+  bk.Event("Other", {B::SynthClip(bk.Synth(500.0f))}).group = 0;
+  r.Load("b", bk.Build("B"));
+  r.sys->Play(HashId("Other"), NoEm(), nullptr);  // takes the group's only voice
+  r.Steps(3);
+  const float before = r.Mean(r.Now() - 256, r.Now()) / kC;
+  const snd_playback_handle h = r.sys->Play(HashId("P"), NoEm(), nullptr);  // refused
+  r.Steps(30);
+  const float after = r.Mean(r.Now() - 256, r.Now()) / kC;
+  snd::test::Note("refused: %s; level before %g, after %g", r.Ended(h.value, SND_END_REJECTED) ? "yes" : "no",
+                  double(before), double(after));
+  SND_CHECK(r.Ended(h.value, SND_END_REJECTED));
+  SND_CHECK_NEAR(after, before, 1e-3f);
+}
+
+// Many action children in one block beyond CoreLimits.maxActionChildren (first block) and the
+// deferred queue (later blocks): bounded; records how many sound and whether a warning is posted.
+SND_TEST(IndepG4Action, SpecHole_ActionChildrenBeyondTheLimits) {
+  snd_config cfg = Config(128);
+  cfg.max_virtual_voices = 512;
+  cfg.max_playbacks = 1024;
+  Rig r(cfg);
+  B bk;
+  std::vector<TAction> acts;
+  for (int i = 0; i < 100; ++i) acts.push_back(Act(10.0f, kPlay, HashId("Z")));
+  for (int k = 0; k < 3; ++k) {
+    char n[8];
+    std::snprintf(n, sizeof n, "P%d", k);
+    TEvent& p = bk.Event(n, {B::SynthClip(bk.Synth(0.0f))});
+    p.tracks[0].actions = acts;
+  }
+  bk.Event("Z", {B::SynthClip(bk.Synth(1.0f))});  // DC 0.001
+  r.Load("b", bk.Build("B"));
+  for (int k = 0; k < 3; ++k) {
+    char n[8];
+    std::snprintf(n, sizeof n, "P%d", k);
+    r.sys->Play(HashId(n), NoEm(), nullptr);
+  }
+  const std::size_t errs = r.errors.size();
+  r.Steps(6);
+  const float n = r.Mean(r.Now() - 256, r.Now()) / kC / 0.001f;
+  snd::test::Note("300 actions at 10 ms in one block: %.1f children sound (real voices 128), warnings +%zu", double(n),
+                  r.errors.size() - errs);
+  SND_CHECK(n <= 300.5f);
+}
+
+// Shuffle: several plays of the same event in one block still take a permutation (7 clips of
+// levels 2^k / 128: the sum of a round played in one block is 127 / 128 only for a permutation).
+SND_TEST(IndepG4Seq, ShuffleRoundsPlayedWithinOneBlock) {
+  Rig r(Config(16));
+  B bk;
+  std::vector<TClip> cl;
+  for (int k = 0; k < 7; ++k) {
+    char an[16];
+    std::snprintf(an, sizeof an, "s%d", k);
+    cl.push_back(B::AssetClip(bk.Asset(an, Constant(2400, float(1 << k) / 128.0f))));
+  }
+  bk.Event("SH", cl, 4);
+  r.Load("b", bk.Build("B"));
+  for (int round = 0; round < 12; ++round) {
+    const std::size_t t0 = r.Now();
+    for (int i = 0; i < 7; ++i) r.sys->Play(HashId("SH"), NoEm(), nullptr);
+    r.Steps(12);
+    SND_CHECK_NEAR(r.At(t0 + 1200) / kC, 127.0f / 128.0f, 1e-4f);
+  }
+}
+
+// loopCount 1 ("既定") on an asset with loop points: records whether it loops endlessly
+// (D-142 says 1 = default without saying what the default is for an asset with loop points).
+SND_TEST(IndepG4Loop, SpecHole_LoopCountOneOnAnAssetWithLoopPoints) {
+  const LoopRun one = RunLoop(1000, 1, 0, 80, 200, 800);
+  snd::test::Note("loopCount 1, loop points [200, 800): end %zu, ends %u (endless: end = 20480)", one.end, one.ends);
+  SND_CHECK(one.ends <= 1u);
+}
+
+// Nested: the child event's own instance limit (EVNT.maxInstances) - D-144 says the child uses
+// its own limits; records whether a second parent's child is refused.
+SND_TEST(IndepG4Nest, SpecHole_ChildEventInstanceLimit) {
+  Rig r;
+  B bk = NestBank();
+  bk.Event("P", {NestClip(1)});
+  bk.Event("C", {B::SynthClip(bk.Synth(300.0f))}, 0, 1).maxInstances = 1;
+  r.Load("b", bk.Build("B"));
+  r.sys->Play(HashId("P"), NoEm(), nullptr);
+  r.Steps(2);
+  r.sys->Play(HashId("P"), NoEm(), nullptr);
+  r.Steps(4);
+  snd::test::Note("two parents, child maxInstances 1: level %g (0.3 = limited, 0.6 = not applied)",
+                  double(r.Mean(r.Now() - 256, r.Now()) / kC));
+}
