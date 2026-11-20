@@ -167,7 +167,7 @@ SND_TEST(BuildtoolPatch, ChunkRoundTripAndBuild) {
   n.pointCount = 2;
   n.points[1][0] = 3.0f;
   n.params[2] = 0.25f;
-  n.inputs[0] = pt::kNoInput;
+  for (std::uint32_t& in : n.inputs) in = pt::kNoInput;
   a.nodes = {n, n};
   a.nodes[1].inputs[0] = 0;
   const std::vector<std::uint8_t> bytes = pt::WritePatchChunk({a}, {pt::Link{4, 0}});
@@ -178,6 +178,13 @@ SND_TEST(BuildtoolPatch, ChunkRoundTripAndBuild) {
             ps[0].nodes[0].points[1][0] == 3.0f && ps[0].nodes[0].params[2] == 0.25f);
   SND_CHECK(ls.size() == 1u && ls[0].synpRow == 4u);
   for (std::size_t cut = 0; cut < bytes.size(); cut += 7) SND_CHECK(!pt::ReadPatchChunk(bytes.data(), cut, &ps, &ls));
+  // D-180c: indices out of range (an input not earlier in its program, a link to no program).
+  pt::Program bad = a;
+  bad.nodes[0].inputs[1] = 1;  // node 0 reads node 1: not dependency order
+  std::vector<std::uint8_t> b2 = pt::WritePatchChunk({bad}, {pt::Link{4, 0}});
+  SND_CHECK(!pt::ReadPatchChunk(b2.data(), b2.size(), &ps, &ls));
+  b2 = pt::WritePatchChunk({a}, {pt::Link{4, 1}});  // program 1 of 1
+  SND_CHECK(!pt::ReadPatchChunk(b2.data(), b2.size(), &ps, &ls));
   // A project: the patch object, a clip using it; an unknown patch reference is an error.
   Project p("patchbuild");
   p.Minimal();

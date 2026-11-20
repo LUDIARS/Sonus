@@ -475,8 +475,11 @@ bool ReadPatchChunk(const std::uint8_t* data, std::uint64_t bytes, std::vector<P
   }
   const std::uint64_t nodeOff = off;
   if (nodeOff + totalNodes * kNodeBytes + lc * 8 > bytes) return false;
+  std::uint64_t expectFirst = 0;
   for (const Head& h : heads) {
-    if (std::uint64_t{h.first} + h.count > totalNodes) return false;
+    // Programs follow each other in the node array (WritePatchChunk), none empty.
+    if (h.first != expectFirst || h.count == 0u || std::uint64_t{h.first} + h.count > totalNodes) return false;
+    expectFirst += h.count;
     Program p;
     p.id = h.id;
     for (std::uint32_t k = 0; k < h.count; ++k) {
@@ -486,7 +489,12 @@ bool ReadPatchChunk(const std::uint8_t* data, std::uint64_t bytes, std::vector<P
       n.parameter = GetU32(q + 4);
       n.pointCount = GetU32(q + 8);
       if (n.pointCount > kMaxCurvePoints) return false;
-      for (std::uint32_t i = 0; i < kMaxInputs; ++i) n.inputs[i] = GetU32(q + 16 + 4 * i);
+      if (n.kind >= kKindCount) return false;
+      for (std::uint32_t i = 0; i < kMaxInputs; ++i) {
+        n.inputs[i] = GetU32(q + 16 + 4 * i);
+        // Dependency order: an input is an earlier node of the same program, or none.
+        if (n.inputs[i] != kNoInput && n.inputs[i] >= k) return false;
+      }
       for (std::uint32_t i = 0; i < kMaxParams; ++i) n.params[i] = GetF32(q + 32 + 4 * i);
       for (std::uint32_t i = 0; i < kMaxCurvePoints; ++i) {
         n.points[i][0] = GetF32(q + 64 + 8 * i);
@@ -497,8 +505,11 @@ bool ReadPatchChunk(const std::uint8_t* data, std::uint64_t bytes, std::vector<P
     programs->push_back(std::move(p));
   }
   const std::uint64_t linkOff = nodeOff + totalNodes * kNodeBytes;
+  if (expectFirst != totalNodes) return false;
   for (std::uint64_t i = 0; i < lc; ++i) {
-    links->push_back(Link{GetU32(data + linkOff + 8 * i), GetU32(data + linkOff + 8 * i + 4)});
+    const Link l{GetU32(data + linkOff + 8 * i), GetU32(data + linkOff + 8 * i + 4)};
+    if (l.program >= pc) return false;
+    links->push_back(l);
   }
   return true;
 }
