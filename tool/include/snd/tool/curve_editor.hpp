@@ -55,6 +55,9 @@ const char* CurveComposeName(CurveCompose c);
 bool ParseCurveTarget(const std::string& s, CurveTarget* out);
 bool ParseCurveCompose(const std::string& s, CurveCompose* out);
 CurveCompose DefaultCompose(CurveTarget t);  // 4.3
+// D-179b: the runtime does not read the "compose" column; for these targets it applies its fixed
+// rule (volume / pitch / pan added, lowpass minimum, highpass maximum) whatever is written.
+bool ComposeIgnored(CurveTarget t);
 
 class CurveEditor {
  public:
@@ -74,6 +77,9 @@ class CurveEditor {
   bool SetCompose(CurveCompose c);
   CurveTarget target() const;
   CurveCompose compose() const;  // the written one, else DefaultCompose(target)
+  // A "compose" is written and the runtime does not apply it (ComposeIgnored(target)): the
+  // screen warns. The editor still accepts it (the project format allows it).
+  bool ComposeIgnored() const;
 
  private:
   bool IsDistanceCurve() const;
@@ -138,6 +144,7 @@ struct ComposeResult {
   double send = 1.0, effectParam = 1.0, spread = 1.0, reverbSend = 1.0, blend3D = 1.0;
   std::vector<CurveContribution> curves;
   std::vector<std::string> outsideScope;  // parameter GUIDs read at an undeclared scope
+  std::vector<std::uint32_t> composeIgnored;  // curves whose written "compose" the runtime ignores
 };
 
 // Event curves (not distance curves) with the given parameter values (by parameter GUID)

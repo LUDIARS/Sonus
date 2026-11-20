@@ -96,6 +96,11 @@ CurveCompose DefaultCompose(CurveTarget t) {
   }
 }
 
+bool ComposeIgnored(CurveTarget t) {
+  return t == CurveTarget::Volume || t == CurveTarget::Pitch || t == CurveTarget::Lowpass || t == CurveTarget::Highpass ||
+         t == CurveTarget::Pan;
+}
+
 // --- CurveEditor ----------------------------------------------------------------------------
 CurveEditor::CurveEditor(ProjectDocument& doc, std::string guid, std::string path)
     : doc_(doc), guid_(NormalizeGuid(guid)), path_(std::move(path)) {}
@@ -184,6 +189,10 @@ CurveTarget CurveEditor::target() const {
   ParseCurveTarget(StringAt(o->doc, path_ + ".target", "volume"), &t);
   return t;
 }
+bool CurveEditor::ComposeIgnored() const {
+  const DocObject* o = doc_.Find(guid_);
+  return o != nullptr && FindPath(o->doc, path_ + ".compose") != nullptr && snd::tool::ComposeIgnored(target());
+}
 CurveCompose CurveEditor::compose() const {
   CurveCompose c = DefaultCompose(target());
   const DocObject* o = doc_.Find(guid_);
@@ -240,7 +249,7 @@ double ParameterEditor::rampRate() const { return valid() ? NumberAt(doc_.Find(g
 
 bool ParameterEditor::SetSwitch(bool s) {
   if (!valid()) return false;
-  if (!s) return doc_.Find(guid_)->doc.Find("kind") != nullptr && doc_.Erase(guid_, "kind");
+  if (!s) return doc_.Find(guid_)->doc.Find("kind") == nullptr || doc_.Erase(guid_, "kind");  // D-177b
   return doc_.Set(guid_, "kind", String("switch"));
 }
 std::uint32_t ParameterEditor::scope() const {
@@ -300,6 +309,7 @@ ComposeResult ComposeEvent(const ProjectDocument& doc, const std::string& eventG
     ParseCurveTarget(StringAt(cv, "target", "volume"), &c.target);
     c.compose = DefaultCompose(c.target);
     ParseCurveCompose(StringAt(cv, "compose"), &c.compose);
+    if (cv.Find("compose") != nullptr && ComposeIgnored(c.target)) r.composeIgnored.push_back(static_cast<std::uint32_t>(k));
     const std::string pref = StringAt(cv, "parameter");
     float x = 0.0f;
     if (pref == "distance") {

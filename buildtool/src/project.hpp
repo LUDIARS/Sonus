@@ -94,6 +94,8 @@ class Project {
 bool ParseGuid(const std::string& text, std::uint64_t* lo, std::uint64_t* hi);
 bool LooksLikeGuid(const std::string& text);
 std::string Hex32(std::uint32_t v);
+std::vector<std::string> SchemaKindList();
+std::vector<std::string> SchemaMemberList(const std::string& kind);
 
 }  // namespace snd::buildtool::detail
 
