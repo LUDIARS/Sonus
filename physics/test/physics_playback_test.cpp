@@ -377,7 +377,7 @@ SND_TEST(PhysicsPlayback, HeldEmitterWaitsForTheSystem) {
     snd::test::Note("variant %d: L %.4f R %.4f", variant, l, r);
     SND_CHECK_NEAR(l, 0.0, 2e-3);
     SND_CHECK_NEAR(r, 0.25, 2e-3);
-    SND_CHECK_EQ(Stats(phys).held_emitters_released_early, 0u);
+    SND_CHECK_EQ(Stats(phys).dropped_no_emitter, 0u);
     snd_phys_destroy(phys);
   }
 }
@@ -402,11 +402,53 @@ SND_TEST(PhysicsPlayback, EmittersComeBackForShortMissingAndRefusedPlays) {
   }
   snd_physics_stats s = Stats(phys);
   SND_CHECK_EQ(s.dropped_no_emitter, 0u);
-  SND_CHECK_EQ(s.held_emitters_released_early, 0u);
   SND_CHECK_EQ(s.group_requests, 300u);
   // Everything that sounded was on the right (the limited loop keeps playing there): nothing
   // was placed at the listener.
   SND_CHECK_NEAR(w.Mean(0, w.sys.Frames() - 4096, 4096), 0.0, 2e-3);
   SND_CHECK(w.Mean(1, w.sys.Frames() - 4096, 4096) > 0.2);
+  snd_phys_destroy(phys);
+}
+
+// A full held ring drops the new group and never destroys a held emitter early: the earlier
+// hit keeps its position (right), the later one (left) is not played at all.
+SND_TEST(PhysicsPlayback, FullHeldRingDropsTheNewGroupAndKeepsTheOld) {
+  World w;
+  SND_REQUIRE(w.ok);
+  Recorder rec;
+  snd_physics_config cfg = OpenConfig(&rec);
+  cfg.max_held_emitters = 1;
+  snd_phys* phys = nullptr;
+  SND_REQUIRE_EQ(snd_physics_create(w.sys.sys, &cfg, nullptr, &phys), SND_OK);
+  OneEventTable(phys, snd_hash_id("SE/Hit"), 1.0f);
+  w.sys.Advance(4);
+  const std::uint64_t start = w.sys.Frames();
+  const snd_contact right = Contact(SND_CONTACT_IMPACT, 1, 2, 0, 0, 2.0f, 0, 0, 5.0f);
+  const snd_contact left = Contact(SND_CONTACT_IMPACT, 3, 4, 0, 0, -2.0f, 0, 0, 5.0f);
+  SND_CHECK_EQ(snd_phys_submit_contacts(phys, &right, 1, 1.0f / 60.0f), SND_OK);
+  SND_CHECK_EQ(snd_phys_submit_contacts(phys, &left, 1, 1.0f / 60.0f), SND_OK);  // no snd_update between
+  const snd_physics_stats s = Stats(phys);
+  SND_CHECK_EQ(s.group_requests, 1u);
+  SND_CHECK_EQ(s.dropped_no_emitter, 1u);
+  SND_REQUIRE_EQ(rec.Count(SND_PHYSICS_RECORD_DROP), 1u);
+  SND_CHECK_EQ(rec.Of(SND_PHYSICS_RECORD_DROP)[0].r.position.x, -2.0f);
+  for (int i = 0; i < 60; ++i) {
+    SND_CHECK_EQ(snd_phys_submit_contacts(phys, nullptr, 0, 1.0f / 60.0f), SND_OK);
+    w.sys.Advance(1);
+  }
+  double l = 0, r = 0;
+  LevelsFrom(w, start, &l, &r);
+  SND_CHECK_NEAR(l, 0.0, 2e-3);
+  SND_CHECK_NEAR(r, 0.25, 2e-3);
+  // The ring emptied once applied: a new hit on the left plays there.
+  const std::uint64_t again = w.sys.Frames();
+  SND_CHECK_EQ(snd_phys_submit_contacts(phys, &left, 1, 1.0f / 60.0f), SND_OK);
+  for (int i = 0; i < 60; ++i) {
+    SND_CHECK_EQ(snd_phys_submit_contacts(phys, nullptr, 0, 1.0f / 60.0f), SND_OK);
+    w.sys.Advance(1);
+  }
+  LevelsFrom(w, again, &l, &r);
+  SND_CHECK_NEAR(l, 0.25, 2e-3);
+  SND_CHECK_NEAR(r, 0.0, 2e-3);
   snd_phys_destroy(phys);
 }

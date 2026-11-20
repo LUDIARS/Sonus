@@ -260,9 +260,11 @@ SND_TEST(PhysicsCulling, BudgetFromDtInMicroseconds) {
     for (std::uint32_t n : contactsPerFrame) {
       std::vector<snd_contact> c;
       for (std::uint32_t i = 0; i < n; ++i, obj += 2) c.push_back(Impact(obj, obj + 1, static_cast<float>(i), 1.0f));
-      const std::size_t before = rec.Count(SND_PHYSICS_RECORD_PLAY);
+      // Groups that passed the budget: played, or dropped for want of a held-emitter place
+      // (the system never runs here, so the held ring fills).
+      const std::size_t before = rec.Count(SND_PHYSICS_RECORD_PLAY) + rec.Count(SND_PHYSICS_RECORD_DROP);
       f.Submit(c, dt);
-      got.push_back(static_cast<std::uint32_t>(rec.Count(SND_PHYSICS_RECORD_PLAY) - before));
+      got.push_back(static_cast<std::uint32_t>(rec.Count(SND_PHYSICS_RECORD_PLAY) + rec.Count(SND_PHYSICS_RECORD_DROP) - before));
     }
     return got;
   };
@@ -432,7 +434,6 @@ SND_TEST(PhysicsCulling, FourTimesTheVoicesAndEmittersInOneFrame) {
   SND_CHECK_EQ(snd_phys_submit_contacts(phys, c.data(), 16, 0.05f), SND_OK);
   s = Stats(phys);
   SND_CHECK_EQ(s.dropped_no_emitter, 96u);
-  SND_CHECK_EQ(s.held_emitters_released_early, 0u);
   SND_CHECK_EQ(rec.Count(SND_PHYSICS_RECORD_PLAY), 16u);
   sys.Advance(4);
   snd_phys_destroy(phys);
