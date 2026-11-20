@@ -304,7 +304,8 @@ std::uint32_t TimeStretchProcess(void* state, float* const* in, std::uint32_t in
         s.tau += Increment(s, SpeedAt(s, speedStart, speedEnd, o, outFrames));
         const std::int64_t natural = s.pCur + hop;
         const std::int64_t t = Nominal(s.tau);
-        const std::int64_t lo = t - s.search, hi = t + s.search;
+        // Never before the first input frame (the history before it is silence).
+        const std::int64_t lo = t - s.search > 0 ? t - s.search : 0, hi = t + s.search;
         s.pPrev = s.pCur;
         s.pCur = natural >= lo && natural <= hi ? natural : Search(s, in, base, natural, lo, hi);
       }

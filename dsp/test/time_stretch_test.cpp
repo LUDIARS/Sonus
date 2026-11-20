@@ -108,7 +108,7 @@ SND_TEST(TimeStretch, ShapeAndInvalidArguments) {
   SND_CHECK(TimeStretchInit(m.get(), b, 2, kRate));
   // A smaller maxSpeed keeps less history.
   SND_CHECK(TimeStretchStateBytes(2, kRate, 1.5f) < b);
-  snd::test::Note("state: stereo 48 kHz max speed 4: %zu bytes, pad %u frames", b, sh.padFrames);
+  snd::test::Note("state: stereo 48 kHz max speed 4: %u bytes, pad %u frames", static_cast<unsigned>(b), sh.padFrames);
 }
 
 // Speed 1 from Init: output == input bit for bit, no delay, however the calls are split.
@@ -128,7 +128,7 @@ SND_TEST(TimeStretch, SpeedOneIsBitExact) {
     bool same = true;
     for (std::uint32_t c = 0; c < 2; ++c)
       for (std::uint32_t i = 0; i < total; ++i) same &= out[c][i] == src[c][i];
-    SND_CHECK_MSG(same, "speed 1 is not the input (sizes %zu)", sizes.size());
+    SND_CHECK_MSG(same, "speed 1 is not the input (sizes %u)", static_cast<unsigned>(sizes.size()));
     // Consumed = output + look-ahead (within one hop).
     const double off = TimeStretchPendingOffset(t.st());
     SND_CHECK_EQ(static_cast<double>(TimeStretchConsumedFrames(t.st())) + off, static_cast<double>(total));
@@ -230,8 +230,8 @@ SND_TEST(TimeStretch, BlockSplitInvariance) {
       b.Call(src, &ob, 2048, s0, s1);
     }
     const float d = dsptest::MaxAbsDiff(oa[0].data(), ob[0].data(), 8192);
-    snd::test::Note("ramp 0.7 -> 1.9 in one call vs 4: max diff %.3g, consumed %llu / %llu", static_cast<double>(d),
-                    static_cast<unsigned long long>(a.pos), static_cast<unsigned long long>(b.pos));
+    snd::test::Note("ramp 0.7 -> 1.9 in one call vs 4: max diff %.3g, consumed %.0f / %.0f", static_cast<double>(d),
+                    static_cast<double>(a.pos), static_cast<double>(b.pos));
     SND_CHECK(a.pos == b.pos);
     SND_CHECK(d < 1e-6f);
   }

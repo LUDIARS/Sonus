@@ -16,7 +16,8 @@
 //   wr[j] = sin^2(pi (j + 0.5) / (2 H)),  wf[j] = wr[H - 1 - j].
 // The nominal position advances by speed * H per hop (32.32 fixed point; the
 // speed of hop k is speed(i) at the output frame i where hop k starts). p_k is
-// chosen in [nominal - S, nominal + S] (S = search radius, default 8 ms):
+// chosen in [max(0, nominal - S), nominal + S] (S = search radius, default 8 ms;
+// never before the first input frame):
 //   - if the natural continuation p_{k-1} + H is in that range it is taken
 //     (then out[k H + j] = x[p_k + j] exactly, no cross-fade);
 //   - otherwise the candidate with the largest normalised cross-correlation
