@@ -607,6 +607,11 @@ inline PlaybackHandle PlayInput(System* sys, const InputDesc& desc,
                                 const When& when = When::Immediate()) noexcept {
   return PlaybackHandle::FromC(snd_play_input(sys, &desc, emitter.ToC(), detail::W(when)));
 }
+// Stage 7-D (D-195): snd_write_input.
+inline std::uint32_t WriteInput(System* sys, std::uint32_t deviceIndex, const float* const* channels,
+                                std::uint32_t channelCount, std::uint32_t frames) noexcept {
+  return snd_write_input(sys, deviceIndex, channels, channelCount, frames);
+}
 
 // ---------------------------------------------------------------------------
 // Queries
