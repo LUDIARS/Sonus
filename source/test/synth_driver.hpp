@@ -11,9 +11,7 @@
 #include <cmath>
 #include <complex>
 #include <cstdint>
-#include <cstdlib>
 #include <cstring>
-#include <memory>
 #include <vector>
 
 #include "snd/base/allocator.hpp"
@@ -71,14 +69,15 @@ class Driver {
     kind_ = ok_ ? runtime.Kinds().kinds[static_cast<std::size_t>(kind)] : nullptr;
     if (kind_ != nullptr) {
       const std::size_t bytes = kind_->PoolBytes(lim_);
-      pool_.reset(static_cast<std::uint8_t*>(std::aligned_alloc(64, (bytes + 127) / 64 * 64)));
-      ok_ = kind_->Init(pool_.get(), bytes, lim_, sv_);
+      pool_ = static_cast<std::uint8_t*>(alloc_->Allocate(bytes, 64, snd::MemTag::Misc));
+      ok_ = pool_ != nullptr && kind_->Init(pool_, bytes, lim_, sv_);
     } else {
       ok_ = false;
     }
   }
   ~Driver() {
     if (kind_ != nullptr && ok_) kind_->Shutdown();
+    if (pool_ != nullptr) alloc_->Free(pool_, snd::MemTag::Misc);
     runtime.Destroy();
   }
   Driver(const Driver&) = delete;
@@ -206,7 +205,7 @@ class Driver {
   src::SourceLimits lim_{};
   src::SourceServices sv_{};
   src::ISourceKind* kind_ = nullptr;
-  std::unique_ptr<std::uint8_t, decltype(&std::free)> pool_{nullptr, &std::free};
+  std::uint8_t* pool_ = nullptr;
   snd::ClockSample clock_ = 0;
   bool ok_ = false;
 };

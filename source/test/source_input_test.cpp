@@ -221,7 +221,7 @@ SND_TEST(SourceInput, WriterAndReaderThreads) {
         const float a = v.out[0][i];
         SND_CHECK_EQ(v.out[1][i], -a);
         if (a != 0.0f) {
-          SND_CHECK_MSG(a > prev, "not increasing at %zu: %f after %f", i, double(a), double(prev));
+          SND_CHECK_MSG(a > prev, "not increasing at %u: %f after %f", static_cast<unsigned>(i), double(a), double(prev));
           prev = a;
         }
       }
