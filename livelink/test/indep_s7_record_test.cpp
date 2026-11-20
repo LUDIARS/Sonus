@@ -33,6 +33,7 @@ struct Recorded {
 struct RecordOpts {
   bool stateBefore = false;  // SetValue + OverrideParam before the recording starts
   bool replace = false;      // a ReplaceChunk during the recording
+  bool replaceTwice = false; // two ReplaceChunks (same chunk slot: same pairing key) with different data
   bool structEdit = false;   // an AddBus (fake editor) during the recording
   bool reload = false;       // a ReloadBank during the recording
 };
@@ -74,6 +75,13 @@ void Record(Recorded& rec, const RecordOpts& o) {
     const std::vector<std::uint8_t> ch = BussChunk(-3.0f);
     SND_CHECK_EQ(t.Ack(t.c->ReplaceChunk(kLive, bf::chunk::BUSS, ch.data(), ch.size())), SND_OK);
     f.Steps(3);
+  }
+  if (o.replaceTwice) {
+    for (float db : {-4.0f, -10.0f}) {
+      const std::vector<std::uint8_t> ch = BussChunk(db);
+      SND_CHECK_EQ(t.Ack(t.c->ReplaceChunk(kLive, bf::chunk::BUSS, ch.data(), ch.size())), SND_OK);
+      f.Steps(3);
+    }
   }
   if (o.structEdit) {
     const std::uint64_t args[2] = {HashId("Master"), 2};
@@ -420,4 +428,25 @@ SND_TEST(IndepS7Record, HotReloadInsideRecordingIsABankChange) {
   ReplayOut b;
   SND_REQUIRE_EQ(Replay(rec, &b), SND_OK);
   SND_CHECK(SameDecisions(a.decisions, b.decisions));  // still deterministic between replays
+}
+
+// Two replacements through the same chunk slot (equal pairing keys) replay with their own data.
+SND_TEST(IndepS7Record, TwoReplacementsWithTheSameKeyReplayInOrder) {
+  Recorded rec;
+  RecordOpts o;
+  o.replaceTwice = true;
+  Record(rec, o);
+  SND_REQUIRE(!rec.bytes.empty());
+  const Order w = Walk(rec.bytes);
+  SND_CHECK_EQ(w.liveData, 2u);
+  ReplayOut a;
+  SND_REQUIRE_EQ(Replay(rec, &a), SND_OK);
+  SND_CHECK_EQ(a.info.replacedChunks, 2u);
+  SND_CHECK_EQ(a.info.skippedCommands, 0u);
+  SND_CHECK(a.bitExact);
+  SND_REQUIRE(rec.blockNumbersMatch);
+  ll::OutputDigest recorded;
+  SND_REQUIRE(RecordedDigest(rec, a.info.firstBlock, a.info.lastBlock, &recorded));
+  SND_CHECK_MSG(recorded.value == a.digest.value, "recorded %016llx replay %016llx",
+                static_cast<unsigned long long>(recorded.value), static_cast<unsigned long long>(a.digest.value));
 }
