@@ -487,8 +487,8 @@ SND_TEST(IndepCull, ReferenceModelRandom) {
       SND_CHECK_EQ(f.Submit(cs, dt), SND_OK);
       std::vector<Rec> got = f.rec.Of(SND_PHYSICS_RECORD_PLAY);
       if (got.size() != want.size()) {
-        snd::test::Note("seed %llu frame %d: %zu plays, model %zu", static_cast<unsigned long long>(seed), frame,
-                        got.size(), want.size());
+        snd::test::Note("seed %llu frame %d: %llu plays, model %llu", static_cast<unsigned long long>(seed), frame,
+                        static_cast<unsigned long long>(got.size()), static_cast<unsigned long long>(want.size()));
         same = false;
         break;
       }
@@ -497,9 +497,9 @@ SND_TEST(IndepCull, ReferenceModelRandom) {
         const ModelPlay& w = want[i];
         if (r.event != w.event || r.count != w.count || r.impulse != w.impulse || r.object_a != w.objA ||
             r.object_b != w.objB || r.position.x != w.pos[0] || r.contact_kind != w.kind) {
-          snd::test::Note("seed %llu frame %d play %zu: event %x count %u impulse %g obj %llu/%llu x %g; model %x %u %g "
+          snd::test::Note("seed %llu frame %d play %llu: event %x count %u impulse %g obj %llu/%llu x %g; model %x %u %g "
                           "%llu/%llu %g",
-                          static_cast<unsigned long long>(seed), frame, i, r.event, r.count,
+                          static_cast<unsigned long long>(seed), frame, static_cast<unsigned long long>(i), r.event, r.count,
                           static_cast<double>(r.impulse), static_cast<unsigned long long>(r.object_a),
                           static_cast<unsigned long long>(r.object_b), static_cast<double>(r.position.x), w.event,
                           w.count, static_cast<double>(w.impulse), static_cast<unsigned long long>(w.objA),

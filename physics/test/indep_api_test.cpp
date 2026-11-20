@@ -256,7 +256,7 @@ SND_TEST(IndepApi, WrongThread) {
   t.join();
   SND_CHECK(registered);
   for (std::size_t i = 0; i < rs.size(); ++i) {
-    SND_CHECK_MSG(rs[i] == SND_ERR_WRONG_THREAD, "call %zu: %d", i, static_cast<int>(rs[i]));
+    SND_CHECK_MSG(rs[i] == SND_ERR_WRONG_THREAD, "call %llu: %d", static_cast<unsigned long long>(i), static_cast<int>(rs[i]));
   }
   SND_CHECK_EQ(count, 0u);
   // Nothing changed: no record, no statistics, the observer and table are still there.
