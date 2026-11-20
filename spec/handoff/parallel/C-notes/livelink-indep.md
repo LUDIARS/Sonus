@@ -188,9 +188,19 @@ tests/integration/indep_livelink_profile_record_test.cpp:349-（SkippedCommandsA
 
 ## 回した構成と結果
 
-（下の表は回し終わった時点の結果。ビルドは `$S/livelink-indep/b-*`、-j2、終わったら消した）
+ビルドは `$S/livelink-indep/b-*`、-j2、1 つずつ。終わったら消した。
 
-RESULTS_PLACEHOLDER
+| 構成 | コミット | 実行 | 結果 |
+| --- | --- | --- | --- |
+| 1 gcc Debug | f54cf1a 前（ccc5129〜9d6333a のテスト。8915416 の再生テストの 1 件追加は単体で通過） | 全件 ctest（222） | 221 通過。失敗は `livelink_indep_s7_impl_test`（欠陥の 1 件だけ）。`platform_device_play_test` は Skipped。`api_indep_runtime_test` は通過 |
+| 3 ASan/UBSan | f54cf1a | `ctest -R livelink`（32）、`SND_FUZZ_ITERATIONS=20000` | 31 通過。失敗は欠陥の 1 件だけ（サニタイザの報告なし。単体で出力を確認） |
+| 4 TSan | 34f282e | `ctest -R livelink`（32）と `livelink_indep_s7_(stress\|live)` を -j1 で `--repeat until-fail:20` | 31 通過、失敗は欠陥の 1 件だけ（TSan の警告なし）。20 回の繰り返しは全通過 |
+| 5 Release | 34f282e → e5b8c3d | `ctest -R livelink`（32）と並行性 2 本の 20 回 | 31 通過、失敗は欠陥の 1 件だけ。20 回の繰り返しで `IndepS7Stress.ReconnectsDuringRequests` が 1 回、最後の `StopAuditions` が 0（Ready でなく送れない）で落ちた → テストの側で送り直す形に直し（e5b8c3d）、Release で stress を 20 回: 全通過 |
+| 2 clang Debug | e5b8c3d | ビルド（警告 0）と `ctest -R livelink`（32） | 失敗は `livelink_indep_s7_impl_test` だけ（-j2 のログでは失敗した SND_TEST の名前を個別に確かめていない。gcc / ASan / TSan では欠陥の 1 件だけ） |
+| MinGW 構文検査 | e5b8c3d | 新しい 6 本を `-std=c++20 -fsyntax-only -Werror -Wall -Wextra -Wpedantic -Wshadow -fno-exceptions -fno-rtti` | 全部通過（std::thread を含めて。POSIX 専用のものは無い）。D-170 の 3 本は依頼書のフラグで通過 |
+
+回していない構成: 6（テストなし Release）、7（Opus なし）、8、9（ツール入り。新しいファイルは tool/ に触れない）。
+TSan は e5b8c3d の stress の変更（最後の全停止を送り直すだけ）の後には回し直していない。
 
 ## 未検証の箇所
 
