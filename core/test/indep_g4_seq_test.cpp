@@ -71,8 +71,8 @@ SND_TEST(IndepG4Calib, AssetComesOutExactlyAtPitchOne) {
   float edge = 0;
   for (std::size_t i = 16; i < 984; ++i) bad += std::fabs(r.At(t0 + i) - ramp[i] * kC) > 1e-4f ? 1u : 0u;
   for (std::size_t i = 0; i < 1000; ++i) edge = std::max(edge, std::fabs(r.At(t0 + i) - ramp[i] * kC));
-  snd::test::Note("max |error| incl. edges %g; tail frames above 1e-3: %zu", double(edge),
-                  r.CountAbove(t0 + 1000, r.Now(), 1e-3f));
+  snd::test::Note("max |error| incl. edges %g; tail frames above 1e-3: %llu", double(edge),
+                  static_cast<unsigned long long>(r.CountAbove(t0 + 1000, r.Now(), 1e-3f)));
   SND_CHECK_EQ(bad, 0u);
   SND_CHECK_EQ(r.CountAbove(t0 + 1024, r.Now(), 1e-7f), 0u);
   SND_CHECK_EQ(r.CountEnds(h.value), 1u);
@@ -284,7 +284,7 @@ SND_TEST(IndepG4Rand, VolumeStaysInsideTheRange) {
     outside += std::fabs(db) > 6.01 ? 1 : 0;
     distinct.insert(int(std::lround(db * 100)));
   }
-  snd::test::Note("volume offsets [%.2f, %.2f] dB, %zu distinct", lo, hi, distinct.size());
+  snd::test::Note("volume offsets [%.2f, %.2f] dB, %llu distinct", lo, hi, static_cast<unsigned long long>(distinct.size()));
   SND_CHECK_EQ(outside, 0);
   SND_CHECK(distinct.size() > 50u);
   SND_CHECK(lo < -3.0 && hi > 3.0);  // +- range (both directions)
@@ -410,7 +410,7 @@ SND_TEST(IndepG4Loop, NLoopsEndAtNTimesTheLength) {
   SND_CHECK_EQ(one.ends, 1u);
   SND_CHECK_EQ(one.reason, SND_END_COMPLETED);
   const LoopRun three = RunLoop(1000, 3);
-  snd::test::Note("loopCount 3: end %zu count %zu min %g", three.end, three.count, double(three.minInside));
+  snd::test::Note("loopCount 3: end %llu count %llu min %g", static_cast<unsigned long long>(three.end), static_cast<unsigned long long>(three.count), double(three.minInside));
   SND_CHECK(three.end >= 2999 && three.end <= 3001);
   SND_CHECK(three.count >= 2998 && three.count <= 3001);
   SND_CHECK(three.minInside > 0.45f * kC);
@@ -421,11 +421,11 @@ SND_TEST(IndepG4Loop, NLoopsEndAtNTimesTheLength) {
 // Loop end exactly on a block boundary (256 x 2 = 512) and over many blocks (100 x 7).
 SND_TEST(IndepG4Loop, NLoopsAtTheBlockBoundaryAndShortClips) {
   const LoopRun b = RunLoop(256, 2);
-  snd::test::Note("256 x 2: end %zu", b.end);
+  snd::test::Note("256 x 2: end %llu", static_cast<unsigned long long>(b.end));
   SND_CHECK(b.end >= 511 && b.end <= 513);
   SND_CHECK_EQ(b.ends, 1u);
   const LoopRun s = RunLoop(100, 7);
-  snd::test::Note("100 x 7: end %zu", s.end);
+  snd::test::Note("100 x 7: end %llu", static_cast<unsigned long long>(s.end));
   SND_CHECK(s.end >= 699 && s.end <= 701);
   SND_CHECK_EQ(s.ends, 1u);
   const LoopRun big = RunLoop(1000, 40, 0, 200);
@@ -442,11 +442,11 @@ SND_TEST(IndepG4Loop, LoopCountZeroIsEndless) {
 // Pitch 2 (1200 cents): 3 loops of 1000 frames take 1500 output frames.
 SND_TEST(IndepG4Loop, NLoopsWithPitch) {
   const LoopRun p = RunLoop(1000, 3, 1200.0f);
-  snd::test::Note("pitch 2: end %zu", p.end);
+  snd::test::Note("pitch 2: end %llu", static_cast<unsigned long long>(p.end));
   SND_CHECK(p.end >= 1498 && p.end <= 1502);
   SND_CHECK_EQ(p.ends, 1u);
   const LoopRun q = RunLoop(1000, 3, -1200.0f);
-  snd::test::Note("pitch 0.5: end %zu", q.end);
+  snd::test::Note("pitch 0.5: end %llu", static_cast<unsigned long long>(q.end));
   SND_CHECK(q.end >= 5996 && q.end <= 6004);
 }
 
@@ -454,8 +454,8 @@ SND_TEST(IndepG4Loop, NLoopsWithPitch) {
 // whether the material after loopEnd follows the last loop).
 SND_TEST(IndepG4Loop, SpecHole_NLoopsWithLoopPoints) {
   const LoopRun p = RunLoop(1000, 3, 0, 80, 200, 800);
-  snd::test::Note("loop points [200, 800) x 3: end %zu, count %zu (2200 = tail played after the last loop, "
-                  "2000 = stops at loopEnd)", p.end, p.count);
+  snd::test::Note("loop points [200, 800) x 3: end %llu, count %llu (2200 = tail played after the last loop, "
+                  "2000 = stops at loopEnd)", static_cast<unsigned long long>(p.end), static_cast<unsigned long long>(p.count));
   SND_CHECK_EQ(p.ends, 1u);
   SND_CHECK(p.end >= 1999 && p.end <= 2201);
 }
@@ -482,7 +482,7 @@ SND_TEST(IndepG4Loop, NLoopsAcrossAPause) {
   // The material after the resume is the continuation: the last frame heard is the clip's last
   // frame (value 0.6996) and the frames heard after the resume plus before the pause make 3000.
   const std::size_t heard = r.CountAbove(t0, r.Now(), 0.1f);
-  snd::test::Note("end %zu (resume at %zu), heard %zu, last value %g", end - t0, resumed - t0, heard,
+  snd::test::Note("end %llu (resume at %llu), heard %llu, last value %g", static_cast<unsigned long long>(end - t0), static_cast<unsigned long long>(resumed - t0), static_cast<unsigned long long>(heard),
                   double(r.At(end - 4) / kC));
   SND_CHECK(heard >= 3000 - 2 * 240 && heard <= 3000 + 2 * 240);
   SND_CHECK_NEAR(r.At(end - 8) / kC, 0.3f + 0.4f * 991.0f / 1000.0f, 0.01f);
@@ -510,8 +510,8 @@ SND_TEST(IndepG4Loop, NLoopsAcrossAVirtualPhase) {
   const End* e = r.EndOf(h.value);
   SND_REQUIRE(e != nullptr);
   const std::size_t endHeard = r.EndAbove(t0, r.Now(), 0.4f * kC);
-  snd::test::Note("ended at block %llu (clock %zu); last loud frame %zu; expected 14400",
-                  static_cast<unsigned long long>(e->block), std::size_t(e->block) * 256u - t0, endHeard - t0);
+  snd::test::Note("ended at block %llu (clock %llu); last loud frame %llu; expected 14400",
+                  static_cast<unsigned long long>(e->block), static_cast<unsigned long long>(std::size_t(e->block) * 256u - t0), static_cast<unsigned long long>(endHeard - t0));
   // +-24: the resampler's look-ahead (16 source frames read ahead of the output) is lost or
   // kept across the virtual phase; the loops themselves are not lost or added (+-4800).
   SND_CHECK(endHeard - t0 >= 14400 - 24 && endHeard - t0 <= 14400 + 24);
@@ -819,7 +819,7 @@ SND_TEST(IndepG4Nest, ChildInheritsTheParentClipPitch) {
   const snd_playback_handle h = r.sys->Play(HashId("P"), NoEm(), nullptr);
   r.Steps(30);
   const std::size_t end = r.EndAbove(t0, r.Now(), 0.25f * kC) - t0;
-  snd::test::Note("child length %zu (expected 2400)", end);
+  snd::test::Note("child length %llu (expected 2400)", static_cast<unsigned long long>(end));
   SND_CHECK(end >= 2398 && end <= 2402);
   SND_CHECK_EQ(r.CountEnds(h.value), 1u);
   SND_CHECK(r.Ended(h.value, SND_END_COMPLETED));
@@ -961,7 +961,7 @@ SND_TEST(IndepG4Nest, DepthLimitPlaysUpToTheLimitAndWarnsBeyond) {
     const bool heard = std::fabs(lvl - 0.5f) < 0.002f;
     if (heard) deepestHeard = depth;
     if (!heard && firstSilent < 0) firstSilent = depth;
-    snd::test::Note("depth %d: level %g, errors +%zu", depth, double(lvl), r.errors.size() - errs);
+    snd::test::Note("depth %d: level %g, errors +%llu", depth, double(lvl), static_cast<unsigned long long>(r.errors.size() - errs));
     if (!heard) SND_CHECK(r.errors.size() > errs);  // "鳴らさず警告"
     SND_CHECK(heard || std::fabs(lvl) < 1e-6f);     // all or nothing
     r.sys->Stop(h, 0.0f, nullptr);
@@ -1024,7 +1024,7 @@ SND_TEST(IndepG4Action, PlayEventStartsOnTheExactFrame) {
     r.Steps(12);
     const std::size_t first = r.FirstAbove(t0, r.Now(), 0.25f * kC) - t0;
     const std::size_t expected = static_cast<std::size_t>(ms * 48.0f + 0.5f);
-    snd::test::Note("action at %.1f ms: child from frame %zu (expected %zu)", double(ms), first, expected);
+    snd::test::Note("action at %.1f ms: child from frame %llu (expected %llu)", double(ms), static_cast<unsigned long long>(first), static_cast<unsigned long long>(expected));
     SND_CHECK_EQ(first, expected);
     SND_CHECK_NEAR(r.At(t0 + expected + 1) / kC, 0.5f, 1e-4f);
     // The children have no handle: no end for them, the parent has not ended.
@@ -1179,7 +1179,7 @@ SND_TEST(IndepG4Action, Defect_PausedParentStillFiresItsActions) {
     r.sys->ResumePlayback(h, 0.0f);  // applied at t0 + 2816
     r.Steps(6);
     const std::size_t first = r.FirstAbove(t0, r.Now(), 0.25f * kC) - t0;
-    snd::test::Note("paused parent: child from %zu (expected 2816 + 224 = 3040)", first);
+    snd::test::Note("paused parent: child from %llu (expected 2816 + 224 = 3040)", static_cast<unsigned long long>(first));
     SND_CHECK(first >= 3040 && first <= 3040 + 240);
   }
 }
@@ -1194,7 +1194,7 @@ SND_TEST(IndepG4Action, ScheduledParentCountsFromItsStart) {
   r.sys->Play(HashId("P"), NoEm(), &w);
   r.Steps(10);
   const std::size_t first = r.FirstAbove(t0, r.Now(), 0.25f * kC) - t0;
-  snd::test::Note("scheduled parent: child from %zu (expected 1480)", first);
+  snd::test::Note("scheduled parent: child from %llu (expected 1480)", static_cast<unsigned long long>(first));
   SND_CHECK_EQ(first, 1480u);
 }
 
@@ -1248,8 +1248,8 @@ SND_TEST(IndepG4Action, SpecHole_TrackTimeOfALoopingOrPitchedParent) {
     for (std::size_t f = t0 + 1; f < r.Now(); ++f) {
       if (std::fabs(r.At(f)) > 0.25f * kC && std::fabs(r.At(f - 1)) <= 0.25f * kC) starts.push_back(f - t0);
     }
-    snd::test::Note("looping parent (20 ms clip), action at 10 ms: %zu firing(s), first at %zu", starts.size(),
-                    starts.empty() ? 0 : starts[0]);
+    snd::test::Note("looping parent (20 ms clip), action at 10 ms: %llu firing(s), first at %llu", static_cast<unsigned long long>(starts.size()),
+                    static_cast<unsigned long long>(starts.empty() ? 0 : starts[0]));
     SND_CHECK(!starts.empty());
   }
   {
@@ -1263,8 +1263,8 @@ SND_TEST(IndepG4Action, SpecHole_TrackTimeOfALoopingOrPitchedParent) {
     const std::size_t t0 = r.Now();
     r.sys->Play(HashId("P"), NoEm(), nullptr);
     r.Steps(6);
-    snd::test::Note("pitched parent (x2), action at 10 ms: child from %zu (480 = clock time, 240 = material time)",
-                    r.FirstAbove(t0, r.Now(), 0.25f * kC) - t0);
+    snd::test::Note("pitched parent (x2), action at 10 ms: child from %llu (480 = clock time, 240 = material time)",
+                    static_cast<unsigned long long>(r.FirstAbove(t0, r.Now(), 0.25f * kC) - t0));
   }
 }
 
@@ -1305,7 +1305,7 @@ SND_TEST(IndepG4Action, Defect_ActionFiresAfterTheParentStopped) {
   r.Steps(1);
   r.sys->Stop(h, 0.0f, nullptr);  // applied at frame 256
   r.Steps(10);
-  snd::test::Note("child heard from %zu (expected never)", r.FirstAbove(t0, r.Now(), 0.25f * kC) - t0);
+  snd::test::Note("child heard from %llu (expected never)", static_cast<unsigned long long>(r.FirstAbove(t0, r.Now(), 0.25f * kC) - t0));
   SND_CHECK_NEAR(r.MaxAbs(t0, r.Now()), 0.0f, 1e-6f);
 }
 
@@ -1322,8 +1322,8 @@ SND_TEST(IndepG4Action, Defect_ScheduledParentFirstBlockActionsAreLate) {
     r.sys->Play(HashId("P"), NoEm(), &w);
     r.Steps(10);
     const std::size_t first = r.FirstAbove(t0, r.Now(), 0.25f * kC) - t0;
-    snd::test::Note("scheduled at 1000, action at %.0f ms: child from %zu (expected %zu)", double(ms), first,
-                    std::size_t(1000 + ms * 48.0f));
+    snd::test::Note("scheduled at 1000, action at %.0f ms: child from %llu (expected %llu)", double(ms), static_cast<unsigned long long>(first),
+                    static_cast<unsigned long long>(std::size_t(1000 + ms * 48.0f)));
     SND_CHECK_EQ(first, std::size_t(1000 + ms * 48.0f));
   }
 }
@@ -1382,8 +1382,8 @@ SND_TEST(IndepG4Action, SpecHole_ActionChildrenBeyondTheLimits) {
   const std::size_t errs = r.errors.size();
   r.Steps(6);
   const float n = r.Mean(r.Now() - 256, r.Now()) / kC / 0.001f;
-  snd::test::Note("300 actions at 10 ms in one block: %.1f children sound (real voices 128), warnings +%zu", double(n),
-                  r.errors.size() - errs);
+  snd::test::Note("300 actions at 10 ms in one block: %.1f children sound (real voices 128), warnings +%llu", double(n),
+                  static_cast<unsigned long long>(r.errors.size() - errs));
   SND_CHECK(n <= 300.5f);
 }
 
@@ -1412,7 +1412,7 @@ SND_TEST(IndepG4Seq, ShuffleRoundsPlayedWithinOneBlock) {
 // (D-142 says 1 = default without saying what the default is for an asset with loop points).
 SND_TEST(IndepG4Loop, SpecHole_LoopCountOneOnAnAssetWithLoopPoints) {
   const LoopRun one = RunLoop(1000, 1, 0, 80, 200, 800);
-  snd::test::Note("loopCount 1, loop points [200, 800): end %zu, ends %u (endless: end = 20480)", one.end, one.ends);
+  snd::test::Note("loopCount 1, loop points [200, 800): end %llu, ends %u (endless: end = 20480)", static_cast<unsigned long long>(one.end), one.ends);
   SND_CHECK(one.ends <= 1u);
 }
 
