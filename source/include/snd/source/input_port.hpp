@@ -12,14 +12,18 @@
 // channels, allocated by Runtime::Init (no allocation afterwards).
 //   Producer  Write(): any thread, ONE writer per port at a time. It copies
 //             what fits and drops the rest (the newest frames: overrun, counted
-//             in InputPortStats::droppedFrames). Channels beyond the port's are
+//             in InputPortStats::droppedFrames). Samples that are not finite
+//             (NaN, +-Inf) are written as 0 (D-197; checked here, on the writer's
+//             thread, never on the render side). Channels beyond the port's are
 //             ignored; port channels beyond the given ones repeat the last one.
 //   Consumer  the Input kind (one playing voice per port at a time). A voice
-//             starts "live": what was written before its start is skipped. When
+//             starts "live" (D-197): of what was written before its start it
+//             keeps only the newest block (blockFrames, or all if less). When
 //             more than MaxLatencyFrames() are buffered (the writer ran ahead, a
-//             pause, a burst), the consumer drops the oldest frames down to half
-//             of it (InputPortStats::skippedFrames). Missing frames are silence
-//             (VoiceRenderStatus::starved once the voice had played).
+//             burst), the consumer drops the oldest frames down to half of it
+//             (InputPortStats::skippedFrames). Missing frames are silence. A voice
+//             with more channels than the port repeats the port's last channel;
+//             one with fewer reads the port's first ones (the rest is ignored).
 // Rate: the port's sample rate (Configure, 0 = the internal rate). The Input
 // kind is a source-rate kind (D-22): core resamples. Core takes a rate other
 // than the internal one from SourceStartResult::reserved (D-194; until core
@@ -53,7 +57,8 @@ class InputPort {
 
   // Any thread. sampleRate: the rate the writer delivers (0 = internal rate); taken by
   // a voice at its start. maxLatencyFrames: buffered frames a playing voice tolerates
-  // before it drops the oldest (0 = Capacity() / 2; clamped to [1, Capacity()]).
+  // before it drops the oldest (0 = Capacity() / 2; clamped to [2 blocks, Capacity()],
+  // D-197).
   void Configure(std::uint32_t sampleRate, std::uint32_t maxLatencyFrames) noexcept;
 
   std::uint32_t Channels() const noexcept { return channels_; }
@@ -66,8 +71,11 @@ class InputPort {
 
   // --- the Input kind (consumer side; audio thread / RT worker of the reading voice) ---
   void Bind(float* data, std::uint32_t channels, std::uint32_t frames) noexcept;
-  // Skips everything written so far (a voice starts or resumes live).
-  void SkipToLive() noexcept;
+  // Owner thread (the Input kind's Init): the block size, for the latency floor (D-197).
+  void SetBlockFrames(std::uint32_t frames) noexcept { blockFrames_.store(frames, std::memory_order_relaxed); }
+  // A voice starts / resumes live: drops what was written so far except the newest
+  // `keep` frames (D-197: one block).
+  void SkipToLive(std::uint32_t keep) noexcept;
   // Reads up to `frames` frames into out[0..outChannels) (out may be nullptr: consumed
   // without output). Returns the frames read.
   std::uint32_t Read(float* const* out, std::uint32_t outChannels, std::uint32_t frames) noexcept;
@@ -81,6 +89,7 @@ class InputPort {
   std::uint32_t frames_ = 0;  // power of two
   std::atomic<std::uint32_t> sampleRate_{0};
   std::atomic<std::uint32_t> maxLatency_{0};
+  std::atomic<std::uint32_t> blockFrames_{0};
   alignas(64) std::atomic<std::uint64_t> writePos_{0};  // producer
   alignas(64) std::atomic<std::uint64_t> readPos_{0};   // consumer
   std::atomic<std::uint64_t> written_{0}, dropped_{0};

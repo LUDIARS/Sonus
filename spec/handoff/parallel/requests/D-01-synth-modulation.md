@@ -33,6 +33,8 @@ core は `sys_renderlist.cpp` で `it = source::RenderItem{}` と零にしてか
      `VoiceStatic` の中に前のブロックの値を持つ）。最初のブロックは start = end。
    - `core/src/sys_render.cpp` の直列区間（b、`it.pitch = ...` の隣）で `it.dutyOffset` / `it.tablePositionOffset` に写す
      （遅れたチャンクの約束 D-43 のとおり、チャンクは列を読まない）。
+   - 写す値は core 側でも有限に丸める（NaN・±∞ を渡さない）。source も受け取ったブロックごとに検査して 0 として扱うが（D-198）、
+     曲線の評価の段で有限にしておくこと。
    - `bank_registry.cpp` で SYNP の `tablePosition` 列を `OscillatorParams::tablePosition` に写す。
 4. **（任意、B）出力レートの合成のピッチの上限**: `sys_render.cpp` は合成のボイスのレート比も `Config.maxPitchRatio`（既定 4）と
    `dsp::kResamplerMinRatio`（1/256）で丸める。リサンプラを通らない種別（Oscillator / Noise / Callback）では上限は要らないので、

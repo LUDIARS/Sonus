@@ -73,7 +73,7 @@ inline double TableAt(const OscInst& in, std::uint32_t k, double t) noexcept {
   if (j >= in.tableLength) j = in.tableLength - 1u;
   const double fr = x - static_cast<double>(j);
   const std::uint32_t j1 = j + 1u == in.tableLength ? 0u : j + 1u;
-  const std::uint32_t base = k * in.tableLength;
+  const std::uint32_t base = in.tableOrigin + k * in.tableLength;
   const double a = PcmAt(in, base + j);
   const double b = PcmAt(in, base + j1);
   return a + (b - a) * fr;
@@ -89,6 +89,11 @@ inline double Wavetable(const OscInst& in, double t, double pos) noexcept {
   const double a = TableAt(in, k, t);
   if (fr <= 0.0) return a;
   return a + (TableAt(in, k + 1u, t) - a) * fr;
+}
+
+Ramp Finite(const Ramp& r) noexcept {
+  return Ramp{std::isfinite(r.start) && std::isfinite(r.end) ? r.start : 0.0f,
+              std::isfinite(r.start) && std::isfinite(r.end) ? r.end : 0.0f};
 }
 
 double StartPhaseOf(std::uint32_t shape) noexcept {
@@ -141,6 +146,7 @@ void OscillatorKind::Start(const SourceStartRequest* requests, std::uint32_t cou
     std::uint32_t shape = p->waveform;
     const SourceAsset* wt = p->wavetable;
     std::uint32_t tableLength = 0, tableCount = 0;
+    std::uint64_t origin = 0;
     if (wt != nullptr) {
       // D-192: resident PCM only.
       const std::uint64_t frames = wt->codec.total_frames;
@@ -152,6 +158,7 @@ void OscillatorKind::Start(const SourceStartRequest* requests, std::uint32_t cou
       std::uint64_t len = 0;
       if (wt->loopEnd > wt->loopStart && wt->loopEnd <= frames) {
         len = wt->loopEnd - wt->loopStart;
+        origin = wt->loopStart;  // D-198: table k starts at loopStart + k x len
       } else if (frames % kDefaultTableLength == 0u) {
         len = kDefaultTableLength;
       } else {
@@ -159,7 +166,7 @@ void OscillatorKind::Start(const SourceStartRequest* requests, std::uint32_t cou
       }
       if (len < 2u) continue;
       tableLength = static_cast<std::uint32_t>(len);
-      tableCount = static_cast<std::uint32_t>(frames / len);
+      tableCount = static_cast<std::uint32_t>((frames - origin) / len);
       shape = kShapeWavetable;
     } else if (shape > static_cast<std::uint32_t>(bf::Waveform::Pulse)) {
       continue;  // unknown waveform
@@ -182,6 +189,7 @@ void OscillatorKind::Start(const SourceStartRequest* requests, std::uint32_t cou
     in.tableChannels = wt != nullptr ? wt->codec.channels : 0u;
     in.tableLength = tableLength;
     in.tableCount = tableCount;
+    in.tableOrigin = static_cast<std::uint32_t>(origin);
     std::atomic_ref<std::uint32_t>(in.state).store(1u, std::memory_order_release);
     live_.fetch_add(1u, std::memory_order_relaxed);
     res.sourceSlot = i;
@@ -231,11 +239,17 @@ void OscillatorKind::RenderBatch(const source::RenderBatch& batch, VoiceRenderSt
     }
     float* out = it.out[0] + off;
     // Per-sample linear ramps over the whole block (frame f of the block at f / frames).
-    const double p0 = it.pitch.start, pd = static_cast<double>(it.pitch.end) - it.pitch.start;
-    const double d0 = static_cast<double>(in.duty) + it.dutyOffset.start;
-    const double dd = static_cast<double>(it.dutyOffset.end) - it.dutyOffset.start;
-    const double t0 = static_cast<double>(in.tablePosition) + it.tablePositionOffset.start;
-    const double td = static_cast<double>(it.tablePositionOffset.end) - it.tablePositionOffset.start;
+    // D-198: inputs that are not finite are made safe once per block (ramp ends): a pitch
+    // -> 0 (silence), an offset -> 0.
+    const bool pitchOk = std::isfinite(it.pitch.start) && std::isfinite(it.pitch.end);
+    const double p0 = pitchOk ? it.pitch.start : 0.0;
+    const double pd = pitchOk ? static_cast<double>(it.pitch.end) - it.pitch.start : 0.0;
+    const Ramp duty = Finite(it.dutyOffset);
+    const Ramp table = Finite(it.tablePositionOffset);
+    const double d0 = static_cast<double>(in.duty) + duty.start;
+    const double dd = static_cast<double>(duty.end) - duty.start;
+    const double t0 = static_cast<double>(in.tablePosition) + table.start;
+    const double td = static_cast<double>(table.end) - table.start;
     double phase = in.phase;
     const double baseDt = in.baseDt;
     switch (in.shape) {
@@ -243,7 +257,11 @@ void OscillatorKind::RenderBatch(const source::RenderBatch& batch, VoiceRenderSt
         for (std::uint32_t i = 0; i < n; ++i) {
           const double a = static_cast<double>(off + i) / blockFrames;
           double dt = baseDt * (p0 + pd * a);
-          dt = dt < 0.0 ? 0.0 : (dt > kMaxDt ? kMaxDt : dt);
+          if (!(dt > 0.0)) {  // D-198: no frequency -> silence, the phase waits
+            out[i] = 0.0f;
+            continue;
+          }
+          dt = dt > kMaxDt ? kMaxDt : dt;
           out[i] = static_cast<float>(std::sin(kTwoPi * phase));
           phase += dt;
           if (phase >= 1.0) phase -= 1.0;
@@ -253,7 +271,11 @@ void OscillatorKind::RenderBatch(const source::RenderBatch& batch, VoiceRenderSt
         for (std::uint32_t i = 0; i < n; ++i) {
           const double a = static_cast<double>(off + i) / blockFrames;
           double dt = baseDt * (p0 + pd * a);
-          dt = dt < 0.0 ? 0.0 : (dt > kMaxDt ? kMaxDt : dt);
+          if (!(dt > 0.0)) {  // D-198: no frequency -> silence, the phase waits
+            out[i] = 0.0f;
+            continue;
+          }
+          dt = dt > kMaxDt ? kMaxDt : dt;
           // Falls by 2 at the wrap.
           out[i] = static_cast<float>(2.0 * phase - 1.0 - 2.0 * StepResidual(phase, dt));
           phase += dt;
@@ -266,7 +288,11 @@ void OscillatorKind::RenderBatch(const source::RenderBatch& batch, VoiceRenderSt
         for (std::uint32_t i = 0; i < n; ++i) {
           const double a = static_cast<double>(off + i) / blockFrames;
           double dt = baseDt * (p0 + pd * a);
-          dt = dt < 0.0 ? 0.0 : (dt > kMaxDt ? kMaxDt : dt);
+          if (!(dt > 0.0)) {  // D-198: no frequency -> silence, the phase waits
+            out[i] = 0.0f;
+            continue;
+          }
+          dt = dt > kMaxDt ? kMaxDt : dt;
           double d = pulse ? d0 + dd * a : 0.5;
           d = d < 0.001 ? 0.001 : (d > 0.999 ? 0.999 : d);
           double y = phase < d ? 1.0 : -1.0;
@@ -283,7 +309,11 @@ void OscillatorKind::RenderBatch(const source::RenderBatch& batch, VoiceRenderSt
         for (std::uint32_t i = 0; i < n; ++i) {
           const double a = static_cast<double>(off + i) / blockFrames;
           double dt = baseDt * (p0 + pd * a);
-          dt = dt < 0.0 ? 0.0 : (dt > kMaxDt ? kMaxDt : dt);
+          if (!(dt > 0.0)) {  // D-198: no frequency -> silence, the phase waits
+            out[i] = 0.0f;
+            continue;
+          }
+          dt = dt > kMaxDt ? kMaxDt : dt;
           // -1 at phase 0 rising to +1 at 0.5: the slope changes by +-8 dt per sample.
           double y = phase < 0.5 ? 4.0 * phase - 1.0 : 3.0 - 4.0 * phase;
           y += 8.0 * dt * RampResidual(phase, dt);
@@ -297,7 +327,11 @@ void OscillatorKind::RenderBatch(const source::RenderBatch& batch, VoiceRenderSt
         for (std::uint32_t i = 0; i < n; ++i) {
           const double a = static_cast<double>(off + i) / blockFrames;
           double dt = baseDt * (p0 + pd * a);
-          dt = dt < 0.0 ? 0.0 : (dt > kMaxDt ? kMaxDt : dt);
+          if (!(dt > 0.0)) {  // D-198: no frequency -> silence, the phase waits
+            out[i] = 0.0f;
+            continue;
+          }
+          dt = dt > kMaxDt ? kMaxDt : dt;
           out[i] = static_cast<float>(Wavetable(in, phase, t0 + td * a));
           phase += dt;
           if (phase >= 1.0) phase -= 1.0;
@@ -320,8 +354,8 @@ void OscillatorKind::AdvanceVirtual(const AdvanceItem* items, std::uint32_t coun
       continue;
     }
     OscInst& in = inst_[a.sourceSlot];
-    double dt = in.baseDt * static_cast<double>(a.pitch > 0.0f ? a.pitch : 0.0f);
-    dt = dt > kMaxDt ? kMaxDt : dt;
+    double dt = in.baseDt * static_cast<double>(a.pitch > 0.0f && std::isfinite(a.pitch) ? a.pitch : 0.0f);
+    dt = dt > kMaxDt ? kMaxDt : dt;  // 0 (and NaN) -> the phase waits (D-198)
     in.phase = Wrap(in.phase + dt * static_cast<double>(a.outputFrames));
     a.playhead->frame += a.outputFrames;
   }

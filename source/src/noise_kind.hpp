@@ -18,17 +18,23 @@
 // splitmix64(key ^ (c + 1) * golden)): the channels are uncorrelated noises of the
 // same colour. Mono noise is a 1-channel synth (pan / spread give the image).
 //
-// Colours (all scaled to the variance of the uniform white noise, RMS 1/sqrt(3)):
-//   white  W
+// Colours (D-199: every output sample within [-1, 1]):
+//   white  W, uniform, RMS 1/sqrt(3) (about -4.8 dBFS)
 //   pink   -3 dB/oct: Kellett's 3-pole economy filter (b0 0.99765, b1 0.963,
-//          b2 0.57 + a direct term), within about 0.5 dB of 1/f above ~10 Hz
-//   brown  -6 dB/oct above ~38 Hz: leaky integrator y = 0.995 y + sqrt(1 - 0.995^2) W
+//          b2 0.57 + a direct term), within about 0.5 dB of 1/f above ~10 Hz;
+//          RMS 0.2 (about -14 dBFS), samples cut to [-1, 1]
+//   brown  -6 dB/oct above ~38 Hz: leaky integrator y = 0.995 y + sqrt(1 - 0.995^2) W;
+//          RMS 0.2, samples cut to [-1, 1]
+// So white sounds about 9 dB louder than pink / brown at the same gain.
 //
 // Virtual voices / Seek: AdvanceVirtual moves the source position in O(1) (white
 // stays exactly on its sequence). The pink / brown filter state is then rebuilt by
 // the next RenderBatch from the last kWarmFrames source samples (from zero state);
-// with the slowest pole (0.99765) the state then differs from an uninterrupted run
-// by < 1e-4 of its RMS (the voice fades in from virtual anyway, D-15). Seek(frame)
+// (D-199: 1024, a bounded cost when many voices come back in one block). The slowest
+// pole (0.99765, time constant ~425 samples; ~877 for the whole low end) is not
+// settled after 1024 samples, so the low end differs from an uninterrupted run for
+// a while after the return; it is noise, so this is no audible discontinuity (the
+// voice fades in from virtual anyway, D-15). The white sequence stays exact. Seek(frame)
 // moves to source sample `frame`. Pause / Resume / Virtualize / Devirtualize /
 // SetLoop need nothing. The voice never ends by itself.
 #ifndef SND_SOURCE_NOISE_KIND_HPP
@@ -58,7 +64,7 @@ struct NoiseInst {
 
 class NoiseKind final : public ISourceKind {
  public:
-  static constexpr std::uint32_t kWarmFrames = 4096;
+  static constexpr std::uint32_t kWarmFrames = 1024;  // D-199
 
   NoiseKind() noexcept = default;
 
@@ -90,6 +96,7 @@ class NoiseKind final : public ISourceKind {
   std::uint32_t cap_ = 0;
   float pinkScale_ = 1.0f;   // Init: output variance = white variance
   float brownGain_ = 0.0f;   // Init: sqrt(1 - a^2)
+  float brownScale_ = 1.0f;  // Init: output RMS 0.2 (D-199)
   std::atomic<std::uint32_t> live_{0};
 
   float Step(std::uint32_t color, float* f, float w) const noexcept;

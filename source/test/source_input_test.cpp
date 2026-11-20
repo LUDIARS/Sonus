@@ -46,35 +46,37 @@ SND_TEST(SourceInput, WrittenPcmPlaysUnchangedAndUnderrunIsSilence) {
   SND_CHECK_EQ(port->Channels(), 2u);
   SND_CHECK_EQ(port->Capacity(), 4096u);
   SND_CHECK(!d.Kind().RendersAtOutputRate());
-  // Written before the start: skipped (the voice plays live).
+  // Written before the start: only the newest block (256) is kept (D-197).
   SND_CHECK_EQ(WriteSeq(*port, 100000, 500), 500u);
   src::InputParams p = In(0, 2);
   Driver::Voice v;
   SND_REQUIRE(d.Start(v, &p, 2));
   SND_CHECK_EQ(v.reserved, 0u);  // the internal rate
+  SND_CHECK_EQ(port->Buffered(), 256u);
   SND_CHECK_EQ(WriteSeq(*port, 0, 1000), 1000u);
-  for (int b = 0; b < 3; ++b) d.Block({&v}, Driver::Mod{}, 256);
+  for (int b = 0; b < 4; ++b) d.Block({&v}, Driver::Mod{}, 256);
   SND_CHECK_EQ(v.starvedBlocks, 0u);
-  d.Block({&v}, Driver::Mod{}, 256);  // 232 frames left: the rest is silence, starved
+  d.Block({&v}, Driver::Mod{}, 256);  // 232 frames left after full blocks: silence, starved
   SND_CHECK_EQ(v.starvedBlocks, 1u);
   SND_CHECK_EQ(v.last.framesRendered, 256u);
   SND_CHECK_EQ(v.last.ended, 0u);
-  SND_REQUIRE_EQ(v.out[0].size(), std::size_t{1024});
-  for (std::size_t i = 0; i < 1024; ++i) {
-    const float want = i < 1000 ? static_cast<float>(i + 1) : 0.0f;
+  SND_REQUIRE_EQ(v.out[0].size(), std::size_t{1280});
+  for (std::size_t i = 0; i < 1280; ++i) {
+    const float want = i < 256 ? static_cast<float>(100245 + i) : (i < 1256 ? static_cast<float>(i - 255) : 0.0f);
     SND_CHECK_EQ(v.out[0][i], want);
     SND_CHECK_EQ(v.out[1][i], -want);
   }
-  SND_CHECK_EQ(v.ph.frame, std::uint64_t{1024});
-  // Writing again continues without a gap.
-  SND_CHECK_EQ(WriteSeq(*port, 1000, 256), 256u);
+  SND_CHECK_EQ(v.ph.frame, std::uint64_t{1280});
+  // Writing again continues without a gap; the block after a short one is not counted.
+  SND_CHECK_EQ(WriteSeq(*port, 1000, 200), 200u);
   d.Block({&v}, Driver::Mod{}, 256);
-  SND_CHECK_EQ(v.out[0][1024], 1001.0f);
-  SND_CHECK_EQ(v.out[0][1279], 1256.0f);
+  SND_CHECK_EQ(v.starvedBlocks, 1u);
+  SND_CHECK_EQ(v.out[0][1280], 1001.0f);
+  SND_CHECK_EQ(v.out[0][1479], 1200.0f);
   const src::InputPortStats st = port->Stats();
-  SND_CHECK_EQ(st.writtenFrames, std::uint64_t{1756});
-  SND_CHECK_EQ(st.skippedFrames, std::uint64_t{500});
-  SND_CHECK_EQ(st.readFrames, std::uint64_t{1256});
+  SND_CHECK_EQ(st.writtenFrames, std::uint64_t{1700});
+  SND_CHECK_EQ(st.skippedFrames, std::uint64_t{244});
+  SND_CHECK_EQ(st.readFrames, std::uint64_t{1456});
   SND_CHECK_EQ(st.underruns, std::uint64_t{1});
   SND_CHECK_EQ(d.runtime.Stats().inputUnderruns, std::uint64_t{1});
   SND_CHECK_EQ(d.runtime.Stats().inputInstances, 1u);
@@ -111,13 +113,15 @@ SND_TEST(SourceInput, OverrunDropsTheNewestAndTheReaderBoundsLatency) {
   src::InputParams p = In(0, 2);
   Driver::Voice v;
   SND_REQUIRE(d.Start(v, &p, 2));
-  SND_CHECK_EQ(port.Buffered(), 0u);
+  SND_CHECK_EQ(port.Buffered(), 256u);  // the newest block is kept
   SND_CHECK_EQ(WriteSeq(port, 0, 3000), 3000u);
   d.Block({&v}, Driver::Mod{}, 256);
   SND_CHECK_EQ(v.out[0][0], static_cast<float>(3000 - 1024 + 1));
   SND_CHECK_EQ(v.out[0][255], static_cast<float>(3000 - 1024 + 256));
   SND_CHECK_EQ(port.Buffered(), 1024u - 256u);
-  // A configured bound.
+  // A configured bound; below 2 blocks it is raised to 2 blocks (D-197).
+  port.Configure(0, 100);
+  SND_CHECK_EQ(port.MaxLatencyFrames(), 512u);
   port.Configure(0, 512);
   SND_CHECK_EQ(port.MaxLatencyFrames(), 512u);
   SND_CHECK_EQ(WriteSeq(port, 3000, 1000), 1000u);  // 1768 buffered > 512 -> keep 256
@@ -175,13 +179,20 @@ SND_TEST(SourceInput, VirtualConsumesAndResumeIsLive) {
   d.Control(v, src::ControlOp::Pause);
   SND_CHECK_EQ(port.Buffered(), 1000u - 394u);  // Pause keeps the backlog
   d.Control(v, src::ControlOp::Resume);
-  SND_CHECK_EQ(port.Buffered(), 0u);
+  SND_CHECK_EQ(port.Buffered(), 256u);  // live, keeping the newest block (D-197)
   SND_CHECK_EQ(WriteSeq(port, 5000, 100), 100u);
   d.Control(v, src::ControlOp::SetLoop, 0);
   d.Control(v, src::ControlOp::Virtualize, 0);
-  SND_CHECK_EQ(port.Buffered(), 100u);
-  d.Control(v, src::ControlOp::Devirtualize, 0);
-  SND_CHECK_EQ(port.Buffered(), 0u);
+  SND_CHECK_EQ(port.Buffered(), 356u);
+  d.Control(v, src::ControlOp::Devirtualize, 0);  // keeps reading on (D-197)
+  SND_CHECK_EQ(port.Buffered(), 356u);
+  d.Block({&v}, Driver::Mod{}, 256);
+  SND_CHECK_EQ(v.out[0][10], static_cast<float>(1000 - 256 + 1));
+  SND_CHECK_EQ(v.starvedBlocks, 0u);
+  d.Control(v, src::ControlOp::Seek, 0);  // the next block (after the skip) is not an underrun
+  d.Block({&v}, Driver::Mod{}, 256);
+  d.Block({&v}, Driver::Mod{}, 256);
+  SND_CHECK_EQ(v.starvedBlocks, 0u);
 }
 
 // A writer thread and a reader thread (the voice's RenderBatch / AdvanceVirtual): the
@@ -234,4 +245,29 @@ SND_TEST(SourceInput, WriterAndReaderThreads) {
   const src::InputPortStats st = port.Stats();
   SND_CHECK_EQ(st.writtenFrames + st.droppedFrames, kTotal);
   SND_CHECK_EQ(st.readFrames + st.skippedFrames, st.writtenFrames);
+}
+
+// D-197: samples that are not finite are written as 0; a voice with more channels than
+// the port repeats its last channel.
+SND_TEST(SourceInput, NonFiniteSamplesAreWrittenAsZero) {
+  Driver::Opt o;
+  o.inputPortChannels = 1;
+  Driver d(snd::SourceKind::Input, o);
+  SND_REQUIRE(d.Ok());
+  src::InputPort& port = *d.runtime.InputPortOf(0);
+  src::InputParams p = In(0, 2);
+  Driver::Voice v;
+  SND_REQUIRE(d.Start(v, &p, 2));
+  std::vector<float> x(256, 0.5f);
+  x[3] = std::nanf("");
+  x[4] = INFINITY;
+  x[5] = -INFINITY;
+  const float* ch[1] = {x.data()};
+  SND_CHECK_EQ(port.Write(ch, 1, 256), 256u);
+  d.Block({&v}, Driver::Mod{}, 256);
+  for (std::size_t i = 0; i < 256; ++i) {
+    const float want = i >= 3 && i <= 5 ? 0.0f : 0.5f;
+    SND_CHECK_EQ(v.out[0][i], want);
+    SND_CHECK_EQ(v.out[1][i], want);
+  }
 }

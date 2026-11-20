@@ -25,9 +25,12 @@ void InputPort::Configure(std::uint32_t sampleRate, std::uint32_t maxLatencyFram
 }
 
 std::uint32_t InputPort::MaxLatencyFrames() const noexcept {
-  const std::uint32_t m = maxLatency_.load(std::memory_order_relaxed);
-  if (m == 0u) return frames_ / 2u == 0u ? 1u : frames_ / 2u;
-  return m > frames_ ? frames_ : m;
+  std::uint32_t m = maxLatency_.load(std::memory_order_relaxed);
+  if (m == 0u) m = frames_ / 2u;
+  const std::uint32_t floor = 2u * blockFrames_.load(std::memory_order_relaxed);  // D-197
+  if (m < floor) m = floor;
+  if (m > frames_) m = frames_;
+  return m == 0u ? 1u : m;
 }
 
 std::uint32_t InputPort::Buffered() const noexcept {
@@ -60,10 +63,14 @@ std::uint32_t InputPort::Write(const float* const* channels, std::uint32_t chann
     if (len > frames_ - at) len = frames_ - at;
     for (std::uint32_t c = 0; c < channels_; ++c) {
       const float* src = channels[c < channelCount ? c : channelCount - 1u];
+      float* dst = Channel(c) + at;
       if (src == nullptr) {
-        std::memset(Channel(c) + at, 0, sizeof(float) * len);
+        std::memset(dst, 0, sizeof(float) * len);
       } else {
-        std::memcpy(Channel(c) + at, src + f, sizeof(float) * len);
+        for (std::uint32_t k = 0; k < len; ++k) {  // D-197: not finite -> 0 (writer side)
+          const float v = src[f + k];
+          dst[k] = v - v == 0.0f ? v : 0.0f;
+        }
       }
     }
     f += len;
@@ -74,11 +81,12 @@ std::uint32_t InputPort::Write(const float* const* channels, std::uint32_t chann
   return n;
 }
 
-void InputPort::SkipToLive() noexcept {
+void InputPort::SkipToLive(std::uint32_t keep) noexcept {
   const std::uint64_t w = writePos_.load(std::memory_order_acquire);
   const std::uint64_t r = readPos_.load(std::memory_order_relaxed);
-  if (w > r) skipped_.fetch_add(w - r, std::memory_order_relaxed);
-  readPos_.store(w, std::memory_order_release);
+  if (w <= r + keep) return;  // at most `keep` buffered: nothing to drop
+  skipped_.fetch_add(w - keep - r, std::memory_order_relaxed);
+  readPos_.store(w - keep, std::memory_order_release);
 }
 
 std::uint32_t InputPort::Read(float* const* out, std::uint32_t outChannels, std::uint32_t frames) noexcept {
@@ -132,6 +140,8 @@ bool InputKind::Init(void* pool, std::size_t bytes, const SourceLimits& limits, 
   auto* base = static_cast<std::uint8_t*>(pool);
   cap_ = n;
   sampleRate_ = limits.sampleRate == 0u ? 48000u : limits.sampleRate;
+  blockFrames_ = limits.blockFrames == 0u ? 256u : limits.blockFrames;
+  for (std::uint32_t p = 0; p < portCount_; ++p) ports_[p].SetBlockFrames(blockFrames_);
   inst_ = reinterpret_cast<InputInst*>(base);
   freeInst_ = reinterpret_cast<std::uint32_t*>(base + Align64(sizeof(InputInst) * n));
   portOwner_ = reinterpret_cast<std::uint32_t*>(base + Align64(sizeof(InputInst) * n) + Align64(sizeof(std::uint32_t) * n));
@@ -169,9 +179,9 @@ void InputKind::Start(const SourceStartRequest* requests, std::uint32_t count, S
     const std::uint32_t i = freeInst_[--freeCount_];
     InputInst& in = inst_[i];
     in.port = port;
-    in.played = 0;
+    in.fullLast = 0;  // D-197: the first block is never an underrun
     portOwner_[port] = i;
-    ports_[port].SkipToLive();
+    ports_[port].SkipToLive(blockFrames_);
     const std::uint32_t rate = ports_[port].SampleRate();
     res.reserved = rate == sampleRate_ ? 0u : rate;  // D-194: the material rate (0 = internal)
     std::atomic_ref<std::uint32_t>(in.state).store(1u, std::memory_order_release);
@@ -196,8 +206,10 @@ void InputKind::Control(const SourceControlOp* ops, std::uint32_t count) noexcep
   for (std::uint32_t k = 0; k < count; ++k) {
     const SourceControlOp& op = ops[k];
     if (op.sourceSlot >= cap_ || inst_[op.sourceSlot].state != 1u) continue;
-    if (op.op == ControlOp::Seek || op.op == ControlOp::Resume || op.op == ControlOp::Devirtualize) {
-      ports_[inst_[op.sourceSlot].port].SkipToLive();
+    // D-197: Devirtualize keeps reading on (the virtual voice consumed in time).
+    if (op.op == ControlOp::Seek || op.op == ControlOp::Resume) {
+      ports_[inst_[op.sourceSlot].port].SkipToLive(blockFrames_);
+      inst_[op.sourceSlot].fullLast = 0;  // the block after a skip is not an underrun
     }
   }
 }
@@ -222,8 +234,9 @@ void InputKind::RenderBatch(const source::RenderBatch& batch, VoiceRenderStatus*
     for (std::uint32_t c = 0; c < ch; ++c) outs[c] = it.out[c] + it.frameOffset;
     const std::uint32_t n = it.framesRequested;
     const std::uint32_t got = port.Read(outs, ch, n);  // the rest stays silent (out is zeroed)
-    if (got != 0u) in.played = 1;
-    if (got < n && in.played != 0u) {
+    const bool wasFull = in.fullLast != 0u;
+    in.fullLast = got == n ? 1u : 0u;
+    if (got < n && wasFull) {  // D-197: an underrun only after a block that got everything
       st.starved = 1;
       port.CountUnderrun();
       underruns_.fetch_add(1u, std::memory_order_relaxed);
@@ -243,7 +256,8 @@ void InputKind::AdvanceVirtual(const AdvanceItem* items, std::uint32_t count, Vo
     }
     const float pitch = a.pitch > 0.0f ? a.pitch : 1.0f;
     const std::uint32_t frames = static_cast<std::uint32_t>(static_cast<float>(a.outputFrames) * pitch + 0.5f);
-    ports_[inst_[a.sourceSlot].port].Read(nullptr, 0u, frames);  // consumed, not heard
+    const std::uint32_t got = ports_[inst_[a.sourceSlot].port].Read(nullptr, 0u, frames);  // consumed, not heard
+    inst_[a.sourceSlot].fullLast = got == frames ? 1u : 0u;
     a.playhead->frame += frames;
   }
 }
