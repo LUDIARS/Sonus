@@ -7,6 +7,7 @@
 
 #include "snd/base/allocator.hpp"
 #include "snd/format/bank_format.hpp"
+#include "snd/internal/notify.hpp"
 #include "snd/livelink/command_check.hpp"
 #include "snd/livelink/record_format.hpp"
 #include "snd/livelink/replayer.hpp"
@@ -386,4 +387,30 @@ SND_TEST(LivelinkV11Unit, OutputDigestIsTheBitPattern) {
   ll::OutputDigest z;
   z.Add(b, 4);
   SND_CHECK(z.value != x.value);
+}
+
+// The replaying System's own LOD changes and stalls are counted and break 2.5 (the hooks
+// are called directly: whether a real System changes its LOD depends on the machine).
+SND_TEST(LivelinkV11Unit, ReplayLodEventIsReported) {
+  std::vector<std::uint8_t> v = Start(10);
+  Arena(v, 10);
+  const snd_config cfg = Cfg();
+  ll::ReplayDesc d;
+  d.config = &cfg;
+  d.allocator = &snd::base::DefaultAllocator();
+  d.record = v.data();
+  d.bytes = v.size();
+  ll::Replayer* r = nullptr;
+  SND_REQUIRE_EQ(ll::Replayer::Create(d, &r), SND_OK);
+  SND_CHECK(r->BitExactExpected());
+  snd::notify::EventRecord e{};
+  e.type = static_cast<std::uint16_t>(snd::notify::EventType::LodChange);
+  e.a = 1;
+  r->OnEvent(e);
+  SND_CHECK_EQ(r->Info().replayLodChanges, 1u);
+  SND_CHECK((r->Info().conditions & ll::kReplayLodInReplay) != 0u);
+  SND_CHECK(!r->BitExactExpected());
+  r->OnStall(0);
+  SND_CHECK((r->Info().conditions & ll::kReplayStallInReplay) != 0u);
+  ll::Replayer::Destroy(r);
 }
