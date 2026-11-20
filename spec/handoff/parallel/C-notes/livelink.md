@@ -136,9 +136,9 @@ UI に依存しない livelink の API はそのまま使える: `Client` の 1.
 | 2 clang Debug | 7cc7d14 | `livelink\|api\|tool`（54） | 既知の 3 件だけ失敗 |
 | 3 ASan/UBSan | 7cc7d14 | `livelink\|api_`（49） | 既知の 3 件だけ失敗。ファズ（livelink_v11_fuzz_test）は SND_FUZZ_ITERATIONS=60000 でも通過（91378fe） |
 | 4 TSan | 7cc7d14 | `livelink`（26） | 既知の 3 件だけ失敗。並行性（livelink_v11_stress / livelink_v11_live / integration_livelink_stress）を -j1 で `--repeat until-fail:20`: 全通過 |
-| 5 Release | RELEASE_COMMIT | RELEASE_RESULT |
-| 6 テストなし Release | NOTESTS |
-| 7 Opus なし | NOOPUS |
+| 5 Release | 8871931（コードは 7cc7d14 と同じ） | `livelink\|api_`（49） | 既知の 3 件だけ失敗。並行性 3 本を `--repeat until-fail:20`: 全通過 |
+| 6 テストなし Release | 8871931 | — | ビルド成功、警告 0 |
+| 7 Opus なし | 8871931 | `livelink`（26） | 既知の 3 件だけ失敗 |
 | 9 ツール入り（Tela） | 7cc7d14 | `livelink\|tool`（50） | 既知の 3 件だけ失敗。既存の tool/test は全通過 |
 | MinGW 構文検査 | 7cc7d14 | — | livelink/src の全 .cpp と新しいテスト 5 本、変えたヘッダ、`livelink_protocol.hpp` を `-Werror -Wall -Wextra -Wpedantic -Wshadow …` で通過（MinGW は apt で入れた。テストの std::thread を含めて通った） |
 
