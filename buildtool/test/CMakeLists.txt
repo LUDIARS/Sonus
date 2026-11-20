@@ -56,3 +56,8 @@ set_tests_properties(buildtool_indep_s7_defects_test PROPERTIES DISABLED TRUE)  
 foreach(_d Defect_ReadPatchChunkAcceptsOutOfRangeIndices)
   add_test(NAME buildtool_indep_s7_${_d} COMMAND buildtool_indep_s7_defects_test --filter ${_d})
 endforeach()
+
+# Re-check after D-180c: mutation fuzz of XPCH (consistency of what the reader accepts).
+snd_add_test(buildtool_indep_s7_recheck_test
+  SOURCES indep_s7_recheck_test.cpp
+  LINK sonus_buildtool sonus_mocks)

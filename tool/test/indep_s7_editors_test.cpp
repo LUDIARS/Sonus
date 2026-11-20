@@ -806,18 +806,42 @@ SND_TEST(IndepS7Edit, D14_MusicRules) {
   REFUSED(fz, s.SetExitFrame(64001));
   REFUSED(fz, s.SetAsset(kSfx));
   StemDesc st;
-  // Accepted.
+  // D-179c: a change of time signature only on a bar line of the signature before it.
+  {
+    TempoPointDesc off;
+    off.tick = 3841;  // not a bar line of 4/4
+    off.bpm = 100;
+    off.beatsPerBar = 3;
+    off.beatUnit = 4;
+    REFUSED(fz, s.AddTempo(off));
+    off.tick = 1920;  // half a bar
+    REFUSED(fz, s.AddTempo(off));
+  }
+  // Accepted: each change on the bar line of the signature before it.
+  std::uint64_t at = 3840;  // bar 1 of 4/4
   for (std::uint32_t u : {1u, 2u, 4u, 8u, 16u, 32u}) {
-    t.tick = 3840u * u;
+    t.tick = at;
+    t.bpm = 100;
+    t.beatsPerBar = 3;
     t.beatUnit = u;
     SND_CHECK(s.AddTempo(t));
+    at += 3u * 3840u / u;  // one bar of 3/u
   }
-  t.tick = 7;
+  {
+    Frozen fzOff(doc);
+    TempoPointDesc off = t;  // 3/32
+    off.tick = at + 1;
+    off.beatUnit = 4;
+    REFUSED(fzOff, s.AddTempo(off));
+  }
+  // A tempo change without a signature change may sit anywhere.
+  t.tick = at + 7;
   t.bpm = 1e-3;
   SND_CHECK(s.AddTempo(t));
-  t.tick = 8;
+  t.tick = at + 8;
   t.bpm = 1e5;
   SND_CHECK(s.AddTempo(t));
+  SND_CHECK(s.Problems().empty());
   const auto tempo = s.Tempo();
   for (std::size_t i = 1; i < tempo.size(); ++i) SND_CHECK(tempo[i - 1].tick < tempo[i].tick);
   m.frame = 64000;

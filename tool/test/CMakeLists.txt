@@ -32,12 +32,19 @@ foreach(_t indep_s7_document_test indep_s7_editors_test indep_s7_compute_test in
         indep_s7_robust_test)
   _snd_tool_test(${_t} "${_tool_core_test_link}")
 endforeach()
+# Re-check after D-176..D-180: the recheck test compares with music's Timeline (music/src);
+# the threads test is the D-178d concurrency test (TSan, repeat 20).
+_snd_tool_test(indep_s7_recheck_test "${_tool_core_test_link}")
+target_link_libraries(tool_indep_s7_recheck_test PRIVATE sonus_music)
+target_include_directories(tool_indep_s7_recheck_test PRIVATE ${PROJECT_SOURCE_DIR}/music/src)
+_snd_tool_test(indep_s7_threads_test "${_tool_core_test_link}")
 _snd_tool_test(indep_s7_defects_test "${_tool_core_test_link}")
 set_tests_properties(tool_indep_s7_defects_test PROPERTIES DISABLED TRUE)  # run per defect below
 foreach(_d Defect_NegativeZeroLosesItsSign Defect_SetSameValueReturnsFalse
         Defect_StemChannelsOutsideTheMaterialAccepted
         Defect_LocateFieldMissesMusicSegmentAndDistanceCurveMembers Defect_LocateFieldLiveWritableForAbsentColumn
-        Defect_SaveIgnoresAFailedDeletion Defect_EmptyMaterialTableBuildIsUndefinedBehaviour)
+        Defect_SaveIgnoresAFailedDeletion Defect_EmptyMaterialTableBuildIsUndefinedBehaviour
+        Defect_SameValueSettersRewriteExplicitDefaults Defect_SaveToSameDirectoryOtherSpellingLeavesStaleFiles)
   add_test(NAME tool_indep_s7_${_d} COMMAND tool_indep_s7_defects_test --filter ${_d})
 endforeach()
 
