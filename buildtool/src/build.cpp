@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -20,6 +21,7 @@
 #include "self_check.hpp"
 #include "snd/buildtool/bank_writer.hpp"
 #include "snd/buildtool/json.hpp"
+#include "snd/buildtool/patch.hpp"
 #include "snd/codec/codec.hpp"
 #include "snd/codec/encode.hpp"
 #include "snd/dsp/effects.hpp"
@@ -134,6 +136,9 @@ struct BankTables {
       msta{ch::MSTA}, mtrn{ch::MTRN}, mstg{ch::MSTG}, mmrk{ch::MMRK}, mtmp{ch::MTMP}, name{ch::NAME},
       guid{ch::GUID}, alis{ch::ALIS};
   std::vector<std::uint8_t> wave, prel, spth, efbl, strs, phys;
+  std::vector<patch::Program> programs;               // provisional XPCH chunk (patch.hpp)
+  std::vector<patch::Link> programLinks;
+  std::map<const Object*, std::uint32_t> programIndex;
   std::map<std::string, std::uint32_t> strOffsets;
   std::uint64_t dspBytes = 0;
   std::uint32_t dspCount = 0;
@@ -178,6 +183,9 @@ class Builder {
   bool OrderBanks(std::vector<const Object*>* order);
   const Object* MasterBus(const Object& from, const Value& at);
   void CheckBusRoots();
+  // Every patch object: graph checks (patch.hpp), problems reported at their members.
+  void CheckPatches();
+  bool CompilePatch(const Object& patchObj, Diagnostics& d, patch::Program* out);
   // Kahn order: `before` must precede everything it points to; ties by name.
   std::vector<const Object*> TopoOrder(const std::vector<const Object*>& nodes,
                                        const std::map<const Object*, std::vector<const Object*>>& edges,
@@ -233,11 +241,14 @@ bool Builder::Run() {
   std::vector<std::string> skip;
   if (!opt_.outDir.empty()) skip.push_back(opt_.outDir);
   if (!opt_.cacheDir.empty()) skip.push_back(opt_.cacheDir);
-  if (!p_.Load(opt_.projectDir, skip, d_)) return false;
+  const bool loaded = opt_.source != nullptr ? p_.Load(*opt_.source, opt_.projectDir, d_)
+                                             : p_.Load(opt_.projectDir, skip, d_);
+  if (!loaded) return false;
   ReadProjectSettings();
   CheckIds();
   CheckNestedCycles();
   CheckBusRoots();
+  CheckPatches();
   for (const Object* dk : p_.OfKind(Kind::Ducking)) {
     if (dk->bank.empty()) p_.WarnAt(*dk, dk->doc, "ducking without \"bank\" is not built into any bank", d_);
   }
@@ -284,6 +295,67 @@ bool Builder::Run() {
     return false;
   }
   return Commit();
+}
+
+// "nodes[2].params.cutoffHz" -> the value (or the deepest existing parent).
+const Value& ValueAtPath(const Value& root, const std::string& path) {
+  const Value* v = &root;
+  std::size_t i = 0;
+  while (i < path.size()) {
+    if (path[i] == '.') {
+      ++i;
+      continue;
+    }
+    if (path[i] == '[') {
+      const std::size_t e = path.find(']', i);
+      if (e == std::string::npos) break;
+      const std::size_t idx = static_cast<std::size_t>(std::strtoull(path.substr(i + 1, e - i - 1).c_str(), nullptr, 10));
+      if (!v->IsArray() || idx >= v->items.size()) break;
+      v = &v->items[idx];
+      i = e + 1;
+      continue;
+    }
+    std::size_t e = i;
+    while (e < path.size() && path[e] != '.' && path[e] != '[') ++e;
+    const Value* c = v->Find(path.substr(i, e - i));
+    if (c == nullptr) break;
+    v = c;
+    i = e;
+  }
+  return *v;
+}
+
+bool Builder::CompilePatch(const Object& po, Diagnostics& d, patch::Program* out) {
+  struct Ctx {
+    const detail::Project* p;
+    const Object* o;
+    Diagnostics* d;
+  } ctx{&p_, &po, &d};
+  std::vector<patch::Problem> problems;
+  const bool ok = patch::Compile(
+      po.doc, po.id, out, &problems,
+      [](void* u, const Value& ref) -> Id {
+        Ctx& c = *static_cast<Ctx*>(u);
+        const Object* prm = c.p->Resolve(*c.o, ref, Kind::Parameter, *c.d);
+        return prm != nullptr ? prm->id : 0u;
+      },
+      &ctx);
+  for (const patch::Problem& pr : problems) {
+    const Value& at = ValueAtPath(po.doc, pr.path);
+    if (pr.error) {
+      p_.ErrorAt(po, at, pr.message, d);
+    } else {
+      p_.WarnAt(po, at, pr.message, d);
+    }
+  }
+  return ok;
+}
+
+void Builder::CheckPatches() {
+  for (const Object* po : p_.OfKind(Kind::Patch)) {
+    patch::Program prog;
+    CompilePatch(*po, d_, &prog);
+  }
 }
 
 void Builder::ReadProjectSettings() {
@@ -849,7 +921,7 @@ bool Builder::ConvertAsset(const Object& a, const std::string& language, Convert
   }
   file = fileV->text;
   std::vector<std::uint8_t> wav;
-  if (!ReadBinary(fs::path(p_.root()) / file, &wav)) {
+  if (!p_.ReadProjectFile(file, &wav)) {
     p_.ErrorAt(a, *fileV, "cannot read '" + file + "'", d_);
     return false;
   }
@@ -1217,7 +1289,7 @@ void Builder::BuildBank(const Object& bank, const std::string& language) {
         std::uint64_t blobBytes = 0;
         if (const Value* blob = e.Find("blob"); blob != nullptr) {
           std::vector<std::uint8_t> bytes;
-          if (!blob->IsString() || !ReadBinary(fs::path(p_.root()) / blob->text, &bytes)) {
+          if (!blob->IsString() || !p_.ReadProjectFile(blob->text, &bytes)) {
             p_.ErrorAt(*b, *blob, "cannot read effect blob", d_);
           } else {
             t.efbl.resize(Align64(t.efbl.size()), 0);
@@ -1678,9 +1750,28 @@ void Builder::BuildBank(const Object& bank, const std::string& language) {
           }
         } else {
           const std::uint32_t kind = p_.Enum(*e, *sv, "kind", kSynthKind, 0, d_);
-          if (kind == 3) p_.ErrorAt(*e, *sv, "patch synthesis is stage 6 (PTCH layout not defined in bank format 1.0)", d_);
           const std::uint32_t sr = t.synp.AddRow();
           t.synp.U32(col::SYNP_kind, sr, kind);
+          if (kind == 3) {
+            // Patch (design.md 5.1): the program goes into the provisional XPCH chunk (patch.hpp).
+            const Value* pv = sv->Find("patch");
+            const Object* po = pv != nullptr ? p_.Resolve(*e, *pv, Kind::Patch, d_) : nullptr;
+            if (pv == nullptr) {
+              p_.ErrorAt(*e, *sv, "patch synthesis needs \"patch\" (a patch reference)", d_);
+            } else if (po != nullptr) {
+              auto it = t.programIndex.find(po);
+              if (it == t.programIndex.end()) {
+                patch::Program prog;
+                if (CompilePatch(*po, quiet_, &prog)) {  // problems were reported by CheckPatches
+                  it = t.programIndex.emplace(po, static_cast<std::uint32_t>(t.programs.size())).first;
+                  t.programs.push_back(std::move(prog));
+                }
+              }
+              if (it != t.programIndex.end()) t.programLinks.push_back(patch::Link{sr, it->second});
+            }
+          } else if (sv->Find("patch") != nullptr) {
+            p_.WarnAt(*e, *sv->Find("patch"), "\"patch\" is only used with kind \"patch\"", d_);
+          }
           t.synp.U32(col::SYNP_waveform, sr, p_.Enum(*e, *sv, "waveform", kWaveform, 0, d_));
           t.synp.F32(col::SYNP_frequencyHz, sr, static_cast<float>(p_.Num(*e, *sv, "frequencyHz", 440, d_)));
           t.synp.F32(col::SYNP_duty, sr, static_cast<float>(p_.Num(*e, *sv, "duty", 0.5, d_)));
@@ -2160,6 +2251,7 @@ void Builder::BuildBank(const Object& bank, const std::string& language) {
   if (!t.spth.empty()) b.writer.AddBlob(ch::SPTH, t.spth);
   if (!t.efbl.empty()) b.writer.AddBlob(ch::EFBL, t.efbl);
   if (!t.phys.empty()) b.writer.AddBlob(ch::PHYS, t.phys);
+  if (!t.programLinks.empty()) b.writer.AddBlob(patch::kChunkFourcc, patch::WritePatchChunk(t.programs, t.programLinks));
   if (t.dspCount > 0) {
     const bf::DspPoolNeed need{t.dspBytes, t.dspCount, 0};
     std::vector<std::uint8_t> nb(sizeof(need));
@@ -2194,6 +2286,7 @@ void Builder::BuildBank(const Object& bank, const std::string& language) {
   for (const auto& [o, row] : plRow) AddIdEntry("playlist", o->name, o->guidText, b.file);
   for (const Object* o : params) AddIdEntry("parameter", o->name, o->guidText, b.file);
   for (const Object* o : mats) AddIdEntry("materialTable", o->name, o->guidText, b.file);
+  for (const auto& [o, idx] : t.programIndex) AddIdEntry("patch", o->name, o->guidText, b.file);
   for (const Object* s : p_.OfKind(Kind::Snapshot)) {
     if (inBank(s)) AddIdEntry("snapshot", s->name, s->guidText, b.file);
   }
@@ -2301,6 +2394,17 @@ void Builder::Stage(const std::string& rel, std::vector<std::uint8_t> bytes) {
 //     the checks passed) is reported; outputs renamed before it are new, the
 //     rest are old and their temporary files are removed (README).
 bool Builder::Commit() {
+  if (opt_.memoryOutput != nullptr) {
+    for (PendingFile& f : pending_) {
+      ++res_->filesWritten;
+      for (BuiltBank& b : res_->banks) {
+        if (b.path == f.rel) b.written = true;
+      }
+      opt_.memoryOutput->push_back(OutputFile{f.rel, std::move(f.bytes)});
+    }
+    pending_.clear();
+    return d_.errors() == 0;
+  }
   struct Job {
     fs::path target;
     fs::path tmp;
@@ -2365,7 +2469,8 @@ bool Build(const BuildOptions& options, Diagnostics& diag, BuildResult* result) 
   BuildResult local;
   BuildResult* r = result != nullptr ? result : &local;
   *r = BuildResult{};
-  if (options.projectDir.empty() || options.outDir.empty()) {
+  if ((options.source == nullptr && options.projectDir.empty()) ||
+      (options.memoryOutput == nullptr && options.outDir.empty())) {
     diag.Error("", 0, 0, "project and output directories are required");
     return false;
   }
