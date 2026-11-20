@@ -227,6 +227,15 @@ std::string SafePart(const std::string& part) {
   if (s.empty() || s == "." || s == "..") s = "_";
   if (s[0] == '.') s = "_" + s;
   while (!s.empty() && (s.back() == '.')) s.back() = '_';  // Windows drops trailing dots
+  // Windows reserved device names (D-176f): the part before the first '.', any case.
+  std::string stem = s.substr(0, s.find('.'));
+  for (char& c : stem) c = (c >= 'a' && c <= 'z') ? static_cast<char>(c - 'a' + 'A') : c;
+  bool reserved = stem == "CON" || stem == "PRN" || stem == "AUX" || stem == "NUL";
+  if (stem.size() == 4 && (stem.compare(0, 3, "COM") == 0 || stem.compare(0, 3, "LPT") == 0) && stem[3] >= '1' &&
+      stem[3] <= '9') {
+    reserved = true;
+  }
+  if (reserved) s = "_" + s;
   return s;
 }
 
@@ -361,8 +370,8 @@ bool JsonEqual(const Value& a, const Value& b) {
 }
 
 std::string FormatNumber(double v) {
-  if (!std::isfinite(v)) return "0";
-  if (v == 0.0) return "0";
+  if (!std::isfinite(v)) return "0";  // last guard (D-176c): edits refuse non-finite numbers before this
+  if (v == 0.0) return std::signbit(v) ? "-0" : "0";  // D-176b: the sign of zero survives
   if (std::fabs(v) < 9007199254740992.0 && v == std::trunc(v)) {
     char b[32];
     std::snprintf(b, sizeof b, "%.0f", v);
@@ -376,7 +385,28 @@ std::string FormatNumber(double v) {
   return b;
 }
 
-Value Number(double v) { return json::MakeNumber(FormatNumber(v)); }
+Value Number(double v) {
+  // A non-finite value becomes a literal JSON cannot hold; every edit refuses it (D-176c).
+  if (!std::isfinite(v)) return json::MakeNumber(std::isnan(v) ? "nan" : (v > 0 ? "inf" : "-inf"));
+  return json::MakeNumber(FormatNumber(v));
+}
+
+static bool HasNonFinite(const Value& v) {
+  switch (v.type) {
+    case json::Type::Number: return v.text == "nan" || v.text == "inf" || v.text == "-inf";
+    case json::Type::Array:
+      for (const Value& x : v.items) {
+        if (HasNonFinite(x)) return true;
+      }
+      return false;
+    case json::Type::Object:
+      for (const json::Member& m : v.members) {
+        if (HasNonFinite(m.second)) return true;
+      }
+      return false;
+    default: return false;
+  }
+}
 Value String(std::string s) { return json::MakeString(std::move(s)); }
 Value Bool(bool b) { return json::MakeBool(b); }
 
@@ -738,7 +768,7 @@ std::string ProjectDocument::FileNameFor(std::string_view kind, const std::strin
 }
 
 std::string ProjectDocument::NewGuid() {
-  for (;;) {
+  for (int attempt = 0; attempt < 16; ++attempt) {  // D-177c: give up after 16 collisions
     std::uint64_t hi = random_ ? random_() : 0, lo = random_ ? random_() : 0;
     hi = (hi & ~0xF000ull) | 0x4000ull;                                  // version 4
     lo = (lo & 0x3FFFFFFFFFFFFFFFull) | 0x8000000000000000ull;           // variant 10
@@ -748,6 +778,7 @@ std::string ProjectDocument::NewGuid() {
                   static_cast<unsigned>(lo >> 48), static_cast<unsigned long long>(lo & 0xFFFFFFFFFFFFull));
     if (Find(b) == nullptr) return b;
   }
+  return std::string();
 }
 
 // --- transactions --------------------------------------------------------------------------
@@ -903,8 +934,10 @@ std::string ProjectDocument::Create(std::string_view kind, const std::string& na
     return std::string();
   }
   if (kind == "project" && projectObject() != nullptr) return std::string();
+  if (init != nullptr && HasNonFinite(*init)) return std::string();  // D-176c
   DocObject o;
   o.guid = NewGuid();
+  if (o.guid.empty()) return std::string();
   o.doc = json::MakeObject();
   const char* const* order = SpecMemberOrder(kind, "");
   SetMember(o.doc, "type", String(std::string(kind)), order);
@@ -945,7 +978,7 @@ bool ProjectDocument::Rename(std::string_view guid, const std::string& newName, 
   if (o == nullptr) return false;
   const std::string kind = o->kind();
   const std::string oldName = o->name();
-  if (newName == oldName) return false;
+  if (newName == oldName) return true;  // D-177b: no change is success, no step
   if ((newName.empty() && kind != "ducking") || HasControl(newName) || NameTaken(kind, newName, o->guid)) return false;
   // An old name of another object cannot become a current name (build rule, 10.1).
   for (const DocObject& other : objects_) {
@@ -1031,7 +1064,8 @@ bool ProjectDocument::Modify(std::string_view guid, const std::function<bool(Val
   Open(mergeKey);
   Touch(g);
   o = FindMutable(g);
-  if (!fn(o->doc) || !o->doc.IsObject() || StringAt(o->doc, "type") != type || NormalizeGuid(StringAt(o->doc, "guid")) != g) {
+  if (!fn(o->doc) || !o->doc.IsObject() || StringAt(o->doc, "type") != type || NormalizeGuid(StringAt(o->doc, "guid")) != g ||
+      HasNonFinite(o->doc)) {
     Cancel();
     return false;
   }
@@ -1056,7 +1090,8 @@ bool ProjectDocument::Set(std::string_view guid, std::string_view path, Value va
     if (!value.IsString()) return false;
     return Rename(guid, value.text, RenameOptions{false, false});
   }
-  if (const Value* cur = FindPath(o->doc, path); cur != nullptr && JsonEqual(*cur, value)) return false;
+  if (HasNonFinite(value)) return false;  // D-176c
+  if (const Value* cur = FindPath(o->doc, path); cur != nullptr && JsonEqual(*cur, value)) return true;  // D-177b
   return Modify(
       guid,
       [&](Value& doc) {
@@ -1120,7 +1155,7 @@ bool ProjectDocument::Erase(std::string_view guid, std::string_view path) {
 
 bool ProjectDocument::Insert(std::string_view guid, std::string_view arrayPath, std::size_t index, Value value) {
   const DocObject* o = Find(guid);
-  if (o == nullptr) return false;
+  if (o == nullptr || HasNonFinite(value)) return false;
   const Value* arr = FindPath(o->doc, arrayPath);
   if (arr == nullptr) {
     if (index != 0) return false;
@@ -1239,36 +1274,139 @@ void ProjectDocument::MarkSaved() {
 
 bool ProjectDocument::Save(std::string* error) { return SaveTo(dir_, error); }
 
-bool ProjectDocument::SaveTo(const std::string& dir, std::string* error) {
-  if (dir.empty()) {
-    if (error != nullptr) *error = "no project directory";
+namespace {
+// Writes `bytes` next to `target` and renames it over (D-176d). false and `why` on failure.
+bool WriteAtomic(const fs::path& target, const std::string& bytes, std::string* why) {
+  std::error_code ec;
+  fs::create_directories(target.parent_path(), ec);
+  const fs::file_status st = fs::symlink_status(target, ec);
+  if (fs::exists(st) && !fs::is_regular_file(st)) {
+    *why = "exists and is not a regular file";
     return false;
   }
-  const std::vector<FileChange> changes = PendingChanges();
-  const bool sameDir = dir == dir_;
-  std::error_code ec;
-  // Writes first (a failure leaves the deletions undone), then deletions.
-  for (const FileChange& c : (sameDir ? changes : std::vector<FileChange>{})) {
-    if (c.op != FileChange::Op::Write) continue;
-    if (!WriteText(fs::path(dir) / c.file, c.text)) {
-      if (error != nullptr) *error = "cannot write " + c.file;
-      return false;
-    }
+  const fs::path tmp = target.string() + ".sonus-tmp";
+  if (!WriteText(tmp, bytes)) {
+    fs::remove(tmp, ec);
+    *why = "cannot write";
+    return false;
   }
-  if (!sameDir) {  // a copy: every object
-    for (const DocObject& o : objects_) {
-      if (!WriteText(fs::path(dir) / o.file, TextOf(o))) {
-        if (error != nullptr) *error = "cannot write " + o.file;
-        return false;
+  fs::rename(tmp, target, ec);
+  if (ec) {
+    fs::remove(tmp, ec);
+    *why = "cannot replace (" + ec.message() + ")";
+    return false;
+  }
+  return true;
+}
+// A project-relative path that stays inside the project ('/' separated, no "..", not absolute).
+bool InsideProject(const std::string& rel) {
+  if (rel.empty() || rel[0] == '/' || rel[0] == '\\' || rel.find(':') != std::string::npos) return false;
+  std::size_t i = 0;
+  while (i <= rel.size()) {
+    const std::size_t e = rel.find_first_of("/\\", i);
+    const std::string part = rel.substr(i, e == std::string::npos ? std::string::npos : e - i);
+    if (part == "..") return false;
+    if (e == std::string::npos) break;
+    i = e + 1;
+  }
+  return true;
+}
+}  // namespace
+
+std::vector<std::string> ProjectDocument::ReferencedFiles() const {
+  std::set<std::string> files;
+  for (const DocObject& o : objects_) {
+    const std::string kind = o.kind();
+    if (kind == "asset") {
+      if (const Value* f = o.doc.Find("file"); f != nullptr && f->IsString() && !f->text.empty()) files.insert(f->text);
+      if (const Value* l = o.doc.Find("languages"); l != nullptr && l->IsObject()) {
+        for (const json::Member& m : l->members) {
+          if (m.first != "notes" && m.second.IsString() && !m.second.text.empty()) files.insert(m.second.text);
+        }
+      }
+    } else if (kind == "bus") {
+      if (const Value* fx = o.doc.Find("effects"); fx != nullptr && fx->IsArray()) {
+        for (const Value& e : fx->items) {
+          if (const Value* b = e.Find("blob"); b != nullptr && b->IsString() && !b->text.empty()) files.insert(b->text);
+        }
       }
     }
   }
-  if (sameDir) {
-    for (const FileChange& c : changes) {
-      if (c.op == FileChange::Op::Delete) fs::remove(fs::path(dir) / c.file, ec);
+  return std::vector<std::string>(files.begin(), files.end());
+}
+
+bool ProjectDocument::SaveTo(const std::string& dir, std::string* error) {
+  lastSave_ = SaveResult{};
+  SaveResult& res = lastSave_;
+  auto fail = [&](const std::string& path, const std::string& why) { res.failures.push_back(SaveFailure{path, why}); };
+  auto finish = [&]() {
+    res.ok = res.failures.empty();
+    if (!res.ok && error != nullptr) {
+      *error = res.failures[0].path + ": " + res.failures[0].reason;
+      if (res.failures.size() > 1) *error += " (+" + std::to_string(res.failures.size() - 1) + " more)";
     }
+    return res.ok;
+  };
+  if (dir.empty()) {
+    fail("", "no project directory");
+    return finish();
   }
-  // The saved state: text as written (or as before, for untouched files).
+  std::error_code ec;
+  if (dir == dir_) {
+    // 1. New and changed files: temporary file + rename. 2. Only if all of them were written:
+    // files no object uses any more are deleted; a deletion that fails stays pending.
+    for (const DocObject& o : objects_) {
+      if (IsUnchanged(o)) continue;
+      const std::string text = json::Write(o.doc);
+      std::string why;
+      if (!WriteAtomic(fs::path(dir) / o.file, text, &why)) {
+        fail(o.file, why);
+        continue;
+      }
+      saved_[o.file] = o.doc;
+      savedText_[o.file] = text;
+    }
+    if (!res.failures.empty()) return finish();  // keep the old files of moved objects
+    std::set<std::string> used;
+    for (const DocObject& o : objects_) used.insert(o.file);
+    std::vector<std::string> gone;
+    for (const auto& [file, v] : saved_) {
+      if (used.count(file) == 0u) gone.push_back(file);
+    }
+    for (const std::string& file : gone) {
+      const fs::path p = fs::path(dir) / file;
+      const bool removed = fs::remove(p, ec);
+      if (!removed && fs::exists(fs::symlink_status(p, ec))) {
+        fail(file, "cannot delete" + (ec ? " (" + ec.message() + ")" : std::string()));
+        continue;
+      }
+      saved_.erase(file);
+      savedText_.erase(file);
+    }
+    return finish();
+  }
+  // "Save as" (D-176e): every object, the files the project reads from inside its directory,
+  // and the *.json files that could not be read; the document then lives in `dir`.
+  for (const DocObject& o : objects_) {
+    std::string why;
+    if (!WriteAtomic(fs::path(dir) / o.file, TextOf(o), &why)) fail(o.file, why);
+  }
+  std::vector<std::string> copies = ReferencedFiles();
+  for (const std::string& f : otherFiles_) copies.push_back(f);
+  for (const std::string& rel : copies) {
+    if (!InsideProject(rel)) {
+      res.outside.push_back(rel);
+      continue;
+    }
+    std::vector<std::uint8_t> bytes;
+    if (!ReadBinaryFile(rel, &bytes)) {
+      res.missing.push_back(rel);
+      continue;
+    }
+    std::string why;
+    if (!WriteAtomic(fs::path(dir) / rel, std::string(bytes.begin(), bytes.end()), &why)) fail(rel, why);
+  }
+  if (!res.failures.empty()) return finish();
   std::map<std::string, Value> saved;
   std::map<std::string, std::string> text;
   for (const DocObject& o : objects_) {
@@ -1277,8 +1415,8 @@ bool ProjectDocument::SaveTo(const std::string& dir, std::string* error) {
   }
   saved_ = std::move(saved);
   savedText_ = std::move(text);
-  if (!sameDir) dir_ = dir;
-  return true;
+  dir_ = dir;
+  return finish();
 }
 
 }  // namespace snd::tool

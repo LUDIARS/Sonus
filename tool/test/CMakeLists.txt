@@ -17,7 +17,7 @@ endfunction()
 foreach(_t model_test live_mixer_test live_profiler_test indep_sync_test core_host_test document_test
         event_editor_test mixer_editor_test curve_editor_test
         spatial_preview_test runtime_compare_test music_editor_test
-        material_editor_test patch_editor_test)
+        material_editor_test patch_editor_test decisions_test)
   _snd_tool_test(${_t} "${_tool_core_test_link}")
 endforeach()
 

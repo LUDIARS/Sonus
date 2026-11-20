@@ -109,7 +109,10 @@ struct BankImage {
   Id bankId = 0;
   std::uint64_t contentHash = 0;
   std::vector<std::uint8_t> bytes;
-  // Parsed view of `bytes` (64-byte aligned copy), null if it does not parse.
+  // Parsed view of `bytes` (64-byte aligned copy), null if it does not parse. BuildDocument
+  // parses its banks before it returns and copies share the parse, so reading a DocBuild from
+  // several threads at once is safe (D-178d); a BankImage filled by hand parses on the first
+  // call, under a lock.
   const ParsedBank* view() const;
 
   BankImage();
@@ -190,17 +193,50 @@ LiveDelta DiffBuilds(const DocBuild& before, const DocBuild& after);
 // Builds the document before and after (`before` a copy of the document) and diffs.
 EditClass ClassifyEdit(const ProjectDocument& before, const ProjectDocument& after, LiveDelta* delta = nullptr);
 
-// Cells of member `path` of object `guid` in every bank it is in (FieldColumns table).
-std::vector<CellRef> LocateField(const DocBuild& build, const ProjectDocument& doc, const std::string& guid,
-                                 const std::string& path);
-// The (kind, member pattern) -> (chunk, column) table LocateField uses ('#' = an index).
+// What an edit of one member does to the banks (D-178b). Every member of project-format.md has
+// an answer (FieldColumns covers the build's whole schema; "notes" anywhere is NotInBank).
+enum class FieldEffect : std::uint8_t {
+  Unknown = 0,    // not a member of the project format
+  Column = 1,     // one or more bank cells (chunk, column) keep the table's shape: LocateField
+  NotInBank = 2,  // the build does not read it (notes, editor positions, ...)
+  Structure = 3,  // names, references, blobs, row counts: a rebuild (DiffBuilds: chunks)
+};
+// How LocateField finds the row of a Column member.
+enum class FieldRow : std::uint8_t {
+  None = 0,
+  Id,              // the object's id table (column 0 = HashId(name))
+  Owner1,          // one level below the id table (index = the member's array index)
+  Owner2,          // two levels (index = hi << 16 | lo)
+  Duck,            // DUCK: the bank's duckings in name order
+  SynpOfClip,      // SYNP row named by the clip's CLIP.target
+  Transition,      // MTRN rows of the music event, in order
+  Stinger,         // MSTG by the stinger's name id
+  SegmentRange,    // MTMP / MMRK: MSEG first column (aux) + index
+  Stem,            // MSTM rows of the segment, in order
+  DistanceCurve,   // CURV row named by EVNT column `aux`
+  DistancePoint,   // CPNT of that curve
+  StemCurve,       // CURV row named by MSTM.volumeCurve
+  StemPoint,       // CPNT of that curve
+};
 struct FieldColumn {
-  const char* kind;
-  const char* pattern;  // "tracks[#].clips[#].startMs", "effects[#].params[#]"
-  std::uint32_t chunk;
+  const char* kind;     // object kind, "*" = every kind
+  const char* pattern;  // "[#]" any index, "*" any member name, "**" anything below
+  FieldEffect effect;
+  std::uint32_t chunk;  // Column only
   std::uint16_t column;
+  FieldRow row;
+  std::uint32_t aux;
 };
 const std::vector<FieldColumn>& FieldColumns();
+// The effect of an edit of `path` ("tracks[2].clips[0].startMs"; "[]" also matches an index).
+FieldEffect ClassifyMember(const std::string& kind, const std::string& path);
+
+// Cells of member `path` of object `guid` in every bank it is in (Column members). A cell's
+// liveWritable is false when the column is not in the bank (the build leaves out optional
+// columns whose rows are all at the default; the runtime cannot write them, D-178c) and when
+// the row has no live address, exactly as DiffBuilds decides.
+std::vector<CellRef> LocateField(const DocBuild& build, const ProjectDocument& doc, const std::string& guid,
+                                 const std::string& path);
 
 float BitsToFloat(std::uint64_t bits);
 

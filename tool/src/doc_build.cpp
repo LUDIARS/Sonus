@@ -5,6 +5,7 @@
 #include <cstring>
 #include <filesystem>
 #include <map>
+#include <mutex>
 #include <set>
 
 #include "snd/buildtool/patch.hpp"
@@ -148,7 +149,7 @@ void Address(const ParsedBank& v, CellRef* c) {
   if (v.Guid(c->runtimeId, &lo, &hi)) c->guid = Guid{lo, hi};
 }
 
-void Classify(CellRef* c) {
+void Classify(const ParsedBank& v, CellRef* c) {
   const bf::ColumnInfo* info = bf::check::FindColumnInfo(c->chunk, c->column);
   c->liveWritable = false;
   if (info == nullptr) return;
@@ -170,104 +171,261 @@ void Classify(CellRef* c) {
       c->type = CellType::U64;
       break;
   }
-  c->liveWritable = c->liveWritable && c->addressable;
+  // D-178c: a column the build left out of the table cannot be written live (NOT_FOUND).
+  c->liveWritable = c->liveWritable && c->addressable && v.HasColumn(c->chunk, c->column);
 }
 
 // --- field table --------------------------------------------------------------------------
 std::vector<FieldColumn> MakeFields() {
-  return {
-      {"event", "sequence", ch::EVNT, co::EVNT_sequenceKind},
-      {"event", "priority", ch::EVNT, co::EVNT_priority},
-      {"event", "maxInstances", ch::EVNT, co::EVNT_maxInstances},
-      {"event", "retriggerMs", ch::EVNT, co::EVNT_retriggerMs},
-      {"event", "fadeOutMs", ch::EVNT, co::EVNT_fadeOutMs},
-      {"event", "comboWindowMs", ch::EVNT, co::EVNT_comboWindowMs},
-      {"event", "maxDistance", ch::EVNT, co::EVNT_maxDistance},
-      {"event", "cone.innerDeg", ch::EVNT, co::EVNT_coneInnerDeg},
-      {"event", "cone.outerDeg", ch::EVNT, co::EVNT_coneOuterDeg},
-      {"event", "cone.outerDb", ch::EVNT, co::EVNT_coneOuterDb},
-      {"event", "virtualReturn", ch::EVNT, co::EVNT_virtualReturn},
-      {"event", "is3D", ch::EVNT, co::EVNT_flags},
-      {"event", "ignorePause", ch::EVNT, co::EVNT_flags},
-      {"event", "stinger", ch::EVNT, co::EVNT_flags},
-      {"event", "tracks[#].flags", ch::TRAK, co::TRAK_flags},
-      {"event", "tracks[#].layerParameter", ch::TRAK, co::TRAK_layerParam},
-      {"event", "tracks[#].clips[#].startMs", ch::CLIP, co::CLIP_startMs},
-      {"event", "tracks[#].clips[#].weight", ch::CLIP, co::CLIP_weight},
-      {"event", "tracks[#].clips[#].volumeDb", ch::CLIP, co::CLIP_volumeDb},
-      {"event", "tracks[#].clips[#].pitchCents", ch::CLIP, co::CLIP_pitchCents},
-      {"event", "tracks[#].clips[#].random.volumeDb", ch::CLIP, co::CLIP_randVolumeDb},
-      {"event", "tracks[#].clips[#].random.pitchCents", ch::CLIP, co::CLIP_randPitchCents},
-      {"event", "tracks[#].clips[#].random.pan", ch::CLIP, co::CLIP_randPan},
-      {"event", "tracks[#].clips[#].random.startMs", ch::CLIP, co::CLIP_randStartMs},
-      {"event", "tracks[#].clips[#].random.filterHz", ch::CLIP, co::CLIP_randFilterHz},
-      {"event", "tracks[#].clips[#].switchValue", ch::CLIP, co::CLIP_switchValue},
-      {"event", "tracks[#].clips[#].layer[0]", ch::CLIP, co::CLIP_layerMin},
-      {"event", "tracks[#].clips[#].layer[1]", ch::CLIP, co::CLIP_layerMax},
-      {"event", "tracks[#].clips[#].fadeInMs", ch::CLIP, co::CLIP_fadeInMs},
-      {"event", "tracks[#].clips[#].fadeOutMs", ch::CLIP, co::CLIP_fadeOutMs},
-      {"event", "tracks[#].clips[#].loopCount", ch::CLIP, co::CLIP_loopCount},
-      {"event", "tracks[#].actions[#].timeMs", ch::ACTN, co::ACTN_timeMs},
-      {"event", "tracks[#].actions[#].value", ch::ACTN, co::ACTN_value},
-      {"event", "tracks[#].actions[#].target", ch::ACTN, co::ACTN_target},
-      {"event", "curves[#].points[#][0]", ch::CPNT, co::CPNT_x},
-      {"event", "curves[#].points[#][1]", ch::CPNT, co::CPNT_y},
-      {"event", "curves[#].points[#][2]", ch::CPNT, co::CPNT_shape},
-      {"bus", "volumeDb", ch::BUSS, co::BUSS_volumeDb},
-      {"bus", "channels", ch::BUSS, co::BUSS_channels},
-      {"bus", "lodPriority", ch::BUSS, co::BUSS_lodPriority},
-      {"bus", "sends[#].levelDb", ch::SEND, co::SEND_levelDb},
-      {"bus", "sends[#].preFader", ch::SEND, co::SEND_preFader},
-      {"bus", "effects[#].params[#]", ch::EFPV, co::EFPV_value},
-      {"bus", "effects[#].flags", ch::EFFX, co::EFFX_flags},
-      {"category", "volumeDb", ch::CATG, co::CATG_volumeDb},
-      {"category", "ignorePause", ch::CATG, co::CATG_flags},
-      {"category", "muteOnFocusLoss", ch::CATG, co::CATG_flags},
-      {"parameter", "min", ch::PARM, co::PARM_minValue},
-      {"parameter", "max", ch::PARM, co::PARM_maxValue},
-      {"parameter", "default", ch::PARM, co::PARM_defaultValue},
-      {"parameter", "rampRate", ch::PARM, co::PARM_rampRate},
-      {"parameter", "scope", ch::PARM, co::PARM_scopeMask},
-      {"parameter", "kind", ch::PARM, co::PARM_kind},
-      {"snapshot", "values[#].value", ch::SNPV, co::SNPV_value},
-      {"voiceLimitGroup", "maxVoices", ch::VLGR, co::VLGR_maxVoices},
-      {"voiceLimitGroup", "steal", ch::VLGR, co::VLGR_stealMode},
-      {"ducking", "amountDb", ch::DUCK, co::DUCK_amountDb},
-      {"ducking", "attackMs", ch::DUCK, co::DUCK_attackMs},
-      {"ducking", "releaseMs", ch::DUCK, co::DUCK_releaseMs},
-      {"ducking", "thresholdDb", ch::DUCK, co::DUCK_thresholdDb},
-      {"playlist", "mode", ch::MPLS, co::MPLS_mode},
-      {"playlist", "loopCount", ch::MPLS, co::MPLS_loopCount},
-      {"playlist", "entries[#].weight", ch::MPLE, co::MPLE_weight},
-      {"playlist", "entries[#].repeat", ch::MPLE, co::MPLE_repeat},
+  using E = FieldEffect;
+  using R = FieldRow;
+  std::vector<FieldColumn> f;
+  auto C = [&](const char* k, const char* p, std::uint32_t chunk, std::uint16_t col, R r, std::uint32_t aux = 0) {
+    f.push_back(FieldColumn{k, p, E::Column, chunk, col, r, aux});
   };
+  auto N = [&](const char* k, const char* p) { f.push_back(FieldColumn{k, p, E::NotInBank, 0, 0, R::None, 0}); };
+  auto S = [&](const char* k, const char* p) { f.push_back(FieldColumn{k, p, E::Structure, 0, 0, R::None, 0}); };
+  // Every kind.
+  for (const char* p : {"type", "guid", "name", "aliases", "aliases[#]", "bank"}) S("*", p);
+  // project, bank
+  for (const char* p : {"formatVersion", "languages", "languages[#]", "platforms", "platforms.**"}) S("project", p);
+  for (const char* p : {"dependsOn", "dependsOn[#]", "language"}) S("bank", p);
+  // bus
+  for (const char* p : {"parent", "master", "sends", "sends[#]", "sends[#].bus", "effects", "effects[#]", "effects[#].type",
+                        "effects[#].params", "effects[#].blob"}) {
+    S("bus", p);
+  }
+  for (const char* p : {"output", "lodBypassable", "meter"}) C("bus", p, ch::BUSS, co::BUSS_flags, R::Id);
+  C("bus", "volumeDb", ch::BUSS, co::BUSS_volumeDb, R::Id);
+  C("bus", "channels", ch::BUSS, co::BUSS_channels, R::Id);
+  C("bus", "lodPriority", ch::BUSS, co::BUSS_lodPriority, R::Id);
+  C("bus", "sends[#].levelDb", ch::SEND, co::SEND_levelDb, R::Owner1);
+  C("bus", "sends[#].preFader", ch::SEND, co::SEND_preFader, R::Owner1);
+  C("bus", "effects[#].params[#]", ch::EFPV, co::EFPV_value, R::Owner2);
+  C("bus", "effects[#].flags", ch::EFFX, co::EFFX_flags, R::Owner1);
+  // category, parameter
+  S("category", "parent");
+  for (const char* p : {"ignorePause", "muteOnFocusLoss"}) C("category", p, ch::CATG, co::CATG_flags, R::Id);
+  C("category", "volumeDb", ch::CATG, co::CATG_volumeDb, R::Id);
+  C("parameter", "kind", ch::PARM, co::PARM_kind, R::Id);
+  C("parameter", "scope", ch::PARM, co::PARM_scopeMask, R::Id);
+  C("parameter", "scope[#]", ch::PARM, co::PARM_scopeMask, R::Id);
+  C("parameter", "min", ch::PARM, co::PARM_minValue, R::Id);
+  C("parameter", "max", ch::PARM, co::PARM_maxValue, R::Id);
+  C("parameter", "default", ch::PARM, co::PARM_defaultValue, R::Id);
+  C("parameter", "rampRate", ch::PARM, co::PARM_rampRate, R::Id);
+  // snapshot, voiceLimitGroup, ducking
+  for (const char* p : {"values", "values[#]", "values[#].kind", "values[#].bus", "values[#].effect", "values[#].send"}) S("snapshot", p);
+  C("snapshot", "values[#].value", ch::SNPV, co::SNPV_value, R::Owner1);
+  C("snapshot", "values[#].param", ch::SNPV, co::SNPV_paramIndex, R::Owner1);
+  C("voiceLimitGroup", "maxVoices", ch::VLGR, co::VLGR_maxVoices, R::Id);
+  C("voiceLimitGroup", "steal", ch::VLGR, co::VLGR_stealMode, R::Id);
+  for (const char* p : {"kind", "source", "target"}) S("ducking", p);
+  C("ducking", "amountDb", ch::DUCK, co::DUCK_amountDb, R::Duck);
+  C("ducking", "attackMs", ch::DUCK, co::DUCK_attackMs, R::Duck);
+  C("ducking", "releaseMs", ch::DUCK, co::DUCK_releaseMs, R::Duck);
+  C("ducking", "thresholdDb", ch::DUCK, co::DUCK_thresholdDb, R::Duck);
+  // asset: the material (WAVE / streams) is rebuilt; only the flags are cells.
+  for (const char* p : {"file", "languages", "languages.**", "loadForm", "loop", "loop.**", "convert", "convert.**", "preloadMs",
+                        "seekIntervalMs"}) {
+    S("asset", p);
+  }
+  for (const char* p : {"stallPolicy", "virtualReturn", "ioPriority"}) C("asset", p, ch::ASST, co::ASST_flags, R::Id);
+  // event
+  for (const char* p : {"bus", "category", "limitGroup", "cone", "distanceCurves", "curves", "curves[#]", "curves[#].points",
+                        "curves[#].points[#]", "tracks", "tracks[#]", "tracks[#].bus", "tracks[#].clips", "tracks[#].actions",
+                        "tracks[#].clips[#]", "tracks[#].clips[#].asset", "tracks[#].clips[#].event",
+                        "tracks[#].clips[#].synth", "tracks[#].clips[#].synth.kind", "tracks[#].clips[#].synth.asset",
+                        "tracks[#].clips[#].synth.patch", "tracks[#].clips[#].random", "tracks[#].actions[#]", "music",
+                        "music.initialState", "music.states", "music.states[#]", "music.states[#].name",
+                        "music.states[#].playlist", "music.transitions", "music.transitions[#]", "music.transitions[#].bridge",
+                        "music.stingers", "music.stingers[#]", "music.stingers[#].name", "music.stingers[#].event"}) {
+    S("event", p);
+  }
+  C("event", "sequence", ch::EVNT, co::EVNT_sequenceKind, R::Id);
+  C("event", "priority", ch::EVNT, co::EVNT_priority, R::Id);
+  C("event", "maxInstances", ch::EVNT, co::EVNT_maxInstances, R::Id);
+  C("event", "retriggerMs", ch::EVNT, co::EVNT_retriggerMs, R::Id);
+  C("event", "fadeOutMs", ch::EVNT, co::EVNT_fadeOutMs, R::Id);
+  C("event", "comboWindowMs", ch::EVNT, co::EVNT_comboWindowMs, R::Id);
+  C("event", "maxDistance", ch::EVNT, co::EVNT_maxDistance, R::Id);
+  C("event", "cone.innerDeg", ch::EVNT, co::EVNT_coneInnerDeg, R::Id);
+  C("event", "cone.outerDeg", ch::EVNT, co::EVNT_coneOuterDeg, R::Id);
+  C("event", "cone.outerDb", ch::EVNT, co::EVNT_coneOuterDb, R::Id);
+  C("event", "virtualReturn", ch::EVNT, co::EVNT_virtualReturn, R::Id);
+  for (const char* p : {"is3D", "ignorePause", "stinger"}) C("event", p, ch::EVNT, co::EVNT_flags, R::Id);
+  struct Dist {
+    const char* key;
+    std::uint16_t col;
+  };
+  static const Dist kDist[] = {{"volume", co::EVNT_curveVolume},       {"lowpass", co::EVNT_curveLowpass},
+                               {"spread", co::EVNT_curveSpread},       {"reverbSend", co::EVNT_curveReverbSend},
+                               {"blend3D", co::EVNT_curveBlend3D}};
+  static std::vector<std::string> names;  // storage for the generated patterns
+  if (names.empty()) {
+    for (const Dist& d : kDist) {
+      const std::string b = std::string("distanceCurves.") + d.key;
+      for (const char* tail : {"", ".parameter", ".target", ".compose", ".points", ".points[#]", ".points[#][0]",
+                               ".points[#][1]", ".points[#][2]"}) {
+        names.push_back(b + tail);
+      }
+    }
+  }
+  for (std::size_t k = 0; k < 5; ++k) {
+    const std::string* n = &names[k * 9];
+    S("event", n[0].c_str());
+    N("event", n[1].c_str());  // a distance curve's input is the distance and its target its key
+    N("event", n[2].c_str());
+    C("event", n[3].c_str(), ch::CURV, co::CURV_compose, R::DistanceCurve, kDist[k].col);
+    S("event", n[4].c_str());
+    S("event", n[5].c_str());
+    C("event", n[6].c_str(), ch::CPNT, co::CPNT_x, R::DistancePoint, kDist[k].col);
+    C("event", n[7].c_str(), ch::CPNT, co::CPNT_y, R::DistancePoint, kDist[k].col);
+    C("event", n[8].c_str(), ch::CPNT, co::CPNT_shape, R::DistancePoint, kDist[k].col);
+  }
+  C("event", "curves[#].parameter", ch::CURV, co::CURV_input, R::Owner1);
+  C("event", "curves[#].target", ch::CURV, co::CURV_target, R::Owner1);
+  C("event", "curves[#].compose", ch::CURV, co::CURV_compose, R::Owner1);
+  C("event", "curves[#].points[#][0]", ch::CPNT, co::CPNT_x, R::Owner2);
+  C("event", "curves[#].points[#][1]", ch::CPNT, co::CPNT_y, R::Owner2);
+  C("event", "curves[#].points[#][2]", ch::CPNT, co::CPNT_shape, R::Owner2);
+  C("event", "tracks[#].flags", ch::TRAK, co::TRAK_flags, R::Owner1);
+  C("event", "tracks[#].layerParameter", ch::TRAK, co::TRAK_layerParam, R::Owner1);
+  const char* clip = "tracks[#].clips[#].";
+  struct ClipCol {
+    const char* m;
+    std::uint16_t col;
+  };
+  static const ClipCol kClip[] = {{"startMs", co::CLIP_startMs},          {"weight", co::CLIP_weight},
+                                  {"volumeDb", co::CLIP_volumeDb},        {"pitchCents", co::CLIP_pitchCents},
+                                  {"random.volumeDb", co::CLIP_randVolumeDb}, {"random.pitchCents", co::CLIP_randPitchCents},
+                                  {"random.pan", co::CLIP_randPan},       {"random.startMs", co::CLIP_randStartMs},
+                                  {"random.filterHz", co::CLIP_randFilterHz}, {"switchValue", co::CLIP_switchValue},
+                                  {"layer", co::CLIP_layerMin},           {"layer", co::CLIP_layerMax},
+                                  {"layer[0]", co::CLIP_layerMin},        {"layer[1]", co::CLIP_layerMax},
+                                  {"fadeInMs", co::CLIP_fadeInMs},        {"fadeOutMs", co::CLIP_fadeOutMs},
+                                  {"loopCount", co::CLIP_loopCount}};
+  static const ClipCol kSynth[] = {{"synth.waveform", co::SYNP_waveform},   {"synth.frequencyHz", co::SYNP_frequencyHz},
+                                   {"synth.duty", co::SYNP_duty},           {"synth.noiseColor", co::SYNP_noiseColor},
+                                   {"synth.channels", co::SYNP_channels}};
+  static const ClipCol kAction[] = {{"timeMs", co::ACTN_timeMs}, {"action", co::ACTN_action}, {"target", co::ACTN_target},
+                                    {"value", co::ACTN_value}};
+  static std::vector<std::string> clipNames;
+  if (clipNames.empty()) {
+    for (const ClipCol& c : kClip) clipNames.push_back(std::string(clip) + c.m);
+    for (const ClipCol& c : kSynth) clipNames.push_back(std::string(clip) + c.m);
+    for (const ClipCol& c : kAction) clipNames.push_back(std::string("tracks[#].actions[#].") + c.m);
+  }
+  std::size_t n = 0;
+  for (const ClipCol& c : kClip) C("event", clipNames[n++].c_str(), ch::CLIP, c.col, R::Owner2);
+  S("event", "tracks[#].clips[#].layer[#]");  // other indices (the two above are the cells)
+  for (const ClipCol& c : kSynth) C("event", clipNames[n++].c_str(), ch::SYNP, c.col, R::SynpOfClip);
+  for (const ClipCol& c : kAction) C("event", clipNames[n++].c_str(), ch::ACTN, c.col, R::Owner2);
+  struct TrCol {
+    const char* m;
+    std::uint16_t col;
+  };
+  static const TrCol kTr[] = {{"music.transitions[#].from", co::MTRN_fromState},
+                              {"music.transitions[#].to", co::MTRN_toState},
+                              {"music.transitions[#].timing", co::MTRN_timing},
+                              {"music.transitions[#].timingCount", co::MTRN_timingCount},
+                              {"music.transitions[#].fadeOutBeats", co::MTRN_fadeOutBeats},
+                              {"music.transitions[#].fadeInBeats", co::MTRN_fadeInBeats},
+                              {"music.transitions[#].start", co::MTRN_startPosition},
+                              {"music.transitions[#].startMarker", co::MTRN_startMarker},
+                              {"music.transitions[#].interrupt", co::MTRN_interrupt},
+                              {"music.transitions[#].late", co::MTRN_lateRule},
+                              {"music.transitions[#].prepare", co::MTRN_flags}};
+  for (const TrCol& t : kTr) C("event", t.m, ch::MTRN, t.col, R::Transition);
+  C("event", "music.stingers[#].timing", ch::MSTG, co::MSTG_timing, R::Stinger);
+  C("event", "music.stingers[#].timingCount", ch::MSTG, co::MSTG_timingCount, R::Stinger);
+  C("event", "music.stingers[#].overlap", ch::MSTG, co::MSTG_overlap, R::Stinger);
+  // segment
+  for (const char* p : {"asset", "tempo", "tempo[#]", "markers", "markers[#]", "stems", "stems[#]", "stems[#].volumeCurve",
+                        "stems[#].volumeCurve.points", "stems[#].volumeCurve.points[#]", "stems[#].asset", "entryPreload"}) {
+    S("segment", p);
+  }
+  C("segment", "bars", ch::MSEG, co::MSEG_bars, R::Id);
+  C("segment", "entryFrame", ch::MSEG, co::MSEG_entryFrame, R::Id);
+  C("segment", "exitFrame", ch::MSEG, co::MSEG_exitFrame, R::Id);
+  C("segment", "tempo[#].tick", ch::MTMP, co::MTMP_tick, R::SegmentRange, co::MSEG_tempoFirst);
+  C("segment", "tempo[#].bpm", ch::MTMP, co::MTMP_bpm, R::SegmentRange, co::MSEG_tempoFirst);
+  C("segment", "tempo[#].beatsPerBar", ch::MTMP, co::MTMP_beatsPerBar, R::SegmentRange, co::MSEG_tempoFirst);
+  C("segment", "tempo[#].beatUnit", ch::MTMP, co::MTMP_beatUnit, R::SegmentRange, co::MSEG_tempoFirst);
+  C("segment", "markers[#].name", ch::MMRK, co::MMRK_id, R::SegmentRange, co::MSEG_markerFirst);
+  C("segment", "markers[#].frame", ch::MMRK, co::MMRK_frame, R::SegmentRange, co::MSEG_markerFirst);
+  C("segment", "markers[#].kind", ch::MMRK, co::MMRK_kind, R::SegmentRange, co::MSEG_markerFirst);
+  C("segment", "stems[#].channelFirst", ch::MSTM, co::MSTM_channelFirst, R::Stem);
+  C("segment", "stems[#].channelCount", ch::MSTM, co::MSTM_channelCount, R::Stem);
+  C("segment", "stems[#].volumeCurve.parameter", ch::CURV, co::CURV_input, R::StemCurve);
+  C("segment", "stems[#].volumeCurve.target", ch::CURV, co::CURV_target, R::StemCurve);
+  C("segment", "stems[#].volumeCurve.compose", ch::CURV, co::CURV_compose, R::StemCurve);
+  C("segment", "stems[#].volumeCurve.points[#][0]", ch::CPNT, co::CPNT_x, R::StemPoint);
+  C("segment", "stems[#].volumeCurve.points[#][1]", ch::CPNT, co::CPNT_y, R::StemPoint);
+  C("segment", "stems[#].volumeCurve.points[#][2]", ch::CPNT, co::CPNT_shape, R::StemPoint);
+  // playlist
+  for (const char* p : {"entries", "entries[#]", "entries[#].segment"}) S("playlist", p);
+  C("playlist", "mode", ch::MPLS, co::MPLS_mode, R::Id);
+  C("playlist", "loopCount", ch::MPLS, co::MPLS_loopCount, R::Id);
+  C("playlist", "entries[#].weight", ch::MPLE, co::MPLE_weight, R::Owner1);
+  C("playlist", "entries[#].repeat", ch::MPLE, co::MPLE_repeat, R::Owner1);
+  // materialTable: the PHYS blob.
+  S("materialTable", "**");
+  // patch: the XPCH blob, except where the editor draws the nodes.
+  N("patch", "nodes[#].position");
+  N("patch", "nodes[#].position[#]");
+  S("patch", "**");
+  return f;
 }
 
-// Matches "tracks[2].clips[0].startMs" against "tracks[#].clips[#].startMs"; indices out.
-bool MatchPattern(const std::string& path, const char* pattern, std::vector<std::uint32_t>* idx) {
+// Segment-wise match: "[#]" (or "[]" in the path) any index, "*" any member name, "**" the rest.
+bool MatchSegments(const std::string& path, const std::string& pattern, std::vector<std::uint32_t>* idx) {
+  auto split = [](const std::string& s) {
+    std::vector<std::string> out;
+    std::string cur;
+    for (std::size_t i = 0; i < s.size(); ++i) {
+      if (s[i] == '.') {
+        if (!cur.empty()) out.push_back(cur);
+        cur.clear();
+      } else if (s[i] == '[') {
+        if (!cur.empty()) out.push_back(cur);
+        const std::size_t e = s.find(']', i);
+        out.push_back(s.substr(i, e == std::string::npos ? std::string::npos : e - i + 1));
+        cur.clear();
+        if (e == std::string::npos) break;
+        i = e;
+      } else {
+        cur.push_back(s[i]);
+      }
+    }
+    if (!cur.empty()) out.push_back(cur);
+    return out;
+  };
+  const std::vector<std::string> a = split(path), b = split(pattern);
   idx->clear();
   std::size_t i = 0;
-  const char* p = pattern;
-  while (*p != '\0') {
-    if (p[0] == '[' && p[1] == '#' && p[2] == ']') {
-      if (i >= path.size() || path[i] != '[') return false;
-      std::size_t e = path.find(']', i);
-      if (e == std::string::npos || e == i + 1) return false;
+  for (; i < b.size(); ++i) {
+    if (b[i] == "**") return i < a.size();
+    if (i >= a.size()) return false;
+    const bool aIdx = a[i].front() == '[';
+    if (b[i] == "[#]") {
+      if (!aIdx) return false;
       std::uint32_t v = 0;
-      for (std::size_t k = i + 1; k < e; ++k) {
-        if (path[k] < '0' || path[k] > '9') return false;
-        v = v * 10u + static_cast<std::uint32_t>(path[k] - '0');
+      for (std::size_t k = 1; k + 1 < a[i].size(); ++k) {
+        if (a[i][k] < '0' || a[i][k] > '9') return false;
+        v = v * 10u + static_cast<std::uint32_t>(a[i][k] - '0');
       }
       idx->push_back(v);
-      i = e + 1;
-      p += 3;
       continue;
     }
-    if (i >= path.size() || path[i] != *p) return false;
-    ++i;
-    ++p;
+    if (b[i].front() == '[') {  // a fixed index: "[0]"
+      if (a[i] != b[i]) return false;
+      continue;
+    }
+    if (aIdx) return false;
+    if (b[i] != "*" && a[i] != b[i]) return false;
   }
-  return i == path.size();
+  return i == a.size();
 }
 
 std::uint32_t FindIdRow(const ParsedBank& v, std::uint32_t fourcc, Id id) {
@@ -397,8 +555,19 @@ std::uint32_t ParsedBank::FindId(std::uint32_t fourcc, Id id) const {
 
 BankImage::BankImage() = default;
 BankImage::~BankImage() = default;
+namespace {
+std::mutex& ViewMutex() {
+  static std::mutex m;
+  return m;
+}
+}  // namespace
+
+// Copies share the parse (the bytes are the same; a ParsedBank is read-only once made).
 BankImage::BankImage(const BankImage& o)
-    : name(o.name), language(o.language), file(o.file), bankId(o.bankId), contentHash(o.contentHash), bytes(o.bytes) {}
+    : name(o.name), language(o.language), file(o.file), bankId(o.bankId), contentHash(o.contentHash), bytes(o.bytes) {
+  std::lock_guard<std::mutex> lock(ViewMutex());
+  parsed_ = o.parsed_;
+}
 BankImage& BankImage::operator=(const BankImage& o) {
   if (this != &o) {
     name = o.name;
@@ -407,7 +576,8 @@ BankImage& BankImage::operator=(const BankImage& o) {
     bankId = o.bankId;
     contentHash = o.contentHash;
     bytes = o.bytes;
-    parsed_.reset();
+    std::lock_guard<std::mutex> lock(ViewMutex());
+    parsed_ = o.parsed_;
   }
   return *this;
 }
@@ -415,9 +585,11 @@ BankImage::BankImage(BankImage&&) noexcept = default;
 BankImage& BankImage::operator=(BankImage&&) noexcept = default;
 
 const ParsedBank* BankImage::view() const {
+  std::lock_guard<std::mutex> lock(ViewMutex());
   if (!parsed_) {
-    parsed_ = std::make_shared<ParsedBank>();
-    parsed_->Parse(bytes);
+    auto p = std::make_shared<ParsedBank>();
+    p->Parse(bytes);
+    parsed_ = std::move(p);
   }
   return parsed_->ok() ? parsed_.get() : nullptr;
 }
@@ -514,6 +686,7 @@ DocBuild BuildDocument(const ProjectDocument& doc, const DocBuildOptions& option
       bi.bankId = b.bankId;
       bi.contentHash = b.contentHash;
       bi.bytes = f.bytes;
+      bi.view();  // parsed now (D-178d): readers on other threads find it made
       out.banks.push_back(std::move(bi));
       isBank = true;
       break;
@@ -576,64 +749,142 @@ const std::vector<FieldColumn>& FieldColumns() {
   return f;
 }
 
+FieldEffect ClassifyMember(const std::string& kind, const std::string& path) {
+  // "notes" at any level is the tool's (project-format.md §1).
+  if (path == "notes" || path.rfind("notes.", 0) == 0 || path.rfind("notes[", 0) == 0 ||
+      path.find(".notes") != std::string::npos) {
+    const std::size_t at = path.find(".notes");
+    if (at == std::string::npos || at + 6 == path.size() || path[at + 6] == '.' || path[at + 6] == '[') {
+      return FieldEffect::NotInBank;
+    }
+  }
+  std::vector<std::uint32_t> idx;
+  for (const FieldColumn& f : FieldColumns()) {
+    if ((std::string_view(f.kind) == "*" || kind == f.kind) && MatchSegments(path, f.pattern, &idx)) return f.effect;
+  }
+  return FieldEffect::Unknown;
+}
+
 std::vector<CellRef> LocateField(const DocBuild& build, const ProjectDocument& doc, const std::string& guid,
                                  const std::string& path) {
   std::vector<CellRef> out;
   const DocObject* o = doc.Find(guid);
-  if (o == nullptr) return out;
+  if (o == nullptr || ClassifyMember(o->kind(), path) != FieldEffect::Column) return out;
   const std::string kind = o->kind();
-  const FieldColumn* field = nullptr;
+  const Id id = HashId(o->name());
   std::vector<std::uint32_t> idx;
   for (const FieldColumn& f : FieldColumns()) {
-    if (kind == f.kind && MatchPattern(path, f.pattern, &idx)) {
-      field = &f;
-      break;
-    }
-  }
-  if (field == nullptr) return out;
-  const Id id = HashId(o->name());
-  for (const BankImage& b : build.banks) {
-    const ParsedBank* v = b.view();
-    if (v == nullptr) continue;
-    std::uint32_t row = bf::kNone;
-    if (kind == "ducking") {
-      // DUCK rows: the duckings of the bank in name order (build.cpp); the live index is the
-      // rank among the bank's rules with the same target bus.
-      std::uint32_t r = 0;
-      for (const DocObject* d : doc.OfKind("ducking")) {
-        const DocObject* bk = doc.Resolve("bank", StringAt(d->doc, "bank"));
-        if (bk == nullptr || bk->name() != b.name) continue;
-        if (d->guid == o->guid) {
-          row = r;
+    if (f.effect != FieldEffect::Column || kind != f.kind || !MatchSegments(path, f.pattern, &idx)) continue;
+    const FieldColumn* field = &f;
+    for (const BankImage& b : build.banks) {
+      const ParsedBank* v = b.view();
+      if (v == nullptr) continue;
+      std::uint32_t row = bf::kNone;
+      auto nth = [&](std::uint32_t chunk, std::uint32_t col, std::uint32_t value, std::uint32_t n) {
+        for (std::uint32_t r = 0, rows = v->Rows(chunk); r < rows; ++r) {
+          if (U32At(*v, chunk, col, r) == value && n-- == 0u) return r;
+        }
+        return bf::kNone;
+      };
+      auto curvePoint = [&](std::uint32_t curve, std::uint32_t p) {
+        return curve == bf::kNone || curve >= v->Rows(ch::CURV)
+                   ? bf::kNone
+                   : InRange(*v, ch::CURV, curve, co::CURV_pointFirst, co::CURV_pointCount, p);
+      };
+      switch (field->row) {
+        case FieldRow::Id: row = FindIdRow(*v, field->chunk, id); break;
+        case FieldRow::Owner1: {
+          const Owner* o1 = FindOwner(kOwners, std::size(kOwners), field->chunk);
+          if (o1 != nullptr && !idx.empty()) {
+            row = InRange(*v, o1->parent, FindIdRow(*v, o1->parent, id), o1->firstCol, o1->countCol, idx[0]);
+          }
           break;
         }
-        ++r;
+        case FieldRow::Owner2:
+        case FieldRow::SynpOfClip: {
+          const std::uint32_t chunk2 = field->row == FieldRow::SynpOfClip ? ch::CLIP : field->chunk;
+          const Owner* o2 = FindOwner(kOwners2, std::size(kOwners2), chunk2);
+          const Owner* p1 = o2 != nullptr ? FindOwner(kOwners, std::size(kOwners), o2->parent) : nullptr;
+          if (p1 != nullptr && idx.size() >= 2) {
+            const std::uint32_t mid = InRange(*v, p1->parent, FindIdRow(*v, p1->parent, id), p1->firstCol, p1->countCol, idx[0]);
+            row = InRange(*v, o2->parent, mid, o2->firstCol, o2->countCol, idx[1]);
+          }
+          if (field->row == FieldRow::SynpOfClip && row != bf::kNone) {
+            row = U32At(*v, ch::CLIP, co::CLIP_kind, row) == 2u ? U32At(*v, ch::CLIP, co::CLIP_target, row) : bf::kNone;
+          }
+          break;
+        }
+        case FieldRow::Duck: {
+          // The duckings of the bank in name order (build.cpp).
+          std::uint32_t r = 0;
+          for (const DocObject* d : doc.OfKind("ducking")) {
+            const DocObject* bk = doc.Resolve("bank", StringAt(d->doc, "bank"));
+            if (bk == nullptr || bk->name() != b.name) continue;
+            if (d->guid == o->guid) {
+              row = r;
+              break;
+            }
+            ++r;
+          }
+          break;
+        }
+        case FieldRow::Transition: {
+          const std::uint32_t ev = FindIdRow(*v, ch::EVNT, id);
+          if (ev != bf::kNone && !idx.empty()) row = nth(ch::MTRN, co::MTRN_musicEvent, ev, idx[0]);
+          break;
+        }
+        case FieldRow::Stinger:
+          if (!idx.empty()) {
+            const std::string name = StringAt(o->doc, "music.stingers[" + std::to_string(idx[0]) + "].name");
+            if (!name.empty()) row = FindIdRow(*v, ch::MSTG, HashId(name));
+          }
+          break;
+        case FieldRow::SegmentRange:
+          if (!idx.empty()) {
+            const std::uint32_t countCol = field->aux == co::MSEG_tempoFirst ? co::MSEG_tempoCount : co::MSEG_markerCount;
+            row = InRange(*v, ch::MSEG, FindIdRow(*v, ch::MSEG, id), field->aux, countCol, idx[0]);
+          }
+          break;
+        case FieldRow::Stem:
+        case FieldRow::StemCurve:
+        case FieldRow::StemPoint: {
+          const std::uint32_t seg = FindIdRow(*v, ch::MSEG, id);
+          const std::uint32_t stem = seg != bf::kNone && !idx.empty() ? nth(ch::MSTM, co::MSTM_segment, seg, idx[0]) : bf::kNone;
+          if (field->row == FieldRow::Stem) {
+            row = stem;
+          } else if (stem != bf::kNone) {
+            const std::uint32_t curve = U32At(*v, ch::MSTM, co::MSTM_volumeCurve, stem);
+            row = field->row == FieldRow::StemCurve ? (curve < v->Rows(ch::CURV) ? curve : bf::kNone)
+                                                    : (idx.size() >= 2 ? curvePoint(curve, idx[1]) : bf::kNone);
+          }
+          break;
+        }
+        case FieldRow::DistanceCurve:
+        case FieldRow::DistancePoint: {
+          const std::uint32_t ev = FindIdRow(*v, ch::EVNT, id);
+          const std::uint32_t curve = ev != bf::kNone ? U32At(*v, ch::EVNT, field->aux, ev) : bf::kNone;
+          if (field->row == FieldRow::DistanceCurve) {
+            row = curve < v->Rows(ch::CURV) ? curve : bf::kNone;
+          } else if (!idx.empty()) {
+            row = curvePoint(curve, idx[0]);
+          }
+          break;
+        }
+        case FieldRow::None: break;
       }
-      if (row != bf::kNone && row >= v->Rows(ch::DUCK)) row = bf::kNone;
-    } else if (field->chunk == ch::EVNT || field->chunk == ch::BUSS || field->chunk == ch::CATG ||
-               field->chunk == ch::PARM || field->chunk == ch::VLGR || field->chunk == ch::MPLS) {
-      row = FindIdRow(*v, field->chunk, id);
-    } else if (const Owner* o1 = FindOwner(kOwners, std::size(kOwners), field->chunk)) {
-      if (idx.size() == 1) row = InRange(*v, o1->parent, FindIdRow(*v, o1->parent, id), o1->firstCol, o1->countCol, idx[0]);
-    } else if (const Owner* o2 = FindOwner(kOwners2, std::size(kOwners2), field->chunk)) {
-      const Owner* p1 = FindOwner(kOwners, std::size(kOwners), o2->parent);
-      if (p1 != nullptr && idx.size() >= 2) {
-        const std::uint32_t mid = InRange(*v, p1->parent, FindIdRow(*v, p1->parent, id), p1->firstCol, p1->countCol, idx[0]);
-        row = InRange(*v, o2->parent, mid, o2->firstCol, o2->countCol, idx[1]);
-      }
+      if (row == bf::kNone || row >= v->Rows(field->chunk)) continue;
+      CellRef c;
+      c.bank = b.name;
+      c.language = b.language;
+      c.bankId = b.bankId;
+      c.chunk = field->chunk;
+      c.column = field->column;
+      c.row = row;
+      if (!v->Cell(c.chunk, c.column, row, &c.bits)) continue;
+      Address(*v, &c);
+      Classify(*v, &c);
+      out.push_back(c);
     }
-    if (row == bf::kNone) continue;
-    CellRef c;
-    c.bank = b.name;
-    c.language = b.language;
-    c.bankId = b.bankId;
-    c.chunk = field->chunk;
-    c.column = field->column;
-    c.row = row;
-    if (!v->Cell(c.chunk, c.column, row, &c.bits)) continue;
-    Address(*v, &c);
-    Classify(&c);
-    out.push_back(c);
   }
   return out;
 }
@@ -718,7 +969,7 @@ LiveDelta DiffBuilds(const DocBuild& before, const DocBuild& after) {
           e.cell.bits = b;
           e.oldBits = a;
           Address(*nv, &e.cell);
-          Classify(&e.cell);
+          Classify(*nv, &e.cell);
           allLive = allLive && e.cell.liveWritable;
           cells.push_back(e);
         }
