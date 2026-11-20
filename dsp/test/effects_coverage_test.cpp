@@ -4,6 +4,7 @@
 // levels, delays, filters, density). Expectations are analytic or relative
 // (same input, one parameter changed); no golden audio.
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <vector>
 
@@ -255,5 +256,45 @@ SND_TEST(EffectsCoverage, ReverbLevelsDelaysAndFilters) {
     double worst = 0;
     for (std::size_t i = 0; i < in.size(); ++i) worst = std::max(worst, std::fabs(double(out[i]) - std::pow(10.0, -0.3) * in[i]));
     SND_CHECK(worst < 1e-4);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Re-check 2: Delay / Time above MaxDelay is exactly MaxDelay (echo and delay), at any
+// rate, also when the ring was sized at a higher rate than the one it runs at.
+// ---------------------------------------------------------------------------
+SND_TEST(EffectsCoverage, DelayAboveMaxDelayIsExactlyMaxDelay) {
+  auto onset = [](EffectKind kind, std::vector<std::pair<std::uint32_t, float>> p, std::uint32_t sizing,
+                  std::uint32_t run) {
+    Fx fx(kind, 1, 256, sizing, p, run);
+    if (!fx.ok) return -1;
+    std::vector<float> x(256);
+    for (int k = 0; k < 16; ++k) {
+      std::fill(x.begin(), x.end(), 0.0f);
+      if (k == 0) x[0] = 1.0f;
+      const float* i[1] = {x.data()};
+      float* o[1] = {x.data()};
+      EffectProcess(fx.state(), i, o, 1, 256, nullptr, nullptr);
+      for (int f = (k == 0 ? 1 : 0); f < 256; ++f) {
+        if (std::fabs(x[static_cast<std::size_t>(f)]) > 0.1f) return k * 256 + f;
+      }
+    }
+    return -1;
+  };
+  struct Rates {
+    std::uint32_t sizing, run;
+  };
+  for (const Rates r : {Rates{48000, 48000}, Rates{44100, 44100}, Rates{96000, 48000}, Rates{192000, 44100}}) {
+    const int want = static_cast<int>(std::lround(10.0 * r.run / 1000.0));  // MaxDelay 10 ms
+    for (float ms : {10.0f, 10.5f, 100.0f, 5000.0f}) {
+      const int e = onset(EffectKind::Echo, {{0, ms}, {1, 0.0f}, {2, 0.0f}, {3, 1.0f}, {4, 10.0f}}, r.sizing, r.run);
+      const int d = onset(EffectKind::Delay, {{0, ms}, {1, 0.0f}, {2, -96.0f}, {3, 0.0f}, {4, 20000.0f}, {5, 0.0f}, {6, 10.0f}},
+                          r.sizing, r.run);
+      SND_CHECK_MSG(e == want && d == want, "sizing %u run %u, %.1f ms: echo %d delay %d (want %d)", r.sizing, r.run, ms, e, d,
+                    want);
+    }
+    // Below MaxDelay: unchanged (5 ms).
+    const int below = onset(EffectKind::Echo, {{0, 5.0f}, {1, 0.0f}, {2, 0.0f}, {3, 1.0f}, {4, 10.0f}}, r.sizing, r.run);
+    SND_CHECK(std::abs(below - static_cast<int>(5.0 * r.run / 1000.0)) <= 1);  // 220.5 frames at 44.1 kHz
   }
 }
