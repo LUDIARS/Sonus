@@ -577,21 +577,31 @@ SND_TEST(IndepConvolution, IrSlotSelectionAndSharing) {
     std::copy(buf.begin(), buf.end(), y.begin());
     const float s[1] = {static_cast<float>(a.slot)}, e[1] = {static_cast<float>(c.slot)};
     snd::ParamBlock pb{s, e, 1, 1, nullptr};
-    std::vector<float> buf2(x.begin() + 2000, x.end());
-    float* p2[1] = {buf2.data()};
-    EffectProcess(fx.st(), p2, p2, 1, 2000, &pb, nullptr);
-    std::copy(buf2.begin(), buf2.end(), y.begin() + 2000);
+    // Calls within max_frames (a longer call ramps IrSlot over its sub-blocks:
+    // Defect_ConvolutionIrSlotRampsInsideLongCalls). The first call ramps a -> c.
+    for (std::uint32_t done = 2000; done < 4000; done += 250) {
+      std::vector<float> buf2(x.begin() + done, x.begin() + done + 250);
+      float* p2[1] = {buf2.data()};
+      EffectProcess(fx.st(), p2, p2, 1, 250, done == 2000 ? &pb : nullptr, nullptr);
+      std::copy(buf2.begin(), buf2.end(), y.begin() + done);
+    }
   }
   const std::vector<double> w1 = Direct(x, h1), w2 = Direct(x, h2);
   double e = 0.0;
+  std::size_t eAt = 0;
   // The partition period in progress at the switch ([2000, 2048) for B 64) still
   // carries the old IR's FDL part (see Defect_ConvolutionIrSwitchLagsOnePartition);
   // everywhere else the output is the old IR before and the new IR after.
   for (std::size_t i = 0; i < 4000; ++i) {
     if (i >= 2000 && i < 2048) continue;
-    e = std::max(e, std::fabs(y[i] - (0.5 * x[i] + (i < 2000 ? w1[i] : w2[i]))));
+    const double d = std::fabs(y[i] - (0.5 * x[i] + (i < 2000 ? w1[i] : w2[i])));
+    if (d > e) {
+      e = d;
+      eAt = i;
+    }
   }
-  SND_CHECK_MSG(e < Tol(h2, 0.5f), "IrSlot switch: error %g (the new IR must apply to the history at once)", e);
+  SND_CHECK_MSG(e < Tol(h2, 0.5f), "IrSlot switch: error %g at %zu (the new IR must apply to the history at once)", e,
+                eAt);
   SND_CHECK_EQ(ConvolutionStateActiveIrFrames(fx.st()), 900u);
   // Unusable / absent IRs: wet silent, dry passes.
   for (std::uint32_t slot : {wrongB.slot, wrongRate.slot, 0u, 1000u, 1024u}) {

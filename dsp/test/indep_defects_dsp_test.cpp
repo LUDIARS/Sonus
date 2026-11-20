@@ -125,7 +125,7 @@ namespace {
 std::vector<float> DecayNoise(std::uint32_t n, std::uint32_t seed, double tau) {
   dsptest::Noise nz(seed);
   std::vector<float> v(n);
-  for (std::uint32_t i = 0; i < n; ++i) v[i] = static_cast<float>(nz.Next(1.0f) * 0.4 * std::exp(-i / tau));
+  for (std::uint32_t i = 0; i < n; ++i) v[i] = static_cast<float>(nz.Next(1.0f) * 0.4 * std::exp(-static_cast<double>(i) / tau));
   return v;
 }
 
@@ -188,6 +188,7 @@ SND_TEST(IndepDefects, Defect_ConvolutionIrSwitchLagsOnePartition) {
   PreparedIr a(h1, b), c(h2, b);
   SND_REQUIRE(a.slot != 0u && c.slot != 0u);
   ConvFx fx(a.slot, b);
+  SND_REQUIRE(EffectStateKind(fx.mem.get()) == EffectKind::Convolution);
   std::vector<float> x(2048);
   dsptest::Noise nz(4);
   for (float& v : x) v = nz.Next(0.5f);
@@ -204,5 +205,45 @@ SND_TEST(IndepDefects, Defect_ConvolutionIrSwitchLagsOnePartition) {
       at = i;
     }
   }
+  snd::test::Note("switch: worst %g at %zu", worst, at);
   SND_CHECK_MSG(worst < 1e-4, "after the switch at frame 1024: error %g at frame %zu (old IR tail)", worst, at);
+}
+
+// D-215 / convolution.hpp: "IrSlot is not ramped: a call uses the slot of its
+// END value". A call longer than max_frames is split into sub-blocks by the
+// effect framework (effects.cpp ProcessCore), which interpolates EVERY
+// parameter at the sub-block boundaries, IrSlot included; fx_convolution.cpp
+// ConvolutionProcess resolves p.e[kConvIrSlot] per sub-block. A ramp from slot
+// A to slot C therefore plays the IRs of the slots in between (here slot B, a
+// loud IR of another owner) for the first sub-blocks.
+SND_TEST(IndepDefects, Defect_ConvolutionIrSlotRampsInsideLongCalls) {
+  const std::uint32_t b = 64;
+  std::vector<float> h1(200, 0.0f), hMid(200, 0.0f), h3(200, 0.0f);
+  h1[0] = 0.5f;
+  hMid[0] = 8.0f;  // the IR of the slot in between (must never be heard)
+  h3[10] = 0.5f;
+  PreparedIr a(h1, b), mid(hMid, b), c(h3, b);
+  SND_REQUIRE(a.slot != 0u && c.slot == a.slot + 2u && mid.slot == a.slot + 1u);
+  ConvFx fx(a.slot, b);
+  SND_REQUIRE(EffectStateKind(fx.mem.get()) == EffectKind::Convolution);
+  std::vector<float> x(1024);
+  dsptest::Noise nz(4);
+  for (float& v : x) v = nz.Next(0.5f);
+  std::vector<float> y(x);
+  // One call of 1024 frames (> max_frames 256), IrSlot ramps a -> c.
+  const float s[1] = {static_cast<float>(a.slot)}, e[1] = {static_cast<float>(c.slot)};
+  snd::ParamBlock pb{s, e, 1, 1, nullptr};
+  float* p[1] = {y.data()};
+  EffectProcess(fx.mem.get(), p, p, 1, 1024, &pb, nullptr);
+  float peak = 0.0f;
+  double worst = 0.0;
+  for (std::size_t i = 0; i < 1024; ++i) {
+    peak = std::max(peak, std::fabs(y[i]));
+    const double want = i >= 10 ? 0.5 * x[i - 10] : 0.0;
+    if (i >= 64) worst = std::max(worst, std::fabs(y[i] - want));  // the first partition may lag (defect above)
+  }
+  snd::test::Note("IrSlot %u -> %u in one 1024-frame call: output peak %g, worst error vs the end IR %g", a.slot,
+                  c.slot, static_cast<double>(peak), worst);
+  SND_CHECK_MSG(peak < 1.0f && worst < 1e-5, "the IR of the slot in between was used (peak %g)",
+                static_cast<double>(peak));
 }
