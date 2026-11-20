@@ -597,8 +597,8 @@ SND_TEST(IndepS7Build, E7_ValueEditsMatchLocateField) {
     // (A column absent from the bank: Defect_LocateFieldLiveWritableForAbsentColumn.)
     if (cells[0].liveWritable && cells[0].addressable && present) {
       if (k != EditClass::Value) {
-        snd::test::Note("%s %s: LocateField says live, ClassifyEdit says %d (%zu chunks)", f[0], f[1], static_cast<int>(k),
-                        delta.chunks.size());
+        snd::test::Note("%s %s: LocateField says live, ClassifyEdit says %d (%u chunks)", f[0], f[1], static_cast<int>(k),
+                        static_cast<unsigned>(delta.chunks.size()));
         for (const auto& c : delta.chunks) snd::test::Note("  chunk %08x", c.fourcc);
       }
       SND_CHECK(k == EditClass::Value);
@@ -611,4 +611,64 @@ SND_TEST(IndepS7Build, E7_ValueEditsMatchLocateField) {
       SND_CHECK(k == EditClass::Structure);
     }
   }
+}
+
+// --- after reading the implementation: the editor's warnings are the build's ----------------------
+
+SND_TEST(IndepS7Build, F13_UnreachableRowsAreTheBuildWarnings) {
+  Rng r(99);
+  const char* const names[] = {"Explore", "Battle", "*"};
+  for (int iter = 0; iter < 25; ++iter) {
+    ProjectDocument doc;
+    SND_REQUIRE(LoadBase(doc));
+    MusicEditor me(doc, kBgm);
+    while (!me.Rules().empty()) SND_REQUIRE(me.RemoveRule(0));
+    const std::uint32_t rows = 1 + r.Below(6);
+    for (std::uint32_t i = 0; i < rows; ++i) {
+      TransitionRule rule;
+      rule.from = names[r.Below(3)];
+      rule.to = names[r.Below(3)];
+      rule.timing = static_cast<Timing>(r.Below(3));
+      SND_REQUIRE(me.AddRule(rule, i));
+    }
+    std::vector<bool> editor(rows, false);
+    for (const auto& u : me.Unreachable()) editor[u.first] = true;
+    std::vector<bool> build(rows, false);
+    for (const auto& is : IssuesOf(CheckDocument(doc), kBgm)) {
+      if (is.error) {
+        snd::test::Note("unexpected error: %s", is.text.c_str());
+        SND_CHECK(false);
+        continue;
+      }
+      for (std::uint32_t k = 0; k < rows; ++k)
+        if (is.path.rfind("music.transitions[" + std::to_string(k) + "]", 0) == 0) build[k] = true;
+    }
+    for (std::uint32_t k = 0; k < rows; ++k) {
+      if (editor[k] != build[k]) {
+        snd::test::Note("table %d row %u: editor unreachable = %d, build warning = %d", iter, k, editor[k] ? 1 : 0,
+                        build[k] ? 1 : 0);
+        SND_CHECK(false);
+      }
+    }
+  }
+}
+
+SND_TEST(IndepS7Build, E2_NestedCycleMadeByRawEditsIsAnError) {
+  ProjectDocument doc;
+  SND_REQUIRE(LoadBase(doc));
+  // SE/Hit nests SE/Shot and SE/Shot nests SE/Hit (only possible with raw edits).
+  json::Value c = json::MakeObject();
+  json::Add(c, "event", String(kShot));
+  SND_REQUIRE(doc.Insert(kHit, "tracks[0].clips", 1, c));
+  json::Value d = json::MakeObject();
+  json::Add(d, "event", String(kHit));
+  SND_REQUIRE(doc.Insert(kShot, "tracks[0].clips", 2, d));
+  const auto issues = CheckDocument(doc);
+  SND_CHECK(Errors(issues) > 0u);
+  SND_CHECK(Errors(IssuesOf(issues, kHit)) + Errors(IssuesOf(issues, kShot)) > 0u);
+  SND_CHECK(!BuildDocument(doc).ok);
+  // The editor refuses the same cycle.
+  SND_REQUIRE(doc.Undo());
+  EventEditor e(doc, kShot);
+  SND_CHECK(!e.AddEventClip(0, kHit, 0));
 }
