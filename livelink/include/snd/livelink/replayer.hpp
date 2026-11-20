@@ -32,7 +32,8 @@
 // MidRun) and carries the live link's part of the state at its start: the override-layer
 // cells (RecordCell, written into the replaying System's banks before the first block)
 // and the live overrides (RecordOverride, applied as LiveOverride commands in the first
-// replayed block). What core holds (sounds playing, parameter values, emitters,
+// replayed block); both are applied in a lead block before the first recorded block
+// (Info().leadBlocks). What core holds (sounds playing, parameter values, emitters,
 // transports) is not in the recording (request C-04): a MidRun recording replays what
 // the recorded run rendered only when the replaying System starts from the same core
 // state. Info().origin and warnings say so.
@@ -143,6 +144,11 @@ struct ReplayInfo {
   std::uint32_t origin = 0;           // RecordOrigin of the Begin record (0: none, a 1.0 recording)
   std::uint32_t startCells = 0;       // RecordCell records
   std::uint32_t startOverrides = 0;   // RecordOverride records
+  // Blocks before the first recorded one that apply the starting state (1 when there is a
+  // starting state to apply, else 0). The recorded block firstBlock is rendered leadBlocks
+  // blocks after Start: start lead blocks early to keep the block numbering (the value
+  // changes of the state ramp in during the lead block, like they did before the recording).
+  std::uint32_t leadBlocks = 0;
   std::uint32_t lostState = 0;        // RecordBegin::lostState
   std::uint32_t liveData = 0;         // RecordLiveData records
   std::uint32_t replacedChunks = 0;   // LiveReplaceChunk commands kept (data found)
@@ -171,8 +177,11 @@ class Replayer {
   // Arms the replay: the next block of the bound System is the first recorded block.
   void Start() noexcept { armed_.store(1u, std::memory_order_release); }
   bool Finished() const noexcept { return finished_.load(std::memory_order_acquire) != 0u; }
-  // Blocks the replay spans (last - first + 1); render at least this many after Start.
-  std::uint64_t Blocks() const noexcept { return info_.arenas == 0u ? 0u : info_.lastBlock - info_.firstBlock + 1u; }
+  // Blocks the replay spans (last - first + 1, plus the lead blocks); render at least this
+  // many after Start.
+  std::uint64_t Blocks() const noexcept {
+    return (info_.arenas == 0u ? 0u : info_.lastBlock - info_.firstBlock + 1u) + info_.leadBlocks;
+  }
   ReplayInfo Info() const noexcept;
   // 1.1: the 2.5 conditions hold (no kReplayBreaksBitExact condition, so far).
   bool BitExactExpected() const noexcept { return (Info().conditions & kReplayBreaksBitExact) == 0u; }
@@ -228,6 +237,7 @@ class Replayer {
   RecordCell* startCells_ = nullptr;
   std::uint32_t startCellCount_ = 0;
   bool applyStart_ = true;
+  bool prologue_ = false;  // arenas_[0] holds the starting overrides
   ReplayDecision* decisions_ = nullptr;
   std::uint32_t maxDecisions_ = 0;
   std::atomic<std::uint32_t> decisionCount_{0};

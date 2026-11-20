@@ -209,6 +209,7 @@ int Replayer::Init(const ReplayDesc& d) noexcept {
   info_.lastBlock = lastBlock;
   // The starting overrides become LiveOverride commands of a first arena (relative block 0).
   const bool prologue = applyStart_ && info_.startOverrides != 0u;
+  prologue_ = prologue;
   cmdBytes += std::uint64_t{info_.startOverrides} * cmd::kWireSize<cmd::LiveOverride>;
   if (cmdBytes > 0xFFFFFFFFull) return SND_ERR_OUT_OF_BUDGET;
   chunkCount_ = info_.liveData;
@@ -402,6 +403,7 @@ int Replayer::Init(const ReplayDesc& d) noexcept {
     pendingFrom = chunkAt;  // data belongs to the arena that follows it only
   }
   info_.commands += overrides;
+  if (applyStart_ && (info_.startCells != 0u || overrides != 0u)) info_.leadBlocks = 1u;
   // Conditions (2.5) known from the recording.
   std::uint32_t lodLevels = 0;
   {
@@ -567,12 +569,27 @@ bool Replayer::Next(std::uint64_t block, core::LiveArenaView* out) noexcept {
   if (armed_.load(std::memory_order_acquire) == 0u || finished_.load(std::memory_order_relaxed) != 0u) return false;
   if (!begun_) {
     begun_ = true;
-    base_ = block;
+    base_ = block + info_.leadBlocks;
     core::System* sys = system_.load(std::memory_order_acquire);
     if (sys != nullptr) {
       CheckBanks(*sys);
-      ApplyStartState(*sys);  // 1.1: override-layer cells before the first replayed arena
+      ApplyStartState(*sys);  // 1.1: override-layer cells (in the lead block, if any)
     }
+  }
+  if (block < base_) {  // 1.1 lead block: the starting overrides (the prologue arena), nothing else
+    if (cursor_ == 0u && prologue_) {
+      const Arena& a = arenas_[cursor_++];
+      *out = core::LiveArenaView{};
+      out->producer = kInvalidSlot;
+      out->appliedBlock = block;
+      out->normal = commands_ + a.normalOffset;
+      out->normalBytes = a.normalBytes;
+      out->reserve = commands_ + a.reserveOffset;
+      out->reserveBytes = a.reserveBytes;
+      out->flags = 0u;
+      return true;
+    }
+    return false;
   }
   const std::uint64_t rel = block - base_;
   rel_ = rel;
@@ -591,7 +608,7 @@ bool Replayer::Next(std::uint64_t block, core::LiveArenaView* out) noexcept {
     out->flags = a.fallback != ~0u ? (a.flags | cmd::kArenaHasFallback) : (a.flags & ~cmd::kArenaHasFallback);
     return true;
   }
-  if (cursor_ >= arenaCount_ && rel >= Blocks()) finished_.store(1u, std::memory_order_release);
+  if (cursor_ >= arenaCount_ && rel + info_.leadBlocks >= Blocks()) finished_.store(1u, std::memory_order_release);
   return false;
 }
 
