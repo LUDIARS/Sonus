@@ -455,7 +455,7 @@ SND_TEST(Document, FieldTableLocatesEveryCell) {
     const DocBuild b = BuildDocument(doc);
     SND_REQUIRE_MSG(b.ok, "%s: %s", c.path, Dump(b.issues).c_str());
     const std::vector<CellRef> cells = LocateField(b, doc, c.guid, c.path);
-    SND_REQUIRE_MSG(cells.size() == 1u, "%s: %zu cells", c.path, cells.size());
+    SND_REQUIRE_MSG(cells.size() == 1u, "%s: %u cells", c.path, static_cast<unsigned>(cells.size()));
     const CellRef& cell = cells[0];
     double got = cell.type == CellType::F32 ? BitsToFloat(cell.bits) : static_cast<double>(cell.bits);
     SND_CHECK_MSG(std::fabs(got - c.value) < 1e-3, "%s: bank holds %g, expected %g", c.path, got, c.value);
