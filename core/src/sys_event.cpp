@@ -675,15 +675,23 @@ void StartClip(Ctx& c, StartContext& sc, const BankRecord& r, std::uint32_t clip
       return;
     }
     VoiceStatic& nv = im.ev.vs[Priv(im, sc.playback).voiceListHead];
+    if (im.desc.clipMarkers != nullptr) {  // markers of effect clips (markers.hpp)
+      const CoreDesc::ClipMarkers m = im.desc.clipMarkers(im.desc.clipMarkersUser, a.assetId);
+      if (m.frames != nullptr && m.ids != nullptr) {
+        nv.markerFrames = m.frames;
+        nv.markerIds = m.ids;
+        nv.markerCount = m.count;
+      }
+    }
     const std::uint64_t total = a.codec.total_frames;
     const std::uint64_t le = assetLoop ? (a.loopEnd < total || total == 0u ? a.loopEnd : total) : total;
     const std::uint64_t lb = assetLoop && a.loopStart < le ? a.loopStart : 0u;
     if ((flags & source::kStartLoop) == 0u) {
       nv.playFrames = total > startFrame ? total - startFrame : 1u;  // one pass to the asset end
-    } else if (loops >= 2u && le > lb && startFrame < le) {
-      nv.playFrames = (le - startFrame) + std::uint64_t{loops - 1u} * (le - lb);
-      nv.loopStartFrame = lb;
+    } else if (le > lb && startFrame < le) {
+      nv.loopStartFrame = lb;  // the region the source wraps in (markers, counting)
       nv.loopEndFrame = le;
+      if (loops >= 2u) nv.playFrames = (le - startFrame) + std::uint64_t{loops - 1u} * (le - lb);
     }
     // CLIP.fadeOutMs: a linear fade over the last fadeOutMs (at the clip's own rate) before
     // the clip's end; clips without an end (endless loops) have none.

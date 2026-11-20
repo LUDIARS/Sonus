@@ -49,4 +49,12 @@ snd_indep_core_fixed2(core_reregistered_thread_reorders_its_commands reregister)
 snd_indep_core_fixed2(core_timed_stop_of_paused_playback_sounds paused_timed_stop)
 
 # Stage 3, session B group 4 (voice management, sequences, notifications, analysis).
-snd_add_test(core_g4_test SOURCES core_voice2_test.cpp LINK ${_core_test_link})
+snd_add_test(core_g4_test SOURCES core_voice2_test.cpp core_sequence2_test.cpp core_notify2_test.cpp core_analysis_test.cpp
+  LINK ${_core_test_link})
+# Determinism (serial / parallel), no allocation, RT safety of the new paths. Repeat under
+# TSan / Release: ctest --repeat until-fail:20 -R core_g4_system_test
+snd_add_test(core_g4_system_test SOURCES core_g4_system_test.cpp LINK ${_core_test_link})
+set_tests_properties(core_g4_system_test PROPERTIES TIMEOUT 300)
+# Load: 4x the limit over steal modes; 128 voices with loudness and spectrum (< 30 % in Release).
+snd_add_test(core_g4_load_test SOURCES core_g4_load_test.cpp LINK ${_core_test_link})
+set_tests_properties(core_g4_load_test PROPERTIES TIMEOUT 600)

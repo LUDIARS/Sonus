@@ -175,14 +175,18 @@ void AnalysisPublish(Impl& im) noexcept {
   RenderPriv& rd = im.rd;
   AnalysisShared& a = *rd.analysis;
   if (a.wanted.exchange(0u, std::memory_order_acq_rel) != 0u) a.interestLeft = kSpectrumInterestBlocks;
-  if (a.interestLeft == 0u) return;
-  --a.interestLeft;
+  // Without readers nothing is copied; the frame published when the interest ends has no
+  // meter (readers then see NOT_READY rather than an old spectrum).
+  const bool live = a.interestLeft != 0u;
+  if (!live && a.deadPublished != 0u) return;
+  a.deadPublished = live ? 0u : 1u;
+  if (live) --a.interestLeft;
   AnalysisFrame& f = a.frames[a.back];
   const std::uint32_t s = f.seq.load(std::memory_order_relaxed);
   f.seq.store(s + 1u, std::memory_order_relaxed);
   for (std::uint32_t m = 0; m < rd.meterCount; ++m) {
     const MeterSlot& ms = rd.meters[m];
-    MeterHeader h{ms.busId, ms.bus == kNoSlot && m != 0u ? 0u : ms.channels, ms.write, ms.filled};
+    MeterHeader h{ms.busId, !live || (ms.bus == kNoSlot && m != 0u) ? 0u : ms.channels, ms.write, ms.filled};
     base::AtomicCopyIn(HeaderOf(a, f.data, m), &h, sizeof(h));
     if (h.channels == 0u) continue;
     base::AtomicCopyIn(SamplesOf(a, f.data, m), ms.ring, sizeof(float) * std::size_t{ms.channels} * a.fftSize);
@@ -236,6 +240,11 @@ snd_result System::GetSpectrum(Id bus, std::uint32_t channel, float* out, std::u
     if (s1 == 0u) return SND_ERR_NOT_READY;  // nothing published since a reader asked
     std::uint32_t m = master ? 0u : kNoSlot;
     MeterHeader h{};
+    base::AtomicCopyOut(&h, HeaderOf(a, f.data, 0u), sizeof(h));
+    if (h.channels == 0u) {  // the frame of the end of an interest: no data (the next Update has)
+      if (f.seq.load(std::memory_order_acquire) != s1) continue;
+      return SND_ERR_NOT_READY;
+    }
     for (std::uint32_t k = 1; k < a.meterCount && m == kNoSlot; ++k) {
       base::AtomicCopyOut(&h, HeaderOf(a, f.data, k), sizeof(h));
       if (h.channels != 0u && h.busId == bus) m = k;

@@ -199,6 +199,16 @@ struct CoreDesc {
   bool rtWorkerRealtimePriority = true;  // false in tests (no SCHED_FIFO)
   std::uint32_t rtDebugClaimDelayMicroseconds = 0;  // tests only (jobs A1-14)
   CoreLimits limits;
+  // Stage 3 (group 4): markers of effect clips (on_marker) until the bank format has a
+  // column for them (requested): called when a clip of the asset starts (audio thread,
+  // principle 1); the arrays must outlive the system. Null = none.
+  struct ClipMarkers {
+    const std::uint64_t* frames;  // asset frames
+    const Id* ids;                // the marker ids reported to on_marker
+    std::uint32_t count;
+  };
+  ClipMarkers (*clipMarkers)(void* user, Id assetId) noexcept = nullptr;
+  void* clipMarkersUser = nullptr;
 };
 
 // Timing of the last rendered block (audio thread; tests and the profiler).

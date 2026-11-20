@@ -26,6 +26,7 @@
 
 #include "access.hpp"
 #include "core_impl.hpp"
+#include "markers.hpp"
 #include "snd/platform/clock.hpp"
 
 namespace snd::core {
@@ -324,6 +325,31 @@ double PlayedSourceFrames(const VoiceStatic& vs, const Playhead& ph) noexcept {
   return (le - start) + static_cast<double>(ph.loopCount - 1u) * (le - lb) + (pos - lb);
 }
 
+// Markers of an effect clip (markers.hpp) crossed by a real voice in this block: the
+// positions before and after its chunk (both as read by the source, the resampler's
+// look-ahead included, so the crossing is that early - up to 16 frames for Sinc), turned
+// into the crossing's clock with the block's mean ratio. Serial part (after the chunks).
+void PostMarkers(Impl& im, SlotIndex v, std::uint32_t d, const Playhead& before, const Playhead& after,
+                 const ItemInput& in) noexcept {
+  const VoiceStatic& vs = im.ev.vs[v];
+  if (vs.markerCount == 0u) return;
+  const schema::Tables& t = im.tables;
+  const SlotIndex pb = SND_R(Voice_playbackSlot)[d];
+  const double from = PlayedSourceFrames(vs, before), to = PlayedSourceFrames(vs, after);
+  const double ratio = 0.5 * (static_cast<double>(in.ratio0) + static_cast<double>(in.ratio1));
+  const std::uint64_t handle = pb < im.cfg.maxPlaybacks ? HandleRef{pb, t.Playback.rows.generation[pb]}.Value() : 0u;
+  ForEachMarkerCrossing(vs.markerFrames, vs.markerCount, vs.startFrame, vs.loopStartFrame, vs.loopEndFrame, from, to,
+                        [&](std::uint32_t k, double played) {
+                          const double off = ratio > 0.0 ? (played - from) / ratio : 0.0;
+                          const std::uint32_t at = in.frameOffset + static_cast<std::uint32_t>(off);
+                          const std::uint32_t before0 = im.eventCount;
+                          PostEvent(im, notify::EventType::Marker, vs.markerIds[k], handle);
+                          if (im.eventCount != before0) {
+                            im.events[im.eventCount - 1u].clock = im.clock + (at < im.cfg.blockFrames ? at : im.cfg.blockFrames - 1u);
+                          }
+                        });
+}
+
 // The clip's end inside this block (source-rate asset voices with an end): a counted loop
 // (D-142) is cut at the end of its last pass (frameEnd, sample accurate up to the
 // resampler's rounding; the chunk reports `ended`), and CLIP.fadeOutMs fades linearly
@@ -331,7 +357,7 @@ double PlayedSourceFrames(const VoiceStatic& vs, const Playhead& ph) noexcept {
 // pos0 + i r0 + (r1 - r0) i (i - 1) / (2 n) (dsp resampler: ratio(i) = r0 + (r1 - r0) i / n),
 // pos0 = played frames + the resampler's pending offset.
 void ClipEnd(const Impl& im, const VoiceStatic& vs, SlotIndex r, ItemInput& in) noexcept {
-  const bool cut = vs.loopEndFrame != 0u;
+  const bool cut = vs.loopEndFrame != 0u;  // with playFrames != 0: a counted loop
   const bool fade = vs.endFadeSeconds > 0.0f;
   if (vs.playFrames == 0u || (!cut && !fade) || (in.flags & kItemSourceRate) == 0u) return;
   const std::uint32_t frames = im.cfg.blockFrames;
@@ -518,7 +544,10 @@ void Render(Impl& im) noexcept {
       float f1 = f0 + in.fadeDelta * static_cast<float>(frames);
       rd.fade[r] = f1 < 0.0f ? 0.0f : (f1 > 1.0f ? 1.0f : f1);
     }
-    in.gain0 = (in.flags & kItemInitPan) != 0u ? gain.end : gain.start;
+    // A new assignment starts at the block's end gain, except a voice's very first block
+    // (its gain ramp is flat then, but a play's fade-in starts at 0, D-146).
+    const bool firstBlock = lc.state == static_cast<std::uint8_t>(VoiceStateId::Starting);
+    in.gain0 = (in.flags & kItemInitPan) != 0u && !firstBlock ? gain.end : gain.start;
     in.gain1 = gain.end;
     t.RealVoice.col.appliedGain[r] = gain.end;
     // Pan (basic 3D or 2D balance).
@@ -606,6 +635,7 @@ void Render(Impl& im) noexcept {
       if (d == kNoSlot) continue;
       float* tail = rd.tail + std::size_t{r} * kMaxChannels;
       if (done) {
+        PostMarkers(im, set.items[i].voiceSlot, d, vPlayhead[d], t.RealVoice.col.playhead[r], set.inputs[i]);
         vPlayhead[d] = t.RealVoice.col.playhead[r];
         vStatus[d] = set.inputs[i].status;
         for (std::uint32_t o = 0; o < kMaxChannels; ++o) tail[o] = set.inputs[i].tail[o];
@@ -668,7 +698,8 @@ void Render(Impl& im) noexcept {
         for (std::uint32_t i = 0; i < n; ++i) {
           // D-142: a virtual voice of a counted loop ends once its last pass is over.
           const VoiceStatic& vs = im.ev.vs[adv[i].voiceSlot];
-          if (vs.loopEndFrame != 0u && PlayedSourceFrames(vs, vPlayhead[dens[i]]) >= static_cast<double>(vs.playFrames)) {
+          if (vs.loopEndFrame != 0u && vs.playFrames != 0u &&
+              PlayedSourceFrames(vs, vPlayhead[dens[i]]) >= static_cast<double>(vs.playFrames)) {
             st[i].ended = 1u;
           }
           vStatus[dens[i]] = st[i];
