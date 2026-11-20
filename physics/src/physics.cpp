@@ -148,7 +148,6 @@ struct Held {
   snd_emitter_handle emitter;
   snd_playback_handle playback[2];
   float volume[2];      // the volume recorded on each playback (1 = none recorded)
-  std::uint32_t stamp;  // call that made it
 };
 
 struct Voice {
@@ -572,15 +571,20 @@ void DestroyHeld(snd_phys& p, std::uint32_t i) noexcept {
 }
 
 // True once the audio side has applied the play recorded on the emitter (or the playback is
-// gone). Why this makes the destroy safe: the play was recorded after the emitter's create
-// and transform in the same arena, so the block that applied it created the emitter, and that
-// block's Compute3D ran with the emitter alive (core computes 3D values for live emitters
-// only, A-004). A playback state other than NONE is read from a snapshot published at the end
-// of such a block; the destroy recorded now is applied at a later block, so the playback has
-// already got its 3D values and keeps them (sonus.h). NONE means "not in a published snapshot
-// yet" or "ended and its slot returned": a recording call tells them apart without changing
-// anything (the volume the playback already has): SND_ERR_INVALID_HANDLE = stale (D-29), the
-// playback is over (it ended - played, not loaded, rejected - so its position no longer matters).
+// gone). Why destroying then keeps the position of the played voices: the play was recorded
+// after the emitter's create and transform in the same arena, so the block that applied it
+// created the emitter, and that block's Compute3D ran with the emitter alive (core computes 3D
+// values for live emitters only, A-004 §1). A playback state other than NONE is read from a
+// snapshot published at the end of such a block; the destroy recorded now is applied at a
+// later block, so the voices already have their 3D values and keep them (sonus.h). The play
+// and the destroy are never in one command batch, which loses the position even for an
+// emitter alive since an earlier block (A-004 §4). Not covered (A-004 §5, core): child
+// playbacks an event action starts later (`play` at timeMs > 0) begin after the destroy and
+// play at the listener; physics does not hold the emitter for the length of the sound.
+// NONE means "not in a published snapshot yet" or "ended and its slot returned": a recording
+// call tells them apart without changing anything (the volume the playback already has):
+// SND_ERR_INVALID_HANDLE = stale (D-29), the playback is over (it ended - played, not loaded,
+// rejected - so its position no longer matters).
 bool Applied(snd_phys& p, snd_playback_handle h, float volume) noexcept {
   if (h.value == SND_HANDLE_INVALID_VALUE) return true;
   if (snd_get_playback_state(p.sys, h) != SND_PLAYBACK_STATE_NONE) return true;
@@ -599,15 +603,13 @@ void ReleaseHeld(snd_phys& p) noexcept {
   }
 }
 
-// An emitter at `position` for one group; false when none can be had (held ring full of this
-// call's emitters, no emitter slot, transform refused).
+// An emitter at `position` for one group; false when none can be had (held ring full, no
+// emitter slot, transform refused). A full ring never destroys a held emitter early: that
+// sound would lose its position (it would play at the listener at full volume); the new group
+// is dropped instead.
 bool AcquireEmitter(snd_phys& p, const snd_vec3& position, snd_emitter_handle* out) noexcept {
   *out = snd_emitter_handle{0};
-  if (p.heldCount == p.heldCap) {
-    if (p.held[0].stamp == p.stamp) return false;
-    ++p.stats.held_emitters_released_early;
-    DestroyHeld(p, 0);
-  }
+  if (p.heldCount == p.heldCap) return false;
   const snd_emitter_handle e = snd_create_emitter(p.sys);
   if (e.value == SND_HANDLE_INVALID_VALUE) return false;
   if (snd_set_transform(p.sys, e, &position, nullptr, nullptr) != SND_OK) {
@@ -624,7 +626,6 @@ bool AcquireEmitter(snd_phys& p, const snd_vec3& position, snd_emitter_handle* o
 bool PlayPositioned(snd_phys& p, snd_emitter_handle e, Request* qs, std::uint32_t n) noexcept {
   Held h{};
   h.emitter = e;
-  h.stamp = p.stamp;
   bool any = false;
   for (std::uint32_t i = 0; i < n; ++i) {
     Request& q = qs[i];
@@ -858,9 +859,11 @@ snd_result Enter(const snd_phys* p) noexcept {
 bool ReadConfig(const snd_physics_config* in, snd_physics_config* out) noexcept {
   snd_physics_config_init(out);
   if (in == nullptr) return false;
-  if (in->struct_size < 8u || in->struct_size > sizeof(snd_physics_config) || (in->struct_size % 4u) != 0u) return false;
-  if (in->version == 0u || in->version > SND_PHYSICS_CONFIG_VERSION) return false;
-  std::memcpy(out, in, in->struct_size);
+  // A larger struct_size (a newer header) is accepted and only the known part is read, like
+  // snd_create (NormalizeConfig); a shorter one gets defaults for the rest.
+  if (in->struct_size < 8u || (in->struct_size % 4u) != 0u) return false;
+  if (in->version == 0u) return false;  // a newer version: its known part is read (as a larger struct_size)
+  std::memcpy(out, in, std::min<std::size_t>(in->struct_size, sizeof(snd_physics_config)));
   out->struct_size = static_cast<std::uint32_t>(sizeof(snd_physics_config));
   out->version = SND_PHYSICS_CONFIG_VERSION;
   const snd_physics_config& c = *out;
@@ -1445,7 +1448,6 @@ snd_result Submit(snd_phys& p, const snd_contact* contacts, std::uint32_t count,
   if (++p.stamp == 0u) {
     std::memset(p.gStamp, 0, (std::size_t{p.gMask} + 1u) * sizeof(std::uint32_t));
     for (std::uint32_t i = 0; i < p.trCap; ++i) p.tracks[i].reportStamp = 0;
-    for (std::uint32_t i = 0; i < p.heldCount; ++i) p.held[i].stamp = 0;
     for (std::uint32_t i = 0; i < p.cdCount; ++i) p.cd[i].stamp = 0;
     p.stamp = 1;
   }
@@ -1691,13 +1693,12 @@ snd_result Footstep(snd_phys& p, snd_emitter_handle foot, std::uint16_t footMate
 // Table setters
 // ---------------------------------------------------------------------------------------
 snd_result SetTable(snd_phys& p, const snd_physics_table_desc* in) noexcept {
-  if (in == nullptr || in->struct_size < 8u || in->struct_size > sizeof(snd_physics_table_desc) ||
-      (in->struct_size % 4u) != 0u) {
+  if (in == nullptr || in->struct_size < 8u || (in->struct_size % 4u) != 0u) {
     return SND_ERR_INVALID_ARGUMENT;
   }
   snd_physics_table_desc d;
   snd_physics_table_desc_init(&d);
-  std::memcpy(&d, in, in->struct_size);
+  std::memcpy(&d, in, std::min<std::size_t>(in->struct_size, sizeof(snd_physics_table_desc)));
   const std::uint32_t n = d.material_count;
   if (!Finite(d.impulse_threshold) || d.impulse_threshold < 0.0f || !ValidCurve(d.weight_to_volume, YRange::Volume)) {
     return SND_ERR_INVALID_ARGUMENT;

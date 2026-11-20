@@ -93,24 +93,33 @@
  *   audio side is seen to have applied the plays: snd_get_playback_state of each playback is
  *   not NONE, or the playback is gone (NONE, and snd_set_playback_volume with the volume it
  *   already has is refused with SND_ERR_INVALID_HANDLE: stale, D-29; while it is not stale
- *   that call changes nothing). Why that is safe: the play was recorded after the emitter's
- *   create and transform in the same arena, so the block that applied the play also created
- *   the emitter and ran its 3D computation with the emitter alive; a state other than NONE
- *   comes from a snapshot published at the end of such a block, and the destroy recorded
- *   afterwards is applied at a later block, after the playbacks got their 3D values (they
- *   keep them, sonus.h). A playback that ended (played, not loaded, rejected) no longer needs
- *   its position. Destroying at once is not safe: an emitter created, moved and destroyed in
- *   one command batch plays at the listener (spec/handoff/parallel/requests/A-004.md). The
- *   release does not depend on physics time (sub-steps before one snd_update are fine).
- *   At most max_held_emitters are held. When full, the oldest one made by an earlier call is
- *   destroyed early (held_emitters_released_early; its position may then be lost); when all
- *   were made by the current call, the new group is dropped. No emitter (no slot, or the
- *   transform refused): the group is dropped (dropped_no_emitter); it is NOT played with
+ *   that call changes nothing). Why this keeps the position of the played voices: the play
+ *   was recorded after the emitter's create and transform in the same arena, so the block
+ *   that applied the play also created the emitter and ran its 3D computation with the
+ *   emitter alive; a state other than NONE comes from a snapshot published at the end of such
+ *   a block, and the destroy recorded afterwards is applied at a later block, after the
+ *   playbacks got their 3D values (they keep them, sonus.h). A playback that ended (played,
+ *   not loaded, rejected) no longer needs its position. The play and the destroy are never in
+ *   one command batch: that loses the position even for an emitter alive since an earlier
+ *   block (A-004 §4, seen in Release builds), and for one created in the same batch always
+ *   (A-004 §1). The release does not depend on physics time (sub-steps before one snd_update
+ *   are fine).
+ *   Limitation (A-004 §5, a core issue): child playbacks that an event starts LATER through
+ *   an action (`play` at timeMs > 0, a nested event) begin after the emitter may already be
+ *   destroyed and then play at the listener. Do not map events with such delayed nested
+ *   plays in the material table (the emitter is not kept for the length of the sound: that
+ *   would hold emitters for as long as the sounds last).
+ *   At most max_held_emitters are held. When the ring is full the new group is dropped
+ *   (dropped_no_emitter, a DROP record); a held emitter is never destroyed early (its sound
+ *   would lose its position and play at the listener at full volume). No emitter (no slot,
+ *   or the transform refused): the group is dropped the same way; it is NOT played with
  *   snd_play_at, whose implicit emitter comes from the same pool and which would sound at the
  *   listener without one (A-004).
  *   Capacities: the system's max_emitters should cover the game's own emitters +
- *   max_tracked_pairs + max_held_emitters; max_held_emitters should be at least twice the
- *   largest budget of one call (budget_per_second * max_dt_seconds, default 30 -> 64).
+ *   max_tracked_pairs + max_held_emitters. max_held_emitters (default 64) should cover the
+ *   groups played between two snd_update calls times the periods until they are applied
+ *   (about 3: render_ahead_blocks + 1); submitting many times without snd_update fills the
+ *   ring and the groups after that are dropped.
  *
  * Footsteps (9.2): surfaces with weight > 0 (finite) are candidates; the two
  *   largest (first on ties) play. volume = weight_to_volume(w / (w1 + w2)) (in double: any
@@ -258,7 +267,12 @@ typedef struct snd_physics_record {
   float pitch;    /* rate ratio, as recorded (1 = not recorded) */
   snd_vec3 position;
   uint64_t object_a, object_b;
-  snd_playback_handle playback; /* 0 for position-only plays, failures and FALLBACK records */
+  /* 0 for position-only plays, failures, FALLBACK and DROP records. The volume and pitch of a
+   * one-shot (PLAY) playback belong to physics: until its emitter is released physics may
+   * record its original volume on it again (the release check), overwriting a
+   * snd_set_playback_volume of the game. Change loudness through the curves or a bus; using
+   * the handle to stop the playback or to query its state is fine. */
+  snd_playback_handle playback;
   snd_emitter_handle emitter;   /* emitter used (0 = 2D / play_at) */
   snd_result result;            /* SND_OK, or the failure of the API call that recorded it */
   uint32_t param_count;
@@ -273,9 +287,11 @@ typedef void(SND_CALL* snd_physics_observer)(void* user, const snd_physics_recor
 /* Configuration                                                              */
 /* ------------------------------------------------------------------------- */
 typedef struct snd_physics_config {
-  uint32_t struct_size; /* = sizeof(snd_physics_config); a smaller size (an older header) gets
-                           defaults for the fields it does not cover; must be a multiple of 4 */
-  uint32_t version;     /* = SND_PHYSICS_CONFIG_VERSION (1..current) */
+  uint32_t struct_size; /* = sizeof(snd_physics_config); a multiple of 4, >= 8. A smaller size (an
+                           older header) gets defaults for the fields it does not cover; a larger
+                           one (a newer header) is accepted and only the known part is read (as
+                           snd_create does with snd_config) */
+  uint32_t version;     /* = SND_PHYSICS_CONFIG_VERSION (>= 1; a newer one: the known part is read) */
   float budget_per_second;         /* 9.4 step 4, default 300 (>= 0, finite) */
   float grid_size;                 /* 9.4 step 2 (m), default 0.5 (> 0, finite) */
   float cooldown_seconds;          /* 9.4 step 3, default 0.05 (>= 0, finite) */
@@ -392,7 +408,8 @@ typedef struct snd_physics_curves {
  */
 
 typedef struct snd_physics_table_desc {
-  uint32_t struct_size;   /* = sizeof(snd_physics_table_desc) (smaller: older header, defaults) */
+  uint32_t struct_size;   /* = sizeof(snd_physics_table_desc); multiple of 4, >= 8 (smaller: older
+                             header, defaults; larger: newer header, the known part is read) */
   uint32_t material_count;/* N (<= config.max_materials) */
   const snd_id* single;   /* [N * 4]: single[m * 4 + kind]; NULL = none */
   const snd_id* pair;     /* [N * N]: pair[min * N + max] for every kind (the lower triangle is ignored); NULL = none */
@@ -533,13 +550,13 @@ typedef struct snd_physics_stats {
   uint64_t dropped_no_event;
   uint64_t dropped_cooldown;
   uint64_t dropped_budget;
-  uint64_t dropped_no_emitter;   /* groups that had a place in the budget but no emitter (not played) */
+  uint64_t dropped_no_emitter;   /* groups that had a place in the budget but no emitter (no slot,
+                                    transform refused, or max_held_emitters full): not played */
   uint64_t group_requests;
   uint64_t requested_impact;     /* events requested for Impact groups */
   uint64_t requested_break;
   uint64_t requested_footstep;
   uint64_t requested_play_at;    /* snd_physics_play_at */
-  uint64_t held_emitters_released_early; /* held emitters destroyed before their plays were seen applied (ring full) */
   uint64_t resolved_pair;
   uint64_t fallback_pair_to_single;
   uint64_t fallback_single_to_default;

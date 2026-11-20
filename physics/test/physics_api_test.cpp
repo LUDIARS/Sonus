@@ -61,15 +61,35 @@ SND_TEST(PhysicsApi, ConfigVersionsAndRanges) {
   SND_CHECK_EQ(rec.Count(SND_PHYSICS_RECORD_PLAY), 6u);  // 60 / s: the covered field counts
   snd_phys_destroy(p);
   // Bad headers.
-  for (std::uint32_t size : {0u, 4u, 6u, 10u, static_cast<std::uint32_t>(sizeof(c) + 4u)}) {
+  for (std::uint32_t size : {0u, 4u, 6u, 10u}) {
     snd_physics_config b = c;
     b.struct_size = size;
     SND_CHECK_MSG(CreateWith(sys.sys, b) == SND_ERR_INVALID_ARGUMENT, "struct_size %u", size);
   }
-  for (std::uint32_t v : {0u, SND_PHYSICS_CONFIG_VERSION + 1u}) {
+  {
     snd_physics_config b = c;
-    b.version = v;
+    b.version = 0u;
     SND_CHECK_EQ(CreateWith(sys.sys, b), SND_ERR_INVALID_ARGUMENT);
+  }
+  // A newer header (larger struct_size, newer version): the known part is read, the rest ignored.
+  {
+    alignas(16) unsigned char buf[sizeof(snd_physics_config) + 32];
+    std::memset(buf, 0xFF, sizeof buf);
+    snd_physics_config b = c;
+    b.struct_size = static_cast<std::uint32_t>(sizeof(snd_physics_config) + 32u);
+    b.version = SND_PHYSICS_CONFIG_VERSION + 1u;
+    std::memcpy(buf, &b, sizeof b);
+    snd_phys* q = nullptr;
+    SND_CHECK_EQ(snd_physics_create(sys.sys, reinterpret_cast<const snd_physics_config*>(buf), nullptr, &q), SND_OK);
+    alignas(16) unsigned char tb[sizeof(snd_physics_table_desc) + 16];
+    std::memset(tb, 0xFF, sizeof tb);
+    std::vector<snd_id> s1;
+    snd_physics_table_desc td = SinglesTable(3, &s1);
+    td.struct_size = static_cast<std::uint32_t>(sizeof(snd_physics_table_desc) + 16u);
+    std::memcpy(tb, &td, sizeof td);
+    SND_CHECK_EQ(snd_physics_set_table(q, reinterpret_cast<const snd_physics_table_desc*>(tb)), SND_OK);
+    SND_CHECK_EQ(snd_physics_material_count(q), 3u);
+    snd_phys_destroy(q);
   }
   // Values.
   struct Bad {
@@ -326,32 +346,37 @@ SND_TEST(PhysicsApi, HeldEmittersReleaseAndCapacity) {
     rec.Clear();
     SND_CHECK_EQ(snd_phys_submit_contacts(p, v.empty() ? nullptr : v.data(), static_cast<std::uint32_t>(n), dt), SND_OK);
   };
-  // 3 groups in one call with room for 2: the third is dropped (all held ones are this call's).
+  // 3 groups in one call with room for 2: the third is dropped.
   submit(3, 0.01f);
   snd_physics_stats s = Stats(p);
   SND_CHECK_EQ(s.dropped_no_emitter, 1u);
-  SND_CHECK_EQ(s.held_emitters_released_early, 0u);
   const std::vector<Rec> first = rec.Of(SND_PHYSICS_RECORD_PLAY);
   SND_REQUIRE_EQ(first.size(), 2u);
   SND_CHECK_EQ(rec.Count(SND_PHYSICS_RECORD_DROP), 1u);
-  // The system has not applied them yet (no update): however much physics time passes, they
-  // stay held; a new group pushes the oldest out early.
+  // Not applied yet (no update): however much physics time passes they stay held, and a new
+  // group in a later call is dropped too (a held emitter is never destroyed early).
   submit(0, 1.0f);
   submit(0, 1.0f);
-  SND_CHECK_EQ(Stats(p).held_emitters_released_early, 0u);
   submit(1, 0.01f);
   s = Stats(p);
-  SND_CHECK_EQ(s.held_emitters_released_early, 1u);
-  SND_CHECK_EQ(s.dropped_no_emitter, 1u);
-  // The first group's emitter is gone; the second's is alive until the plays are seen applied.
+  SND_CHECK_EQ(s.dropped_no_emitter, 2u);
+  SND_CHECK_EQ(s.group_requests, 2u);
+  SND_CHECK_EQ(s.groups, s.dropped_no_event + s.dropped_cooldown + s.dropped_budget + s.dropped_no_emitter + s.group_requests);
+  SND_CHECK_EQ(rec.Count(SND_PHYSICS_RECORD_DROP), 1u);
+  SND_CHECK_EQ(rec.Of(SND_PHYSICS_RECORD_DROP)[0].r.result, SND_ERR_LIMIT_REACHED);
+  // Both emitters are alive until the plays are seen applied.
   sys.Advance(8);
+  SND_CHECK_EQ(snd_set_transform(sys.sys, first[0].r.emitter, nullptr, nullptr, nullptr), SND_OK);
   SND_CHECK_EQ(snd_set_transform(sys.sys, first[1].r.emitter, nullptr, nullptr, nullptr), SND_OK);
-  SND_CHECK_EQ(snd_set_transform(sys.sys, first[0].r.emitter, nullptr, nullptr, nullptr), SND_ERR_INVALID_HANDLE);
-  // Applied (the system advanced): the next call releases the rest, even with dt 0.
+  // Applied (the system advanced): the next call releases both, even with dt 0, and new
+  // groups get emitters again.
   submit(0, 0.0f);
   sys.Advance(8);
+  SND_CHECK_EQ(snd_set_transform(sys.sys, first[0].r.emitter, nullptr, nullptr, nullptr), SND_ERR_INVALID_HANDLE);
   SND_CHECK_EQ(snd_set_transform(sys.sys, first[1].r.emitter, nullptr, nullptr, nullptr), SND_ERR_INVALID_HANDLE);
-  SND_CHECK_EQ(Stats(p).held_emitters_released_early, 1u);
+  submit(2, 0.01f);
+  SND_CHECK_EQ(rec.Count(SND_PHYSICS_RECORD_PLAY), 2u);
+  SND_CHECK_EQ(Stats(p).dropped_no_emitter, 2u);
   snd_phys_destroy(p);
 }
 
