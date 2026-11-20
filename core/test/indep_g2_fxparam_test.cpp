@@ -67,7 +67,7 @@ SND_TEST(IndepG2Param, FadeIsOneLinearRampFromTheNextBlock) {
     worst0 = std::fmax(worst0, std::fabs(r.Ratio(f) - e0));
     worst1 = std::fmax(worst1, std::fabs(r.Ratio(f) - e1));
   }
-  // One frame of the fade is 1/1536 = 6.5e-4 of the full scale (the strict line: SpecHole_ below).
+  // One frame of the fade is 1/1536 = 6.5e-4 of the full scale (the truncation rule: FadeSecondsAreTruncatedToFramesLikeTheBusVolume).
   if (std::fmin(worst0, worst1) >= 1e-3) {
     for (std::size_t b = 0; b <= kN + 1; ++b) {
       const std::size_t f = start + b * kB;
@@ -79,25 +79,40 @@ SND_TEST(IndepG2Param, FadeIsOneLinearRampFromTheNextBlock) {
   for (std::size_t f = start + kN * kB; f < r.h.Total(); ++f) SND_CHECK(std::fabs(r.h.At(f, 0)) < 1e-6f);
 }
 
-// A2 strict (spec hole: seconds -> frames rounding). fade_seconds = 6 blocks given as
-// 6 * (256 / 48000.0f) is 1535.99998 frames in float. The fade is truncated to 1535 frames (the
-// same rule as the bus volume's FadeFrames), so the block-end values step by 256/1535 and the
-// last block catches up. Records the steps; rounding to the nearest frame would give 1/6 each.
-SND_TEST(IndepG2Param, SpecHole_FadeSecondsToFramesRounding) {
-  GainRig r;
-  SND_REQUIRE(r.h.sys != nullptr);
-  const std::size_t f0 = r.h.Total();
+// Decision (re-check 1): fade seconds -> frames are truncated, as snd_set_bus_volume. With
+// fade_seconds = 6 * (256 / 48000.0f) (1535.99998 frames in float) the effect parameter's fade
+// takes 1535 frames, and the same fade on the bus volume has the same shape.
+SND_TEST(IndepG2Param, FadeSecondsAreTruncatedToFramesLikeTheBusVolume) {
   constexpr std::uint32_t kN = 6;
-  r.h.sys->SetEffectParam(HashId("Sfx"), 0, 2, 0.0f, kN * kBlockSec);
-  r.h.Steps(kN + 4);
-  const std::size_t start = (RampStart(r, f0) / kB) * kB;
-  double ends[kN + 1];
-  for (std::uint32_t b = 0; b <= kN; ++b) ends[b] = r.Ratio(start + b * kB);
+  auto ramp = [](bool effect) {
+    GainRig r;
+    std::vector<double> v;
+    if (r.h.sys == nullptr) return v;
+    const std::size_t f0 = r.h.Total();
+    if (effect) r.h.sys->SetEffectParam(HashId("Sfx"), 0, 2, 0.0f, kN * kBlockSec);
+    else r.h.sys->SetBusVolume(HashId("Sfx"), 0.0f, kN * kBlockSec);
+    r.h.Steps(kN + 4);
+    for (std::size_t f = f0; f < r.h.Total(); ++f) v.push_back(r.Ratio(f));
+    return v;
+  };
+  const std::vector<double> e = ramp(true), bus = ramp(false);
+  SND_REQUIRE(!e.empty() && e.size() == bus.size());
+  // Effect: block-end values on the line of 1535 frames (1 - 256 k / 1535), 0 from the 6th block on.
+  std::size_t s = 0;
+  while (s < e.size() && e[s] >= 1.0 - 1e-6) ++s;
+  const std::size_t start = (s / kB) * kB;
   double worst = 0;
-  for (std::uint32_t b = 0; b < kN; ++b) worst = std::fmax(worst, std::fabs((ends[b] - ends[b + 1]) - 1.0 / kN));
-  std::printf("  [spec hole] block steps differ from 1/%u by up to %g (first %.6f, last %.6f)\n", kN, worst,
-              ends[0] - ends[1], ends[kN - 1] - ends[kN]);
-  SND_CHECK(worst < 1e-3);  // within one frame of the fade
+  for (std::uint32_t k = 0; k < kN; ++k) worst = std::fmax(worst, std::fabs(e[start + k * kB] - (1.0 - 256.0 * k / 1535.0)));
+  SND_CHECK_MSG(worst < 2e-5, "block starts deviate from the 1535-frame line by %g", worst);
+  SND_CHECK(std::fabs(e[start + kN * kB]) < 1e-6);
+  // Same shape as the bus volume (whatever the bus's own per-block interpolation, the end is the same frame range).
+  std::size_t busEnd = 0, fxEnd = 0;
+  for (std::size_t f = 0; f < e.size(); ++f) {
+    if (std::fabs(e[f]) > 1e-6) fxEnd = f + 1;
+    if (std::fabs(bus[f]) > 1e-6) busEnd = f + 1;
+  }
+  SND_CHECK_MSG(fxEnd / kB == busEnd / kB, "effect fade ends in block %llu, the bus volume's in block %llu",
+                static_cast<unsigned long long>(fxEnd / kB), static_cast<unsigned long long>(busEnd / kB));
 }
 
 // A3: a new target while a fade runs continues from the current value.
@@ -271,8 +286,8 @@ SND_TEST(IndepG2Param, IndexInTheChainAndOneBusOnly) {
   SND_CHECK_NEAR(h.LastMean(0), 0.25 * e, 1e-5);
 }
 
-// A11 (spec hole, records the behaviour): a bank holding the bus is unloaded and loaded again.
-SND_TEST(IndepG2Param, SpecHole_ValueAfterTheBankIsLoadedAgain) {
+// Decision: a bank defining the bus unloaded and loaded again starts from the bank's values.
+SND_TEST(IndepG2Param, BankLoadedAgainStartsFromTheBankValues) {
   GainRig r;
   SND_REQUIRE(r.h.sys != nullptr);
   r.h.sys->SetEffectParam(HashId("Sfx"), 0, 2, 0.5f, 0.0f);
@@ -286,9 +301,7 @@ SND_TEST(IndepG2Param, SpecHole_ValueAfterTheBankIsLoadedAgain) {
   r.h.Load("g2", fb.Build("G"));
   r.h.sys->Play(HashId("E"), NoEmitter(), nullptr);
   r.h.Steps(4);
-  const double ratio = r.h.LastMean(0) / r.level;
-  std::printf("  [spec hole A11] DryMix after unload + load: %.4f of the bank value (0.5 = kept, 1 = bank)\n", ratio);
-  SND_CHECK(std::fabs(ratio - 1.0) < 1e-4 || std::fabs(ratio - 0.5) < 1e-4);
+  SND_CHECK_NEAR(r.h.LastMean(0) / r.level, 1.0, 1e-5);
 }
 
 // A12: SetBusVolume variant 0 is the bus volume, bit for bit; an unknown variant is dropped.
@@ -525,8 +538,9 @@ SND_TEST(IndepG2Side, SilentOrPausedKeyDoesNotReduce) {
   SND_CHECK_NEAR(r.h.LastMean(0) / alone, 1.0, 1e-3);
 }
 
-// B4 (spec hole): key bus muted by its volume: is the sidechain taken before or after the fader?
-SND_TEST(IndepG2Side, SpecHole_KeyBusMutedByItsVolume) {
+// Decision: the sidechain is the key bus's output after its fader (a muted key does not reduce;
+// a key at half volume reduces as a key 6 dB lower).
+SND_TEST(IndepG2Side, SidechainIsTakenAfterTheKeyBusFader) {
   SideRig r(true, 1.0f);
   SND_REQUIRE(r.h.sys != nullptr);
   r.h.sys->Play(HashId("T"), NoEmitter(), nullptr);
@@ -535,9 +549,12 @@ SND_TEST(IndepG2Side, SpecHole_KeyBusMutedByItsVolume) {
   r.h.sys->SetBusVolume(HashId("Key"), 0.0f, 0.0f);
   r.h.sys->Play(HashId("K"), NoEmitter(), nullptr);
   r.h.Steps(10);
-  const double db = Db(r.h.LastMean(0) / alone);
-  std::printf("  [spec hole B4] T with a muted key bus: %.2f dB (0 = post-fader key, about -12 = pre-fader)\n", db);
-  SND_CHECK(std::isfinite(db));
+  SND_CHECK_NEAR(Db(r.h.LastMean(0) / alone), 0.0, 0.01);
+  r.h.sys->SetBusVolume(HashId("Key"), 0.5f, 0.0f);
+  r.h.Steps(10);
+  const double key = Db(0.5 * kKey);
+  const double exp = (-20.0 + (key + 20.0) / 4.0) - key;
+  SND_CHECK_NEAR(Db((r.h.LastMean(0) - 0.5 * kKey) / alone), exp, 0.3);
 }
 
 // B8: a mono key bus reduces as much as a stereo one (peak detector).
@@ -566,8 +583,8 @@ SND_TEST(IndepG2Side, MonoKeyBusSameReduction) {
   SND_CHECK_NEAR(red[1], stereo, 0.6);
 }
 
-// B6 (spec hole): two DUCK rows on the same target bus.
-SND_TEST(IndepG2Side, SpecHole_TwoDuckRowsOnOneTarget) {
+// Decision: several DUCK kind 0 rows on one target: the first row (bank order) is the sidechain.
+SND_TEST(IndepG2Side, OnlyTheFirstDuckRowFeedsTheSidechain) {
   Fx h(G2Config());
   FxBank fb;
   fb.b.buses = {TBus{HashId("K1"), 3u, 0, 0, 0.0f, {}, {}}, TBus{HashId("K2"), 3u, 0, 0, 0.0f, {}, {}},
@@ -588,11 +605,12 @@ SND_TEST(IndepG2Side, SpecHole_TwoDuckRowsOnOneTarget) {
   const snd_playback_handle a = h.sys->Play(HashId("A"), NoEmitter(), nullptr);
   h.Steps(8);
   const double byBoth = Db((h.LastMean(0) - 2 * kKey) / alone);
-  (void)a;
-  std::printf("  [spec hole B6] second row's key only: %.2f dB, both keys: %.2f dB (one key: -12.06)\n", bySecond,
-              byBoth);
-  const double byFirst = bySecond;
-  SND_CHECK(std::isfinite(byFirst) && std::isfinite(byBoth));
+  const double one = (-20.0 + (Db(kKey) + 20.0) / 4.0) - Db(kKey);
+  SND_CHECK_NEAR(bySecond, 0.0, 0.01);  // the second row's key alone: nothing
+  SND_CHECK_NEAR(byBoth, one, 0.3);     // the first row's key: as one key
+  h.sys->Stop(a, 0.0f, nullptr);
+  h.Steps(10);
+  SND_CHECK_NEAR(Db((h.LastMean(0) - kKey) / alone), 0.0, 0.01);
 }
 
 // B7: the target as its own key: no runaway, finite, bounded.
