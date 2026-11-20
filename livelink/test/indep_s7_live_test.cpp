@@ -1145,7 +1145,9 @@ SND_TEST(IndepS7Session, AnswerStoreOverflowIsRecordedBehaviour) {
   SND_CHECK(taken > 0u);
 }
 
-// L3: a RevertValue / ReplaceChunk of an earlier Server's session is not applied.
+// L3: a RevertValue / ReplaceChunk of an earlier Server's session is not applied. The old
+// Server records and publishes them, is destroyed before any block is rendered, and a new
+// Server starts (one Server per System at a time, server.hpp).
 SND_TEST(IndepS7Session, OldSessionRevertAndReplaceAreNotApplied) {
   Fixture f;
   f.Load(IndepBank(), "a.sndb");
@@ -1159,33 +1161,19 @@ SND_TEST(IndepS7Session, OldSessionRevertAndReplaceAreNotApplied) {
     SND_REQUIRE(t.c->RevertValue(SfxVolumeCell()) != 0u);
     SND_REQUIRE(t.c->ReplaceChunk(kLive, bf::chunk::BUSS, ch.data(), ch.size()) != 0u);
     SND_REQUIRE(WaitFramesIn(f, base, 2));
-    // recorded by the old Server (not yet applied: no block rendered); now replace the Server
-    ll::Server* old = f.server;
-    ll::ServerDesc sd;
-    sd.system = f.sys;
-    sd.runtime = f.rt;
-    sd.allocator = &snd::base::DefaultAllocator();
-    ll::MemoryLink link2;
-    SND_REQUIRE(link2.Init(snd::base::DefaultAllocator(), 1u << 20));
-    sd.acceptor = &link2.acceptor();
-    ll::Server* fresh = nullptr;
-    SND_REQUIRE_EQ(ll::Server::Create(sd, &fresh), SND_OK);
-    SND_REQUIRE_EQ(fresh->Start(), SND_OK);  // new session starts here (D-87)
-    f.Steps(10);
-    ll::Server::Destroy(old);
-    f.server = fresh;
-    f.Steps(10);
-    SND_CHECK(f.rt->Drops().staleEdits >= 1u);
-    ll::ClientDesc d;
-    d.connector = &link2.connector();
-    d.projectBuildHash = lltest::kProjectHash;
-    Tool t2(f, d);
-    SND_REQUIRE(t2.Ready());
-    ll::CellValue cv{};
-    SND_REQUIRE(WaitCell(t2, t2.c->ReadCell(SfxVolumeCell()), &cv));
-    SND_CHECK_EQ(cv.current, Db(-6.0f));  // neither the revert nor the replacement of the old session
-    SND_CHECK((cv.flags & ll::kCellOverridden) != 0u);
-    t2.c->Stop();
-    f.StopServer();
+    std::this_thread::sleep_for(std::chrono::milliseconds(30));  // a loop or two: recorded and flushed
+    f.StopServer();  // no block rendered since
   }
+  const std::uint32_t stale0 = f.rt->Drops().staleEdits;
+  f.link.Destroy();
+  SND_REQUIRE_EQ(f.StartServer(), SND_OK);  // new session (D-87)
+  f.Steps(10);
+  std::printf("[indep_s7] old-session edits dropped as stale: %u\n", f.rt->Drops().staleEdits - stale0);
+  Tool t2(f);
+  SND_REQUIRE(t2.Ready());
+  ll::CellValue cv{};
+  SND_REQUIRE(WaitCell(t2, t2.c->ReadCell(SfxVolumeCell()), &cv));
+  SND_CHECK_EQ(cv.current, Db(-6.0f));  // neither the revert nor the replacement of the old session
+  SND_CHECK((cv.flags & ll::kCellOverridden) != 0u);
+  SND_CHECK_EQ(cv.original, Db(0.0f));
 }
