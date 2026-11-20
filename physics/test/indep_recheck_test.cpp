@@ -153,22 +153,22 @@ SND_TEST(IndepRecheck, HitsStayOnTheRightUnderEveryPattern) {
     double l = 0, r = 0;
     Energy(f.s, from, &l, &r);
     const snd_physics_stats st = phystest::Stats(f.phys);
-    snd::test::Note("%s: |L| %.3f |R| %.3f, requests %llu, no emitter %llu, early %llu, api failures %llu", pt.what, l, r,
+    snd::test::Note("%s: |L| %.3f |R| %.3f, requests %llu, no emitter %llu, api failures %llu", pt.what, l, r,
                     static_cast<unsigned long long>(st.group_requests),
                     static_cast<unsigned long long>(st.dropped_no_emitter),
-                    static_cast<unsigned long long>(st.held_emitters_released_early),
                     static_cast<unsigned long long>(st.api_failures));
     SND_CHECK_MSG(r > 1.0, "%s: nothing heard", pt.what);
     SND_CHECK_MSG(l < 1e-3 * r, "%s: |L| %.4f against |R| %.4f (a hit was heard off its position)", pt.what, l, r);
-    SND_CHECK_EQ(st.held_emitters_released_early, 0u);
+    SND_CHECK_EQ(st.dropped_no_emitter, 0u);
   }
 }
 
-// Decided behaviour, recorded: when sub-steps fill the hold ring with emitters of earlier
-// calls that are not applied yet, the oldest is destroyed early (decision) and its hit may
-// then sound at the listener. Here 6 sub-steps of 20 hits before one snd_update
-// (max_held_emitters 64). The test only records what is heard (no assertion on position).
-SND_TEST(IndepRecheck, RecordRingFullEarlyReleaseWithSubsteps) {
+// Decision 2 of the final round: a full hold ring never destroys a held emitter early; the
+// new group is dropped (dropped_no_emitter). 6 sub-steps of 20 hits in 20 cells before one
+// snd_update (max_held_emitters 64): 64 hits are held and heard on the right, the other 56
+// are dropped; nothing is heard at the listener. Once the audio side runs, the ring empties
+// and new hits play again.
+SND_TEST(IndepRecheck, RingFullBySubstepsDropsNewAndKeepsPositions) {
   Fx f(kDc, Open());
   SND_REQUIRE(f.Ok());
   f.s.Advance(2);
@@ -182,11 +182,43 @@ SND_TEST(IndepRecheck, RecordRingFullEarlyReleaseWithSubsteps) {
   f.s.Advance(20);
   double l = 0, r = 0;
   Energy(f.s, from, &l, &r);
-  const snd_physics_stats st = phystest::Stats(f.phys);
-  snd::test::Note("ring full by sub-steps: early %llu, no emitter %llu, |L| %.2f |R| %.2f (L > 0: hits at the listener)",
-                  static_cast<unsigned long long>(st.held_emitters_released_early),
+  snd_physics_stats st = phystest::Stats(f.phys);
+  snd::test::Note("ring full by sub-steps: requests %llu, no emitter %llu, |L| %.2f |R| %.2f",
+                  static_cast<unsigned long long>(st.group_requests),
                   static_cast<unsigned long long>(st.dropped_no_emitter), l, r);
-  SND_CHECK(st.held_emitters_released_early > 0u);
+  SND_CHECK_EQ(st.group_requests, 64u);
+  SND_CHECK_EQ(st.dropped_no_emitter, 56u);
+  SND_CHECK(r > 1.0);
+  SND_CHECK_EQ(l, 0.0);
+  // The ring empties as soon as the plays are applied: a new hit plays.
+  SND_CHECK_EQ(f.Submit({Hit(obj, 2.0f)}, 1.0f / 60.0f), SND_OK);
+  SND_CHECK_EQ(f.rec.Count(SND_PHYSICS_RECORD_PLAY), 1u);
+  SND_CHECK_EQ(f.rec.Count(SND_PHYSICS_RECORD_DROP), 0u);
+}
+
+// The ring cannot stay full for good while the audio side runs: with max_held_emitters 1
+// and several hits every call (only one fits), the system keeps playing one hit per few
+// calls for 2000 frames, never zero for long.
+SND_TEST(IndepRecheck, FullRingAlwaysDrains) {
+  snd_physics_config c = Open();
+  c.max_held_emitters = 1;
+  Fx f(kShort, c);
+  SND_REQUIRE(f.Ok());
+  std::uint64_t obj = 0;
+  int sinceLastPlay = 0, longestGap = 0;
+  for (int frame = 0; frame < 2000; ++frame) {
+    std::vector<snd_contact> cs;
+    for (int i = 0; i < 3; ++i, obj += 2) cs.push_back(Hit(obj, 1.0f + static_cast<float>(i)));
+    SND_CHECK_EQ(f.Submit(cs, 1.0f / 60.0f), SND_OK);
+    if (f.rec.Count(SND_PHYSICS_RECORD_PLAY) > 0u) {
+      sinceLastPlay = 0;
+    } else if (++sinceLastPlay > longestGap) {
+      longestGap = sinceLastPlay;
+    }
+    f.s.Advance(1);
+  }
+  snd::test::Note("ring of 1: longest run of calls without a play %d", longestGap);
+  SND_CHECK(longestGap <= 8);
 }
 
 // The volume recorded again by the release check (the volume the playback already has)
@@ -263,10 +295,9 @@ SND_TEST(IndepRecheck, NoEmitterLeakOverALongRun) {
   }
   SND_CHECK_EQ(quietOk, quietChecks);
   const snd_physics_stats st = phystest::Stats(f.phys);
-  snd::test::Note("long run: requests %llu, no emitter %llu, early %llu, api failures %llu",
+  snd::test::Note("long run: requests %llu, no emitter %llu, api failures %llu",
                   static_cast<unsigned long long>(st.group_requests),
                   static_cast<unsigned long long>(st.dropped_no_emitter),
-                  static_cast<unsigned long long>(st.held_emitters_released_early),
                   static_cast<unsigned long long>(st.api_failures));
   snd_physics_destroy(f.phys);
   f.phys = nullptr;
@@ -304,7 +335,7 @@ SND_TEST(IndepRecheck, SuspendHoldsThenResumeReleases) {
   }
   f.s.Advance(2);
   SND_CHECK_EQ(f.FreeEmitters(16), 16u);
-  SND_CHECK_EQ(phystest::Stats(f.phys).held_emitters_released_early, 0u);
+  SND_CHECK_EQ(phystest::Stats(f.phys).dropped_no_emitter, 0u);
 }
 
 // Tracking order (decision): (1) reports, (2) timeouts, (3) new keys; eviction only when
@@ -416,7 +447,7 @@ const LateBank& BuildLateBank() {
 }  // namespace
 
 namespace {
-void CheckHitPositioned(const LateBank& lb, const char* name);
+void CheckHitPositioned(const LateBank& lb, const char* name, double* outL = nullptr, double* outR = nullptr);
 }  // namespace
 
 // The release rule assumes that a playback state other than NONE means its 3D values are
@@ -432,20 +463,27 @@ SND_TEST(IndepRecheck, LateStartingVoicesKeepThePosition) {
   }
 }
 
-// Defect (decision D "Emitter を作って位置を与えて snd_play"; physics.h claims the release is
-// safe once the play is seen applied): an event whose action plays a nested event 100 ms
-// after the play. Physics releases the emitter after ~3 frames (the play is applied), the
-// nested playback starts afterwards without the emitter and sounds at the listener (centred,
-// no attenuation). Root cause in core (CoreNestedPlayAfterEmitterDestroyed below), but the
-// physics release rule does not hold for such events.
-SND_TEST(IndepRecheck, Defect_ReleasedEmitterLosesNestedActionPlay) {
+// Record of a core limit (A-004 §5; physics.h "known limits"; acceptance decision: core
+// side, the physics rule stays): an event whose action plays a nested event 100 ms after the
+// play. Physics releases the emitter once the play is applied (~3 frames); the nested
+// playback starts afterwards. Passes when the hit is heard either
+//   (a) on the right (core fixed: the child keeps the parent's transform), or
+//   (b) at the listener, centred (the known limit),
+// and says which. Anything else fails. (Was Defect_ReleasedEmitterLosesNestedActionPlay.)
+SND_TEST(IndepRecheck, CoreA004_NestedActionPlayAfterEmitterRelease) {
   const LateBank& lb = BuildLateBank();
   SND_REQUIRE(!lb.bank.empty());
-  CheckHitPositioned(lb, "L/Outer");
+  double l = 0, r = 0;
+  CheckHitPositioned(lb, "L/Outer", &l, &r);
+  const bool fixed = r > 1.0 && l < 1e-3 * r;
+  const bool knownLimit = r > 1.0 && std::fabs(l - r) < 0.01 * r;
+  snd::test::Note("core A-004 section 5: %s (|L| %.2f |R| %.2f)",
+                  fixed ? "(a) fixed: heard on the right" : knownLimit ? "(b) known limit: at the listener" : "neither", l, r);
+  SND_CHECK(fixed || knownLimit);
 }
 
 namespace {
-void CheckHitPositioned(const LateBank& lb, const char* name) {
+void CheckHitPositioned(const LateBank& lb, const char* name, double* outL, double* outR) {
   {
     Sys s;
     if (!lb.stream.empty()) s.fs.AddFile(lb.streamName, lb.stream);
@@ -489,9 +527,14 @@ void CheckHitPositioned(const LateBank& lb, const char* name) {
     Energy(s, from, &l, &r);
     snd::test::Note("%s: emitter back after %u frames (%u samples of audio), |L| %.2f |R| %.2f", name, releasedAt,
                     releasedAt * 256u, l, r);
+    snd_physics_destroy(p);
+    if (outL != nullptr) {  // the caller judges
+      *outL = l;
+      *outR = r;
+      return;
+    }
     SND_CHECK_MSG(r > 1.0, "%s: nothing heard", name);
     SND_CHECK_MSG(l < 1e-3 * r, "%s: |L| %.2f against |R| %.2f: heard off its position", name, l, r);
-    snd_physics_destroy(p);
   }
 }
 }  // namespace

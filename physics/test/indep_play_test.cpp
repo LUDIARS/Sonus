@@ -187,9 +187,10 @@ SND_TEST(IndepPlay, EmitterExhaustionDropsTheGroup) {
   SND_CHECK_EQ(f.rec.Count(SND_PHYSICS_RECORD_PLAY), 0u);
 }
 
-// The hold ring (decision): full of this call's emitters -> the new group is dropped; full
-// with emitters of an earlier call that are not applied yet -> the oldest is destroyed early
-// (held_emitters_released_early); applied ones are released normally (not early).
+// The hold ring (decision 2 of the final round): when full, the new group is dropped in both
+// cases (full of this call's emitters, or of an earlier call's that are not applied yet);
+// no held emitter is destroyed early, so the earlier hits keep their position. Applied ones
+// are released and the ring takes new groups again.
 SND_TEST(IndepPlay, HoldRingFull) {
   snd_physics_config c = Cfg(nullptr);
   c.cooldown_seconds = 0.0f;
@@ -197,21 +198,30 @@ SND_TEST(IndepPlay, HoldRingFull) {
   c.max_held_emitters = 4;
   Fx f(c);
   SND_REQUIRE(f.Ok());
+  f.s.Advance(2);
+  const std::uint64_t from = f.s.Frames();
   std::vector<snd_contact> cs;
-  for (std::uint64_t i = 0; i < 6; ++i) cs.push_back(ImpactAt(i * 2, static_cast<float>(i)));
+  for (std::uint64_t i = 0; i < 6; ++i) cs.push_back(ImpactAt(i * 2, 2.0f + static_cast<float>(i)));
   SND_CHECK_EQ(f.Submit(cs, 0.01f), SND_OK);
   SND_CHECK_EQ(phystest::Stats(f.phys).dropped_no_emitter, 2u);
-  // No snd_update in between: the 4 held are not applied -> 2 released early.
-  SND_CHECK_EQ(f.Submit({ImpactAt(100, 1.0f), ImpactAt(102, 3.0f)}, 0.01f), SND_OK);
+  // No snd_update in between: the 4 held are not applied -> the 2 new groups are dropped.
+  SND_CHECK_EQ(f.Submit({ImpactAt(100, 3.0f), ImpactAt(102, 5.0f)}, 0.01f), SND_OK);
+  SND_CHECK_EQ(f.rec.Count(SND_PHYSICS_RECORD_DROP), 2u);
+  for (const Rec& r : f.rec.Of(SND_PHYSICS_RECORD_DROP)) SND_CHECK_EQ(r.r.result, SND_ERR_LIMIT_REACHED);
   snd_physics_stats st = phystest::Stats(f.phys);
-  SND_CHECK_EQ(st.held_emitters_released_early, 2u);
-  SND_CHECK_EQ(st.dropped_no_emitter, 2u);
-  // Applied now: the next call releases them normally.
-  f.s.Advance(4);
+  SND_CHECK_EQ(st.dropped_no_emitter, 4u);
+  SND_CHECK_EQ(st.group_requests, 4u);
+  // The 4 held hits keep their position (all on the right).
+  const Lr m = Measure(f.s, 4, 8);
+  (void)from;
+  snd::test::Note("4 held hits: L %.4f R %.4f", m.l, m.r);
+  SND_CHECK(m.r > 0.05);
+  SND_CHECK_EQ(m.l, 0.0);
+  // Applied now: the next call releases them and takes new groups.
   SND_CHECK_EQ(f.Submit({ImpactAt(104, 1.0f), ImpactAt(106, 3.0f), ImpactAt(108, 5.0f), ImpactAt(110, 7.0f)}, 0.01f), SND_OK);
   st = phystest::Stats(f.phys);
-  SND_CHECK_EQ(st.held_emitters_released_early, 2u);
-  SND_CHECK_EQ(st.dropped_no_emitter, 2u);
+  SND_CHECK_EQ(st.dropped_no_emitter, 4u);
+  SND_CHECK_EQ(st.group_requests, 8u);
 }
 
 // P37 / P35: destroy releases held emitters at once (all slots usable afterwards).
