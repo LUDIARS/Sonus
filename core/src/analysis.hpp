@@ -66,6 +66,7 @@ struct AnalysisShared {
   std::atomic<std::uint32_t> frontPublished{2u};
   std::atomic<std::uint32_t> wanted{0};  // set by readers; Publish takes it (interest renewed)
   std::uint32_t interestLeft = 0;        // Publish: blocks to keep publishing the rings
+  std::uint32_t deadPublished = 1;       // Publish: the frame without data is out
   // Reader side (non-RT, serialised by readerMutex).
   base::Mutex readerMutex;
   void* spectrum = nullptr;  // dsp spectrum state (fftSize)

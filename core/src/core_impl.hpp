@@ -423,11 +423,11 @@ struct VoiceStatic {
   double transportBeatsPerSample;
   // Stage 3 (group 4).
   std::uint32_t virtualReturn;   // D-140: 0 continue, 1 restart, 2 never (Event value when the asset sets none)
-  std::uint32_t markerCount;     // markers of the clip (no bank column yet: always 0, see markers.hpp)
+  std::uint32_t markerCount;     // markers of the clip (CoreDesc::clipMarkers until a bank column, markers.hpp)
   // D-142 / CLIP.fadeOutMs: finite asset clips. playFrames = source frames from startFrame to
   // the end (the asset end, or the end of the loop's last pass); 0 = endless (or not an asset).
   std::uint64_t playFrames;
-  std::uint64_t loopStartFrame, loopEndFrame;  // loop counted (loopEnd 0 = no loop)
+  std::uint64_t loopStartFrame, loopEndFrame;  // loop region of a looping asset clip (loopEnd 0 = none)
   float endFadeSeconds;          // CLIP.fadeOutMs: linear fade over the last part (source time)
   float reserved4;
   const std::uint64_t* markerFrames;  // [markerCount] source frames (bank memory)
