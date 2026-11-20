@@ -56,3 +56,9 @@ snd_add_test(core_fx_kinds_test SOURCES core_fx_kinds_test.cpp LINK ${_core_test
 set_tests_properties(core_fx_kinds_test PROPERTIES TIMEOUT 600)
 snd_add_test(core_fx_load_test SOURCES core_fx_load_test.cpp LINK ${_core_test_link})
 set_tests_properties(core_fx_load_test PROPERTIES TIMEOUT 600)
+
+# Stage 3 group 2, independent tester: D-130 / D-131 / LOD bypass, voice effects D-132..D-134,
+# the 14 standard kinds through core. Defect_* tests fail on purpose (see the tester's report).
+# Repeat under TSan / Release: ctest --repeat until-fail:20 -R indep_g2_
+snd_add_test(indep_g2_fxparam_test SOURCES indep_g2_fxparam_test.cpp LINK ${_core_test_link})
+set_tests_properties(indep_g2_fxparam_test PROPERTIES TIMEOUT 600)
