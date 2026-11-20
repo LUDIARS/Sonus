@@ -24,7 +24,12 @@
  * capacity: SND_ERR_LIMIT_REACHED.
  *
  * The snd_phys object keeps the snd_system pointer: destroy it before the
- * system (snd_phys_destroy stops the tracked sliding / rolling playbacks).
+ * system (snd_phys_destroy stops the tracked sliding / rolling playbacks and
+ * destroys the held emitters).
+ *
+ * Call snd_phys_submit_contacts every game frame, also while the game is paused
+ * (dt 0, count 0 is fine): it releases the held one-shot emitters and times out
+ * sliding contacts.
  *
  * Behaviour (exact rules, CONTRACTS.md "段階 7-A" candidates D-110..):
  *
@@ -34,7 +39,7 @@
  *   that clock in microseconds (the configured seconds are rounded the same way).
  *   Negative, NaN or infinite dt: SND_ERR_INVALID_ARGUMENT and nothing happens.
  *   count == 0 (contacts may be NULL) still advances the clock, the budget carry
- *   and the timeouts. Call once per game frame.
+ *   and the timeouts. Call once per game frame (sub-steps may call it more often).
  *
  * Culling of Impact / Break (9.4), one pass in this order:
  *   1. Threshold: Impact with impulse < threshold is dropped (equal passes).
@@ -49,19 +54,25 @@
  *   3. Cooldown: key = (unordered object pair, unordered sound-material pair,
  *      kind) of the representative; passes when no record exists or
  *      now - last_play >= cooldown (equal passes). Recorded only for groups that
- *      were actually requested in step 4.
+ *      were actually requested in step 4. A full cooldown table pushes out the
+      record with the oldest last request (the first recorded on ties).
  *   4. Budget: Break first, then by impulse descending (array order of the
  *      representative on ties); the first floor(carry + budget_per_second * dt)
  *      are requested, only the fraction is carried (an unused whole part is
  *      not). dt here is the clamped dt in whole microseconds.
- *   A group whose event resolves to nothing is dropped before step 3.
+ *   A group whose event resolves to nothing is dropped before step 3. A group that
+   gets its place in the budget but no emitter (below) is dropped, not played
+   (dropped_no_emitter, a DROP record); it keeps using its place in the budget and
+   records no cooldown.
  *
  * Event resolution (9.3) for a contact of materials A, B and kind k:
  *   pair override pair[k][min(A,B) * N + max(A,B)] -> both single events
  *   single[A][k] and single[B][k] (each that is set; A == B plays once) ->
  *   default[k] -> nothing. A material that is unknown (not in the map, mapped to
- *   SND_PHYSICS_UNMAPPED, or >= N) skips the pair and single stages and goes to
- *   default[k].
+ *   SND_PHYSICS_UNMAPPED, or >= N): no pair override; the known side's single event
+ *   (its curves, mass and surface parameters) if it has one, else default[k]; both
+ *   unknown: default[k]. Counted in fallback_unknown_material, flagged
+ *   SND_PHYSICS_RECORD_FLAG_UNKNOWN_MATERIAL, and in the stage that decided.
  * Strength (9.3): a single event of A uses A's curves and mass_a (B: B's and
  *   mass_b); a pair override or a default event uses the material and mass of
  *   the lighter object (A when equal; non-finite or negative masses count as 0).
@@ -77,21 +88,33 @@
  *   value when an id appears in both), as playback-scope parameters.
  *
  * Positioned one-shots: an Impact / Break group is played with snd_create_emitter ->
- *   snd_set_transform -> snd_play (each event) -> parameters, volume, pitch. The emitter is
- *   destroyed by a later snd_phys_submit_contacts, once emitter_hold_seconds of physics time
- *   have passed (the playbacks keep the last transform). It is not destroyed at once because
- *   the runtime computes an emitter's 3D values only at a block where it is alive: an emitter
- *   created, moved and destroyed in the same command batch plays at the listener
- *   (spec/handoff/parallel/requests/A-004.md). At most max_held_emitters are held; when full
- *   the oldest is destroyed early (held_emitters_released_early), or, when all of them were
- *   created in the current call, the group falls back to snd_play_at. When no emitter slot is
- *   free (or the transform is refused) the group falls back to snd_play_at without parameters,
- *   volume or pitch (play_at_fallbacks, flag SND_PHYSICS_RECORD_FLAG_POSITION_ONLY). Note that
- *   snd_play_at takes its implicit emitter from the same pool: with none free it plays without
- *   a position (A-004).
+ *   snd_set_transform -> snd_play (each event, on the one emitter) -> parameters, volume,
+ *   pitch. The emitter is held and destroyed by a later snd_phys_submit_contacts, once the
+ *   audio side is seen to have applied the plays: snd_get_playback_state of each playback is
+ *   not NONE, or the playback is gone (NONE, and snd_set_playback_volume with the volume it
+ *   already has is refused with SND_ERR_INVALID_HANDLE: stale, D-29; while it is not stale
+ *   that call changes nothing). Why that is safe: the play was recorded after the emitter's
+ *   create and transform in the same arena, so the block that applied the play also created
+ *   the emitter and ran its 3D computation with the emitter alive; a state other than NONE
+ *   comes from a snapshot published at the end of such a block, and the destroy recorded
+ *   afterwards is applied at a later block, after the playbacks got their 3D values (they
+ *   keep them, sonus.h). A playback that ended (played, not loaded, rejected) no longer needs
+ *   its position. Destroying at once is not safe: an emitter created, moved and destroyed in
+ *   one command batch plays at the listener (spec/handoff/parallel/requests/A-004.md). The
+ *   release does not depend on physics time (sub-steps before one snd_update are fine).
+ *   At most max_held_emitters are held. When full, the oldest one made by an earlier call is
+ *   destroyed early (held_emitters_released_early; its position may then be lost); when all
+ *   were made by the current call, the new group is dropped. No emitter (no slot, or the
+ *   transform refused): the group is dropped (dropped_no_emitter); it is NOT played with
+ *   snd_play_at, whose implicit emitter comes from the same pool and which would sound at the
+ *   listener without one (A-004).
+ *   Capacities: the system's max_emitters should cover the game's own emitters +
+ *   max_tracked_pairs + max_held_emitters; max_held_emitters should be at least twice the
+ *   largest budget of one call (budget_per_second * max_dt_seconds, default 30 -> 64).
  *
  * Footsteps (9.2): surfaces with weight > 0 (finite) are candidates; the two
- *   largest (first on ties) play. volume = weight_to_volume(w / (w1 + w2))
+ *   largest (first on ties) play. volume = weight_to_volume(w / (w1 + w2)) (in double: any
+ *   finite weights)
  *   (one surface: weight_to_volume(1)). Event: footstep[M][motion] ->
  *   footstep_any[M] -> footstep_default -> nothing (unknown material: straight to
  *   footstep_default). Played on `foot` (2D when the handle is 0). The motion,
@@ -99,7 +122,12 @@
  *   with the surface's surface parameters.
  *
  * Sliding / rolling (9.5): key = (unordered object pair, unordered sound-material
- *   pair, kind). The first report creates an emitter and starts the resolved
+ *   pair, kind). One call does, in this order: (1) the reports to tracked keys update their
+ *   entries, (2) entries not reported in the call whose last report is >= tracking_timeout
+ *   ago stop (TIMEOUT), (3) new keys start (eviction only when the table is full of entries
+ *   that did not time out). Reports to tracked keys are kept in the entries; new keys use
+ *   their own area of max_tracked_pairs reports (overflow: dropped_work_overflow), apart from
+ *   the Impact / Break work area. The first report creates an emitter and starts the resolved
  *   event(s); later reports (the largest relative speed when one call repeats a
  *   key) move the emitter and update the speed parameter, volume and pitch. An
  *   entry not reported for >= tracking_timeout is stopped with
@@ -182,6 +210,7 @@ typedef uint32_t snd_physics_record_kind;
 #define SND_PHYSICS_RECORD_UPDATE 2u   /* a sliding / rolling playback was updated */
 #define SND_PHYSICS_RECORD_STOP 3u     /* a sliding / rolling playback was stopped */
 #define SND_PHYSICS_RECORD_FALLBACK 4u /* event resolution did not use the first stage */
+#define SND_PHYSICS_RECORD_DROP 5u     /* an Impact / Break group was not played: no emitter (event = its first) */
 
 typedef uint32_t snd_physics_source;
 #define SND_PHYSICS_SOURCE_CONTACT 0u
@@ -206,7 +235,7 @@ typedef uint32_t snd_physics_stop_reason;
 #define SND_PHYSICS_STOP_DESTROYED 3u /* snd_phys_destroy */
 #define SND_PHYSICS_STOP_ENDED 4u     /* the playback had ended by itself (restart follows) */
 
-#define SND_PHYSICS_RECORD_FLAG_POSITION_ONLY 0x1u    /* played with snd_play_at: no parameters / volume / pitch */
+#define SND_PHYSICS_RECORD_FLAG_POSITION_ONLY 0x1u    /* snd_physics_play_at: no parameters / volume / pitch */
 #define SND_PHYSICS_RECORD_FLAG_UNKNOWN_MATERIAL 0x2u /* a material was unknown (resolution went to the default) */
 #define SND_PHYSICS_RECORD_FLAG_RESTART 0x4u          /* START of a playback that had ended by itself */
 
@@ -255,14 +284,12 @@ typedef struct snd_physics_config {
   float tracking_timeout_seconds;  /* 9.5, default 0.2 (>= 0, finite) */
   float tracking_fade_seconds;     /* 9.5 fade of a stop, default 0.1 (>= 0, finite) */
   float max_dt_seconds;            /* dt clamp, default 0.1 (> 0, finite) */
-  float emitter_hold_seconds;      /* one-shot emitters are destroyed this long after their play
-                                      (at a later submit), default 0.1 (>= 0, finite) */
   uint32_t max_tracked_pairs;      /* 9.5 tracking table, default 64 */
   uint32_t max_cooldowns;          /* 9.4 cooldown table, default 256 */
   uint32_t max_groups_per_call;    /* work area of one call (groups + slide reports), default 2048 */
   uint32_t max_materials;          /* sound materials N, default 64 (1..SND_PHYSICS_MAX_MATERIALS_LIMIT) */
   uint32_t max_game_materials;     /* game -> sound material map entries, default 1024 */
-  uint32_t max_held_emitters;      /* one-shot emitters held at once, default 64 */
+  uint32_t max_held_emitters;      /* one-shot emitters held until applied, default 64 (see above) */
   snd_physics_param_ids params;    /* parameter ids (defaults: hashes of the names above) */
   snd_physics_observer observer;   /* NULL = none */
   void* observer_user;
@@ -281,7 +308,6 @@ static inline void snd_physics_config_init(snd_physics_config* c) {
   c->tracking_timeout_seconds = 0.2f;
   c->tracking_fade_seconds = 0.1f;
   c->max_dt_seconds = 0.1f;
-  c->emitter_hold_seconds = 0.1f;
   c->max_tracked_pairs = 64u;
   c->max_cooldowns = 256u;
   c->max_groups_per_call = 2048u;
@@ -309,9 +335,9 @@ static inline void snd_physics_config_init(snd_physics_config* c) {
  */
 SND_API snd_result SND_CALL snd_physics_create(snd_system* sys, const snd_physics_config* cfg,
                                                const snd_allocator* allocator, snd_phys** out);
-/* Same as snd_phys_destroy: stops the tracked playbacks (fade) and destroys the held emitters on
- * the physics thread, then frees the memory. On another thread only the memory is freed. NULL,
- * or a call from inside the observer, is a no-op. */
+/* Same as snd_phys_destroy: stops the tracked playbacks (fade), destroys the held emitters and
+ * frees the memory. On another thread, from inside the observer, or NULL: nothing happens (the
+ * object stays alive and can be destroyed on its thread). */
 SND_API void SND_CALL snd_physics_destroy(snd_phys* phys);
 
 /* 9.5 position-only one-shot: snd_play_at(event, position). Counted in requested_play_at.
@@ -483,11 +509,11 @@ SND_API snd_result SND_CALL snd_physics_set_surface_param(snd_phys* phys, uint16
 /*
  * Accounting: contacts_received = dropped_invalid + dropped_threshold + dropped_work_overflow
  *   + merged + groups + slide_reports;
- * groups = dropped_no_event + dropped_cooldown + dropped_budget + group_requests (Impact / Break
+ * groups = dropped_no_event + dropped_cooldown + dropped_budget + dropped_no_emitter + group_requests (Impact / Break
  *   groups that were requested; each requests 1 or 2 events, counted in requested_impact /
  *   requested_break, failed plays included);
  * slide_reports (one per key and call) = tracking_started + tracking_updated + tracking_restarted
- *   + tracking_dropped + (reports resolving to nothing, counted in fallback_none).
+ *   + tracking_dropped + (new keys resolving to nothing, also counted in fallback_none).
  * Resolution stages (one per resolution of a requested group / started entry): resolved_pair +
  *   fallback_pair_to_single + fallback_single_to_default + fallback_none; fallback_unknown_material
  *   counts in addition those where a material was unknown. Footstep surfaces use the footstep_*
@@ -507,13 +533,13 @@ typedef struct snd_physics_stats {
   uint64_t dropped_no_event;
   uint64_t dropped_cooldown;
   uint64_t dropped_budget;
+  uint64_t dropped_no_emitter;   /* groups that had a place in the budget but no emitter (not played) */
   uint64_t group_requests;
   uint64_t requested_impact;     /* events requested for Impact groups */
   uint64_t requested_break;
   uint64_t requested_footstep;
   uint64_t requested_play_at;    /* snd_physics_play_at */
-  uint64_t play_at_fallbacks;    /* one-shots played with snd_play_at for want of an emitter */
-  uint64_t held_emitters_released_early; /* one-shot emitters destroyed before emitter_hold_seconds */
+  uint64_t held_emitters_released_early; /* held emitters destroyed before their plays were seen applied (ring full) */
   uint64_t resolved_pair;
   uint64_t fallback_pair_to_single;
   uint64_t fallback_single_to_default;

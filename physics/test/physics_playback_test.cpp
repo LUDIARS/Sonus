@@ -44,6 +44,12 @@ std::vector<std::uint8_t> BuildBank() {
   proj.Add("params/Wet.json", "parameter", "Surface/Wetness", "\"min\": 0, \"max\": 1");
   proj.Add("events/Hit.json", "event", "SE/Hit",
            "\"bank\": \"Main\", \"is3D\": true, \"tracks\": [{\"clips\": [{\"asset\": \"hit\"}]}]");
+  proj.Wav("audio/short.wav", Dc(64, 0.5f), bt::WavSampleFormat::Float32);
+  proj.Add("assets/short.json", "asset", "short", "\"file\": \"audio/short.wav\", " + f32);
+  proj.Add("events/Short.json", "event", "SE/Short",
+           "\"bank\": \"Main\", \"is3D\": true, \"tracks\": [{\"clips\": [{\"asset\": \"short\"}]}]");
+  proj.Add("events/Lim.json", "event", "SE/Lim",
+           "\"bank\": \"Main\", \"is3D\": true, \"maxInstances\": 1, \"tracks\": [{\"clips\": [{\"asset\": \"loop\", \"loopCount\": 0}]}]");
   proj.Add("events/Hit2D.json", "event", "SE/Hit2D", "\"bank\": \"Main\", \"tracks\": [{\"clips\": [{\"asset\": \"hit\"}]}]");
   proj.Add("events/Layer.json", "event", "SE/Layer",
            "\"bank\": \"Main\", \"curves\": [{\"parameter\": \"Phys/Velocity\", \"target\": \"volume\", "
@@ -158,7 +164,7 @@ SND_TEST(PhysicsPlayback, PositionedImpactPlaysAtItsPositionAndEmittersComeBack)
     w.sys.Advance(4);
   }
   const snd_physics_stats s = Stats(phys);
-  SND_CHECK_EQ(s.play_at_fallbacks, 0u);
+  SND_CHECK_EQ(s.dropped_no_emitter, 0u);
   SND_CHECK_EQ(s.api_failures, 0u);
   SND_CHECK_EQ(s.requested_impact, 27u);
   for (const Rec& r : rec.Of(SND_PHYSICS_RECORD_PLAY)) SND_CHECK(r.r.emitter.value != 0u && r.r.playback.value != 0u);
@@ -180,9 +186,8 @@ SND_TEST(PhysicsPlayback, PositionedImpactPlaysAtItsPositionAndEmittersComeBack)
     SND_CHECK_EQ(p.back().r.event, snd_hash_id("SE/Hit"));
   }
   w.sys.Advance(60);
-  // No emitter left (the game holds them all): the group falls back to snd_play_at, whose
-  // implicit emitter comes from the same pool, so it plays without a position (at the
-  // listener: centre, no attenuation; requests/A-004.md).
+  // No emitter left (the game holds them all): the group is dropped, not played at the
+  // listener (snd_play_at would take its implicit emitter from the same empty pool, A-004).
   SND_CHECK_EQ(snd_phys_submit_contacts(phys, nullptr, 0, 0.1f), SND_OK);  // releases physics' held emitter
   w.sys.Advance(8);
   {
@@ -193,15 +198,16 @@ SND_TEST(PhysicsPlayback, PositionedImpactPlaysAtItsPositionAndEmittersComeBack)
     }
     SND_REQUIRE_EQ(held.size(), 4u);
     const std::uint64_t start = w.sys.Frames();
+    const std::size_t plays = rec.Count(SND_PHYSICS_RECORD_PLAY);
     const snd_contact x = Contact(SND_CONTACT_IMPACT, 1, 2, 0, 0, -2.0f, 0, 0, 5.0f);
     SND_CHECK_EQ(snd_phys_submit_contacts(phys, &x, 1, 0.1f), SND_OK);
-    SND_CHECK_EQ(Stats(phys).play_at_fallbacks, 1u);
+    SND_CHECK_EQ(Stats(phys).dropped_no_emitter, 1u);
+    SND_CHECK_EQ(rec.Count(SND_PHYSICS_RECORD_PLAY), plays);
+    SND_CHECK_EQ(rec.Count(SND_PHYSICS_RECORD_DROP), 1u);
     w.sys.Advance(30);
-    std::uint64_t on = start;
-    while (on < w.sys.Frames() && std::fabs(w.sys.L(on)) < 1e-4f) ++on;
-    SND_REQUIRE(on < start + 10u * kBlock);
-    SND_CHECK_NEAR(w.Mean(0, on + 512, 2048), 0.5 * kCenter, 2e-3);
-    SND_CHECK_NEAR(w.Mean(1, on + 512, 2048), 0.5 * kCenter, 2e-3);
+    double energy = 0.0;
+    for (std::uint64_t f = start; f < w.sys.Frames(); ++f) energy += std::fabs(w.sys.L(f)) + std::fabs(w.sys.R(f));
+    SND_CHECK_EQ(energy, 0.0);
     for (const snd_emitter_handle e : held) snd_destroy_emitter(w.sys.sys, e);
   }
   snd_phys_destroy(phys);
@@ -321,5 +327,86 @@ SND_TEST(PhysicsPlayback, SlidingContactFollowsItsPosition) {
   SND_CHECK_NEAR(w.Mean(0, w.sys.Frames() - 1024, 1024), 0.25, 2e-3);
   SND_CHECK_NEAR(w.Mean(1, w.sys.Frames() - 1024, 1024), 0.0, 2e-3);
   SND_CHECK_EQ(Stats(phys).tracking_restarted, 0u);
+  snd_phys_destroy(phys);
+}
+
+namespace {
+// Mean L / R over 4096 frames from the first audible frame after `start` (0, 0 if silent).
+void LevelsFrom(const World& w, std::uint64_t start, double* l, double* r) {
+  std::uint64_t on = start;
+  while (on < w.sys.Frames() && std::fabs(w.sys.L(on)) + std::fabs(w.sys.R(on)) < 1e-4f) ++on;
+  *l = *r = 0.0;
+  if (on + 512 + 4096 > w.sys.Frames()) return;
+  *l = w.Mean(0, on + 512, 4096);
+  *r = w.Mean(1, on + 512, 4096);
+}
+}  // namespace
+
+// The held emitter is released only once the system is seen to have applied the play: neither
+// sub-steps before one snd_update (a) nor many updates while the audio side does not advance
+// (b) lose the position.
+SND_TEST(PhysicsPlayback, HeldEmitterWaitsForTheSystem) {
+  for (int variant = 0; variant < 2; ++variant) {
+    World w;
+    SND_REQUIRE(w.ok);
+    snd_physics_config cfg = OpenConfig(nullptr);
+    snd_phys* phys = nullptr;
+    SND_REQUIRE_EQ(snd_physics_create(w.sys.sys, &cfg, nullptr, &phys), SND_OK);
+    OneEventTable(phys, snd_hash_id("SE/Hit"), 1.0f);
+    w.sys.Advance(4);
+    const std::uint64_t start = w.sys.Frames();
+    const snd_contact x = Contact(SND_CONTACT_IMPACT, 1, 2, 0, 0, 2.0f, 0, 0, 5.0f);
+    SND_CHECK_EQ(snd_phys_submit_contacts(phys, &x, 1, 1.0f / 60.0f), SND_OK);
+    if (variant == 0) {
+      // (a) a fixed-step catch-up: 7 sub-steps of 1/60 s before one snd_update.
+      for (int i = 0; i < 6; ++i) SND_CHECK_EQ(snd_phys_submit_contacts(phys, nullptr, 0, 1.0f / 60.0f), SND_OK);
+    } else {
+      // (b) the audio side does not move (no snd_advance_output): updates and empty submits.
+      for (int i = 0; i < 30; ++i) {
+        snd_update(w.sys.sys);
+        SND_CHECK_EQ(snd_phys_submit_contacts(phys, nullptr, 0, 0.1f), SND_OK);
+      }
+    }
+    // Keep calling every frame while the output advances (the release happens here).
+    for (int i = 0; i < 60; ++i) {
+      SND_CHECK_EQ(snd_phys_submit_contacts(phys, nullptr, 0, 1.0f / 60.0f), SND_OK);
+      w.sys.Advance(1);
+    }
+    double l = 0, r = 0;
+    LevelsFrom(w, start, &l, &r);
+    snd::test::Note("variant %d: L %.4f R %.4f", variant, l, r);
+    SND_CHECK_NEAR(l, 0.0, 2e-3);
+    SND_CHECK_NEAR(r, 0.25, 2e-3);
+    SND_CHECK_EQ(Stats(phys).held_emitters_released_early, 0u);
+    snd_phys_destroy(phys);
+  }
+}
+
+// (c) Emitters come back for plays that end at once, are not loaded or are refused by the
+// event's instance limit: a long run on 12 emitters never runs out, and nothing is placed at
+// the listener.
+SND_TEST(PhysicsPlayback, EmittersComeBackForShortMissingAndRefusedPlays) {
+  snd_config sc = SmallConfig();
+  sc.max_emitters = 12;
+  World w(sc);
+  SND_REQUIRE(w.ok);
+  snd_physics_config cfg = OpenConfig(nullptr);
+  snd_phys* phys = nullptr;
+  SND_REQUIRE_EQ(snd_physics_create(w.sys.sys, &cfg, nullptr, &phys), SND_OK);
+  const snd_id events[3] = {snd_hash_id("SE/Short"), snd_hash_id("SE/NotInAnyBank"), snd_hash_id("SE/Lim")};
+  for (int i = 0; i < 300; ++i) {
+    OneEventTable(phys, events[i % 3], 1.0f);
+    const snd_contact x = Contact(SND_CONTACT_IMPACT, 1, 2, 0, 0, 2.0f, 0, 0, 5.0f);
+    SND_CHECK_EQ(snd_phys_submit_contacts(phys, &x, 1, 1.0f / 60.0f), SND_OK);
+    w.sys.Advance(2);
+  }
+  snd_physics_stats s = Stats(phys);
+  SND_CHECK_EQ(s.dropped_no_emitter, 0u);
+  SND_CHECK_EQ(s.held_emitters_released_early, 0u);
+  SND_CHECK_EQ(s.group_requests, 300u);
+  // Everything that sounded was on the right (the limited loop keeps playing there): nothing
+  // was placed at the listener.
+  SND_CHECK_NEAR(w.Mean(0, w.sys.Frames() - 4096, 4096), 0.0, 2e-3);
+  SND_CHECK(w.Mean(1, w.sys.Frames() - 4096, 4096) > 0.2);
   snd_phys_destroy(phys);
 }

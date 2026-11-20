@@ -17,8 +17,17 @@ namespace {
 constexpr float kNan = std::numeric_limits<float>::quiet_NaN();
 constexpr float kInf = std::numeric_limits<float>::infinity();
 
+// Enough emitters and playbacks for the tests that never let the system run (the held
+// emitters are released only once the system is seen to have applied their plays).
+snd_config RoomyConfig() {
+  snd_config c = SmallConfig();
+  c.max_emitters = 2048;
+  c.max_playbacks = 2048;
+  return c;
+}
+
 struct Fixture {
-  explicit Fixture(snd_physics_config cfg, std::uint32_t materials = 2) {
+  explicit Fixture(snd_physics_config cfg, std::uint32_t materials = 2) : sys(RoomyConfig()) {
     SND_REQUIRE_EQ(sys.created, SND_OK);
     SND_REQUIRE_EQ(snd_physics_create(sys.sys, &cfg, nullptr, &phys), SND_OK);
     snd_physics_table_desc d = SinglesTable(materials, &single);
@@ -218,6 +227,27 @@ SND_TEST(PhysicsCulling, CooldownTableEvictsTheOldest) {
   SND_CHECK_EQ(Stats(f.phys).cooldown_evictions, 2u);
 }
 
+SND_TEST(PhysicsCulling, CooldownEvictionTiesGoInInsertionOrder) {
+  Recorder rec;
+  snd_physics_config cfg = OpenConfig(&rec);
+  cfg.cooldown_seconds = 1.0f;
+  cfg.max_cooldowns = 2;
+  Fixture f(cfg);
+  // Three keys requested in one call (impulses 3, 2, 1 in that order): the third pushes out the
+  // first recorded, (1, 2), and takes its slot 0.
+  SND_CHECK_EQ(f.Submit({Impact(1, 2, 0.0f, 3.0f), Impact(3, 4, 10.0f, 2.0f), Impact(5, 6, 20.0f, 1.0f)}, 0.01f), SND_OK);
+  SND_CHECK_EQ(Stats(f.phys).cooldown_evictions, 1u);
+  // (1, 2) again: the table holds (5, 6) in slot 0 and (3, 4) in slot 1, both at 10 ms; the
+  // first recorded of them, (3, 4), goes (not the lower slot).
+  SND_CHECK_EQ(f.Submit({Impact(1, 2, 0.0f, 3.0f)}, 0.01f), SND_OK);
+  rec.Clear();
+  SND_CHECK_EQ(f.Submit({Impact(3, 4, 10.0f, 2.0f), Impact(5, 6, 20.0f, 1.0f)}, 0.01f), SND_OK);
+  const std::vector<Rec> p = rec.Of(SND_PHYSICS_RECORD_PLAY);
+  SND_REQUIRE_EQ(p.size(), 1u);
+  SND_CHECK_EQ(p[0].r.object_a, 3u);
+  SND_CHECK_EQ(Stats(f.phys).dropped_cooldown, 1u);
+}
+
 SND_TEST(PhysicsCulling, BudgetFromDtInMicroseconds) {
   auto perFrame = [](float budget, float dt, const std::vector<std::uint32_t>& contactsPerFrame, float maxDt = 0.1f) {
     Recorder rec;
@@ -320,7 +350,8 @@ SND_TEST(PhysicsCulling, ThousandContactsAFrameWithoutAllocating) {
   std::vector<snd_contact> c;
   for (int i = 0; i < 1000; ++i) {
     const std::uint64_t o = static_cast<std::uint64_t>(i) * 2u + 1u;
-    snd_contact x = Contact(i % 5 == 0 ? SND_CONTACT_SLIDE : SND_CONTACT_IMPACT, o, o + 1u,
+    // 40 sliding pairs (fewer than the 64 tracked pairs) and 960 impacts.
+    snd_contact x = Contact(i % 25 == 0 ? SND_CONTACT_SLIDE : SND_CONTACT_IMPACT, o, o + 1u,
                             static_cast<std::uint16_t>(i % 4), static_cast<std::uint16_t>((i / 4) % 4),
                             static_cast<float>(i % 10), static_cast<float>((i / 10) % 10), static_cast<float>(i / 100),
                             1.0f + static_cast<float>(i % 7), 1.0f);
@@ -372,36 +403,36 @@ SND_TEST(PhysicsCulling, FourTimesTheVoicesAndEmittersInOneFrame) {
   std::vector<snd_id> single;
   snd_physics_table_desc d = SinglesTable(1, &single);
   SND_REQUIRE_EQ(snd_physics_set_table(phys, &d), SND_OK);
-  // 4 x max_real_voices (32) requests in one frame; only 32 emitters: the rest are played
-  // position-only with snd_play_at.
+  // 4 x max_real_voices (32) requests in one frame; only 32 emitters: the other 96 groups are
+  // dropped (no snd_play_at fallback: it would sound at the listener).
   std::vector<snd_contact> c;
   for (int i = 0; i < 128; ++i) c.push_back(Impact(static_cast<std::uint64_t>(i) * 2u + 1u, 0, static_cast<float>(i), 1.0f));
   SND_CHECK_EQ(snd_phys_submit_contacts(phys, c.data(), 128, 0.05f), SND_OK);
   snd_physics_stats s = Stats(phys);
-  SND_CHECK_EQ(s.requested_impact, 128u);
-  SND_CHECK_EQ(s.play_at_fallbacks, 96u);
+  SND_CHECK_EQ(s.requested_impact, 32u);
+  SND_CHECK_EQ(s.group_requests, 32u);
+  SND_CHECK_EQ(s.dropped_no_emitter, 96u);
+  SND_CHECK_EQ(s.groups, s.dropped_no_event + s.dropped_cooldown + s.dropped_budget + s.dropped_no_emitter + s.group_requests);
   SND_CHECK_EQ(s.api_failures, 0u);
-  std::size_t positionOnly = 0;
   for (const Rec& r : rec.Of(SND_PHYSICS_RECORD_PLAY)) {
-    if ((r.r.flags & SND_PHYSICS_RECORD_FLAG_POSITION_ONLY) != 0u) {
-      ++positionOnly;
-      SND_CHECK_EQ(r.r.playback.value, 0u);
-      SND_CHECK_EQ(r.r.result, SND_OK);
-    } else {
-      SND_CHECK(r.r.playback.value != 0u);
-      SND_CHECK(r.r.emitter.value != 0u);
-    }
+    SND_CHECK(r.r.playback.value != 0u);
+    SND_CHECK(r.r.emitter.value != 0u);
   }
-  SND_CHECK_EQ(positionOnly, 96u);
-  // The held emitters are destroyed by a later call once emitter_hold_seconds (0.1 s) passed,
-  // the slots come back with the system's updates, and the next requests are positioned again.
+  SND_CHECK_EQ(rec.Count(SND_PHYSICS_RECORD_PLAY), 32u);
+  const std::vector<Rec> drops = rec.Of(SND_PHYSICS_RECORD_DROP);
+  SND_REQUIRE_EQ(drops.size(), 96u);
+  SND_CHECK_EQ(drops[0].r.event, Ev(0, SND_CONTACT_IMPACT));
+  SND_CHECK_EQ(drops[0].r.result, SND_ERR_LIMIT_REACHED);
+  // Once the system has applied the plays, the next call destroys the held emitters; the slots
+  // come back with the system's updates and the next requests get emitters again.
   sys.Advance(8);
-  SND_CHECK_EQ(snd_phys_submit_contacts(phys, nullptr, 0, 0.1f), SND_OK);
+  SND_CHECK_EQ(snd_phys_submit_contacts(phys, nullptr, 0, 0.0f), SND_OK);
   sys.Advance(8);
   rec.Clear();
   SND_CHECK_EQ(snd_phys_submit_contacts(phys, c.data(), 16, 0.05f), SND_OK);
   s = Stats(phys);
-  SND_CHECK_EQ(s.play_at_fallbacks, 96u);
+  SND_CHECK_EQ(s.dropped_no_emitter, 96u);
+  SND_CHECK_EQ(s.held_emitters_released_early, 0u);
   SND_CHECK_EQ(rec.Count(SND_PHYSICS_RECORD_PLAY), 16u);
   sys.Advance(4);
   snd_phys_destroy(phys);
