@@ -798,3 +798,26 @@ SND_TEST(IndepTimeStretch, CostPerBlock) {
                     sum / blocks, worst, worst / (sum / blocks));
   }
 }
+
+// S1 / design 2.5: the stretcher has no SIMD path; the same input must give the
+// same bits in every configuration (scalar executable, -mavx2 -mfma, Release,
+// sanitizers). Checksum computed once (gcc Debug).
+SND_TEST(IndepTimeStretch, BitExactChecksumAcrossConfigurations) {
+  const Signal src = NoiseSig(2, 48000 * 6, 4242);
+  std::uint64_t h = 1469598103934665603ull;
+  for (float speed : {0.43f, 1.37f, 3.1f}) {
+    Ts ts(2);
+    Signal out(2);
+    for (int i = 0; i < 60; ++i) ts.Call(src, &out, 256, speed, speed * 1.1f > 4.0f ? 4.0f : speed * 1.1f);
+    for (auto& c : out) {
+      const unsigned char* b = reinterpret_cast<const unsigned char*>(c.data());
+      for (std::size_t i = 0; i < c.size() * 4u; ++i) {
+        h ^= b[i];
+        h *= 1099511628211ull;
+      }
+    }
+  }
+  snd::test::Note("time stretch checksum %016llx", static_cast<unsigned long long>(h));
+  constexpr std::uint64_t kExpected = 0xf7d42a3b48c9c009ull;
+  SND_CHECK_EQ(h, kExpected);
+}
