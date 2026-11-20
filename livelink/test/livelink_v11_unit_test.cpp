@@ -269,6 +269,7 @@ SND_TEST(LivelinkV11Unit, ReplayerReportsConditionsAndRejectsMisplacedState) {
     Arena(v, 10);
     SND_REQUIRE_EQ(Create(v, &i), SND_OK);
     SND_CHECK((i.conditions & ll::kReplayNoBegin) != 0u);
+    SND_CHECK((i.conditions & ll::kReplayBreaksRecordedRun) != 0u);  // D-175: a 1.0 recording never claims it
     SND_CHECK_EQ(i.origin, 0u);
     SND_CHECK_EQ(i.conditions & ll::kReplayBreaksBitExact, 0u);
   }
