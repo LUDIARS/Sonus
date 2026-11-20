@@ -162,6 +162,27 @@ UI に依存せず使えるモデル（`Sonus::tool_core` だけで動く）:
   af8f4e7 では構成 2・3・5 で組 M のテストを含む tool / buildtool のテストを回している。af8f4e7 での構成 8 の全テストは回していない。
 - TSan（構成 4）は回していない（組 M のモデルはスレッドを使わない）。並行性の繰り返しテストも対象が無いので回していない。
 
+### 差し戻しの後（D-176〜D-180）
+
+| 構成 | コミット | テスト | 結果 |
+| --- | --- | --- | --- |
+| 8: TOOL_CORE、gcc Debug | 0e2852f | 全部 | 241 件中 238 通過。失敗 3 件は下の「決定と食い違う独立テスト」だけ。`tool_live_mixer_test` は通過 |
+| 3 ＋ TOOL_CORE（ASan/UBSan） | 37d9176 | `-R 'tool\|buildtool'` | 35 件中 32 通過（同じ 3 件）。UB の報告なし（`tool_indep_s7_build_test` の E1 も通過） |
+| 5 ＋ TOOL_CORE（Release） | 37d9176 | 同上 | 35 件中 32 通過（同じ 3 件） |
+| clang ＋ TOOL_CORE | 37d9176 | 同上 | 35 件中 32 通過（同じ 3 件） |
+| 9（Tela） | 37d9176 | `-R tool` | 49 件中 46 通過（同じ 3 件） |
+| MinGW 構文検査 | 37d9176 | 変えた .cpp | 通過（`buildtool/src/build.cpp`・`project.cpp` は前からの `detail/file_io.hpp` のエラーで止まる） |
+
+0e2852f と 37d9176 の差は文書だけ。`Defect_*` は 8 件中 7 件が通過。通らない 1 件は決定 D-177d と食い違う（下）。
+
+決定と食い違って落ちる独立テスト（変更していない。独立テスト担当が直す）:
+- `tool_indep_s7_Defect_EmptyMaterialTableBuildIsUndefinedBehaviour`: 材質を全部消せる前提（`SND_REQUIRE(m.RemoveMaterial(...))`）。
+  D-177d で最後の材質の削除は拒否。UB の元（`build.cpp` の PHYS の `put`）は D-180d で直した。
+- `tool_indep_s7_document_test` の `IndepS7Doc.C1_NewGuidLayoutAndDeterminism`: 999 回同じ値を返す生成器で `Create` が成功する前提。
+  D-177c で 16 回の衝突で諦める。
+- `tool_indep_s7_editors_test` の `IndepS7Edit.D14_MusicRules`（813、817、820 行）: 直前の拍子の小節線に当たらない位置での拍子の変化
+  （tick 3840×u で beatUnit を変える、tick 7・8 で beatUnit 32 と 4/4 の後）を受け入れる前提。D-179c で拒否。
+
 ## 未検証の箇所
 
 - TSan の構成（4）は回していない。
