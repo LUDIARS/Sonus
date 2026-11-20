@@ -860,8 +860,8 @@ SND_TEST(IndepConvolution, BlobFuzz) {
     SND_CHECK_MSG(!ConvolutionParseIrBlob(n != 0u ? t.data() : nullptr, n, &bi) && ConvolutionIrBytesFromBlob(t.data(), n, kRate, 64) == 0u,
                   "truncated blob of %zu bytes accepted", n);
   }
-  std::vector<unsigned char> longer(blob);
-  longer.push_back(0);
+  std::vector<unsigned char> longer(need + 1u, 0);
+  std::memcpy(longer.data(), blob.data(), need);
   SND_CHECK(!ConvolutionParseIrBlob(longer.data(), longer.size(), &bi));
   SND_CHECK(!ConvolutionParseIrBlob(nullptr, need, &bi));
   // Field corruptions.
