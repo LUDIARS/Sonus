@@ -436,8 +436,8 @@ void RunRandomHistory(std::uint64_t seed, std::uint32_t ops) {
     if (name == "Undo" || name == "Redo") {
       if (ok) {
         if (doc.UndoCount() >= states.size() || after != states[doc.UndoCount()]) {
-          snd::test::Note("seed %llu op %u: %s does not give the state of step %zu", static_cast<unsigned long long>(seed), i,
-                          name.c_str(), doc.UndoCount());
+          snd::test::Note("seed %llu op %u: %s does not give the state of step %u", static_cast<unsigned long long>(seed), i,
+                          name.c_str(), static_cast<unsigned>(doc.UndoCount()));
           SND_CHECK(false);
           ++failures;
         }
@@ -485,8 +485,8 @@ void RunRandomHistory(std::uint64_t seed, std::uint32_t ops) {
   while (doc.CanUndo()) {
     SND_REQUIRE(doc.Undo());
     if (Image(doc) != states[doc.UndoCount()]) {
-      snd::test::Note("seed %llu: undo to step %zu does not give that step's state", static_cast<unsigned long long>(seed),
-                      doc.UndoCount());
+      snd::test::Note("seed %llu: undo to step %u does not give that step's state", static_cast<unsigned long long>(seed),
+                      static_cast<unsigned>(doc.UndoCount()));
       SND_CHECK(false);
       break;
     }
