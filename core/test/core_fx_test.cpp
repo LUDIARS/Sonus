@@ -699,7 +699,8 @@ SND_TEST(CoreFx, EveryStandardKindRunsAsAVoiceEffect) {
 // ===========================================================================
 SND_TEST(CoreFx, LodBypassWaitsForTheTailThenSkipsTheChain) {
   snd_config cfg = SmallConfig();
-  cfg.tuning.lod_up_blocks = 0xFFFFFFFFu;  // stays at the forced level
+  cfg.tuning.lod_up_blocks = 0xFFFFFFFFu;  // stays at the forced level ...
+  cfg.tuning.lod_down_blocks = 0;          // ... and the measured load does not move it (UpdateLod off)
   Harness h(cfg);
   TestBank b = BasicBank();
   // Echo 10 ms (480 frames), decay 0.5, dry 1, wet 1.
@@ -742,8 +743,11 @@ SND_TEST(CoreFx, LodBypassWaitsForTheTailThenSkipsTheChain) {
 namespace {
 // A script using every new path: bus effect fades, a sidechain compressor, voice effects
 // (reverb + chorus, lowpass) with playback values, a pool smaller than the voices.
-std::vector<float> FxScript(bool parallel) {
+std::vector<float> FxScript(bool parallel, std::uint32_t* lateChunks = nullptr, std::uint32_t* parallelBlocks = nullptr) {
   snd_config cfg = VfxConfig(3);
+  // 2.5: bit identity only with the load LOD off (a slow build, e.g. TSan, would otherwise
+  // reach level 2 and give later voices the light resampler, depending on timing).
+  cfg.tuning.lod_down_blocks = 0;
   if (parallel) {
     cfg.jobs.realtime_workers = 2;
     cfg.tuning.rt_spin_microseconds = 200000;  // no late chunk (bit identity needs every chunk)
@@ -772,6 +776,8 @@ std::vector<float> FxScript(bool parallel) {
     if (blk % 13 == 3 && !ps.empty()) h.sys->SetPlaybackEffectParam(ps.back(), 1, 3, 0.5f + 0.1f * float(blk % 7));
     if (blk % 23 == 7 && ps.size() > 2) h.sys->Stop(ps[ps.size() - 3], 0.01f, nullptr);
     h.Step();
+    if (lateChunks != nullptr) *lateChunks += h.sys->LastBlock().lateChunks;
+    if (parallelBlocks != nullptr) *parallelBlocks += h.sys->LastBlock().parallel;
   }
   return h.all;
 }
@@ -782,9 +788,17 @@ SND_TEST(CoreFxDeterminism, SameScriptSameBitsSerialAndParallel) {
   const std::vector<float> b = FxScript(false);
   SND_REQUIRE_EQ(a.size(), b.size());
   SND_CHECK(std::memcmp(a.data(), b.data(), a.size() * sizeof(float)) == 0);
-  const std::vector<float> c = FxScript(true);
+  std::uint32_t late = 0, par = 0;
+  const std::vector<float> c = FxScript(true, &late, &par);
+  snd::test::Note("parallel run: %u parallel blocks, %u late chunks", par, late);
   SND_REQUIRE_EQ(a.size(), c.size());
   SND_CHECK(std::memcmp(a.data(), c.data(), a.size() * sizeof(float)) == 0);
+  for (std::size_t i = 0; i < a.size(); ++i) {
+    if (a[i] != c[i]) {
+      snd::test::Note("first difference at sample %u (block %u): %g vs %g", unsigned(i), unsigned(i / 512), a[i], c[i]);
+      break;
+    }
+  }
   double energy = 0;
   for (float v : a) energy += double(v) * v;
   SND_CHECK(energy > 1.0);
