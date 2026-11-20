@@ -14,9 +14,16 @@ function(_snd_tool_test name link)
 endfunction()
 
 # Core only (no Tela). core_host_test uses the core the way an outside host does (D-101).
-foreach(_t model_test live_mixer_test live_profiler_test indep_sync_test core_host_test)
+foreach(_t model_test live_mixer_test live_profiler_test indep_sync_test core_host_test document_test
+        event_editor_test mixer_editor_test curve_editor_test
+        spatial_preview_test runtime_compare_test music_editor_test
+        material_editor_test patch_editor_test)
   _snd_tool_test(${_t} "${_tool_core_test_link}")
 endforeach()
+
+# The runtime comparisons read the music module's time line and rule lookup (music/src).
+target_link_libraries(tool_runtime_compare_test PRIVATE sonus_music)
+target_include_directories(tool_runtime_compare_test PRIVATE ${PROJECT_SOURCE_DIR}/music/src)
 
 if(NOT SND_BUILD_TOOL)
   return()

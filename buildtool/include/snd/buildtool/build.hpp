@@ -23,6 +23,7 @@
 
 #include "snd/buildtool/diagnostics.hpp"
 #include "snd/buildtool/plugins.hpp"
+#include "snd/buildtool/source.hpp"
 #include "snd/ext.h"
 #include "snd/format/bank_format.hpp"
 
@@ -47,6 +48,13 @@ struct BuildOptions {
   std::uint32_t dspSampleRate = 48000;  // = Config.sampleRate of the runtime (default 48000)
   std::uint32_t dspMaxFrames = 256;     // = Config.blockSize (default 256)
   std::vector<snd_dsp_effect> pluginEffects;  // = Config.plugins.effects (sizing only)
+  // In-memory project (source.hpp). Set: the objects and the files they name are read
+  // from it, and projectDir is only used as the project's name in messages (may be "").
+  const ProjectSource* source = nullptr;
+  // Set: the outputs are appended here (in the order of the files written to disk,
+  // banks first) and nothing is written; outDir may be "". Reading old outputs to skip
+  // unchanged files does not happen (BuildResult::filesWritten counts every output).
+  std::vector<OutputFile>* memoryOutput = nullptr;
 };
 
 struct BuiltBank {

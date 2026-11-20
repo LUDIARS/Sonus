@@ -37,7 +37,7 @@ cmake --build /tmp/tela-build && cmake --install /tmp/tela-build
 cmake -S . -B build-tool -G Ninja -DSND_BUILD_TOOL=ON -DCMAKE_PREFIX_PATH=/tmp/tela-prefix
 cmake --build build-tool && ctest --test-dir build-tool --output-on-failure -R tool_
 
-# 中核だけ（Tela なし）。モデルのテスト（model / live_mixer / live_profiler / indep_sync / core_host）だけが入る
+# 中核だけ（Tela なし）。モデルのテスト（model / live_mixer / live_profiler / indep_sync / core_host と、段階5 のエディタのモデル）だけが入る
 cmake -S . -B build-core -G Ninja -DSND_BUILD_TOOL_CORE=ON
 ```
 
@@ -74,6 +74,17 @@ tool/
     meter_ballistics ピークホールドとクリップ
     recording_file   記録ファイルの形式と保存・読み込み
     session          上をまとめたもの（UI のフレームごとに Tick）
+    document         編集できるプロジェクト（段階5）: 全種類のオブジェクト、保存の規則、GUID、参照、リネーム、Undo / Redo
+    doc_build        文書の検査とメモリ上のビルド（buildtool と同じ診断）、ビルドの差分（値の編集 / 構造の変更）、メンバ → セルの対応表
+    event_editor     Event エディタ: トラックとクリップ、シーケンス種別、ランダム幅、アクション、タイムラインの計算
+    mixer_editor     ミキサーの構造: バスの木と graph order、センド、エフェクト、スナップショット、ダッキング、カテゴリ、
+                     ボイスリミットグループ、ライブの値の文書への書き戻し
+    curve_editor     パラメータとカーブ: 点の編集、合成の規則の計算、スコープの優先、ランプ
+    spatial_preview  3D 減衰のプレビュー: 上から見た図の状態とランタイムと同じ減衰・パンの計算、試聴の要求
+    music_editor     音楽: テンポマップ、タップテンポとグリッド、Segment / Playlist / State / Stinger、遷移ルール表、
+                     最小先読み時間、遷移の試聴の計算
+    material_editor  マテリアル表: 材質と番号、単体音・組・足音・既定、代替の解決と一覧、強さのカーブ
+    patch_editor     波形生成パッチ: ノード、接続の規則、検査と依存順の配列（表は buildtool の patch.hpp）
   ui/                sonus_tool_ui: Tela の宣言を作る層（OS 非依存）
     app              Tela の Runtime、画面の宣言、ポインタの振り分け
     mixer_view, profiler_view, status_view   画面の宣言
@@ -185,11 +196,32 @@ tool/
 | `tool_model_test` | プロジェクトの読み込み（木の順、GUID、dsp の表、エラー）、ビルドハッシュ、フェーダー・ミュート・ソロの規則、セルの宛先、取り消し・やり直し・併合、上書きの一覧と Revert、オフライン、記録ファイル、ピークホールド |
 | `tool_live_mixer_test` | 本物の core とライブリンクのサーバ（メモリ転送）。フェーダー・マスター・ミュート（完全な無音）・ソロ・取り消し・エフェクトのパラメータ・カテゴリが出力のレベルを解析どおりに変える、切断・再接続・`revertOnDisconnect` の後もツールの状態に戻る、ビルド不一致（送る / 断る / 知らないバスは拒否として報告）、パラメータの上書き |
 | `tool_live_profiler_test` | メータ（マスター = 出力、バス別）が描いた出力と一致、処理時間・ボイス・メモリ・イベントログ、記録の保存と読み込みの往復（壊れたファイルは拒否） |
+| `tool_document_test` | 文書: 数値の表記、読み込み → 保存で何も書かない、編集 → 取り消し → 保存で何も書かない、知らないメンバと notes の保持、仕様の順、Undo / Redo（グループ・併合）、GUID とファイル名、リネームと別名、参照と削除、壊れた入力、buildtool と同じ診断（文言・位置）、メモリ上のビルド、対応表の全項目、値の編集と構造の変更の分類 |
+| `tool_event_editor_test` | Event エディタ: タイムライン（WAV から求める長さ、ループ区間、ピッチ、入れ子、無限、重なり）、規則の拒否、全編集・Undo / Redo・保存の往復・バンクの列の値、ドラッグの併合、パッチと synth のクリップ |
+| `tool_mixer_editor_test` | ミキサーの構造: 木と循環、graph order がビルドの `BUSS` の並びと一致、センドとエフェクト（dsp の範囲、MixerModel と同じ）、スナップショット（取り込み・重み付きの結果）、ダッキング・カテゴリ・ボイスリミットグループ、書き戻し |
+| `tool_curve_editor_test` | カーブ: 点の順序・最小数・shape、全カーブの編集、パラメータの規則、合成（dB・セントの加算、最小・最大、パンの加算、乗算）とスコープの優先、ランプ |
+| `tool_spatial_preview_test` | 3D: 逆距離と maxDistance、コーン、距離カーブ、方位とパン、外挿、2D、表示の変換、試聴の要求 |
+| `tool_music_editor_test` | 音楽: テンポマップ（解析値）、タップテンポとグリッド、Segment / Playlist の編集と規則、State・ルール・Stinger（照合、到達できない行がビルドの警告と一致、自動の並べ替え）、最小先読み、遷移の試聴、保存の往復 |
+| `tool_material_editor_test` | マテリアル表: 番号の付け替え、対称な組、9.3 の代替順と代替の一覧、強さのカーブ、`PHYS` の中身 |
+| `tool_patch_editor_test` | パッチ: ノードと接続の規則、上限、ビルドと同じ検査、依存順、`XPCH` の中身、位置はバンクに届かない |
+| `tool_runtime_compare_test` | ランタイムとの一致: カーブの評価（core の `EvaluateCurve` とビット一致）、3D のプレビューとパラメータの合成（本物の core の出力と比べる）、テンポマップ（music の `Timeline`）、ルールの照合（music の `FindRule`） |
 | `tool_ui_declaration_test` | ストリップの数と並び、ID の安定（フレーム・値の変更・画面の往復）、ボタンがモデルを動かす、ページ |
 | `tool_ui_gesture_test` | ドラッグ量と値（端で飽和）、宣言の差し替えをまたぐドラッグ、Shift、ダブルクリック、ホイールの併合、ノブ（線形・対数）、取り消し・フォーカス喪失 |
 | `tool_ui_raster_test` | Tela::Raster で描いた画素: メータの棒の高さ（DPI 1 と 2）、グラフの点と予算の線、フェーダーのつまみ、図形の上限 |
 | `tool_ui_concurrency_test` | ゲームのスレッドとクライアントの受信スレッドが動く中で UI のスレッドがフレーム・ドラッグ・記録・切断を繰り返す（TSan 用） |
 | `tool_ui_snapshot_test` | 接続中のツール全体を描き、マスターのメータの棒が出力のレベルの高さにあること。`SND_TOOL_SNAPSHOT_DIR` を設定すると画像を書く |
+
+## 段階5 のモデル（組 M）
+
+全画面の中身は `Sonus::tool_core` にある（Tela に依存しない。Ergo Studio の sonus プラグインも同じものを使える）。
+画面（Tela）、ライブへの反映・試聴・再生は後の組が足す。
+
+- 文書（`ProjectDocument`）を 1 つ持ち、各エディタ（`EventEditor`、`MixerEditor`、`CurveEditor` / `ParameterEditor`、
+  `SpatialPreview`、`SegmentEditor` / `PlaylistEditor` / `MusicEditor`、`MaterialEditor`、`PatchEditor`）はその上の型のある窓。
+  どの編集も 1 つの履歴で取り消せる。ライブの値（`MixerModel`）の履歴は別で、`WriteBackMixer` が文書の 1 手として書き戻す。
+- 検査は `CheckDocument`（buildtool を保存前の文書に走らせる）。ビルドは `BuildDocument`（メモリ上、必要ならディスクにも）。
+  ライブ用には `DiffBuilds` が編集を値の編集（SetValue の宛先付き）と構造の変更（チャンクの差し替え）に分ける。
+- buildtool は `BuildOptions::source`（ProjectSource）と `memoryOutput` で、ディスクを介さずに動く（CLI は変わらない）。
 
 ## 段階2で入れていないもの
 
