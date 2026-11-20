@@ -702,16 +702,34 @@ SND_TEST(IndepS7Doc, C1_NewGuidLayoutAndDeterminism) {
     SND_CHECK(LooksLikeGuid(g));
     SND_CHECK_EQ(NormalizeGuid(g), g);
   }
-  // A generator that repeats itself for a while still gives unique GUIDs to new objects.
-  // (A generator that never changes makes Create loop forever: reported, not tested here.)
-  ProjectDocument c;
-  SND_REQUIRE(c.LoadFiles(BaseFiles()));
-  std::uint64_t calls = 0;
-  c.SetRandom([&calls]() { return ++calls < 1000 ? 0ull : calls * 0x9E3779B97F4A7C15ull; });
-  const std::string x = c.Create("bus", "X", nullptr);
-  const std::string y = c.Create("bus", "Y", nullptr);
-  SND_CHECK(!x.empty() && !y.empty());
-  SND_CHECK(x != y);
+  // D-177c: NewGuid gives up after 16 values that are taken; Create then fails, nothing changes.
+  // A generator that repeats a taken GUID k times and then gives a fresh one: k <= 15 succeeds.
+  for (std::uint32_t k : {1u, 8u, 15u, 16u, 17u, 1000u}) {
+    ProjectDocument c;
+    SND_REQUIRE(c.LoadFiles(BaseFiles()));
+    std::uint64_t zero = 0;
+    c.SetRandom([&zero]() { return zero; });
+    const std::string first = c.Create("bus", "X", nullptr);  // takes the GUID of the value 0
+    SND_REQUIRE(!first.empty());
+    // Each NewGuid draws two values (hi, lo).
+    std::uint64_t draws = 0;
+    c.SetRandom([&draws, k]() {
+      ++draws;
+      return draws <= 2ull * k ? 0ull : draws * 0x9E3779B97F4A7C15ull;
+    });
+    const auto before = Image(c);
+    const std::size_t steps = c.UndoCount();
+    const std::string y = c.Create("bus", "Y", nullptr);
+    if (k <= 15u) {
+      SND_CHECK(!y.empty());
+      SND_CHECK(y != first);
+    } else {
+      SND_CHECK(y.empty());
+      SND_CHECK(Image(c) == before);
+      SND_CHECK_EQ(c.UndoCount(), steps);
+      SND_CHECK(c.FindByName("bus", "Y") == nullptr);
+    }
+  }
 }
 
 SND_TEST(IndepS7Doc, C2_C3_NormalizeAndResolve) {
@@ -938,10 +956,9 @@ SND_TEST(IndepS7Doc, A14_SaveThenUndoThenSaveRestoresTheDisk) {
   SND_CHECK_EQ(again.objects().size(), doc.objects().size());
 }
 
-// Spec gap (recorded): SaveTo(another directory) writes every object and then works in that
-// directory, but WAV and blob files are not copied: the copy does not build where the
-// original did. Expected by the header? ("Applies PendingChanges to directory() (or dir).")
-SND_TEST(IndepS7Doc, A14_SaveToAnotherDirectoryIsRecorded) {
+// D-176e: SaveTo is "save as": the referenced files inside the project are copied, the
+// document works in the new directory and still builds there.
+SND_TEST(IndepS7Doc, A14_SaveToAnotherDirectory_D176e) {
   const std::string dir = TempDir("a14b");
   WriteBaseProject(dir);
   ProjectDocument doc;
@@ -954,8 +971,11 @@ SND_TEST(IndepS7Doc, A14_SaveToAnotherDirectoryIsRecorded) {
   SND_CHECK(doc.PendingChanges().empty());
   std::uint32_t errorsAfter = 0;
   for (const auto& i : CheckDocument(doc)) errorsAfter += i.error ? 1u : 0u;
-  const bool wavCopied = !DirContents(other).empty() && DirContents(other).count("wav/tone.wav") == 1;
-  snd::test::Note("SaveTo(other dir): WAV copied = %d, build errors before %u, after %u", wavCopied ? 1 : 0, errorsBefore,
-                  errorsAfter);
+  const auto copied = DirContents(other);
+  SND_CHECK(copied.count("wav/tone.wav") == 1 && copied.count("wav/music.wav") == 1);
+  SND_CHECK(copied.count("wav/tone.wav") == 1 && copied.at("wav/tone.wav") == ReadFileText(dir + "/wav/tone.wav"));
   SND_CHECK_EQ(errorsBefore, 0u);
+  SND_CHECK_EQ(errorsAfter, 0u);
+  SND_CHECK(doc.lastSave().ok);
+  SND_CHECK(doc.lastSave().outside.empty() && doc.lastSave().missing.empty());
 }
