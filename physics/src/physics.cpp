@@ -242,7 +242,9 @@ struct snd_phys {
   std::uint32_t sameBlockCalls;  // calls in a row that saw the same block_index
   bool stalled;
   bool haveProbeBlock;
-  std::uint64_t probeBlock;    // block_index of the last release check that recorded
+  std::uint64_t probeBlock;    // block_index of the last check that recorded
+  bool probeAllowed;           // this call may record a check (block_index moved since the last)
+  bool probedThisCall;
   std::uint32_t stamp;
   std::uint64_t seq;
 
@@ -856,6 +858,13 @@ bool UpdateVoice(snd_phys& p, Track& t, std::uint32_t vi) noexcept {
       }
     }
     if (!same) note(snd_set_param_playback(p.sys, v.handle, q.params[i].id, q.params[i].value));
+  }
+  // Nothing changed and the state is NONE without having been seen applied: not yet applied, or
+  // ended and its slot returned before physics looked. The recording check (the volume it
+  // already has) tells them apart; at most once per moved block_index (D-125).
+  if (!stale && st == SND_PLAYBACK_STATE_NONE && q.volume == v.lastVolume && p.probeAllowed) {
+    p.probedThisCall = true;
+    note(snd_set_playback_volume(p.sys, v.handle, v.lastVolume));
   }
   if (stale) return false;
   v.lastVolume = q.volume;
@@ -1517,12 +1526,9 @@ snd_result Submit(snd_phys& p, const snd_contact* contacts, std::uint32_t count,
   }
   p.stalled = known && p.cfg.stall_calls > 0u && p.sameBlockCalls >= p.cfg.stall_calls;
   if (p.stalled) ++p.stats.audio_stalled_calls;
-  // The release check that records runs only when block_index moved since the last one.
-  const bool probe = !known || !p.haveProbeBlock || ss.block_index != p.probeBlock;
-  if (ReleaseHeld(p, probe) && known) {
-    p.haveProbeBlock = true;
-    p.probeBlock = ss.block_index;
-  }
+  // Checks that record run only when block_index moved since the last such check.
+  p.probeAllowed = !known || !p.haveProbeBlock || ss.block_index != p.probeBlock;
+  p.probedThisCall = ReleaseHeld(p, p.probeAllowed);
   p.freshCount = 0;
   const float threshold = p.cfg.impulse_threshold > 0.0f ? p.cfg.impulse_threshold : p.tableThreshold;
   const float grid = p.cfg.grid_size;
@@ -1662,6 +1668,10 @@ snd_result Submit(snd_phys& p, const snd_contact* contacts, std::uint32_t count,
   UpdateTracked(p, contacts);  // (1)
   Timeouts(p);                 // (2)
   StartFresh(p, contacts);     // (3)
+  if (p.probedThisCall && known) {
+    p.haveProbeBlock = true;
+    p.probeBlock = ss.block_index;
+  }
   return SND_OK;
 }
 
