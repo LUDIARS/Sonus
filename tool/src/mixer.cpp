@@ -347,6 +347,50 @@ bool MixerModel::Revert(const OverrideItem& item) {
   return changed;
 }
 
+bool MixerModel::RevertOnly(const Target& t) {
+  if (!IsEditable(t)) return false;
+  if (t.control == Control::ParamOverrideOn || t.control == Control::ParamOverride) {
+    BeginGroup();
+    bool changed = Set(Target{Control::ParamOverrideOn, t.a, 0, 0}, 0.0f);
+    changed |= Set(Target{Control::ParamOverride, t.a, 0, 0}, BankValue(Target{Control::ParamOverride, t.a, 0, 0}));
+    EndGroup();
+    return changed;
+  }
+  return Set(t, BankValue(t));
+}
+
+std::vector<CellAddress> MixerModel::CellsOf(const Target& t) const {
+  std::vector<CellAddress> out;
+  if (project_ == nullptr) return out;
+  const auto& buses = project_->buses();
+  switch (t.control) {
+    case Control::BusFader:
+    case Control::BusMute:
+    case Control::BusSolo:
+      if (t.a >= 0 && static_cast<std::size_t>(t.a) < buses.size()) {
+        const BusDesc& b = buses[static_cast<std::size_t>(t.a)];
+        out.push_back(CellAddress{bf::chunk::BUSS, b.id, bf::col::BUSS_volumeDb, 0, b.guid});
+      }
+      break;
+    case Control::EffectParam:
+      if (t.a >= 0 && static_cast<std::size_t>(t.a) < buses.size()) {
+        const BusDesc& b = buses[static_cast<std::size_t>(t.a)];
+        out.push_back(CellAddress{bf::chunk::EFPV, b.id, bf::col::EFPV_value,
+                                  static_cast<std::uint32_t>((t.b << 16) | t.c), b.guid});
+      }
+      break;
+    case Control::CategoryFader:
+    case Control::CategoryMute:
+      if (t.a >= 0 && static_cast<std::size_t>(t.a) < project_->categories().size()) {
+        const CategoryDesc& d = project_->categories()[static_cast<std::size_t>(t.a)];
+        out.push_back(CellAddress{bf::chunk::CATG, d.id, bf::col::CATG_volumeDb, 0, d.guid});
+      }
+      break;
+    default: break;
+  }
+  return out;
+}
+
 bool MixerModel::RevertAll() {
   if (project_ == nullptr) return false;
   BeginGroup();

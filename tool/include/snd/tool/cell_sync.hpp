@@ -18,6 +18,19 @@
 // session sends it again (step 2).
 // No answer: a cell Pending for more than kAckTimeoutNs is shown as "no answer"
 // (NoAnswer()); nothing is re-sent for it (a new session re-sends, step 2).
+//
+// Protocol 1.1 (group P; livelink-protocol.md §8.2):
+//   - Item revert: RequestRevert(address) marks a cell whose value the model has put back to
+//     the bank value (MixerModel::Revert / RevertOnly). The next send of that cell is a
+//     RevertValue (the game's override layer forgets the cell) instead of a SetValue of the bank
+//     value, when the game is 1.1 and the cell's value is its bank value; otherwise (a 1.0 game,
+//     or the value moved on, e.g. an Undo before the send) the ordinary SetValue goes out. The
+//     Ack rules are the same. Undo after a revert is an ordinary edit (SetValue).
+//   - Read-back: RequestReadBack() asks the game for every cell (ReadCell, at most
+//     kReadBatch per Update, always fewer than the client keeps: kClientCellsKept). Each answer
+//     fills the cell's `read*` fields: what the game holds now, the bank value it remembers and
+//     whether it is overridden. A 1.0 game: nothing is asked (readState stays None).
+// Nothing changes for a 1.0 game: the rules above are the stage-2 rules.
 #ifndef SND_TOOL_CELL_SYNC_HPP
 #define SND_TOOL_CELL_SYNC_HPP
 
@@ -48,7 +61,18 @@ struct CellStatus {
   bool everSent = false;
   bool enabled = false;    // parameter overrides only
   std::uint64_t sentNs = 0;  // when the frame in flight was sent (Update's nowNs)
+  // 1.1 (group P)
+  bool revertRequested = false;  // RequestRevert: the next send is a RevertValue (if still the bank value)
+  bool revertedLive = false;     // the last send was a RevertValue
+  enum class Read : std::uint8_t { None = 0, Pending = 1, Done = 2, Failed = 3 } readState = Read::None;
+  std::uint32_t readSeq = 0;
+  std::int32_t readResult = 0;   // CellValue.result (NOT_FOUND: the game has no such cell)
+  float readCurrent = 0.0f;      // what the game holds now
+  float readOriginal = 0.0f;     // the bank value the game remembers
+  bool readOverridden = false;   // the game's override layer holds an edit of the cell
+  std::uint32_t readCells = 0;   // banks holding the cell
 };
+inline constexpr std::uint32_t kReadBatch = 64;
 inline constexpr std::uint64_t kAckTimeoutNs = 2000000000ull;
 
 struct SyncStats {
@@ -78,11 +102,24 @@ class CellSync {
   }
   const SyncStats& stats() const { return stats_; }
 
+  // --- 1.1 (group P) ------------------------------------------------------------------------
+  // Marks `address` for an item revert (see the header). false if no such cell.
+  bool RequestRevert(const CellAddress& address);
+  // Reads every cell back from the game over the next Updates (ReadCell). false if no cells.
+  bool RequestReadBack();
+  // Cells still to ask or waiting for their CellValue.
+  std::uint32_t ReadsOutstanding() const;
+  std::uint64_t reverts() const { return reverts_; }  // RevertValue sent
+
  private:
+  void UpdateReads(livelink::Client* client);
   std::vector<CellAddress> addresses_;
   std::vector<CellStatus> cells_;
   std::vector<CellStatus> params_;
   SyncStats stats_;
+  bool readAll_ = false;
+  std::size_t readNext_ = 0;
+  std::uint64_t reverts_ = 0;
 };
 
 }  // namespace snd::tool

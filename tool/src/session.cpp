@@ -90,6 +90,22 @@ bool Session::LoadRecording(const std::string& path) {
   return true;
 }
 
+bool Session::RevertItem(const OverrideItem& item) {
+  const std::vector<CellAddress> cells = mixer_.CellsOf(item.target);
+  if (!mixer_.Revert(item)) return false;
+  for (const CellAddress& a : cells) sync_.RequestRevert(a);
+  return true;
+}
+
+bool Session::RevertOnly(const Target& target) {
+  const std::vector<CellAddress> cells = mixer_.CellsOf(target);
+  if (!mixer_.RevertOnly(target)) return false;
+  for (const CellAddress& a : cells) sync_.RequestRevert(a);
+  return true;
+}
+
+bool Session::ReadBack() { return sync_.RequestReadBack(); }
+
 void Session::Message(std::string text) {
   messages_.push_back(std::move(text));
   if (messages_.size() > 64u) messages_.erase(messages_.begin());
