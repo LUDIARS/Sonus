@@ -198,6 +198,29 @@ UI に依存せず使えるモデル（`Sonus::tool_core` だけで動く）:
 - `tool_indep_s7_editors_test` の `IndepS7Edit.D14_MusicRules`（813、817、820 行）: 直前の拍子の小節線に当たらない位置での拍子の変化
   （tick 3840×u で beatUnit を変える、tick 7・8 で beatUnit 32 と 4/4 の後）を受け入れる前提。D-179c で拒否。
 
+### 差し戻し 2 回目の後
+
+| 構成 | コミット | テスト | 結果 |
+| --- | --- | --- | --- |
+| 8: TOOL_CORE、gcc Debug | a5e5fe2 | 全部 | 246 件全部通過（`Defect_*` 全部、`tool_live_mixer_test` も通過） |
+| ASan/UBSan ＋ TOOL_CORE | a5e5fe2 | `-R 'tool\|buildtool'` | 40 件全部通過 |
+| Release ＋ TOOL_CORE | a5e5fe2 | 同上 | 40 件中 39 通過。`tool_live_mixer_test`（既存、組 M の範囲外）が 1 回落ちた（下に出力） |
+| clang ＋ TOOL_CORE | a5e5fe2 | 同上 | 40 件全部通過 |
+| 9（Tela） | a5e5fe2 | `-R tool` | 54 件全部通過 |
+| 1: ツールなしの通常構成（gcc Debug） | a5e5fe2 | 全部 | 215 件全部通過（`platform_device_play_test` は既存の Skipped） |
+| MinGW 構文検査 | a5e5fe2 | 変えた .cpp（tool/src 7、decisions_test） | 通過 |
+
+Release の全体実行（-j2）での `tool_live_mixer_test` の出力（`--output-on-failure`、絞り込みなし）:
+
+```
+11/42 Test #171: tool_live_mixer_test ........................................................***Failed    0.49 sec
+/home/user/sonus/.claude/worktrees/model/tool/test/live_mixer_test.cpp:189: FAILED: t.Rel() ~= 1.0  (lhs: 0.501187216, rhs: 1, |diff| 0.499 > tol 1e-05)
+[  FAILED  ] ToolLiveMixer.StateSurvivesDisconnectAndReconnect
+[==========] 8 test(s) run, 1 failed
+```
+
+（0.501187 = -6 dB。再接続のあとにツールの状態へ戻るはずのバスの値が、まだ前の値のまま読まれた。既存のテストで組 M は触っていない。）
+
 ## 未検証の箇所
 
 - TSan の構成（4）は回していない。
