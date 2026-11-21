@@ -426,3 +426,173 @@ SND_TEST(PhysicsApi, CppWrapper) {
   snd::phys::Destroy(p);
   SND_CHECK_EQ(counting.frees, 1u);
 }
+
+// D-125: the audio side counts as stalled after stall_calls calls in a row with the same
+// block_index (63 sub-steps with the default 64 are not a stall); while stalled, Impact /
+// Break groups are dropped (dropped_audio_stalled), nothing is recorded; a moved
+// block_index ends it.
+SND_TEST(PhysicsApi, AudioStallDetectionBoundaryAndDrops) {
+  Sys sys;
+  SND_REQUIRE_EQ(sys.created, SND_OK);
+  sys.Advance(4);
+  Recorder rec;
+  snd_physics_config c = OpenConfig(&rec);
+  c.max_held_emitters = 256;
+  snd_phys* p = nullptr;
+  SND_REQUIRE_EQ(snd_physics_create(sys.sys, &c, nullptr, &p), SND_OK);
+  SND_CHECK_EQ(c.stall_calls, 64u);
+  std::vector<snd_id> single;
+  snd_physics_table_desc d = SinglesTable(1, &single);
+  SND_REQUIRE_EQ(snd_physics_set_table(p, &d), SND_OK);
+  std::uint64_t obj = 1;
+  auto hit = [&] {
+    const snd_contact x = Impact(obj, obj + 1, 0.0f, 1.0f);
+    obj += 2;
+    rec.Clear();
+    SND_CHECK_EQ(snd_phys_submit_contacts(p, &x, 1, 1.0f / 240.0f), SND_OK);
+  };
+  // Call 1 reads the block; calls 2..64 see it unchanged 1..63 times: not stalled.
+  for (int i = 0; i < 64; ++i) hit();
+  snd_physics_stats s = Stats(p);
+  SND_CHECK_EQ(s.audio_stalled_calls, 0u);
+  SND_CHECK_EQ(s.dropped_audio_stalled, 0u);
+  SND_CHECK_EQ(s.group_requests, 64u);
+  // Call 65: the 64th unchanged in a row: stalled.
+  hit();
+  s = Stats(p);
+  SND_CHECK_EQ(s.audio_stalled_calls, 1u);
+  SND_CHECK_EQ(s.dropped_audio_stalled, 1u);
+  SND_CHECK_EQ(s.group_requests, 64u);
+  SND_REQUIRE_EQ(rec.Count(SND_PHYSICS_RECORD_DROP), 1u);
+  SND_CHECK_EQ(rec.Of(SND_PHYSICS_RECORD_DROP)[0].r.result, SND_ERR_LIMIT_REACHED);
+  SND_CHECK_EQ(rec.Count(SND_PHYSICS_RECORD_PLAY), 0u);
+  for (int i = 0; i < 10; ++i) hit();
+  s = Stats(p);
+  SND_CHECK_EQ(s.audio_stalled_calls, 11u);
+  SND_CHECK_EQ(s.dropped_audio_stalled, 11u);
+  SND_CHECK_EQ(s.groups, s.dropped_no_event + s.dropped_cooldown + s.dropped_budget + s.dropped_audio_stalled +
+                             s.dropped_no_emitter + s.group_requests);
+  // Footsteps and play_at still record while stalled.
+  const snd_vec3 pos{0, 0, 0};
+  SND_CHECK_EQ(snd_physics_play_at(p, 5u, &pos), SND_OK);
+  SND_CHECK_EQ(Stats(p).requested_play_at, 1u);
+  // The system moves: the stall ends at the next call and hits play again.
+  sys.Advance(1);
+  hit();
+  s = Stats(p);
+  SND_CHECK_EQ(s.audio_stalled_calls, 11u);
+  SND_CHECK_EQ(s.group_requests, 65u);
+  SND_CHECK_EQ(rec.Count(SND_PHYSICS_RECORD_PLAY), 1u);
+  // stall_calls 0: never stalled.
+  snd_physics_config c0 = OpenConfig(nullptr);
+  c0.stall_calls = 0;
+  c0.max_held_emitters = 256;
+  snd_phys* q = nullptr;
+  SND_REQUIRE_EQ(snd_physics_create(sys.sys, &c0, nullptr, &q), SND_OK);
+  SND_REQUIRE_EQ(snd_physics_set_table(q, &d), SND_OK);
+  for (int i = 0; i < 100; ++i) SND_CHECK_EQ(snd_phys_submit_contacts(q, nullptr, 0, 0.01f), SND_OK);
+  SND_CHECK_EQ(Stats(q).audio_stalled_calls, 0u);
+  snd_phys_destroy(q);
+  // An older config without the field gets the default 64.
+  snd_physics_config old = OpenConfig(nullptr);
+  old.struct_size = static_cast<std::uint32_t>(offsetof(snd_physics_config, stall_calls));
+  old.stall_calls = 1;
+  SND_REQUIRE_EQ(snd_physics_create(sys.sys, &old, nullptr, &q), SND_OK);
+  for (int i = 0; i < 64; ++i) SND_CHECK_EQ(snd_phys_submit_contacts(q, nullptr, 0, 0.01f), SND_OK);
+  SND_CHECK_EQ(Stats(q).audio_stalled_calls, 0u);
+  SND_CHECK_EQ(snd_phys_submit_contacts(q, nullptr, 0, 0.01f), SND_OK);
+  SND_CHECK_EQ(Stats(q).audio_stalled_calls, 1u);
+  snd_phys_destroy(q);
+  snd_phys_destroy(p);
+}
+
+// D-125 for sliding contacts: while stalled the reports update the entries without
+// recording, new keys are dropped, a timeout waits for the first call after the stall; then
+// the latest values are recorded.
+SND_TEST(PhysicsApi, AudioStallHoldsSlidesAndCatchesUp) {
+  Sys sys;
+  SND_REQUIRE_EQ(sys.created, SND_OK);
+  sys.Advance(4);
+  Recorder rec;
+  snd_physics_config c = OpenConfig(&rec);
+  c.stall_calls = 4;
+  c.tracking_timeout_seconds = 0.05f;
+  snd_phys* p = nullptr;
+  SND_REQUIRE_EQ(snd_physics_create(sys.sys, &c, nullptr, &p), SND_OK);
+  std::vector<snd_id> single;
+  snd_physics_table_desc d = SinglesTable(1, &single);
+  std::vector<snd_physics_curves> cv(1);
+  std::memset(cv.data(), 0, sizeof(snd_physics_curves));
+  cv[0].speed_to_volume = Linear({{0.0f, 0.0f}, {10.0f, 1.0f}});
+  d.curves = cv.data();
+  SND_REQUIRE_EQ(snd_physics_set_table(p, &d), SND_OK);
+  auto slide = [](std::uint64_t a, float speed, float x) {
+    return Contact(SND_CONTACT_SLIDE, a, a + 1, 0, 0, x, 0, 0, 0.0f, speed);
+  };
+  // Call 1: A and B start. Calls 2..4 report A only (3 unchanged blocks); call 5 is stalled.
+  SND_CHECK_EQ(snd_phys_submit_contacts(p, std::vector<snd_contact>{slide(1, 1.0f, 0), slide(3, 1.0f, 0)}.data(), 2, 0.02f),
+               SND_OK);
+  for (int i = 0; i < 3; ++i) {
+    const snd_contact a = slide(1, 1.0f, 0);
+    SND_CHECK_EQ(snd_phys_submit_contacts(p, &a, 1, 0.02f), SND_OK);
+  }
+  SND_CHECK_EQ(Stats(p).tracking_timeouts, 1u);  // B: 60 ms without a report (not stalled yet)
+  // Restart B and let it go silent during the stall.
+  {
+    const snd_contact b = slide(3, 1.0f, 0);
+    SND_CHECK_EQ(snd_phys_submit_contacts(p, &b, 1, 0.02f), SND_OK);  // stalled: B is new -> dropped
+  }
+  snd_physics_stats s = Stats(p);
+  SND_CHECK_EQ(s.audio_stalled_calls, 1u);
+  SND_CHECK_EQ(s.tracking_dropped, 1u);
+  rec.Clear();
+  for (int i = 0; i < 10; ++i) {
+    const snd_contact a = slide(1, 5.0f + static_cast<float>(i), 1.0f + static_cast<float>(i));
+    SND_CHECK_EQ(snd_phys_submit_contacts(p, &a, 1, 0.02f), SND_OK);
+  }
+  s = Stats(p);
+  SND_CHECK_EQ(s.audio_stalled_calls, 11u);
+  SND_CHECK_EQ(rec.recs.size(), 0u);  // nothing recorded, nothing observed
+  // Stalled: A not reported for 100 ms -> no timeout yet.
+  for (int i = 0; i < 5; ++i) SND_CHECK_EQ(snd_phys_submit_contacts(p, nullptr, 0, 0.02f), SND_OK);
+  SND_CHECK_EQ(Stats(p).tracking_timeouts, 1u);
+  SND_CHECK_EQ(rec.Count(SND_PHYSICS_RECORD_STOP), 0u);
+  // The system moves: the first call times A out (its last report is 100 ms old).
+  sys.Advance(1);
+  SND_CHECK_EQ(snd_phys_submit_contacts(p, nullptr, 0, 0.02f), SND_OK);
+  SND_CHECK_EQ(Stats(p).tracking_timeouts, 2u);
+  SND_REQUIRE_EQ(rec.Count(SND_PHYSICS_RECORD_STOP), 1u);
+  SND_CHECK_EQ(rec.Of(SND_PHYSICS_RECORD_STOP)[0].r.stop_reason, SND_PHYSICS_STOP_TIMEOUT);
+  // A reported through a stall keeps its entry and records the latest values after it.
+  rec.Clear();
+  {
+    const snd_contact a = slide(1, 1.0f, 0);
+    SND_CHECK_EQ(snd_phys_submit_contacts(p, &a, 1, 0.02f), SND_OK);  // starts again
+  }
+  for (int i = 0; i < 5; ++i) {
+    const snd_contact a = slide(1, 2.0f, 0);
+    SND_CHECK_EQ(snd_phys_submit_contacts(p, &a, 1, 0.0f), SND_OK);  // the 4th unchanged call stalls
+  }
+  SND_CHECK(Stats(p).audio_stalled_calls >= 12u);
+  rec.Clear();
+  {
+    const snd_contact a = slide(1, 8.0f, 3.0f);
+    SND_CHECK_EQ(snd_phys_submit_contacts(p, &a, 1, 0.0f), SND_OK);  // still stalled
+  }
+  SND_CHECK_EQ(rec.recs.size(), 0u);
+  sys.Advance(1);
+  {
+    const snd_contact a = slide(1, 8.0f, 3.0f);
+    SND_CHECK_EQ(snd_phys_submit_contacts(p, &a, 1, 0.0f), SND_OK);
+  }
+  // UPDATE, or (the events are not loaded here: the playback may have ended meanwhile) a
+  // restart; either way the latest values.
+  bool latest = false;
+  for (const Rec& r : rec.recs) {
+    if (r.r.kind == SND_PHYSICS_RECORD_UPDATE || r.r.kind == SND_PHYSICS_RECORD_START) {
+      latest = std::fabs(r.r.volume - 0.8f) < 1e-6f && r.r.position.x == 3.0f;
+    }
+  }
+  SND_CHECK(latest);
+  snd_phys_destroy(p);
+}

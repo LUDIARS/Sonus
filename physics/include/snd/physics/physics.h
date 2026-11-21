@@ -55,15 +55,15 @@
  *      kind) of the representative; passes when no record exists or
  *      now - last_play >= cooldown (equal passes). Recorded only for groups that
  *      were actually requested in step 4. A full cooldown table pushes out the
-      record with the oldest last request (the first recorded on ties).
+ *      record with the oldest last request (the first recorded on ties).
  *   4. Budget: Break first, then by impulse descending (array order of the
  *      representative on ties); the first floor(carry + budget_per_second * dt)
  *      are requested, only the fraction is carried (an unused whole part is
  *      not). dt here is the clamped dt in whole microseconds.
  *   A group whose event resolves to nothing is dropped before step 3. A group that
-   gets its place in the budget but no emitter (below) is dropped, not played
-   (dropped_no_emitter, a DROP record); it keeps using its place in the budget and
-   records no cooldown.
+ *   gets its place in the budget but no emitter (below) is dropped, not played
+ *   (dropped_no_emitter, a DROP record); it keeps using its place in the budget and
+ *   records no cooldown.
  *
  * Event resolution (9.3) for a contact of materials A, B and kind k:
  *   pair override pair[k][min(A,B) * N + max(A,B)] -> both single events
@@ -120,6 +120,29 @@
  *   groups played between two snd_update calls times the periods until they are applied
  *   (about 3: render_ahead_blocks + 1); submitting many times without snd_update fills the
  *   ring and the groups after that are dropped.
+ *
+ * Audio side stalled (D-125): each snd_phys_submit_contacts reads snd_get_stats().block_index.
+ *   After config.stall_calls calls in a row (default 64; 0 = never) that saw the same
+ *   block_index as the call before, the audio side counts as stalled (suspended, output not
+ *   advanced, no snd_update); a call that sees it change ends the stall. Counted in calls, not
+ *   physics time (several sub-steps before one block are normal: 63 are never a stall). While
+ *   stalled nothing is recorded for contacts, so commands do not pile up for an audio side that
+ *   does not consume them:
+ *   - Impact / Break groups that pass the budget are dropped without an emitter
+ *     (dropped_audio_stalled, a DROP record with SND_ERR_LIMIT_REACHED; the budget place is
+ *     used, no cooldown, not counted as requests).
+ *   - Reports to tracked Slide / Roll keys update their entries (last report, speed,
+ *     position: tracking_updated) without recording; new keys are dropped (tracking_dropped);
+ *     timeouts and evictions wait for the first call after the stall (the timeout itself is
+ *     still measured in physics time). The first report after the stall records the latest
+ *     values.
+ *   - Held one-shot emitters are checked with snd_get_playback_state only.
+ *   Always (stalled or not): the release check that records (snd_set_playback_volume) runs only
+ *   in a call whose block_index moved since the last such check, and a tracked sliding /
+ *   rolling playback records only the values that changed since it last recorded them
+ *   (position, speed parameter, volume, pitch, surface parameters). snd_phys_play_footstep and
+ *   snd_physics_play_at record as usual (the game calls them itself); snd_phys_destroy stops
+ *   and releases as usual. audio_stalled_calls counts the stalled calls.
  *
  * Footsteps (9.2): surfaces with weight > 0 (finite) are candidates; the two
  *   largest (first on ties) play. volume = weight_to_volume(w / (w1 + w2)) (in double: any
@@ -311,6 +334,10 @@ typedef struct snd_physics_config {
   snd_physics_param_ids params;    /* parameter ids (defaults: hashes of the names above) */
   snd_physics_observer observer;   /* NULL = none */
   void* observer_user;
+  /* --- added after the first version (shorter struct_size: defaults) --- */
+  uint32_t stall_calls; /* calls in a row with the same block_index before the audio side counts
+                           as stalled (D-125), default 64; 0 = never */
+  uint32_t reserved1;   /* 0 */
 } snd_physics_config;
 
 /* Fill defaults. Thread: any. */
@@ -342,6 +369,8 @@ static inline void snd_physics_config_init(snd_physics_config* c) {
   c->params.surface_weight = snd_hash_id(SND_PHYSICS_PARAM_SURFACE_WEIGHT_NAME);
   c->observer = NULL;
   c->observer_user = NULL;
+  c->stall_calls = 64u;
+  c->reserved1 = 0u;
 }
 
 /*
@@ -528,7 +557,8 @@ SND_API snd_result SND_CALL snd_physics_set_surface_param(snd_phys* phys, uint16
 /*
  * Accounting: contacts_received = dropped_invalid + dropped_threshold + dropped_work_overflow
  *   + merged + groups + slide_reports;
- * groups = dropped_no_event + dropped_cooldown + dropped_budget + dropped_no_emitter + group_requests (Impact / Break
+ * groups = dropped_no_event + dropped_cooldown + dropped_budget + dropped_audio_stalled + dropped_no_emitter
+ *   + group_requests (Impact / Break
  *   groups that were requested; each requests 1 or 2 events, counted in requested_impact /
  *   requested_break, failed plays included);
  * slide_reports (one per key and call) = tracking_started + tracking_updated + tracking_restarted
@@ -552,6 +582,7 @@ typedef struct snd_physics_stats {
   uint64_t dropped_no_event;
   uint64_t dropped_cooldown;
   uint64_t dropped_budget;
+  uint64_t dropped_audio_stalled; /* groups that had a place in the budget while the audio side was stalled */
   uint64_t dropped_no_emitter;   /* groups that had a place in the budget but no emitter (no slot,
                                     transform refused, or max_held_emitters full): not played */
   uint64_t group_requests;
@@ -578,7 +609,8 @@ typedef struct snd_physics_stats {
   uint64_t footstep_fallback_default;
   uint64_t footstep_fallback_none;
   uint64_t footstep_surfaces_ignored; /* weight <= 0, NaN or infinite, or past the two largest */
-  uint64_t api_failures;         /* sonus C API calls that failed */
+  uint64_t api_failures;
+  uint64_t audio_stalled_calls;  /* snd_phys_submit_contacts calls made while the audio side was stalled */         /* sonus C API calls that failed */
 } snd_physics_stats;
 
 /* Copy min(out->struct_size, sizeof) bytes (struct_size is kept). Errors: INVALID_ARGUMENT

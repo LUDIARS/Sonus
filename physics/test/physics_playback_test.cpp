@@ -452,3 +452,40 @@ SND_TEST(PhysicsPlayback, FullHeldRingDropsTheNewGroupAndKeepsTheOld) {
   SND_CHECK_NEAR(r, 0.0, 2e-3);
   snd_phys_destroy(phys);
 }
+
+// D-125 end to end: while the system is suspended the game keeps calling snd_update and
+// submitting hits; physics stops recording once it sees the stall, the system resumes and
+// new hits play at their position.
+SND_TEST(PhysicsPlayback, SuspendedSystemResumesAndHitsPlayAgain) {
+  World w;
+  SND_REQUIRE(w.ok);
+  snd_physics_config cfg = OpenConfig(nullptr);
+  snd_phys* phys = nullptr;
+  SND_REQUIRE_EQ(snd_physics_create(w.sys.sys, &cfg, nullptr, &phys), SND_OK);
+  OneEventTable(phys, snd_hash_id("SE/Hit"), 1.0f);
+  w.sys.Advance(2);
+  SND_CHECK_EQ(snd_suspend(w.sys.sys), SND_OK);
+  std::uint64_t obj = 0;
+  for (int i = 0; i < 1500; ++i, obj += 2) {
+    const snd_contact x = Contact(SND_CONTACT_IMPACT, obj, obj + 1, 0, 0, 2.0f, 0, 0, 5.0f);
+    SND_CHECK_EQ(snd_phys_submit_contacts(phys, &x, 1, 1.0f / 60.0f), SND_OK);
+    snd_update(w.sys.sys);
+  }
+  const snd_physics_stats s = Stats(phys);
+  SND_CHECK(s.dropped_audio_stalled > 1000u);
+  SND_CHECK_EQ(snd_resume(w.sys.sys), SND_OK);
+  const std::uint64_t start = w.sys.Frames();
+  for (int i = 0; i < 80; ++i, obj += 2) {
+    const snd_contact x = Contact(SND_CONTACT_IMPACT, obj, obj + 1, 0, 0, 2.0f, 0, 0, 5.0f);
+    SND_CHECK_EQ(snd_phys_submit_contacts(phys, i < 20 ? &x : nullptr, i < 20 ? 1u : 0u, 1.0f / 60.0f), SND_OK);
+    w.sys.Advance(1);
+  }
+  double l = 0, r = 0;
+  for (std::uint64_t f = start; f < w.sys.Frames(); ++f) {
+    l += std::fabs(w.sys.L(f));
+    r += std::fabs(w.sys.R(f));
+  }
+  SND_CHECK(r > 1.0);
+  SND_CHECK_EQ(l, 0.0);
+  snd_phys_destroy(phys);
+}
