@@ -101,3 +101,11 @@ bank-format.md の PHYS、project-format.md の materialTable、公開ヘッダ�
 - P46 新（欠陥）: `snd_suspend` 中もゲームが毎フレーム Submit を呼ぶと、解除の確認の記録でコマンドの予備が溢れ、`snd_resume` が受け付けられなくなる（core の欠陥と重なる）。
 - P47 新（記録）: 解除の後に始まる子の再生: 音楽の 2 つ目のセグメント（core は音楽の Event を 3D にしない。保持した Emitter と同じ結果）、ゲームが鳴らすスティンガー（(b) リスナーの位置）。
 - P48 新: 資源の枯渇（再生のスロット、Emitter、コマンド領域）で API の失敗は `api_failures` と記録の result に出て、落ちず、資源が戻れば回復する。
+
+## D-125（音声側が止まっている間は記録しない、indep_stall_test.cpp）
+
+- P49 新: `block_index` が同じ呼び出しが `stall_calls` 回続いた次から停止中（その値を初めて見た呼び出しを含めて `stall_calls` 回までは鳴る）。値が進めばすぐ解ける。0 は検出しない。同じ値で 64 回（初めての 1 回 + 63 回）のサブステップは停止にならない。
+- P50 新: 停止中の Impact / Break は `dropped_audio_stalled`（DROP、`LIMIT_REACHED`、予算は消費、クールダウンは記録しない）。恒等式は `groups = no_event + cooldown + budget + audio_stalled + no_emitter + requests`。
+- P51 新: 停止中の擦れ音は項目だけを更新し、何も記録しない（コマンド領域が増えない）。新しいキーは `tracking_dropped`。タイムアウトは停止が解けた最初の呼び出しで処理する。解けた後の最初の報告は最新の位置と速度を記録する。
+- P52 新: 長い suspend（衝突と擦れを毎フレーム送る）の後も `snd_resume` が通り、位置は正しい。足音と `play_at` は停止中も記録する（A-005 の範囲は記録用テスト）。
+- P53 新: 短い（1 ブロック）擦れ音は、値が変わっても変わらなくても、終わるたびに始め直される。ゲームが止めた擦れ音も次の報告で始め直される。
