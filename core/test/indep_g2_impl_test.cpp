@@ -13,7 +13,6 @@ namespace {
 using namespace g2;
 using snd::HashId;
 
-constexpr std::uint32_t kB = 256;
 constexpr std::size_t kDelay = 480;
 
 snd_config VConfig(std::uint32_t slots = 4, std::uint32_t real = 8) {
