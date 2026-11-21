@@ -81,7 +81,8 @@ class IPreviewEngine {
   virtual std::uint64_t projectBuildHash() const = 0;  // of the loaded build (Hello)
 
   // --- auditions (owner) --------------------------------------------------------------------
-  // Plays an event (emitter null: 2D, no emitter). Returns the playback handle value, 0 if refused.
+  // Plays an event (emitter null: 2D, no emitter). Returns the playback handle value, 0 if the
+  // request could not be recorded (an unknown event is ended by the runtime: Status() drops it).
   virtual std::uint64_t Play(Id event, const EmitterPose* emitter) = 0;
   // Moves the emitter of a Play started with one (false: unknown handle / no emitter).
   virtual bool MoveEmitter(std::uint64_t playback, const EmitterPose& pose) = 0;

@@ -106,6 +106,7 @@ class PreviewEngine final : public IPreviewEngine {
   struct Playing {
     std::uint64_t playback;
     std::uint64_t emitter;  // emitter handle value, 0 = none
+    std::uint64_t startBlock;
   };
   void RunScheduled(std::uint64_t upToBlock);
   void Forget(std::uint64_t playback);
