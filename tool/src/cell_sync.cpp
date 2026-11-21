@@ -52,6 +52,77 @@ void CellSync::Reset() {
   cells_.clear();
   params_.clear();
   stats_ = SyncStats{};
+  readAll_ = false;
+  readNext_ = 0;
+  reverts_ = 0;
+}
+
+bool CellSync::RequestRevert(const CellAddress& address) {
+  const std::int32_t i = Find(address);
+  if (i < 0) return false;
+  CellStatus& s = cells_[static_cast<std::size_t>(i)];
+  s.revertRequested = true;
+  if (s.state != CellState::Pending) s.state = CellState::Unsent;  // sent at the next Update
+  return true;
+}
+
+bool CellSync::RequestReadBack() {
+  if (cells_.empty()) return false;
+  readAll_ = true;
+  readNext_ = 0;
+  for (CellStatus& s : cells_) {
+    if (s.readState != CellStatus::Read::Pending) s.readState = CellStatus::Read::None;
+  }
+  return true;
+}
+
+std::uint32_t CellSync::ReadsOutstanding() const {
+  std::uint32_t n = 0;
+  for (std::size_t i = 0; i < cells_.size(); ++i) {
+    const CellStatus& s = cells_[i];
+    if (s.readState == CellStatus::Read::Pending) ++n;
+    else if (readAll_ && i >= readNext_) ++n;
+  }
+  return n;
+}
+
+void CellSync::UpdateReads(livelink::Client* client) {
+  // Answers first (they free places of the client's CellValue buffer).
+  for (CellStatus& s : cells_) {
+    if (s.readState != CellStatus::Read::Pending || s.readSeq == 0u) continue;
+    if (client == nullptr) {
+      s.readState = CellStatus::Read::None;
+      s.readSeq = 0;
+      continue;
+    }
+    livelink::CellValue v{};
+    if (!client->TakeCell(s.readSeq, &v)) continue;
+    s.readSeq = 0;
+    s.readResult = v.result;
+    s.readCells = v.cells;
+    if (v.result != SND_OK) {
+      s.readState = CellStatus::Read::Failed;
+      continue;
+    }
+    const std::uint32_t cur = static_cast<std::uint32_t>(v.current), orig = static_cast<std::uint32_t>(v.original);
+    std::memcpy(&s.readCurrent, &cur, 4);
+    std::memcpy(&s.readOriginal, &orig, 4);
+    s.readOverridden = (v.flags & livelink::kCellOverridden) != 0u;
+    s.readState = CellStatus::Read::Done;
+  }
+  if (!readAll_ || client == nullptr || !client->Supports(livelink::MessageType::ReadCell)) return;
+  std::uint32_t pending = 0;
+  for (const CellStatus& s : cells_) pending += s.readState == CellStatus::Read::Pending ? 1u : 0u;
+  while (readNext_ < cells_.size() && pending < kReadBatch) {
+    CellStatus& s = cells_[readNext_];
+    const std::uint32_t seq = client->ReadCell(Encode(addresses_[readNext_], 0.0f), false);
+    if (seq == 0u) return;  // not connected / queue full: next Update
+    s.readSeq = seq;
+    s.readState = CellStatus::Read::Pending;
+    ++pending;
+    ++readNext_;
+  }
+  if (readNext_ >= cells_.size()) readAll_ = false;
 }
 
 std::int32_t CellSync::Find(const CellAddress& a) const {
@@ -95,13 +166,20 @@ void CellSync::Update(livelink::Client* client, const std::vector<Cell>& cells, 
     for (std::size_t i = 0; i < params.size(); ++i) params_[i].sent = params_[i].confirmed = params[i].value;
   }
 
-  for (CellStatus& s : cells_) TakeAck(client, s, stats_);
+  for (CellStatus& s : cells_) {
+    TakeAck(client, s, stats_);
+    if (s.revertRequested && s.state == CellState::Synced) s.state = CellState::Unsent;  // asked while in flight
+  }
   for (CellStatus& s : params_) TakeAck(client, s, stats_);
 
   if (sessionStarted) {
     for (std::size_t i = 0; i < cells.size(); ++i) {
       CellStatus& s = cells_[i];
       s.seq = 0;  // acks of the previous session will not come
+      if (s.readState == CellStatus::Read::Pending) {  // nor its CellValues
+        s.readState = CellStatus::Read::None;
+        s.readSeq = 0;
+      }
       if (sendAll || s.everSent || cells[i].value != cells[i].bankValue) {
         if (s.everSent) ++stats_.resent;
         s.state = CellState::Unsent;
@@ -121,8 +199,19 @@ void CellSync::Update(livelink::Client* client, const std::vector<Cell>& cells, 
     if (!changed && s.state != CellState::Unsent) continue;
     if (changed && s.state == CellState::Failed) s.state = CellState::Unsent;
     std::uint32_t seq = 0;
-    if (client != nullptr) seq = client->SetValue(Encode(cells[i].address, v), true);
+    // 1.1 item revert: the model put the value back to the bank value; the game forgets the cell.
+    const bool revert = s.revertRequested && v == cells[i].bankValue && client != nullptr &&
+                        client->Supports(livelink::MessageType::RevertValue);
+    if (client != nullptr) {
+      seq = revert ? client->RevertValue(Encode(cells[i].address, v), true)
+                   : client->SetValue(Encode(cells[i].address, v), true);
+    }
     s.sent = v;
+    if (seq != 0u) {
+      s.revertedLive = revert;
+      s.revertRequested = false;
+      if (revert) ++reverts_;
+    }
     if (seq == 0u) {
       s.state = CellState::Unsent;
       continue;
@@ -133,6 +222,7 @@ void CellSync::Update(livelink::Client* client, const std::vector<Cell>& cells, 
     s.everSent = true;
     ++stats_.sent;
   }
+  UpdateReads(client);
   for (std::size_t i = 0; i < params.size(); ++i) {
     CellStatus& s = params_[i];
     const float v = params[i].value;

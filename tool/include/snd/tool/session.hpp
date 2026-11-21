@@ -65,6 +65,14 @@ class Session {
   bool SaveRecording(const std::string& path);
   bool LoadRecording(const std::string& path);
 
+  // 1.1 (group P): item revert. Revert(item) / RevertOnly(target) on the mixer, then the cells
+  // the item is sent through go back with RevertValue (a 1.0 game: SetValue of the bank value,
+  // as before). One undo step on the mixer; Undo sends the value again.
+  bool RevertItem(const OverrideItem& item);
+  bool RevertOnly(const Target& target);
+  // Reads every mixer cell back from the game (CellSync::RequestReadBack; 1.1 only).
+  bool ReadBack();
+
   // Status messages for the UI (newest last, at most 64).
   const std::vector<std::string>& messages() const { return messages_; }
   void Message(std::string text);

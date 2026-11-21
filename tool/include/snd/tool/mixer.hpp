@@ -125,6 +125,17 @@ class MixerModel {
   std::vector<OverrideItem> Overrides() const;
   bool Revert(const OverrideItem& item);
   bool RevertAll();
+  // 1.1 (group P): "only this item". Puts the value of `target` alone back to the bank value
+  // (one undo step; mute, solo and other controls stay as they are). Fader / category fader /
+  // effect parameter: the value; ParamOverride / ParamOverrideOn: the override off and the value
+  // back to the default (as Revert). false if nothing changed or not editable. Undo puts the
+  // value back (an ordinary edit: the game gets a SetValue).
+  bool RevertOnly(const Target& target);
+  // The SetValue cells an item's value is sent through (CellSync::RequestRevert after a revert):
+  // a bus fader -> its BUSS.volumeDb (also the solo-muted buses' when the bus is soloed is not
+  // included: those cells change as ordinary edits), an effect parameter -> its EFPV cell, a
+  // category fader -> CATG.volumeDb; parameter overrides have none (OverrideParam).
+  std::vector<CellAddress> CellsOf(const Target& target) const;
 
   std::uint64_t revision() const { return revision_; }
 
