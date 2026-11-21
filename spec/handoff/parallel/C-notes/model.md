@@ -103,6 +103,21 @@
 | D-179 計算はランタイムに | 9〜15 | `ComposeIgnored(target)` と `CurveEditor::ComposeIgnored()`、`ComposeResult::composeIgnored`。拍子の変化は直前の拍子の小節線だけ（`AddTempo` / `SetTempo` が拒否、読み込んだ小節の途中の変化は `Problems()`）。`TempoMap::MusicalIsApproximate`。到達できない行がある表の `AutoSort` は理由付きで拒否 |
 | D-180 マテリアルとパッチ | 16、17 | `EvaluateStrength` は非有限の入力を 0 に。`ReadPatchChunk` はプログラムの連続、ノードの種類、入力（同じプログラムの前のノード）、対応表のプログラム番号を確かめる。buildtool の PHYS の `put` は大きさ 0 で写さない（同じ形はほかに無い） |
 
+### 差し戻し 2 回目（D-176・D-177 への追記）
+
+- `SaveTo` の「同じディレクトリか」は実体で比べる（`fs::equivalent`、無ければ正規化したパス）。同じなら `Save` と同じ経路
+  （`Defect_SaveToSameDirectoryOtherSpellingLeavesStaleFiles`）。
+- `SaveTo` の宛先の規則: プロジェクトの中・プロジェクトを含む親は拒否。宛先にこの保存が書かない *.json が前からあれば拒否
+  （宛先の下を再帰で見る。`.` で始まるディレクトリは見ない）。拒否は false、理由は `lastSave()`、何も書かず文書と `directory()` は不変。
+  外を指す参照は今のまま（写さず `outside`）。
+- 値が変わらない設定は JSON を一切書き換えない（`Defect_SameValueSettersRewriteExplicitDefaults`）。
+  - 文書: `JsonSameMeaning`（数値は値で比べる）。`Modify` は意味が変わらなければ元のテキストに戻す（手も dirty も増えない）。
+    `SetDefaulted(path, value, default)`（省略を既定値とみなして比べる）。`MoveElement` の同じ位置は true で何もしない。
+  - 全エディタの設定関数を見直した: 既定値のある数値・列挙・真偽は `SetDefaulted` か「今の意味と同じなら true」。参照は名前で
+    書かれていても同じ対象なら書き換えない。オブジェクトを組み直す設定（synth、action、snapshot の値、遷移の行、Stinger、
+    tempo、marker、stem、playlist の entry、カーブの点、パッチの parameterCurve、強さのカーブ）は今の値と比べてから書く。
+    cone と parameterCurve の params は、ほかのメンバ（notes など）を残して書く。Rename 系の同じ名前は true。
+
 ## 契約の変更点
 
 - 契約（`contract/`）は変えていない。livelink のプロトコルも変えていない。
@@ -182,6 +197,29 @@ UI に依存せず使えるモデル（`Sonus::tool_core` だけで動く）:
   D-177c で 16 回の衝突で諦める。
 - `tool_indep_s7_editors_test` の `IndepS7Edit.D14_MusicRules`（813、817、820 行）: 直前の拍子の小節線に当たらない位置での拍子の変化
   （tick 3840×u で beatUnit を変える、tick 7・8 で beatUnit 32 と 4/4 の後）を受け入れる前提。D-179c で拒否。
+
+### 差し戻し 2 回目の後
+
+| 構成 | コミット | テスト | 結果 |
+| --- | --- | --- | --- |
+| 8: TOOL_CORE、gcc Debug | a5e5fe2 | 全部 | 246 件全部通過（`Defect_*` 全部、`tool_live_mixer_test` も通過） |
+| ASan/UBSan ＋ TOOL_CORE | a5e5fe2 | `-R 'tool\|buildtool'` | 40 件全部通過 |
+| Release ＋ TOOL_CORE | a5e5fe2 | 同上 | 40 件中 39 通過。`tool_live_mixer_test`（既存、組 M の範囲外）が 1 回落ちた（下に出力） |
+| clang ＋ TOOL_CORE | a5e5fe2 | 同上 | 40 件全部通過 |
+| 9（Tela） | a5e5fe2 | `-R tool` | 54 件全部通過 |
+| 1: ツールなしの通常構成（gcc Debug） | a5e5fe2 | 全部 | 215 件全部通過（`platform_device_play_test` は既存の Skipped） |
+| MinGW 構文検査 | a5e5fe2 | 変えた .cpp（tool/src 7、decisions_test） | 通過 |
+
+Release の全体実行（-j2）での `tool_live_mixer_test` の出力（`--output-on-failure`、絞り込みなし）:
+
+```
+11/42 Test #171: tool_live_mixer_test ........................................................***Failed    0.49 sec
+/home/user/sonus/.claude/worktrees/model/tool/test/live_mixer_test.cpp:189: FAILED: t.Rel() ~= 1.0  (lhs: 0.501187216, rhs: 1, |diff| 0.499 > tol 1e-05)
+[  FAILED  ] ToolLiveMixer.StateSurvivesDisconnectAndReconnect
+[==========] 8 test(s) run, 1 failed
+```
+
+（0.501187 = -6 dB。再接続のあとにツールの状態へ戻るはずのバスの値が、まだ前の値のまま読まれた。既存のテストで組 M は触っていない。）
 
 ## 未検証の箇所
 

@@ -391,6 +391,31 @@ Value Number(double v) {
   return json::MakeNumber(FormatNumber(v));
 }
 
+// Like JsonEqual, but numbers compare by value (and the sign of zero): "2", "2.0" and "2e0" are the same.
+bool JsonSameMeaning(const Value& a, const Value& b) {
+  if (a.type != b.type) return false;
+  switch (a.type) {
+    case json::Type::Number: {
+      if (a.text == b.text) return true;
+      const double x = std::strtod(a.text.c_str(), nullptr), y = std::strtod(b.text.c_str(), nullptr);
+      return x == y && std::signbit(x) == std::signbit(y);
+    }
+    case json::Type::Array:
+      if (a.items.size() != b.items.size()) return false;
+      for (std::size_t i = 0; i < a.items.size(); ++i) {
+        if (!JsonSameMeaning(a.items[i], b.items[i])) return false;
+      }
+      return true;
+    case json::Type::Object:
+      if (a.members.size() != b.members.size()) return false;
+      for (std::size_t i = 0; i < a.members.size(); ++i) {
+        if (a.members[i].first != b.members[i].first || !JsonSameMeaning(a.members[i].second, b.members[i].second)) return false;
+      }
+      return true;
+    default: return JsonEqual(a, b);
+  }
+}
+
 static bool HasNonFinite(const Value& v) {
   switch (v.type) {
     case json::Type::Number: return v.text == "nan" || v.text == "inf" || v.text == "-inf";
@@ -1064,6 +1089,7 @@ bool ProjectDocument::Modify(std::string_view guid, const std::function<bool(Val
   Open(mergeKey);
   Touch(g);
   o = FindMutable(g);
+  const Value before = o->doc;
   if (!fn(o->doc) || !o->doc.IsObject() || StringAt(o->doc, "type") != type || NormalizeGuid(StringAt(o->doc, "guid")) != g ||
       HasNonFinite(o->doc)) {
     Cancel();
@@ -1075,6 +1101,9 @@ bool ProjectDocument::Modify(std::string_view guid, const std::function<bool(Val
     Cancel();
     return false;
   }
+  // D-177b: an edit that leaves every value as it was (a number written another way) changes
+  // nothing: the text stays as it is.
+  if (JsonSameMeaning(before, o->doc)) o->doc = before;
   Close();
   return true;
 }
@@ -1123,6 +1152,15 @@ bool ProjectDocument::Set(std::string_view guid, std::string_view path, Value va
         return true;
       },
       mergeKey);
+}
+
+bool ProjectDocument::SetDefaulted(std::string_view guid, std::string_view path, Value value, const Value& def,
+                                   std::uint32_t mergeKey) {
+  const DocObject* o = Find(guid);
+  if (o == nullptr || HasNonFinite(value)) return false;
+  const Value* cur = FindPath(o->doc, path);
+  if (JsonSameMeaning(cur != nullptr ? *cur : def, value)) return true;  // D-177b
+  return Set(guid, path, std::move(value), mergeKey);
 }
 
 bool ProjectDocument::Erase(std::string_view guid, std::string_view path) {
@@ -1177,9 +1215,8 @@ bool ProjectDocument::MoveElement(std::string_view guid, std::string_view arrayP
   const DocObject* o = Find(guid);
   if (o == nullptr) return false;
   const Value* arr = FindPath(o->doc, arrayPath);
-  if (arr == nullptr || !arr->IsArray() || from >= arr->items.size() || to >= arr->items.size() || from == to) {
-    return false;
-  }
+  if (arr == nullptr || !arr->IsArray() || from >= arr->items.size() || to >= arr->items.size()) return false;
+  if (from == to) return true;  // D-177b: a move to the same place is success and changes nothing
   const std::string ap(arrayPath);
   return Modify(guid, [&](Value& doc) {
     Value* a = FindPath(doc, ap);
@@ -1352,14 +1389,61 @@ bool ProjectDocument::SaveTo(const std::string& dir, std::string* error) {
     return finish();
   }
   std::error_code ec;
-  if (dir == dir_) {
+  // D-176e (review 2): the same directory is compared as a directory, not as text.
+  auto norm = [](const std::string& d) {
+    std::error_code e;
+    fs::path p = fs::weakly_canonical(fs::absolute(fs::path(d), e), e);
+    return p.lexically_normal();
+  };
+  bool same = dir == dir_;
+  if (!same && !dir_.empty()) {
+    std::error_code e1;
+    same = fs::exists(dir, e1) && fs::exists(dir_, e1) ? fs::equivalent(dir, dir_, e1) : norm(dir) == norm(dir_);
+  }
+  if (!same && !dir_.empty()) {
+    // A destination inside the project (its copy would be read with the project) or a directory
+    // that contains the project (the project would be read with the copy): refused.
+    const fs::path cur = norm(dir_), dst = norm(dir);
+    auto under = [](const fs::path& inner, const fs::path& outer) {
+      auto i = inner.begin();
+      for (auto o = outer.begin(); o != outer.end(); ++o, ++i) {
+        if (o->empty()) continue;
+        if (i == inner.end() || *i != *o) return false;
+      }
+      return true;
+    };
+    if (under(dst, cur) || under(cur, dst)) {
+      fail(dir, under(dst, cur) ? "the destination is inside the project directory"
+                                : "the destination contains the project directory");
+      return finish();
+    }
+    // *.json files already there that this save does not write would mix into the project.
+    std::set<std::string> writes;
+    for (const DocObject& o : objects_) writes.insert(o.file);
+    for (const std::string& f : otherFiles_) writes.insert(f);
+    if (fs::is_directory(dst, ec)) {
+      for (auto it = fs::recursive_directory_iterator(dst, ec); !ec && it != fs::recursive_directory_iterator(); it.increment(ec)) {
+        const std::string leaf = it->path().filename().string();
+        std::error_code e2;
+        if (it->is_directory(e2)) {
+          if (!leaf.empty() && leaf[0] == '.') it.disable_recursion_pending();
+          continue;
+        }
+        if (it->path().extension() != ".json") continue;
+        const std::string rel = fs::relative(it->path(), dst, e2).generic_string();
+        if (writes.count(rel) == 0u) fail(rel, "a project file already in the destination that this save does not write");
+      }
+    }
+    if (!res.failures.empty()) return finish();
+  }
+  if (same) {
     // 1. New and changed files: temporary file + rename. 2. Only if all of them were written:
     // files no object uses any more are deleted; a deletion that fails stays pending.
     for (const DocObject& o : objects_) {
       if (IsUnchanged(o)) continue;
       const std::string text = json::Write(o.doc);
       std::string why;
-      if (!WriteAtomic(fs::path(dir) / o.file, text, &why)) {
+      if (!WriteAtomic(fs::path(dir_) / o.file, text, &why)) {
         fail(o.file, why);
         continue;
       }
@@ -1374,7 +1458,7 @@ bool ProjectDocument::SaveTo(const std::string& dir, std::string* error) {
       if (used.count(file) == 0u) gone.push_back(file);
     }
     for (const std::string& file : gone) {
-      const fs::path p = fs::path(dir) / file;
+      const fs::path p = fs::path(dir_) / file;
       const bool removed = fs::remove(p, ec);
       if (!removed && fs::exists(fs::symlink_status(p, ec))) {
         fail(file, "cannot delete" + (ec ? " (" + ec.message() + ")" : std::string()));

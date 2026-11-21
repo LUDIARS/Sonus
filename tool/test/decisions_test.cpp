@@ -366,3 +366,120 @@ SND_TEST(Decisions, D180b_StrengthIsFiniteForAnyInput) {
     SND_CHECK_EQ(r.layer, -1);
   }
 }
+
+// --- review 2 ------------------------------------------------------------------------------------
+
+SND_TEST(Decisions, D176e_SaveToRules) {
+  TempDir root("saveto-rules");
+  const std::string dir = (root.path() / "proj").string();
+  std::error_code ec;
+  fs::create_directories(dir, ec);
+  for (const auto& [f, t] : BaseFiles()) {
+    fs::create_directories((fs::path(dir) / f).parent_path(), ec);
+    std::FILE* fp = std::fopen((fs::path(dir) / f).string().c_str(), "wb");
+    std::fwrite(t.data(), 1, t.size(), fp);
+    std::fclose(fp);
+  }
+  root.WriteBytes("proj/audio/tone.wav", ToneWav());
+  ProjectDocument doc;
+  SND_REQUIRE(doc.Load(dir));
+  // The same directory spelled otherwise is a save: removed and moved files go.
+  SND_REQUIRE(doc.Remove(G(9)));
+  SND_REQUIRE(doc.Rename(G(4), "Hall"));
+  SND_REQUIRE(doc.SaveTo(dir + "/."));
+  SND_CHECK(!root.Exists("proj/snapshots/Quiet.json") && !root.Exists("proj/buses/Reverb.json"));
+  SND_CHECK_EQ(doc.directory(), dir);
+  // Refused, nothing written, nothing changed: inside the project, a directory containing it,
+  // a destination with other project files.
+  const auto stamps = root.Stamps();
+  SND_CHECK(!doc.SaveTo(dir + "/copy"));
+  SND_CHECK(!doc.lastSave().ok && !doc.lastSave().failures.empty());
+  SND_CHECK(!doc.SaveTo(root.path().string()));
+  root.Write("other/events/Stranger.json", "{\"type\": \"event\", \"guid\": \"" + G(999) + "\", \"name\": \"Stranger\"}");
+  const auto stamps2 = root.Stamps();
+  SND_CHECK(!doc.SaveTo((root.path() / "other").string()));
+  SND_CHECK(doc.lastSave().failures[0].path == "events/Stranger.json");
+  SND_CHECK(root.Stamps() == stamps2);
+  SND_CHECK(stamps.size() + 1 == stamps2.size());
+  SND_CHECK_EQ(doc.directory(), dir);
+  // A destination holding only files this save writes is fine (an earlier copy).
+  SND_CHECK(doc.SaveTo((root.path() / "copy").string()));
+  ProjectDocument back;
+  SND_REQUIRE(back.Load(dir));
+  SND_CHECK(back.SaveTo((root.path() / "copy").string()));
+}
+
+SND_TEST(Decisions, D177b_ExplicitDefaultsAndMovesInPlace) {
+  std::map<std::string, std::string> f = RichFiles();
+  f["buses/Sfx.json"] = "{\"type\": \"bus\", \"guid\": \"" + G(3) + "\", \"name\": \"Sfx\", \"parent\": \"Master\", \"volumeDb\": -1.5, "
+                        "\"meter\": false, \"lodPriority\": 0, \"sends\": [{\"bus\": \"Reverb\", \"levelDb\": -12.0, \"preFader\": false}], "
+                        "\"effects\": [{\"type\": \"snd.fx.lowpass\", \"params\": [1000], \"flags\": 0}]}";
+  f["parameters/Speed.json"] = "{\"type\": \"parameter\", \"guid\": \"" + G(6) + "\", \"name\": \"Speed\", \"kind\": \"continuous\", "
+                               "\"scope\": [\"global\", \"emitter\", \"playback\"], \"min\": 0, \"max\": 10, \"default\": 1, \"rampRate\": 5}";
+  f["events/Shot.json"] = "{\"type\": \"event\", \"guid\": \"" + G(8) + "\", \"name\": \"Shot\", \"bank\": \"Main\", \"bus\": \"Sfx\", "
+                          "\"sequence\": \"polyphonic\", \"priority\": 128, \"is3D\": false, \"virtualReturn\": \"continue\", "
+                          "\"tracks\": [{\"flags\": 0, \"clips\": [{\"asset\": \"tone\", \"startMs\": 0, \"weight\": 1, \"loopCount\": 1, "
+                          "\"random\": {\"pan\": 0}}]}, {}]}";
+  ProjectDocument doc;
+  LoadBase(doc, f);
+  doc.SetBinaryFile("audio/m.wav", ToneWav(48000, 48000, 2));
+  json::Value init;
+  json::ParseError pe;
+  SND_REQUIRE(json::Parse("{\"bank\": \"Main\", \"materials\": [\"a\", \"b\"]}", &init, &pe));
+  const std::string phys = doc.Create("materialTable", "Phys", &init);
+  doc.MarkSaved();
+  doc.ClearHistory();
+  const std::string sfx = doc.TextOf(*doc.Find(G(3))), shot = doc.TextOf(*doc.Find(G(8))), speed = doc.TextOf(*doc.Find(G(6)));
+  MixerEditor m(doc);
+  EventEditor e(doc, G(8));
+  ParameterEditor p(doc, G(6));
+  MaterialEditor mat(doc, phys);
+  SegmentEditor s(doc, G(301));
+  MusicEditor mu(doc, G(303));
+  PlaylistEditor pl(doc, G(302));
+  SND_CHECK(m.SetFlag(G(3), BusFlag::Meter, false));
+  SND_CHECK(m.SetLodPriority(G(3), 0));
+  SND_CHECK(m.SetSendLevel(G(3), 0, -12));
+  SND_CHECK(m.SetSendPreFader(G(3), 0, false));
+  SND_CHECK(m.SetSendTarget(G(3), 0, G(4)));  // written by name
+  SND_CHECK(m.SetEffectFlags(G(3), 0, 0));
+  SND_CHECK(m.SetParent(G(3), G(2)));
+  SND_CHECK(m.MoveEffect(G(3), 0, 0));
+  SND_CHECK(e.SetSequence(SequenceKind::Polyphonic));
+  SND_CHECK(e.SetNumber(EventNumber::Priority, 128));
+  SND_CHECK(e.SetFlag(EventFlag::Is3D, false));
+  SND_CHECK(e.SetVirtualReturn(VirtualReturn::Continue));
+  SND_CHECK(e.SetBus(G(3)));
+  SND_CHECK(e.SetTrackFlags(0, 0));
+  SND_CHECK(e.MoveClip(0, 0, 0));
+  SND_CHECK(e.SetClipNumber(0, 0, ClipNumber::Weight, 1));
+  SND_CHECK(e.SetClipNumber(0, 0, ClipNumber::LoopCount, 1));
+  SND_CHECK(e.SetClipRandom(0, 0, RandomField::Pan, 0));
+  SND_CHECK(e.SetClipRandom(0, 0, RandomField::VolumeDb, 0));  // absent: same as 0
+  SND_CHECK(e.MoveTrack(1, 1));
+  SND_CHECK(p.SetSwitch(false));
+  SND_CHECK(p.SetScope(7));
+  SND_CHECK(p.SetRange(0, 10));
+  SND_CHECK(p.SetDefault(1));
+  SND_CHECK(mat.MoveMaterial(1, 1));
+  SND_CHECK(mat.RenameMaterial("a", "a"));
+  SND_CHECK(s.SetMarker(0, s.Markers()[0]));
+  SND_CHECK(s.SetTempo(0, s.Tempo()[0]));
+  SND_CHECK(s.SetStem(0, {0, 2, ""}));
+  SND_CHECK(s.SetAsset(G(300)));
+  SND_CHECK(mu.SetRule(0, mu.Rules()[0]));
+  SND_CHECK(mu.SetStatePlaylist("A", G(302)));
+  SND_CHECK(mu.RenameState("A", "A"));
+  SND_CHECK(mu.MoveRule(1, 1));
+  SND_CHECK(pl.SetEntry(0, G(301), 2, 1));
+  SND_CHECK(pl.SetLoopCount(0));
+  SND_CHECK_EQ(doc.UndoCount(), std::size_t{0});
+  SND_CHECK(doc.PendingChanges().empty());
+  SND_CHECK(doc.TextOf(*doc.Find(G(3))) == sfx && doc.TextOf(*doc.Find(G(8))) == shot && doc.TextOf(*doc.Find(G(6))) == speed);
+  // A number written another way is the same value too.
+  SND_CHECK(doc.Modify(G(3), [](json::Value& v) {
+    *FindPath(v, "sends[0].levelDb") = json::MakeNumber("-12");
+    return true;
+  }));
+  SND_CHECK(doc.PendingChanges().empty());
+}

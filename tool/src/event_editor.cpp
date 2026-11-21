@@ -182,7 +182,8 @@ SequenceKind EventEditor::sequence() const {
 }
 bool EventEditor::SetSequence(SequenceKind k) {
   if (!valid()) return false;
-  if (k == SequenceKind::Polyphonic) return event()->Find("sequence") == nullptr || doc_.Erase(guid_, "sequence");
+  if (sequence() == k) return true;  // D-177b (an explicit "polyphonic" stays)
+  if (k == SequenceKind::Polyphonic) return doc_.Erase(guid_, "sequence");
   return doc_.Set(guid_, "sequence", String(SequenceName(k)));
 }
 
@@ -194,6 +195,10 @@ static bool SetRef(ProjectDocument& doc, const std::string& guid, const char* me
   }
   const DocObject* o = doc.Find(ref);
   if (o == nullptr || o->kind() != kind) return false;
+  // D-177b: a reference that already names it (by GUID or name) is left as written.
+  const DocObject* self = doc.Find(guid);
+  const DocObject* cur = self != nullptr ? doc.Resolve(kind, StringAt(self->doc, member)) : nullptr;
+  if (cur != nullptr && cur->guid == o->guid) return true;
   return doc.Set(guid, member, String(o->guid));
 }
 bool EventEditor::SetBus(const std::string& g) { return valid() && SetRef(doc_, guid_, "bus", g, "bus"); }
@@ -207,7 +212,8 @@ bool EventEditor::SetNumber(EventNumber n, double v, std::uint32_t mergeKey) {
   if ((n == EventNumber::MaxInstances || n == EventNumber::Priority) && !IsInteger(v)) return false;
   if (n == EventNumber::Priority && v > 255) return false;
   if (n == EventNumber::MaxInstances && v > 4294967295.0) return false;
-  return doc_.Set(guid_, EventKey(n), snd::tool::Number(v), mergeKey);
+  return doc_.SetDefaulted(guid_, EventKey(n), snd::tool::Number(v),
+                           snd::tool::Number(n == EventNumber::Priority ? 128.0 : 0.0), mergeKey);
 }
 double EventEditor::NumberOf(EventNumber n) const {
   const Value* e = event();
@@ -215,8 +221,8 @@ double EventEditor::NumberOf(EventNumber n) const {
 }
 bool EventEditor::SetFlag(EventFlag f, bool on) {
   if (!valid()) return false;
-  if (!on && event()->Find(FlagKey(f)) != nullptr) return doc_.Erase(guid_, FlagKey(f));
-  if (!on) return true;  // already off
+  if (Flag(f) == on) return true;  // D-177b (an explicit false stays)
+  if (!on) return doc_.Erase(guid_, FlagKey(f));
   return doc_.Set(guid_, FlagKey(f), Bool(true));
 }
 bool EventEditor::Flag(EventFlag f) const {
@@ -226,14 +232,27 @@ bool EventEditor::Flag(EventFlag f) const {
 bool EventEditor::SetCone(double innerDeg, double outerDeg, double outerDb) {
   if (!valid() || !std::isfinite(innerDeg) || !std::isfinite(outerDeg) || !std::isfinite(outerDb)) return false;
   if (innerDeg < 0 || innerDeg > outerDeg || outerDeg > 360) return false;
-  Value cone = json::MakeObject();
-  json::Add(cone, "innerDeg", snd::tool::Number(innerDeg));
-  json::Add(cone, "outerDeg", snd::tool::Number(outerDeg));
-  json::Add(cone, "outerDb", snd::tool::Number(outerDb));
-  return doc_.Set(guid_, "cone", cone);
+  const Value& e = *event();
+  if (NumberAt(e, "cone.innerDeg", 0) == innerDeg && NumberAt(e, "cone.outerDeg", 0) == outerDeg &&
+      NumberAt(e, "cone.outerDb", 0) == outerDb) {
+    return true;  // D-177b
+  }
+  return doc_.Modify(guid_, [&](Value& d) {  // the cone's other members (notes ...) stay
+    Value* cone = FindPath(d, "cone");
+    if (cone == nullptr) {
+      SetMember(d, "cone", json::MakeObject(), SpecMemberOrder("event", ""));
+      cone = FindPath(d, "cone");
+    }
+    if (!cone->IsObject()) return false;
+    const char* const* order = SpecMemberOrder("event", "cone");
+    SetMember(*cone, "innerDeg", snd::tool::Number(innerDeg), order);
+    SetMember(*cone, "outerDeg", snd::tool::Number(outerDeg), order);
+    SetMember(*cone, "outerDb", snd::tool::Number(outerDb), order);
+    return true;
+  });
 }
 bool EventEditor::SetVirtualReturn(VirtualReturn r) {
-  return valid() && doc_.Set(guid_, "virtualReturn", String(kVirtualNames[static_cast<int>(r)]));
+  return valid() && doc_.SetDefaulted(guid_, "virtualReturn", String(kVirtualNames[static_cast<int>(r)]), String("continue"));
 }
 
 std::vector<std::string> EventEditor::UnusedMembers() const {
@@ -281,7 +300,7 @@ bool EventEditor::SetTrackLayerParameter(std::uint32_t t, const std::string& g) 
   return t < TrackCount() && SetRef(doc_, guid_, (TrackPath(t) + ".layerParameter").c_str(), g, "parameter");
 }
 bool EventEditor::SetTrackFlags(std::uint32_t t, std::uint32_t flags) {
-  return t < TrackCount() && doc_.Set(guid_, TrackPath(t) + ".flags", snd::tool::Number(flags));
+  return t < TrackCount() && doc_.SetDefaulted(guid_, TrackPath(t) + ".flags", snd::tool::Number(flags), snd::tool::Number(0));
 }
 
 // --- clips --------------------------------------------------------------------------------
@@ -328,7 +347,21 @@ bool EventEditor::AddSynthClip(std::uint32_t t, const SynthDesc& s, double start
 bool EventEditor::SetSynth(std::uint32_t t, std::uint32_t c, const SynthDesc& s) {
   if (c >= ClipCount(t)) return false;
   const std::string p = ClipPath(t, c);
-  if (FindPath(*event(), p + ".synth") == nullptr) return false;  // only synth clips
+  const Value* cur = FindPath(*event(), p + ".synth");
+  if (cur == nullptr) return false;  // only synth clips
+  {
+    // D-177b: the same synthesis (defaults included) leaves the member as written.
+    auto ref = [&](const char* kind, const char* m) {
+      const DocObject* o = doc_.Resolve(kind, StringAt(*cur, m));
+      return o != nullptr ? o->guid : StringAt(*cur, m);
+    };
+    const std::string kind = StringAt(*cur, "kind", "oscillator");
+    const bool same = kind == s.kind && StringAt(*cur, "waveform", "sine") == s.waveform &&
+                      NumberAt(*cur, "frequencyHz", 440) == s.frequencyHz && NumberAt(*cur, "duty", 0.5) == s.duty &&
+                      StringAt(*cur, "noiseColor", "white") == s.noiseColor && ref("asset", "asset") == NormalizeGuid(s.asset) &&
+                      ref("patch", "patch") == NormalizeGuid(s.patch) && NumberAt(*cur, "channels", 1) == s.channels;
+    if (same) return true;
+  }
   if (s.kind == "patch" && !ValidRef(s.patch, "patch")) return false;
   if ((s.kind == "granular" || s.kind == "wavetable") && !ValidRef(s.asset, "asset")) return false;
   SynthDesc n = s;
@@ -366,7 +399,8 @@ bool EventEditor::SetClipNumber(std::uint32_t t, std::uint32_t c, ClipNumber n, 
   if (c >= ClipCount(t) || !std::isfinite(v)) return false;
   if (v < 0 && n != ClipNumber::VolumeDb && n != ClipNumber::PitchCents) return false;
   if (n == ClipNumber::LoopCount && (!IsInteger(v) || v > 4294967295.0)) return false;
-  return doc_.Set(guid_, ClipPath(t, c) + "." + ClipKey(n), snd::tool::Number(v), mergeKey);
+  return doc_.SetDefaulted(guid_, ClipPath(t, c) + "." + ClipKey(n), snd::tool::Number(v), snd::tool::Number(ClipDefault(n)),
+                           mergeKey);
 }
 double EventEditor::ClipNumberOf(std::uint32_t t, std::uint32_t c, ClipNumber n) const {
   const Value* e = event();
@@ -375,7 +409,8 @@ double EventEditor::ClipNumberOf(std::uint32_t t, std::uint32_t c, ClipNumber n)
 bool EventEditor::SetClipRandom(std::uint32_t t, std::uint32_t c, RandomField f, double width, std::uint32_t mergeKey) {
   if (c >= ClipCount(t) || !std::isfinite(width) || width < 0) return false;
   if (f == RandomField::Pan && width > 2) return false;  // pan spans -1 .. 1
-  return doc_.Set(guid_, ClipPath(t, c) + ".random." + RandomKey(f), snd::tool::Number(width), mergeKey);
+  return doc_.SetDefaulted(guid_, ClipPath(t, c) + ".random." + RandomKey(f), snd::tool::Number(width), snd::tool::Number(0),
+                           mergeKey);
 }
 double EventEditor::ClipRandom(std::uint32_t t, std::uint32_t c, RandomField f) const {
   const Value* e = event();
@@ -425,6 +460,14 @@ bool EventEditor::AddAction(std::uint32_t t, const ActionDesc& a) {
 bool EventEditor::SetAction(std::uint32_t t, std::uint32_t i, const ActionDesc& a) {
   Value v;
   if (i >= ActionCount(t) || !MakeAction(doc_, a, &v)) return false;
+  {
+    const ActionDesc cur = Action(t, i);
+    const bool usesValue = a.action == ActionKind::SetParameter || a.action == ActionKind::ApplySnapshot;
+    if (cur.timeMs == a.timeMs && cur.action == a.action && cur.target == NormalizeGuid(a.target) &&
+        (!usesValue || cur.value == a.value)) {
+      return true;  // D-177b
+    }
+  }
   const std::string p = TrackPath(t) + ".actions[" + std::to_string(i) + "]";
   // Keep members the tool does not know (notes ...).
   Value merged = *FindPath(*event(), p);

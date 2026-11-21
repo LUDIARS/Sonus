@@ -217,27 +217,29 @@ bool MixerEditor::SetParent(const std::string& bus, const std::string& parentGui
   const DocObject* b = Bus(bus);
   const DocObject* p = Bus(parentGuid);
   if (b == nullptr || p == nullptr || b->doc.Find("parent") == nullptr) return false;  // the master stays the root
+  if (ParentOf(*b) == p->guid) return true;  // D-177b: already its parent (by name or GUID)
   if (!BusGraphAcyclic(b->guid, p->guid, std::string())) return false;
   return doc_.Set(b->guid, "parent", String(p->guid));
 }
 
 bool MixerEditor::SetVolume(const std::string& bus, double db, std::uint32_t mergeKey) {
   if (Bus(bus) == nullptr || !Finite(db)) return false;
-  return doc_.SetNumber(bus, "volumeDb", std::clamp(db, static_cast<double>(kFaderOffDb), static_cast<double>(kFaderMaxDb)),
-                        mergeKey);
+  return doc_.SetDefaulted(bus, "volumeDb", Number(std::clamp(db, static_cast<double>(kFaderOffDb), static_cast<double>(kFaderMaxDb))),
+                           Number(0), mergeKey);
 }
 bool MixerEditor::SetChannels(const std::string& bus, std::uint32_t channels) {
-  return Bus(bus) != nullptr && channels <= 8u && doc_.SetNumber(bus, "channels", channels);
+  return Bus(bus) != nullptr && channels <= 8u && doc_.SetDefaulted(bus, "channels", Number(channels), Number(0));
 }
 bool MixerEditor::SetFlag(const std::string& bus, BusFlag f, bool on) {
   const DocObject* b = Bus(bus);
   if (b == nullptr) return false;
   const char* key = f == BusFlag::Output ? "output" : f == BusFlag::LodBypassable ? "lodBypassable" : "meter";
-  if (!on) return b->doc.Find(key) == nullptr || doc_.Erase(bus, key);
+  if (BoolAt(b->doc, key, false) == on) return true;  // D-177b (an explicit false stays)
+  if (!on) return doc_.Erase(bus, key);
   return doc_.Set(bus, key, Bool(true));
 }
 bool MixerEditor::SetLodPriority(const std::string& bus, std::uint32_t priority) {
-  return Bus(bus) != nullptr && doc_.SetNumber(bus, "lodPriority", priority);
+  return Bus(bus) != nullptr && doc_.SetDefaulted(bus, "lodPriority", Number(priority), Number(0));
 }
 
 // --- sends ----------------------------------------------------------------------------------
@@ -259,18 +261,22 @@ bool MixerEditor::RemoveSend(const std::string& bus, std::uint32_t i) {
 bool MixerEditor::SetSendLevel(const std::string& bus, std::uint32_t i, double db, std::uint32_t mergeKey) {
   const DocObject* b = Bus(bus);
   return b != nullptr && i < ArraySize(b->doc, "sends") && Finite(db) &&
-         doc_.SetNumber(bus, P("sends", i, ".levelDb"), std::max(db, static_cast<double>(kFaderOffDb)), mergeKey);
+         doc_.SetDefaulted(bus, P("sends", i, ".levelDb"), Number(std::max(db, static_cast<double>(kFaderOffDb))), Number(0), mergeKey);
 }
 bool MixerEditor::SetSendPreFader(const std::string& bus, std::uint32_t i, bool preFader) {
   const DocObject* b = Bus(bus);
   if (b == nullptr || i >= ArraySize(b->doc, "sends")) return false;
-  if (!preFader) return FindPath(b->doc, P("sends", i, ".preFader")) == nullptr || doc_.Erase(bus, P("sends", i, ".preFader"));
+  if (BoolAt(b->doc, P("sends", i, ".preFader"), false) == preFader) return true;  // D-177b
+  if (!preFader) return doc_.Erase(bus, P("sends", i, ".preFader"));
   return doc_.Set(bus, P("sends", i, ".preFader"), Bool(true));
 }
 bool MixerEditor::SetSendTarget(const std::string& bus, std::uint32_t i, const std::string& target) {
   const DocObject* b = Bus(bus);
   const DocObject* t = Bus(target);
   if (b == nullptr || t == nullptr || b->guid == t->guid || i >= ArraySize(b->doc, "sends")) return false;
+  if (const DocObject* cur = doc_.Resolve("bus", StringAt(b->doc, P("sends", i, ".bus"))); cur != nullptr && cur->guid == t->guid) {
+    return true;  // D-177b
+  }
   // Check the graph with the send moved.
   ProjectDocument trial = doc_;
   if (!trial.Set(b->guid, P("sends", i, ".bus"), String(t->guid))) return false;
@@ -315,6 +321,7 @@ bool MixerEditor::SetEffectParam(const std::string& bus, std::uint32_t e, std::u
   const dsp::EffectInfo* info = dsp::FindEffect(HashId(type));
   if (info != nullptr && p >= info->paramCount) return false;
   const double n = NormalizeEffectParam(type, p, v);
+  if (EffectParam(b->guid, e, p) == n) return true;  // D-177b (the dsp default when absent)
   const std::string arrPath = P("effects", e, ".params");
   const Value* arr = FindPath(b->doc, arrPath);
   const std::size_t have = arr != nullptr && arr->IsArray() ? arr->items.size() : 0u;
@@ -341,12 +348,15 @@ bool MixerEditor::SetEffectParam(const std::string& bus, std::uint32_t e, std::u
 }
 bool MixerEditor::SetEffectFlags(const std::string& bus, std::uint32_t e, std::uint32_t flags) {
   const DocObject* b = Bus(bus);
-  return b != nullptr && e < ArraySize(b->doc, "effects") && doc_.SetNumber(bus, P("effects", e, ".flags"), flags);
+  return b != nullptr && e < ArraySize(b->doc, "effects") && doc_.SetDefaulted(bus, P("effects", e, ".flags"), Number(flags), Number(0));
 }
 bool MixerEditor::SetEffectBlob(const std::string& bus, std::uint32_t e, const std::string& path) {
   const DocObject* b = Bus(bus);
   if (b == nullptr || e >= ArraySize(b->doc, "effects")) return false;
-  if (path.empty()) return FindPath(b->doc, P("effects", e, ".blob")) == nullptr || doc_.Erase(bus, P("effects", e, ".blob"));
+  if (path.empty()) {
+    const Value* cur = FindPath(b->doc, P("effects", e, ".blob"));
+    return cur == nullptr || (cur->IsString() && cur->text.empty()) || doc_.Erase(bus, P("effects", e, ".blob"));
+  }
   return doc_.Set(bus, P("effects", e, ".blob"), String(path));
 }
 
@@ -392,6 +402,14 @@ bool MixerEditor::SetSnapshotValue(const std::string& snap, std::uint32_t i, con
   Value val;
   if (s == nullptr || s->kind() != "snapshot" || i >= ArraySize(s->doc, "values") || !MakeSnapValue(doc_, v, &val)) {
     return false;
+  }
+  {
+    const SnapshotValue cur = SnapshotValues(snap)[i];
+    const bool fx = v.kind == SnapshotKind::EffectParam, sd = v.kind == SnapshotKind::SendLevel;
+    if (cur.kind == v.kind && cur.bus == NormalizeGuid(v.bus) && NumberAt(val, "value", 0) == cur.value &&
+        (!fx || (cur.effect == v.effect && cur.param == v.param)) && (!sd || cur.send == v.send)) {
+      return true;  // D-177b
+    }
   }
   return doc_.Set(s->guid, P("values", i), val);
 }
@@ -521,6 +539,10 @@ bool MixerEditor::SetDuckingKind(const std::string& duck, DuckKind kind, const s
     return false;
   }
   const std::string sg = src->guid;
+  const DocObject* curSrc = doc_.Resolve(kind == DuckKind::Rule ? "category" : "bus", StringAt(d->doc, "source"));
+  if ((StringAt(d->doc, "kind", "sidechain") == "rule") == (kind == DuckKind::Rule) && curSrc != nullptr && curSrc->guid == sg) {
+    return true;  // D-177b
+  }
   return doc_.Modify(d->guid, [&](Value& v) {
     const char* const* order = SpecMemberOrder("ducking", "");
     SetMember(v, "kind", String(kind == DuckKind::Rule ? "rule" : "sidechain"), order);
@@ -531,7 +553,9 @@ bool MixerEditor::SetDuckingKind(const std::string& duck, DuckKind kind, const s
 bool MixerEditor::SetDuckingTarget(const std::string& duck, const std::string& target) {
   const DocObject* d = doc_.Find(duck);
   const DocObject* t = Bus(target);
-  return d != nullptr && d->kind() == "ducking" && t != nullptr && doc_.Set(d->guid, "target", String(t->guid));
+  if (d == nullptr || d->kind() != "ducking" || t == nullptr) return false;
+  if (const DocObject* cur = doc_.Resolve("bus", StringAt(d->doc, "target")); cur != nullptr && cur->guid == t->guid) return true;
+  return doc_.Set(d->guid, "target", String(t->guid));
 }
 bool MixerEditor::SetDucking(const std::string& duck, DuckField f, double v, std::uint32_t mergeKey) {
   const DocObject* d = doc_.Find(duck);
@@ -539,7 +563,8 @@ bool MixerEditor::SetDucking(const std::string& duck, DuckField f, double v, std
   if ((f == DuckField::AttackMs || f == DuckField::ReleaseMs) && v < 0) return false;
   const char* key = f == DuckField::AmountDb ? "amountDb" : f == DuckField::AttackMs ? "attackMs"
                     : f == DuckField::ReleaseMs ? "releaseMs" : "thresholdDb";
-  return doc_.SetNumber(d->guid, key, v, mergeKey);
+  const double def = f == DuckField::AttackMs ? 10.0 : f == DuckField::ReleaseMs ? 200.0 : 0.0;  // the build's defaults
+  return doc_.SetDefaulted(d->guid, key, Number(v), Number(def), mergeKey);
 }
 
 // --- categories -----------------------------------------------------------------------------
@@ -568,6 +593,7 @@ bool MixerEditor::SetCategoryParent(const std::string& cat, const std::string& p
   if (parentGuid.empty()) return c->doc.Find("parent") == nullptr || doc_.Erase(cg, "parent");
   const DocObject* p = doc_.Find(parentGuid);
   if (p == nullptr || p->kind() != "category") return false;
+  if (const DocObject* cur = doc_.Resolve("category", StringAt(c->doc, "parent")); cur != nullptr && cur->guid == p->guid) return true;
   // Walk up from the new parent: reaching `cat` is a cycle.
   std::string g = p->guid;
   for (std::size_t guard = 0; guard <= doc_.objects().size() && !g.empty(); ++guard) {
@@ -581,12 +607,15 @@ bool MixerEditor::SetCategoryParent(const std::string& cat, const std::string& p
 bool MixerEditor::SetCategoryVolume(const std::string& cat, double db, std::uint32_t mergeKey) {
   const DocObject* c = doc_.Find(cat);
   return c != nullptr && c->kind() == "category" && Finite(db) &&
-         doc_.SetNumber(c->guid, "volumeDb", std::clamp(db, static_cast<double>(kFaderOffDb), static_cast<double>(kFaderMaxDb)),
-                        mergeKey);
+         doc_.SetDefaulted(c->guid, "volumeDb", Number(std::clamp(db, static_cast<double>(kFaderOffDb), static_cast<double>(kFaderMaxDb))),
+                           Number(0), mergeKey);
 }
 bool MixerEditor::SetCategoryFlag(const std::string& cat, bool ignorePause, bool muteOnFocusLoss) {
   const DocObject* c = doc_.Find(cat);
   if (c == nullptr || c->kind() != "category") return false;
+  if (BoolAt(c->doc, "ignorePause", false) == ignorePause && BoolAt(c->doc, "muteOnFocusLoss", false) == muteOnFocusLoss) {
+    return true;  // D-177b
+  }
   return doc_.Modify(c->guid, [&](Value& v) {
     const char* const* order = SpecMemberOrder("category", "");
     for (std::size_t i = v.members.size(); i-- > 0;) {
@@ -613,7 +642,8 @@ bool MixerEditor::SetMaxVoices(const std::string& group, std::uint32_t maxVoices
 }
 bool MixerEditor::SetSteal(const std::string& group, StealMode steal) {
   const DocObject* g = doc_.Find(group);
-  return g != nullptr && g->kind() == "voiceLimitGroup" && doc_.Set(g->guid, "steal", String(kSteal[static_cast<int>(steal)]));
+  return g != nullptr && g->kind() == "voiceLimitGroup" &&
+         doc_.SetDefaulted(g->guid, "steal", String(kSteal[static_cast<int>(steal)]), String("oldest"));
 }
 
 // --- write back -------------------------------------------------------------------------------

@@ -62,6 +62,8 @@ namespace json = ::snd::buildtool::json;
 // --- JSON helpers -----------------------------------------------------------------------
 // Structural equality (positions ignored; numbers by literal text).
 bool JsonEqual(const json::Value& a, const json::Value& b);
+// Like JsonEqual, but numbers compare by value ("2" = "2.0"; -0 and 0 differ).
+bool JsonSameMeaning(const json::Value& a, const json::Value& b);
 // Shortest decimal text that reads back as `v` (integers without a fraction). Non-finite
 // values are written as 0.
 std::string FormatNumber(double v);
@@ -176,12 +178,19 @@ class ProjectDocument {
   bool Remove(std::string_view guid, bool force = false);
   // Sets the value at `path` (members are created in spec order; array elements must exist,
   // or index == size appends). A value equal to the current one: true, no step, not dirty
-  // (D-177b). false only for a refused edit: no object, bad path, a non-finite number (Number()
+  // (D-177b; compared by meaning: numbers by value, so the text stays as written; in the editors'
+  // setters an explicit default equals an absent member, and a move to the same place is success).
+  // false only for a refused edit: no object, bad path, a non-finite number (Number()
   // of NaN / Inf, D-176c), or a rule of the object. The same holds for every editor's setters.
   bool Set(std::string_view guid, std::string_view path, json::Value value, std::uint32_t mergeKey = 0);
   bool SetNumber(std::string_view guid, std::string_view path, double v, std::uint32_t mergeKey = 0) {
     return Set(guid, path, Number(v), mergeKey);
   }
+  // Set for a member with a default: when the current value (or `def` when the member is absent)
+  // means the same as `value`, true and nothing is written (D-177b: an explicit default and an
+  // absent member are the same value). The editors' setters go through it.
+  bool SetDefaulted(std::string_view guid, std::string_view path, json::Value value, const json::Value& def,
+                    std::uint32_t mergeKey = 0);
   // Removes the member / array element at `path`. false if absent.
   bool Erase(std::string_view guid, std::string_view path);
   // Array operations at `arrayPath` (the array is created when absent and index is 0).
@@ -231,7 +240,11 @@ class ProjectDocument {
   // that could not be read) to the same relative paths, and from then on works in `dir`. Files
   // outside the project directory are not copied (lastSave().outside); a referenced file that
   // cannot be read is listed in lastSave().missing. A failed write or copy: false, directory()
-  // unchanged.
+  // unchanged. `dir` that is the project's directory spelled otherwise (std::filesystem::equivalent,
+  // or the normalised path when it does not exist) is a Save. Refused (false, the reason in
+  // lastSave(), nothing written, the document and directory() unchanged): a destination inside
+  // the project directory or containing it, and a destination that already holds *.json files
+  // this save does not write (they would mix into the project on the next Load).
   bool SaveTo(const std::string& dir, std::string* error = nullptr);
   const SaveResult& lastSave() const { return lastSave_; }
   // Project-relative files the objects name (asset "file" / "languages", effect "blob").

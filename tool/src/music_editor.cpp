@@ -214,9 +214,14 @@ double SegmentEditor::Frames() const {
 }
 bool SegmentEditor::SetAsset(const std::string& g) {
   const DocObject* a = doc_.Find(g);
-  return valid() && a != nullptr && a->kind() == "asset" && doc_.Set(guid_, "asset", String(a->guid));
+  if (!valid() || a == nullptr || a->kind() != "asset") return false;
+  const DocObject* cur = doc_.Resolve("asset", StringAt(doc_.Find(guid_)->doc, "asset"));
+  if (cur != nullptr && cur->guid == a->guid) return true;  // D-177b
+  return doc_.Set(guid_, "asset", String(a->guid));
 }
-bool SegmentEditor::SetBars(std::uint32_t bars) { return valid() && bars >= 1u && doc_.SetNumber(guid_, "bars", bars); }
+bool SegmentEditor::SetBars(std::uint32_t bars) {
+  return valid() && bars >= 1u && doc_.SetDefaulted(guid_, "bars", Number(bars), Number(1));
+}
 bool SegmentEditor::SetEntryFrame(std::uint64_t f) {
   if (!valid()) return false;
   const json::Value& d = doc_.Find(guid_)->doc;
@@ -224,7 +229,7 @@ bool SegmentEditor::SetEntryFrame(std::uint64_t f) {
   if (exit > 0 && static_cast<double>(f) >= exit) return false;
   const double frames = Frames();
   if (frames > 0 && static_cast<double>(f) >= frames) return false;
-  return doc_.SetNumber(guid_, "entryFrame", static_cast<double>(f));
+  return doc_.SetDefaulted(guid_, "entryFrame", Number(static_cast<double>(f)), Number(0));
 }
 bool SegmentEditor::SetExitFrame(std::uint64_t f) {
   if (!valid()) return false;
@@ -235,7 +240,8 @@ bool SegmentEditor::SetExitFrame(std::uint64_t f) {
 }
 bool SegmentEditor::SetEntryPreload(bool on) {
   if (!valid()) return false;
-  if (!on) return doc_.Find(guid_)->doc.Find("entryPreload") == nullptr || doc_.Erase(guid_, "entryPreload");
+  if (BoolAt(doc_.Find(guid_)->doc, "entryPreload", false) == on) return true;  // D-177b
+  if (!on) return doc_.Erase(guid_, "entryPreload");
   return doc_.Set(guid_, "entryPreload", Bool(true));
 }
 std::vector<TempoPointDesc> SegmentEditor::Tempo() const {
@@ -293,6 +299,9 @@ bool SegmentEditor::AddTempo(const TempoPointDesc& p) {
 bool SegmentEditor::SetTempo(std::uint32_t i, const TempoPointDesc& p) {
   std::vector<TempoPointDesc> t = Tempo();
   if (i >= t.size()) return false;
+  if (t[i].tick == p.tick && t[i].bpm == p.bpm && t[i].beatsPerBar == p.beatsPerBar && t[i].beatUnit == p.beatUnit) {
+    return true;  // D-177b
+  }
   t[i] = p;
   if (!SignatureOnBarLine(t, i) || !SignatureOnBarLine(t, i + 1)) return false;
   return WriteTempo(t);
@@ -363,6 +372,7 @@ bool SegmentEditor::AddMarker(const MarkerDesc& m) {
 bool SegmentEditor::SetMarker(std::uint32_t i, const MarkerDesc& m) {
   const std::vector<MarkerDesc> have = Markers();
   if (i >= have.size() || m.name.empty()) return false;
+  if (have[i].name == m.name && have[i].frame == m.frame && have[i].kind == m.kind) return true;  // D-177b
   const double frames = Frames();
   if (frames > 0 && static_cast<double>(m.frame) > frames) return false;
   for (std::size_t k = 0; k < have.size(); ++k) {
@@ -390,6 +400,14 @@ bool SegmentEditor::SetStem(std::uint32_t i, const StemDesc& s) {
   if (!valid() || s.channelCount == 0u) return false;
   const Value* cur = FindPath(doc_.Find(guid_)->doc, Idx("stems", i));
   if (cur == nullptr) return false;
+  {
+    const DocObject* ca = doc_.Resolve("asset", StringAt(*cur, "asset"));
+    const std::string curAsset = ca != nullptr ? ca->guid : StringAt(*cur, "asset");
+    if (NumberAt(*cur, "channelFirst", 0) == s.channelFirst && NumberAt(*cur, "channelCount", 2) == s.channelCount &&
+        (s.asset.empty() || NormalizeGuid(s.asset) == curAsset)) {
+      return true;  // D-177b
+    }
+  }
   Value v = *cur;  // keeps volumeCurve and unknown members
   const char* const* order = SpecMemberOrder("segment", "stems[0]");
   SetMember(v, "channelFirst", Number(s.channelFirst), order);
@@ -440,8 +458,10 @@ bool PlaylistEditor::valid() const {
   const DocObject* o = doc_.Find(guid_);
   return o != nullptr && o->kind() == "playlist";
 }
-bool PlaylistEditor::SetMode(PlaylistMode m) { return valid() && doc_.Set(guid_, "mode", String(kModes[static_cast<int>(m)])); }
-bool PlaylistEditor::SetLoopCount(std::uint32_t n) { return valid() && doc_.SetNumber(guid_, "loopCount", n); }
+bool PlaylistEditor::SetMode(PlaylistMode m) {
+  return valid() && doc_.SetDefaulted(guid_, "mode", String(kModes[static_cast<int>(m)]), String("sequential"));
+}
+bool PlaylistEditor::SetLoopCount(std::uint32_t n) { return valid() && doc_.SetDefaulted(guid_, "loopCount", Number(n), Number(0)); }
 std::uint32_t PlaylistEditor::EntryCount() const {
   const Value* e = valid() ? doc_.Find(guid_)->doc.Find("entries") : nullptr;
   return e != nullptr && e->IsArray() ? static_cast<std::uint32_t>(e->items.size()) : 0u;
@@ -461,7 +481,13 @@ bool PlaylistEditor::AddEntry(const std::string& seg, double w, std::uint32_t re
 }
 bool PlaylistEditor::SetEntry(std::uint32_t i, const std::string& seg, double w, std::uint32_t repeat) {
   Value v;
-  return i < EntryCount() && EntryJson(doc_, seg, w, repeat, &v) && doc_.Set(guid_, Idx("entries", i), v);
+  if (i >= EntryCount() || !EntryJson(doc_, seg, w, repeat, &v)) return false;
+  const Value& cur = *FindPath(doc_.Find(guid_)->doc, Idx("entries", i));
+  const DocObject* cs = doc_.Resolve("segment", StringAt(cur, "segment"));
+  if (cs != nullptr && cs->guid == NormalizeGuid(seg) && NumberAt(cur, "weight", 1) == w && NumberAt(cur, "repeat", 1) == repeat) {
+    return true;  // D-177b
+  }
+  return doc_.Set(guid_, Idx("entries", i), v);
 }
 bool PlaylistEditor::RemoveEntry(std::uint32_t i) { return i < EntryCount() && doc_.Erase(guid_, Idx("entries", i)); }
 bool PlaylistEditor::MoveEntry(std::uint32_t from, std::uint32_t to) { return doc_.MoveElement(guid_, "entries", from, to); }
@@ -512,6 +538,7 @@ bool MusicEditor::RemoveState(const std::string& name) {
 bool MusicEditor::RenameState(const std::string& from, const std::string& to) {
   const std::vector<std::string> st = States();
   const int i = IndexOf(st, from);
+  if (i >= 0 && from == to) return true;  // D-177b
   if (i < 0 || to.empty() || to == "*" || IndexOf(st, to) >= 0) return false;
   return doc_.Modify(guid_, [&](Value& e) {
     Value* m = FindPath(e, "music");
@@ -531,8 +558,11 @@ bool MusicEditor::RenameState(const std::string& from, const std::string& to) {
 bool MusicEditor::SetStatePlaylist(const std::string& name, const std::string& playlistGuid) {
   const int i = IndexOf(States(), name);
   const DocObject* pl = doc_.Find(playlistGuid);
-  return i >= 0 && pl != nullptr && pl->kind() == "playlist" &&
-         doc_.Set(guid_, Idx("music.states", static_cast<std::uint32_t>(i), ".playlist"), String(pl->guid));
+  if (i < 0 || pl == nullptr || pl->kind() != "playlist") return false;
+  const std::string path = Idx("music.states", static_cast<std::uint32_t>(i), ".playlist");
+  const DocObject* cur = doc_.Resolve("playlist", StringAt(doc_.Find(guid_)->doc, path));
+  if (cur != nullptr && cur->guid == pl->guid) return true;  // D-177b
+  return doc_.Set(guid_, path, String(pl->guid));
 }
 bool MusicEditor::SetInitialState(const std::string& name) {
   return IndexOf(States(), name) >= 0 && doc_.Set(guid_, "music.initialState", String(name));
@@ -613,6 +643,15 @@ bool MusicEditor::SetRule(std::uint32_t i, const TransitionRule& r) {
   const Value* m = Music();
   const Value* cur = m != nullptr ? FindPath(*m, Idx("transitions", i)) : nullptr;
   if (cur == nullptr || !ValidRule(r)) return false;
+  {
+    const TransitionRule c = Rules()[i];
+    if (c.from == r.from && c.to == r.to && c.timing == r.timing && c.timingCount == r.timingCount &&
+        c.fadeOutBeats == r.fadeOutBeats && c.fadeInBeats == r.fadeInBeats && c.bridge == NormalizeGuid(r.bridge) &&
+        c.start == r.start && c.startMarker == r.startMarker && c.interruptAfterBridge == r.interruptAfterBridge &&
+        c.late == r.late && c.prepare == r.prepare) {
+      return true;  // D-177b: explicit defaults stay as written
+    }
+  }
   return doc_.Set(guid_, Idx("music.transitions", i), RuleJson(r, cur));
 }
 bool MusicEditor::RemoveRule(std::uint32_t i) { return i < Rules().size() && doc_.Erase(guid_, Idx("music.transitions", i)); }
@@ -693,7 +732,15 @@ bool MusicEditor::SetStinger(std::uint32_t i, const StingerDesc& s) {
   bool ok = false;
   const Value v = StingerJson(doc_, s, &ok);
   const Value* m = Music();
-  return ok && m != nullptr && FindPath(*m, Idx("stingers", i)) != nullptr && doc_.Set(guid_, Idx("music.stingers", i), v);
+  const Value* cur = m != nullptr ? FindPath(*m, Idx("stingers", i)) : nullptr;
+  if (!ok || cur == nullptr) return false;
+  const DocObject* ce = doc_.Resolve("event", StringAt(*cur, "event"));
+  if (StringAt(*cur, "name") == s.name && ce != nullptr && ce->guid == NormalizeGuid(s.event) &&
+      StringAt(*cur, "timing", "nextBeat") == kTimingNames[static_cast<int>(s.timing)] &&
+      NumberAt(*cur, "timingCount", 0) == s.timingCount && (StringAt(*cur, "overlap", "replace") == "stack") == s.stack) {
+    return true;  // D-177b
+  }
+  return doc_.Set(guid_, Idx("music.stingers", i), v);
 }
 bool MusicEditor::RemoveStinger(std::uint32_t i) {
   const Value* m = Music();
