@@ -359,14 +359,18 @@ SND_TEST(IndepFinal, LongStallWithoutAdvanceKeepsDroppingThenRecovers) {
                   static_cast<unsigned long long>(st.group_requests),
                   static_cast<unsigned long long>(st.dropped_no_emitter), static_cast<unsigned long long>(st.api_failures),
                   ss.rejected_commands, ss.reserve_overflows, ss.fallback_commands);
-  SND_CHECK_EQ(st.group_requests, 64u);
-  SND_CHECK_EQ(st.dropped_no_emitter, 2u * 4000u - 64u);
+  // The audio thread may still apply the first batches while it fills its render-ahead (the
+  // output is not advanced, the thread is not stopped): a few rings' worth may be released
+  // at the start; after that the ring stays full.
+  SND_CHECK(st.group_requests >= 64u && st.group_requests <= 3u * 64u);
+  SND_CHECK_EQ(st.group_requests + st.dropped_no_emitter, 2u * 4000u);
   SND_CHECK_EQ(st.tracking_timeouts, 1u);  // slide 2
   SND_CHECK_EQ(st.tracking_updated + st.tracking_restarted, 3999u);
   // The output runs again.
   const std::uint64_t from = f.s.Frames();
   int frames = 0;
-  for (; frames < 60 && phystest::Stats(f.phys).group_requests == 64u; ++frames) {
+  const std::uint64_t stalledRequests = st.group_requests;
+  for (; frames < 60 && phystest::Stats(f.phys).group_requests == stalledRequests; ++frames) {
     f.s.Advance(1);
     SND_CHECK_EQ(f.Submit({Hit(9000000, 2.0f)}), SND_OK);
   }
@@ -432,7 +436,7 @@ SND_TEST(IndepFinal, Defect_LongSuspendWithPhysicsCannotResume) {
 }
 
 // Core (outside physics), public API only: snd_suspend, then 64 snd_set_param_global a frame
-// with snd_update for 300 frames (a game that keeps updating its parameters while
+// with snd_update for 2000 frames (a game that keeps updating its parameters while
 // suspended). Expected: snd_resume succeeds (sonus.h: "Recorded like other commands"; nothing
 // says a resume can be refused for good). Actual: SND_ERR_COMMAND_BUFFER_FULL, and retrying
 // after snd_update never succeeds: nothing consumes the commands while suspended, so the
@@ -442,7 +446,7 @@ SND_TEST(IndepFinal, Defect_CoreResumeRefusedForeverAfterRecordingWhileSuspended
   SND_REQUIRE_EQ(s.created, SND_OK);
   s.Advance(2);
   SND_CHECK_EQ(snd_suspend(s.sys), SND_OK);
-  for (int frame = 0; frame < 300; ++frame) {
+  for (int frame = 0; frame < 2000; ++frame) {
     for (int i = 0; i < 64; ++i) snd_set_param_global(s.sys, 0x5000u + static_cast<snd_id>(i), static_cast<float>(frame));
     snd_update(s.sys);
   }
@@ -452,7 +456,7 @@ SND_TEST(IndepFinal, Defect_CoreResumeRefusedForeverAfterRecordingWhileSuspended
     snd_update(s.sys);
     rr = snd_resume(s.sys);
   }
-  snd::test::Note("resume after 300 suspended frames of 64 global parameters: %d (after %d retries)", static_cast<int>(rr),
+  snd::test::Note("resume after 2000 suspended frames of 64 global parameters: %d (after %d retries)", static_cast<int>(rr),
                   retries);
   SND_CHECK_EQ(rr, SND_OK);
 }
