@@ -34,7 +34,6 @@ using snd::HashId;
 constexpr std::uint32_t kB = 256;
 constexpr std::size_t kDelay = 480;  // 10 ms at 48 kHz
 const std::vector<float> kDelay10 = EchoDelay(10.0f);
-constexpr std::size_t kNpos = static_cast<std::size_t>(-1);
 
 snd_config VfxConfig(std::uint32_t slots = 4, std::uint32_t chain = 2) {
   snd_config c = G2Config();
