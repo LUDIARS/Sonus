@@ -140,7 +140,10 @@
  *   Always (stalled or not): the release check that records (snd_set_playback_volume) runs only
  *   in a call whose block_index moved since the last such check, and a tracked sliding /
  *   rolling playback records only the values that changed since it last recorded them
- *   (position, speed parameter, volume, pitch, surface parameters). snd_phys_play_footstep and
+ *   (position, speed parameter, volume, pitch, surface parameters). An ended sliding /
+ *   rolling playback is found by its state (ENDED, or NONE after it was seen applied), by a
+ *   record refused as stale, or - when nothing changed and it was never seen applied - by the
+ *   same recording check as the release (its own volume), also only when block_index moved. snd_phys_play_footstep and
  *   snd_physics_play_at record as usual (the game calls them itself); snd_phys_destroy stops
  *   and releases as usual. audio_stalled_calls counts the stalled calls.
  *
