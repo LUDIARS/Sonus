@@ -58,6 +58,9 @@ class IStructEditor {
 //   the live sends from it: they leave the revert log with it (D-172, no Undo is asked for
 //   them). Every edit also takes one place of the revert log at acceptance
 //   (RuntimeDesc::maxStructLog); an edit that does not fit is refused (LIMIT_REACHED).
+//   A remove is accepted with a full log: if it cancels a live add it needs no place;
+//   otherwise the audio thread takes one when it applies it, or answers LIMIT_REACHED
+//   without asking the editor.
 inline constexpr std::uint32_t kStructEditBaseBytes = 64;
 struct StructCost {
   std::uint32_t buses = 0;

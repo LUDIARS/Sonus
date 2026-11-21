@@ -687,7 +687,7 @@ void LiveRuntime::ScanArena(const core::LiveArenaView& a) noexcept {
 
 void LiveRuntime::ApplyStruct(core::System& sys, PendingChunk& p, std::uint32_t session, ApplyResult* r) noexcept {
   const StructCost cost{p.costBuses, p.costEffects, p.costBytes};
-  const std::uint32_t logPlace = p.structLogPlace;
+  std::uint32_t logPlace = p.structLogPlace;
   StructEdit h{};
   if (p.bytes < sizeof(h)) {
     ReleaseStruct(cost);
@@ -698,6 +698,26 @@ void LiveRuntime::ApplyStruct(core::System& sys, PendingChunk& p, std::uint32_t 
   std::memcpy(&h, p.data, sizeof(h));
   const std::uint64_t* args = reinterpret_cast<const std::uint64_t*>(p.data + sizeof(StructEdit));
   const StructEditRequest q{static_cast<StructOp>(h.op), h.targetId, h.argCount, session, args};
+  // D-172: a remove accepted without a log place (the log was full) is applied only when it
+  // cancels a live add (no place needed); otherwise it needs a place now, or it is refused
+  // without asking the editor.
+  if (logPlace == 0u && (q.op == StructOp::RemoveBus || q.op == StructOp::RemoveEffect)) {
+    const std::uint32_t addOp =
+        static_cast<std::uint32_t>(q.op == StructOp::RemoveBus ? StructOp::AddBus : StructOp::AddEffect);
+    bool cancels = false;
+    for (std::uint32_t i = 0; i < structLogCount_ && !cancels; ++i) {
+      cancels = structLog_[i].op == addOp && structLog_[i].targetId == q.targetId;
+    }
+    if (!cancels) {
+      if (!ReserveStructLog()) {
+        ReleaseStruct(cost);
+        r->result = SND_ERR_LIMIT_REACHED;
+        r->cells = 0u;
+        return;
+      }
+      logPlace = 1u;
+    }
+  }
   const snd_result res = structEditor_ != nullptr ? structEditor_->Apply(sys, q) : SND_ERR_UNSUPPORTED;
   r->result = res;
   r->cells = res == SND_OK ? 1u : 0u;

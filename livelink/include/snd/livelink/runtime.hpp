@@ -209,8 +209,9 @@ class LiveRuntime {
   DevReserveUsage ReserveUsage() const noexcept;
   // D-172: one place of the structural-edit log (maxStructLog), taken by the live link thread
   // when it accepts an edit (false: full, the edit is refused with SND_ERR_LIMIT_REACHED and
-  // takes nothing). The audio thread gives it back unless the applied edit stays in the log
-  // (a refused / stale / cancelled edit, a remove that cancels a live add, an undo).
+  // takes nothing; a remove goes on without one). The audio thread gives it back unless the
+  // applied edit stays in the log (a refused / stale / cancelled edit, a remove that cancels
+  // a live add, an undo); it takes one itself for a remove of a bank object accepted without.
   bool ReserveStructLog() noexcept;
   void ReleaseStructLog(std::uint32_t n = 1) noexcept;
   std::uint32_t StructLogPlaces() const noexcept { return structLogTaken_.load(std::memory_order_relaxed); }
