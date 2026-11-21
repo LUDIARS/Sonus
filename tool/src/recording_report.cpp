@@ -506,7 +506,7 @@ ExpectationResult CheckExpectation(const ReplayRun& run, const ReplayExpectation
     std::snprintf(m, sizeof m,
                   "decision %zu: block %" PRIu64 " %s id %08x slot %u detail %08x, expected block %" PRIu64
                   " %s id %08x slot %u detail %08x",
-                  i, a.block, LogKindName(a.kind).c_str(), a.id, a.slot, a.detail, b.block, LogKindName(b.kind).c_str(),
+                  i, a.block, LogEntryKindName(a.kind).c_str(), a.id, a.slot, a.detail, b.block, LogEntryKindName(b.kind).c_str(),
                   b.id, b.slot, b.detail);
     r.messages.push_back(m);
     break;

@@ -3,8 +3,6 @@
 
 #include <algorithm>
 
-#include "snd/internal/commands.hpp"
-#include "snd/internal/notify.hpp"
 #include "snd/livelink/client.hpp"
 #include "snd/livelink/runtime.hpp"
 
@@ -25,13 +23,6 @@ std::uint32_t ProfilerMaskFor(std::uint32_t views, std::uint16_t peerMinor) {
   return m & ll::ProfilerMaskOf(peerMinor);
 }
 
-const char* MemTagName(std::uint32_t tag) {
-  static const char* const kNames[SND_MEM_TAG_COUNT] = {"tables",      "frame arena", "thread arena", "stream pool",
-                                                        "decoder pool", "dsp pool",    "pcm cache",    "bank",
-                                                        "command arena", "notify",     "live link",    "misc"};
-  return tag < SND_MEM_TAG_COUNT ? kNames[tag] : "?";
-}
-
 bool LogFilter::Matches(const ll::LogEntry& e) const {
   const bool isCommand = (e.kind & ll::kLogCommandBit) != 0u;
   const bool isEnd = !isCommand && e.kind == ll::kLogPlaybackEnded;
@@ -43,24 +34,9 @@ bool LogFilter::Matches(const ll::LogEntry& e) const {
   return true;
 }
 
-std::string LogKindName(std::uint32_t kind) {
-  if ((kind & ll::kLogCommandBit) != 0u) {
-    const cmd::CommandInfo* i = cmd::FindCommandInfo(static_cast<std::uint16_t>(kind & 0x7FFFu));
-    return i != nullptr ? std::string(i->name) : "Command?";
-  }
-  if (kind == ll::kLogPlaybackEnded) return "PlaybackEnded";
-  switch (static_cast<notify::EventType>(kind)) {
-    case notify::EventType::Beat: return "Beat";
-    case notify::EventType::Marker: return "Marker";
-    case notify::EventType::Log: return "Log";
-    case notify::EventType::Error: return "Error";
-    case notify::EventType::Warning: return "Warning";
-    case notify::EventType::StreamStall: return "StreamStall";
-    case notify::EventType::Underrun: return "Underrun";
-    case notify::EventType::LodChange: return "LodChange";
-    case notify::EventType::ReservationLate: return "ReservationLate";
-  }
-  return "Kind" + std::to_string(kind);
+std::string LogEntryKindName(std::uint32_t kind) {
+  if (kind == ll::kLogPlaybackEnded) return "playback ended";
+  return LogKindName(kind);
 }
 
 bool ProfilerStreams::Available(std::uint32_t view, std::string* why) const {

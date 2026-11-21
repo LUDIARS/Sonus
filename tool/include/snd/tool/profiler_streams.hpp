@@ -30,6 +30,7 @@
 #include <vector>
 
 #include "snd/format/livelink_protocol.hpp"
+#include "snd/tool/names.hpp"
 
 namespace snd::livelink {
 class Client;
@@ -68,7 +69,6 @@ struct MemoryRow {
   std::uint64_t budget = 0;   // 0 = no budget
   float fraction = 0.0f;      // used / budget (0 without a budget)
 };
-const char* MemTagName(std::uint32_t tag);
 struct StallPoint {
   std::uint64_t receivedNs = 0;
   livelink::StreamStall stall{};
@@ -93,8 +93,9 @@ struct LogFilter {
   std::uint32_t slot = ~0u;  // ~0u = any playback slot
   bool Matches(const livelink::LogEntry& e) const;
 };
-// Short text of a log kind ("Play", "PlaybackEnded", "Marker", ...).
-std::string LogKindName(std::uint32_t kind);
+// Text of a log kind: names.hpp's LogKindName ("cmd Play", "marker", ...) plus "playback ended"
+// (kLogPlaybackEnded, which the stage-2 names do not know). MemTagName: names.hpp.
+std::string LogEntryKindName(std::uint32_t kind);
 
 // Received / missed per stream (missed = entries pushed out of the client before Poll read them).
 struct StreamCount {
