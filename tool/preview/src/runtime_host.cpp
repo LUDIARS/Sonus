@@ -86,11 +86,10 @@ snd_result RuntimeHost::Create(const RuntimeHostDesc& desc, std::string* error) 
   if (live_ != nullptr) live_->Bind(sys_);
   if (replayer_ != nullptr) replayer_->Bind(sys_);
   mix_.assign(std::size_t{blockFrames_} * channels_, 0.0f);
-  {
-    std::lock_guard<std::mutex> g(recentMutex_);
-    recent_.assign(std::size_t{kRecentBlocks} * blockFrames_ * channels_, 0.0f);
-    recentAt_ = 0;
-  }
+  recentSamples_ = std::size_t{kRecentBlocks} * blockFrames_ * channels_;
+  recent_ = std::make_unique<std::atomic<float>[]>(recentSamples_);
+  for (std::size_t i = 0; i < recentSamples_; ++i) recent_[i].store(0.0f, std::memory_order_relaxed);
+  recentWritten_.store(0, std::memory_order_relaxed);
 
   if (output_ != HostOutput::Manual) {
     device_ = platform::CreateOutputDevice(
@@ -175,25 +174,29 @@ void RuntimeHost::Destroy() {
 }
 
 void RuntimeHost::Keep(const float* block) {
-  // Owner thread (Manual) or audio thread (Device): the lock is only taken by readers of the
-  // recent output, never for long (a copy of a few kilobytes).
-  std::unique_lock<std::mutex> g(recentMutex_, std::try_to_lock);
-  if (!g.owns_lock() || recent_.empty()) return;  // a reader holds it: skip this block (meters only)
+  if (recent_ == nullptr) return;
   const std::size_t n = std::size_t{blockFrames_} * channels_;
-  std::memcpy(recent_.data() + recentAt_ * n, block, n * sizeof(float));
-  recentAt_ = (recentAt_ + 1u) % kRecentBlocks;
+  const std::uint64_t w = recentWritten_.load(std::memory_order_relaxed);
+  std::atomic<float>* dst = recent_.get() + static_cast<std::size_t>(w % kRecentBlocks) * n;
+  for (std::size_t i = 0; i < n; ++i) dst[i].store(block[i], std::memory_order_relaxed);
+  recentWritten_.store(w + 1u, std::memory_order_release);
 }
 
 std::vector<float> RuntimeHost::RecentOutput(std::uint32_t blocks) const {
-  std::lock_guard<std::mutex> g(recentMutex_);
   std::vector<float> out;
-  if (recent_.empty()) return out;
-  if (blocks > kRecentBlocks) blocks = kRecentBlocks;
+  if (recent_ == nullptr) return out;
+  if (blocks > kRecentBlocks / 2u) blocks = kRecentBlocks / 2u;
   const std::size_t n = std::size_t{blockFrames_} * channels_;
-  for (std::uint32_t i = 0; i < blocks; ++i) {
-    const std::size_t at = (recentAt_ + kRecentBlocks - blocks + i) % kRecentBlocks;
-    out.insert(out.end(), recent_.begin() + static_cast<std::ptrdiff_t>(at * n),
-               recent_.begin() + static_cast<std::ptrdiff_t>((at + 1u) * n));
+  for (int attempt = 0; attempt < 4; ++attempt) {
+    const std::uint64_t w = recentWritten_.load(std::memory_order_acquire);
+    const std::uint64_t have = w < blocks ? w : blocks;
+    out.assign(static_cast<std::size_t>(have) * n, 0.0f);
+    for (std::uint64_t k = 0; k < have; ++k) {
+      const std::atomic<float>* src = recent_.get() + static_cast<std::size_t>((w - have + k) % kRecentBlocks) * n;
+      for (std::size_t i = 0; i < n; ++i) out[static_cast<std::size_t>(k) * n + i] = src[i].load(std::memory_order_relaxed);
+    }
+    // The writer may have lapped the copied blocks (kRecentBlocks / 2 of slack): try again.
+    if (recentWritten_.load(std::memory_order_acquire) - w < kRecentBlocks / 2u) return out;
   }
   return out;
 }

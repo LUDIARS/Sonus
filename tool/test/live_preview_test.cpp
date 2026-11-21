@@ -142,3 +142,41 @@ SND_TEST(LivePreview, TransitionAuditionSwitchesAtTheComputedBlock) {
   SND_CHECK(before > 0.01f);
   SND_CHECK_NEAR(after / before, 2.0, 1e-4);
 }
+
+SND_TEST(LivePreview, AuditionsToAConnectedGame) {
+  // The preview engine stands in for a game: the router sends live link auditions.
+  Rig r;
+  SND_REQUIRE(r.ok);
+  SND_REQUIRE(r.Connect());
+  SND_REQUIRE(r.Settled());
+  AuditionRouter router;
+  router.Bind(&r.conn, r.engine.get());
+  router.SetTarget(AuditionTarget::Game);
+  std::string why;
+  SND_CHECK(router.Ready(&why));
+  AuditionRequest q;
+  q.eventId = snd::HashId("Tone");
+  q.atPosition = false;
+  const AuditionResult a = router.PlayEvent(q);
+  SND_REQUIRE(a.ok);
+  SND_CHECK(a.seq != 0u);
+  SND_REQUIRE(r.Run([&] { return r.Left() > 0.05f; }));
+  // Moving a game audition: said, not done.
+  const AuditionResult m = router.Update3D(ListenerPose{}, EmitterPose{});
+  SND_CHECK(!m.ok);
+  SND_CHECK(!m.unsupported.empty());
+  // Stop-all (1.1): only the auditions; the game's own playback keeps playing.
+  SND_REQUIRE(r.engine->Play(snd::HashId("Pad"), nullptr) != 0u);
+  r.Frames(8);
+  const float both = r.Left();
+  const AuditionResult s = router.StopAll();
+  SND_REQUIRE(s.ok);
+  SND_REQUIRE(r.Run([&] { return r.Left() < both * 0.9f; }));
+  r.Frames(8);
+  SND_CHECK_NEAR(r.Left(), both * Ratio(-3.0) / (1.0 + Ratio(-3.0)), 1e-5);  // Pad alone (Music -3 dB)
+  // Without a connection the router says so.
+  r.conn.Close();
+  SND_CHECK(!router.Ready(&why));
+  SND_CHECK(!why.empty());
+  SND_CHECK(!router.PlayEvent(q).ok);
+}
