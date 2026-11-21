@@ -232,7 +232,7 @@ TSan は e5b8c3d の stress の変更（最後の全停止を送り直すだけ�
 | `IndepS7Replay.BeginWithUnknownOriginIsRecordedBehaviour`（穴 10） | 出力だけ | `...IsCorrupt`（origin 0 / 3 / 7 / 0xFFFF は CORRUPT） |
 
 穴 5（列 0 本）は前から OK を期待値にしていた。2 つ目の Server（穴 9）は新しいテスト（下の M7）。
-ほかに、テスト側の誤りを 1 つ直した（2f… 下の構成の節）: `IndepS7Fuzz.OrderViolations` が Hello の前の 4 つの要求を
+ほかに、テスト側の誤りを 1 つ直した（ba01c38）: `IndepS7Fuzz.OrderViolations` が Hello の前の 4 つの要求を
 SND_REQUIRE で送っていたが、ゲームが最初の要求で接続を閉じることがある（ASan で 1 回）。送信を必須にしない形にした。
 
 ### 再確認のテスト（`livelink/test/indep_s7_recheck_test.cpp`、10 件）と結果
@@ -277,3 +277,25 @@ SND_REQUIRE で送っていたが、ゲームが最初の要求で接続を閉�
 
 枠の取り合い、引数 65、同じ鍵の差し替え 2 回、取りこぼしの数そのものが足されている。ゲームが同じファイルを既に読み込んでいる
 場合のリロードの失敗、Remove も枠を取ることは、実装担当のテストに無い。
+
+### 回した構成（再確認）
+
+ビルドは `$S/livelink-indep/b-*`、-j2、1 つずつ。全部消した。
+
+| 構成 | コミット | 実行 | 結果 |
+| --- | --- | --- | --- |
+| 1 gcc Debug | 56d0cd0 | 全件 ctest（223） | 222 通過。失敗は `livelink_indep_s7_recheck_test` の `Defect_FailedReloadUnloadsTheGamesOwnOtherBank` だけ（単体で確認）。`platform_device_play_test` は Skipped。`tool_live_mixer_test`・`api_indep_runtime_test` を含め、ほかは全部通過 |
+| 3 ASan/UBSan | 56d0cd0 → ba01c38 | `ctest -R livelink`（33） | 56d0cd0 で `IndepS7Fuzz.OrderViolations` が 1 回落ちた（テスト側の誤り、上）→ 直して fuzz を `SND_FUZZ_ITERATIONS=20000` で 5 回: 全通過。ほかは欠陥 1 件だけ失敗。サニタイザの報告なし |
+| 4 TSan | ba01c38 | `ctest -R livelink`（33）。-j1 で `--repeat until-fail:20`: indep_s7_stress、indep_s7_live、v11_stress、v11_live、integration_livelink_stress。recheck の `ConcurrentStartsNeverOverlap`・`OneStartedServer`・`StructLogAndReserve` を `--filter` で 20 回ずつ | 欠陥 1 件だけ失敗、TSan の警告なし。繰り返しは全部通過（recheck の繰り返しの失敗 0） |
+| 5 Release | ba01c38 | 同じ（ctest と 20 回の繰り返し） | 欠陥 1 件だけ失敗。繰り返しは全部通過 |
+| clang Debug | ba01c38 | ビルド（警告 0）と `ctest -R livelink`（33） | 欠陥 1 件だけ失敗（各 indep_s7 を単体で回して確認） |
+| MinGW 構文検査 | 56d0cd0 | indep_s7 の 7 本（`-Wall -Wextra -Wpedantic -Wshadow -Werror`） | 全部通過 |
+
+回していないもの: 構成 6・7・8・9。
+
+### 未検証（再確認）
+
+- 言語バンク（languageId ≠ 0）を本当に持つバンクのホットリロード（言語の不一致は、言語 0 のファイルを言語 7 として要求する形でだけ確かめた）。
+- TCP での 1.1、Windows / macOS での実行（前と同じ）。
+- 構造の変更の模型は、RemoveEffect を含めていない（番号で指す外し方は偽の編集器では意味が無いため）。RemoveEffect は
+  `StructArgCountAtTheCap` などの規則の検査だけ。
