@@ -21,6 +21,23 @@ foreach(_t model_test live_mixer_test live_profiler_test indep_sync_test core_ho
   _snd_tool_test(${_t} "${_tool_core_test_link}")
 endforeach()
 
+# Group P (live reflection, preview engine, auditions, item revert, profiler streams, replay).
+# The preview engine and the replay host are in Sonus::tool_preview (tool/preview).
+set(_tool_live_link sonus_tool_preview ${_tool_core_test_link})
+foreach(_t live_preview_test live_sync_test live_revert_test profiler_streams_test replay_test
+        live_concurrency_test live_v10_test)
+  _snd_tool_test(${_t} "${_tool_live_link}")
+endforeach()
+# The 1.0 game of live_v10_test is the live link tests' hand-driven game (livelink/test).
+target_include_directories(tool_live_v10_test PRIVATE ${PROJECT_SOURCE_DIR}/livelink/test)
+# sonus-replay on the bug report replay_test writes (FIXTURES: replay_test first).
+set_tests_properties(tool_replay_test PROPERTIES FIXTURES_SETUP tool_replay_report
+                     ENVIRONMENT "SND_TOOL_REPLAY_REPORT_DIR=${CMAKE_CURRENT_BINARY_DIR}/replay-report")
+add_test(NAME tool_replay_cli COMMAND sonus-replay ${CMAKE_CURRENT_BINARY_DIR}/replay-report)
+set_tests_properties(tool_replay_cli PROPERTIES FIXTURES_REQUIRED tool_replay_report)
+add_test(NAME tool_replay_cli_bad_input COMMAND sonus-replay ${CMAKE_CURRENT_BINARY_DIR}/no-such-report)
+set_tests_properties(tool_replay_cli_bad_input PROPERTIES WILL_FAIL TRUE)
+
 # The runtime comparisons read the music module's time line and rule lookup (music/src).
 target_link_libraries(tool_runtime_compare_test PRIVATE sonus_music)
 target_include_directories(tool_runtime_compare_test PRIVATE ${PROJECT_SOURCE_DIR}/music/src)

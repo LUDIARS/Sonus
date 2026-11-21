@@ -159,7 +159,7 @@ std::uint64_t PreviewEngine::Play(Id event, const EmitterPose* emitter) {
     error_ = "the event did not start";
     return 0;
   }
-  playing_.push_back(Playing{h.value, em.value});
+  playing_.push_back(Playing{h.value, em.value, NextBlock()});
   return h.value;
 }
 
@@ -251,7 +251,9 @@ std::uint32_t PreviewEngine::Render(std::uint32_t blocks, std::vector<float>* ou
   // Playbacks that ended are forgotten (their emitters go back).
   for (std::size_t i = 0; i < playing_.size();) {
     const snd_playback_state st = host_->system()->GetPlaybackState(snd_playback_handle{playing_[i].playback});
-    if (st == SND_PLAYBACK_STATE_ENDED || st == SND_PLAYBACK_STATE_NONE) {
+    // NONE right after Play means "not known yet"; long after, the handle is gone.
+    const bool gone = st == SND_PLAYBACK_STATE_NONE && NextBlock() > playing_[i].startBlock + 64u;
+    if (st == SND_PLAYBACK_STATE_ENDED || gone) {
       Forget(playing_[i].playback);
     } else {
       ++i;
