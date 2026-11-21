@@ -609,9 +609,18 @@ SND_TEST(LivelinkV11, RemovingALiveBusTakesItsLiveEffectsAndTheLogIsReserved) {
   SND_CHECK_EQ(s.f.rt->ReserveUsage().buses, full.buses);
   SND_CHECK_EQ(s.f.rt->ReserveUsage().bytes, full.bytes);
   SND_CHECK_EQ(s.f.rt->Drops().structLog, 0u);
-  // Make room: the log holds 3, a remove needs a place too, so first an edit is refused...
-  SND_CHECK_EQ(s.Ack(s.client->StructEdit(ll::StructOp::RemoveBus, HashId("B1"), nullptr, 0)), SND_ERR_LIMIT_REACHED);
-  // ...with a larger log, removing B1 frees everything that went with it.
+  // A remove of a bank bus needs a log place: refused while the log is full, without the editor.
+  SND_CHECK_EQ(s.Ack(s.client->StructEdit(ll::StructOp::RemoveBus, HashId("Sfx"), nullptr, 0)), SND_ERR_LIMIT_REACHED);
+  SND_CHECK_EQ(ed.calls.size(), calls);
+  SND_CHECK_EQ(s.f.rt->StructLogPlaces(), 3u);
+  // A remove that cancels a live add is accepted with a full log (D-172): everything that went
+  // with B1 comes back, places and reserve.
+  SND_CHECK_EQ(s.Ack(s.client->StructEdit(ll::StructOp::RemoveBus, HashId("B1"), nullptr, 0)), SND_OK);
+  SND_CHECK_EQ(s.f.rt->StructLogPlaces(), 0u);
+  SND_CHECK_EQ(s.f.rt->ReserveUsage().buses, 0u);
+  SND_CHECK_EQ(s.f.rt->ReserveUsage().bytes, 0u);
+  SND_CHECK_EQ(s.f.rt->Drops().structLog, 0u);
+  // The same with a larger log (places to spare), then the revert has nothing to undo.
   ll::RuntimeDesc rd2 = rd;
   rd2.maxStructLog = 4;
   Session t(cfg, rd2, sd);
@@ -730,4 +739,30 @@ SND_TEST(LivelinkV11, SharedSlotIsLimitReachedAndArgCountIsCapped) {
                                             static_cast<std::uint32_t>(raw.size()));
   SND_CHECK_EQ(s.Ack(q), SND_ERR_INVALID_ARGUMENT);
   SND_CHECK_EQ(ed.calls.size(), 1u);
+}
+
+// D-173: a failed reload unloads only a registration it made itself. Here the file is the one
+// the game itself loaded for another bank ("Two"): the game keeps "Two".
+SND_TEST(LivelinkV11, FailedReloadKeepsTheGamesOwnOtherBank) {
+  Session s;
+  indep::BankOpts two;
+  two.name = "Two";
+  s.f.Load(indep::IndepBank(two), "two.sndb");
+  SND_REQUIRE(s.Ready());
+  SND_CHECK_EQ(s.Ack(s.client->ReloadBank(kBankId, 0, "two.sndb")), SND_ERR_INVALID_ARGUMENT);
+  ll::BankEntry b[4];
+  SND_REQUIRE(s.f.StepUntil([&] {
+    s.client->QueryBanks();
+    s.f.Steps(4);
+    return s.client->CopyBanks(b, 4) == 1u;
+  }));
+  SND_CHECK_EQ(b[0].bankId, HashId("Two"));  // the game's own; "Live" stays unloaded
+  // Another language of "Two" from the same file: fails, "Two" (language 0) stays.
+  SND_CHECK_EQ(s.Ack(s.client->ReloadBank(HashId("Two"), 7, "two.sndb", true)), SND_ERR_INVALID_ARGUMENT);
+  s.f.Steps(16);
+  s.client->QueryBanks();
+  const std::uint64_t lists = s.client->Sequences().bankLists;
+  SND_REQUIRE(s.f.StepUntil([&] { return s.client->Sequences().bankLists > lists - 1u && s.client->CopyBanks(b, 4) == 1u; }));
+  SND_CHECK_EQ(b[0].bankId, HashId("Two"));
+  SND_CHECK_EQ(b[0].languageId, 0u);
 }

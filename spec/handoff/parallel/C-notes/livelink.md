@@ -82,6 +82,12 @@
 | D-174 プロファイラと budget | 8 | 変更なし |
 | D-175 記録 1.1 と再生 | 9〜13 | 述語を 2 つに: `BitExactExpected()`（再生どうし、`kReplayStateLost` は外した）と `ReproducesRecordedRun()`（`kReplayBreaksRecordedRun` = それ ＋ StateLost ＋ NoBegin）。開始時に core で生きていた再生の数を `lostState` に足す（見分けられない core の状態は既定値と見なす、とヘッダに）。`Finished()` は最後の記録ブロックを描いた時点（ブロックの終わりのフック）（483e6e4） |
 
+差し戻し 2 回目（D-172・D-173 への追記）:
+- D-173: 失敗したリロードが外すのは、そのリロードが新しく作った登録だけ。`LoadBankAsync` が読み込みの前からあった登録（同じパスの
+  ゲーム自身のバンク）を返したときは外さない（`Reload::preexisting`）。読み込み中で一覧にまだ無いゲームのバンクは見分けられない（未検証）。
+- D-172: Remove は記録が一杯でも受け付ける。打ち消しなら枠なしで適用、バンクのものを外すならオーディオスレッドが適用時に枠を取り、
+  取れなければ編集器を呼ばずに LIMIT_REACHED。枠を取るのは受け付けか適用のどちらか一方、返すのはオーディオスレッドだけ。
+
 決定の番号を CONTRACTS.md の段階 7-C の節に書くのは、持ち場の外（`spec/interface/CONTRACTS.md`）なので、この組ではしていない。
 
 ## 契約の変更点（`contract/internal/include/snd/format/livelink_protocol.hpp` への追加だけ）

@@ -70,6 +70,7 @@ struct Server::Impl final : FrameReader::Handler {
     std::uint32_t seq = 0, conn = 0, bankId = 0, languageId = 0;
     bool wantAck = false;
     snd_bank_handle bank{0};
+    bool preexisting = false;  // LoadBankAsync returned a registration the game already had
   };
 
   ServerDesc d{};
@@ -703,8 +704,12 @@ struct Server::Impl final : FrameReader::Handler {
       reload.active = true;
       SendReloadStatus(ReloadPhase::Unloading, SND_OK);
     }
+    RefreshBanks();  // D-173: the registrations before the load (the same path returns the game's own)
     reload.bank = sys->LoadBankAsync(reloadPath);
     reload.active = true;
+    for (std::uint32_t i = 0; i < bankCount && !reload.preexisting; ++i) {
+      reload.preexisting = banks[i].handle.Value() == reload.bank.value;
+    }
     if (reload.bank.value == 0u) {
       FinishReload(ReloadPhase::Failed, SND_ERR_INVALID_ARGUMENT);
       return;
@@ -735,7 +740,8 @@ struct Server::Impl final : FrameReader::Handler {
           // D-173: the file held another bank (id or language): it is not kept (unloaded again);
           // the bank asked for stays unloaded, as when the load fails.
           if (banks[i].bankId != reload.bankId || banks[i].languageId != reload.languageId) {
-            if (registered) sys->UnloadBank(reload.bank, SND_UNLOAD_STOP_AND_UNLOAD);
+            // Only a registration this reload made; the game's own bank stays (D-173).
+            if (registered && !reload.preexisting) sys->UnloadBank(reload.bank, SND_UNLOAD_STOP_AND_UNLOAD);
             return FinishReload(ReloadPhase::Failed, SND_ERR_INVALID_ARGUMENT);
           }
           return FinishReload(ReloadPhase::Done, SND_OK);
@@ -771,7 +777,11 @@ struct Server::Impl final : FrameReader::Handler {
     bool logPlace = false;  // D-172: an edit the revert log cannot hold is refused here
     if (r == SND_OK) {
       logPlace = rt->ReserveStructLog();
-      if (!logPlace) r = SND_ERR_LIMIT_REACHED;
+      // A remove goes on without a place: if it cancels a live add it needs none, else the
+      // audio thread takes one when it applies it (or refuses it, LIMIT_REACHED).
+      const bool remove = m.op == static_cast<std::uint32_t>(StructOp::RemoveBus) ||
+                          m.op == static_cast<std::uint32_t>(StructOp::RemoveEffect);
+      if (!logPlace && !remove) r = SND_ERR_LIMIT_REACHED;
     }
     PendingChunk* slot = nullptr;
     const std::uint64_t bytes = sizeof(StructEdit) + std::uint64_t{m.argCount} * 8u;
@@ -794,7 +804,7 @@ struct Server::Impl final : FrameReader::Handler {
       c.costBuses = cost.buses;
       c.costEffects = cost.effects;
       c.costBytes = cost.bytes;
-      c.structLogPlace = 1u;
+      c.structLogPlace = logPlace ? 1u : 0u;
       c.state.store(PendingChunk::kQueued, std::memory_order_release);
       const cmd::LiveReplaceChunk cc{0u, kStructEditTag, &c};
       r = Record(cmd::CommandType::LiveReplaceChunk, &cc, sizeof(cc), h.seq, wantAck, slot, true, kOpStruct);
