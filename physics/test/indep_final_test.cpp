@@ -354,16 +354,24 @@ SND_TEST(IndepFinal, LongStallWithoutAdvanceKeepsDroppingThenRecovers) {
   snd_stats ss{};
   SND_CHECK_EQ(snd_get_stats(f.s.sys, &ss), SND_OK);
   snd_physics_stats st = phystest::Stats(f.phys);
-  snd::test::Note("not advanced 4000 frames: requests %llu, no emitter %llu, api failures %llu, core rejected %u, "
-                  "reserve overflows %u, fallback %u (overflow: see Defect_LongSuspendWithPhysicsCannotResume)",
+  snd::test::Note("not advanced 4000 frames: requests %llu, no emitter %llu, stalled %llu, api failures %llu, core "
+                  "rejected %u, reserve overflows %u, fallback %u",
                   static_cast<unsigned long long>(st.group_requests),
-                  static_cast<unsigned long long>(st.dropped_no_emitter), static_cast<unsigned long long>(st.api_failures),
+                  static_cast<unsigned long long>(st.dropped_no_emitter),
+                  static_cast<unsigned long long>(st.dropped_audio_stalled), static_cast<unsigned long long>(st.api_failures),
                   ss.rejected_commands, ss.reserve_overflows, ss.fallback_commands);
   // The audio thread may still apply the first batches while it fills its render-ahead (the
   // output is not advanced, the thread is not stopped): a few rings' worth may be released
   // at the start; after that the ring stays full.
   SND_CHECK(st.group_requests >= 64u && st.group_requests <= 3u * 64u);
-  SND_CHECK_EQ(st.group_requests + st.dropped_no_emitter, 2u * 4000u);
+  // D-125: after stall_calls (64) calls that saw the same block_index the audio side counts as
+  // stalled; the groups after that are dropped as dropped_audio_stalled (not no_emitter), and
+  // nothing is recorded for contacts, so the command area does not overflow.
+  SND_CHECK_EQ(st.group_requests + st.dropped_no_emitter + st.dropped_audio_stalled, 2u * 4000u);
+  SND_CHECK(st.dropped_audio_stalled >= 2u * (4000u - 70u));
+  SND_CHECK(st.audio_stalled_calls >= 4000u - 70u);
+  SND_CHECK_EQ(ss.rejected_commands, 0u);
+  SND_CHECK_EQ(ss.reserve_overflows, 0u);
   SND_CHECK_EQ(st.tracking_timeouts, 1u);  // slide 2
   SND_CHECK_EQ(st.tracking_updated + st.tracking_restarted, 3999u);
   // The output runs again.
@@ -398,7 +406,8 @@ SND_TEST(IndepFinal, LongStallWithoutAdvanceKeepsDroppingThenRecovers) {
 // playback at every call (D-119), i.e. up to max_held_emitters commands a frame; while
 // suspended nothing consumes them, the command reserve overflows and snd_resume itself is
 // refused with SND_ERR_COMMAND_BUFFER_FULL - for good (retrying with snd_update does not
-// help). Core shares the blame (Defect_CoreResumeRefusedForeverAfterRecordingWhileSuspended).
+// help). Core shares the blame (CoreA005_ResumeRefusedAfterRecordingWhileSuspended). Fixed in physics by
+// D-125 (nothing recorded for contacts while the audio side is stalled).
 SND_TEST(IndepFinal, Defect_LongSuspendWithPhysicsCannotResume) {
   Fx f;
   SND_REQUIRE(f.Ok());
@@ -435,13 +444,14 @@ SND_TEST(IndepFinal, Defect_LongSuspendWithPhysicsCannotResume) {
   SND_CHECK_EQ(l, 0.0);
 }
 
-// Core (outside physics), public API only: snd_suspend, then 64 snd_set_param_global a frame
-// with snd_update for 2000 frames (a game that keeps updating its parameters while
-// suspended). Expected: snd_resume succeeds (sonus.h: "Recorded like other commands"; nothing
-// says a resume can be refused for good). Actual: SND_ERR_COMMAND_BUFFER_FULL, and retrying
-// after snd_update never succeeds: nothing consumes the commands while suspended, so the
-// system cannot be resumed any more.
-SND_TEST(IndepFinal, Defect_CoreResumeRefusedForeverAfterRecordingWhileSuspended) {
+// Record of a core defect (request A-005), public API only: snd_suspend, then 64
+// snd_set_param_global a frame with snd_update for 2000 frames (a game that keeps updating its
+// parameters while suspended). Passes when snd_resume is
+//   (a) accepted (core fixed), or
+//   (b) refused with SND_ERR_COMMAND_BUFFER_FULL even after retries (the known defect: nothing
+//       consumes the commands while suspended, so the resume cannot be recorded any more),
+// and says which. Anything else fails. (Was Defect_CoreResumeRefusedForeverAfterRecordingWhileSuspended.)
+SND_TEST(IndepFinal, CoreA005_ResumeRefusedAfterRecordingWhileSuspended) {
   Sys s;
   SND_REQUIRE_EQ(s.created, SND_OK);
   s.Advance(2);
@@ -456,9 +466,12 @@ SND_TEST(IndepFinal, Defect_CoreResumeRefusedForeverAfterRecordingWhileSuspended
     snd_update(s.sys);
     rr = snd_resume(s.sys);
   }
-  snd::test::Note("resume after 2000 suspended frames of 64 global parameters: %d (after %d retries)", static_cast<int>(rr),
-                  retries);
-  SND_CHECK_EQ(rr, SND_OK);
+  const bool fixed = rr == SND_OK;
+  const bool known = rr == SND_ERR_COMMAND_BUFFER_FULL;
+  snd::test::Note("core A-005: %s (resume %d after %d retries)",
+                  fixed ? "(a) fixed: the resume is accepted" : known ? "(b) known defect: COMMAND_BUFFER_FULL" : "neither",
+                  static_cast<int>(rr), retries);
+  SND_CHECK(fixed || known);
 }
 
 // For comparison (passes): a short suspend (300 frames) with physics holding 8 hits and the

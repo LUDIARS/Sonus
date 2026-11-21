@@ -247,6 +247,7 @@ SND_TEST(IndepCull, MicrosecondClock) {
   snd_physics_config c = Open();
   c.cooldown_seconds = 0.0001f;  // 100 us
   c.budget_per_second = 1.0e7f;  // 10 slots per us
+  c.stall_calls = 0;             // D-125: >1000 calls without output; this test is about time only
   Fx f(c);
   SND_REQUIRE_EQ(f.created, SND_OK);
   SND_CHECK_EQ(f.Submit({Imp(1, 2, 0.0f, 1.0f)}, 0.01f), SND_OK);
