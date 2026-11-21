@@ -141,6 +141,15 @@ SND_TEST(LivePreview, TransitionAuditionSwitchesAtTheComputedBlock) {
   const float before = at(want - frames), after = at(want + frames);
   SND_CHECK(before > 0.01f);
   SND_CHECK_NEAR(after / before, 2.0, 1e-4);
+  // Parameter and state while auditioning: back to Explore at the next bar (one more transition).
+  SND_CHECK(router.SetParam(snd::HashId("Knob"), 0.75f).ok);
+  SND_CHECK(router.SetState(snd::HashId("Song"), snd::HashId("Explore")).ok);
+  r.engine->Render(static_cast<std::uint32_t>(2.5 * ms.sampleRate / frames), nullptr);
+  const std::vector<PreviewTransition> tr2 = r.engine->Transitions();
+  SND_REQUIRE(tr2.size() == tr.size() + 1u);
+  SND_CHECK_EQ(tr2.back().to, snd::HashId("Explore"));
+  SND_CHECK_EQ((tr2.back().clock - startClock) % static_cast<std::uint64_t>(2.0 * ms.sampleRate), 0u);  // a bar line
+  SND_CHECK(router.StopAll().ok);
 }
 
 SND_TEST(LivePreview, AuditionsToAConnectedGame) {
