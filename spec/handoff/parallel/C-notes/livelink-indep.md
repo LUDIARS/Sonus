@@ -211,3 +211,91 @@ TSan は e5b8c3d の stress の変更（最後の全停止を送り直すだけ�
 - 本物の LOD の変化・ストールを含む記録（core で起こせない。手で組んだ記録だけ）。
 - Windows / macOS での実行（MinGW は構文検査だけ）。
 - K1 の RT 検査は libc のフックが有効な構成（サニタイザなし）だけで意味がある。gcc Debug で有効を確認した。
+
+## 再確認（受け入れ側の決定 D-170〜D-175 と実装担当の修正 6a4377e、d8e5291、10d36af、483e6e4、f61937a の後）
+
+作業ツリーの先頭 6bde346 の上に足した。性質は `indep_s7_properties.md` の M 節（決定と公開ヘッダから、実装を読む前に書いた: 50074a3）。
+
+### 決定に合わせて更新したテスト（56d0cd0、コメントに D-番号）
+
+| テスト | 前 | 後 |
+| --- | --- | --- |
+| `IndepS7Impl.Defect_RemoveOfLiveBusAddedWithFullStructLogKeepsReserve` | 欠陥（記録が一杯でも Add を適用し予備容量が返らない） | `StructEditBeyondTheLogIsRefusedAtAcceptance`（D-172: 受け付けで LIMIT_REACHED、予備容量も編集器も使わない、ack なしなら Error、`structLog` 0）と `StructLogPlacesComeBackWithTheRevert`（戻しで枠が返り、B3 が入る） |
+| `IndepS7Replay.LostStateIsReported` | lostState で BitExactExpected false | D-175: BitExactExpected true、ReproducesRecordedRun false |
+| `IndepS7Impl.ReloadWithAFileOfAnotherBankIsRecordedBehaviour` | 振る舞いの記録 | `...Fails`（D-173: Ack INVALID_ARGUMENT、最後の ReloadStatus は Failed、バンクは残らない） |
+| `IndepS7Record.*`（Finished） | 1 ブロック多く描いて true | D-175: Blocks()−1 個では false、Blocks() 個で true（leadBlocks 1 と 0）。ReproducesRecordedRun も確認 |
+| `IndepS7Session.AnswerStoreOverflowIsRecordedBehaviour` | 振る舞いの記録 | `AnswerStoreLimitsAndLostCounts`（D-170: CellValue 256 ちょうどで全部取れて cellsLost 0、取ったあとは数えない、1 つ超えで cellsLost 1・最も古いものだけ消える、Ack 1025 で acksLost 1） |
+| `IndepS7Handshake.DeferredSyncDecisionWithBankList`（穴 3） | コメントだけ | D-171: リリースバンクと共有する SetValue は UNSUPPORTED、セルは書かれない |
+| `IndepS7Audition.LimitAndPlacesComeBack`、`IndepS7Impl.AuditionsThatNeverStart...`（穴 6） | 出力だけ／OK 以外も許す | D-171: 存在しない Event の試聴の Ack は SND_OK、枠は戻る |
+| `IndepS7Struct.BusReserveExactlyFullOneOverAndGivenBack`（穴 8） | 出力だけ | D-172: Remove は bytes も全部返す |
+| `IndepS7Impl.RemoveLiveBusWithLiveEffectThenRevert`（穴 7） | 出力だけ | D-172: エフェクトの分も返り、戻しで Undo が編集器に行かない |
+| `IndepS7Replay.BeginWithUnknownOriginIsRecordedBehaviour`（穴 10） | 出力だけ | `...IsCorrupt`（origin 0 / 3 / 7 / 0xFFFF は CORRUPT） |
+
+穴 5（列 0 本）は前から OK を期待値にしていた。2 つ目の Server（穴 9）は新しいテスト（下の M7）。
+ほかに、テスト側の誤りを 1 つ直した（ba01c38）: `IndepS7Fuzz.OrderViolations` が Hello の前の 4 つの要求を
+SND_REQUIRE で送っていたが、ゲームが最初の要求で接続を閉じることがある（ASan で 1 回）。送信を必須にしない形にした。
+
+### 再確認のテスト（`livelink/test/indep_s7_recheck_test.cpp`、10 件）と結果
+
+| # | テスト | 結果 |
+| --- | --- | --- |
+| M1 | `IndepS7Impl.StructEditBeyondTheLogIsRefusedAtAcceptance`、`StructLogPlacesComeBackWithTheRevert` | 通過 |
+| M2 | `IndepS7Recheck.StructLogAndReserveFollowTheModel`（4 つの種 × 120 操作: AddBus / AddEffect / AddSend（ライブのバスと Sfx）、ライブのバスの Remove、バンクのバスの Remove、壊れた編集、編集器の断り 1/8、切断と再接続（戻し）。毎回 `ReserveUsage()`・`StructLogPlaces()`・`structLog` を模型と比べ、結果も模型から予想（OK なら予算と枠があること、OUT_OF_BUDGET なら予算が無いこと、LIMIT_REACHED なら枠が無いこと）） | 通過（食い違い 0） |
+| M3 | `RemovedLiveBusTakesItsEffectsAndSends`（B1 の上の 2 つのエフェクトと B1 から出るセンドが一緒に返り、B2 → B1 のセンド・Sfx から出るセンドは残る。戻しは残った 4 つだけを新しい順に Undo） | 通過 |
+| M4 | `PredicateTable`（origin なし／FromCreation／MidRun × lostState × LOD × ストールの 20 行）、`PlaybackAliveAtTheStartIsLostState`（開始時に鳴っている音があると lostState ≥ 1、BitExactExpected true、ReproducesRecordedRun false。無ければ両方 true） | 通過 |
+| M5 | `FinishedAtTheLastBlockWithoutLead`（leadBlocks 0: Start 前は false、2 個で false、3 個目で true、その後も true）と record の leadBlocks 1 | 通過 |
+| M6 | `IndepS7Session.AnswerStoreLimitsAndLostCounts` | 通過 |
+| M7 | `OneStartedServerPerRuntime`（2 つ目は LIMIT_REACHED、Start していない方の Stop では空かない、Stop・Destroy で空く、Stop 2 回、再 Start）、`ConcurrentStartsNeverOverlap`（3 スレッドが 25 回ずつ Create / Start / Stop / Destroy: 同時に動いたのは常に 1 つ、LIMIT 以外の失敗 0） | 通過 |
+| M8 | `StateAfterReloadOfAnotherBanksFile`（Failed の後: バンク一覧は空、SetValue は NOT_FOUND、通常のリロードは NOT_FOUND、loadIfAbsent で読み込み直せる、そのセルはバンクの値、編集と次のリロードが動く、ack なしの失敗は Error "…another bank"） | 通過 |
+| M8 | **`Defect_FailedReloadUnloadsTheGamesOwnOtherBank`** | **失敗（新しい欠陥）** |
+| M10 | `MalformedEditsWithAFullLog`（記録が一杯で壊れた StructEdit 400 件: 全部に答え、枠は 2 を超えず、戻しで枠も予備容量も 0） | 通過 |
+
+### 新しい欠陥
+
+**`IndepS7Recheck.Defect_FailedReloadUnloadsTheGamesOwnOtherBank`**（中）
+- 再現: ゲームが "Live"（a.sndb）と "Two"（two.sndb）を読み込んでいる。ツールが `ReloadBank(Live, 0, "two.sndb")`。
+- 期待: Failed（INVALID_ARGUMENT）、Live は外れたまま（D-173）、**ゲーム自身が読み込んでいた Two は残る**（要求は Two を
+  対象にしていない。D-173 の「読んだ別のバンクは登録しない（すでに登録していたら外す）」は、リロードが読み込んだ登録のこと）。
+- 実際: Two も外れる。`ReloadBank(Two, 7, "two.sndb", loadIfAbsent)`（言語違い）でも、ゲームの (Two, 0) が外れる。
+- 原因（server.cpp `PollReload`）: 同じパスがもう読み込まれていると `LoadBankAsync` はゲームの既存の登録を返し、bankId / 言語の
+  不一致のときその登録を `UnloadBank` する。
+- 案: `LoadBankAsync` の前にその時点の登録の一覧を覚え、返ってきたハンドルがもとからあった登録なら外さない（Failed だけ）。
+  もとからあった登録と同じバンク（bankId・言語）を指す ReloadBank は、外す手順の前に Failed にできる。
+
+ほかに新しい欠陥は見つからなかった。
+
+### 残る仕様の穴
+
+1. **記録が一杯のとき、ライブの Add を打ち消す Remove も断られる**（D-172「どの編集も受け付けで枠を 1 つ取る」の帰結）。
+   枠を空けるには切断の戻ししかない（ツールが 1 つ外して入れ直す、ができない）。→ 推奨: 枠が一杯でも Remove は受け付けて
+   オーディオスレッドで判定する（打ち消しなら枠は要らない、バンクのものを外すなら適用の時点で枠が無ければ断る）か、
+   Remove 用に枠を 1 つ取っておく。少なくとも §8.4 に「一杯なら Remove も LIMIT_REACHED、戻しで空く」と書く。
+2. **D-173 の「外す前のヘッダの確認」はしていない**（受け入れ側の補足で可）。そのため Failed の後は要求したバンクが外れたまま。
+3. 上の欠陥の扱い（ゲーム自身の登録を外さない）を §8.5 に明記する。
+
+### 実装担当の修正のテスト（f61937a）について
+
+枠の取り合い、引数 65、同じ鍵の差し替え 2 回、取りこぼしの数そのものが足されている。ゲームが同じファイルを既に読み込んでいる
+場合のリロードの失敗、Remove も枠を取ることは、実装担当のテストに無い。
+
+### 回した構成（再確認）
+
+ビルドは `$S/livelink-indep/b-*`、-j2、1 つずつ。全部消した。
+
+| 構成 | コミット | 実行 | 結果 |
+| --- | --- | --- | --- |
+| 1 gcc Debug | 56d0cd0 | 全件 ctest（223） | 222 通過。失敗は `livelink_indep_s7_recheck_test` の `Defect_FailedReloadUnloadsTheGamesOwnOtherBank` だけ（単体で確認）。`platform_device_play_test` は Skipped。`tool_live_mixer_test`・`api_indep_runtime_test` を含め、ほかは全部通過 |
+| 3 ASan/UBSan | 56d0cd0 → ba01c38 | `ctest -R livelink`（33） | 56d0cd0 で `IndepS7Fuzz.OrderViolations` が 1 回落ちた（テスト側の誤り、上）→ 直して fuzz を `SND_FUZZ_ITERATIONS=20000` で 5 回: 全通過。ほかは欠陥 1 件だけ失敗。サニタイザの報告なし |
+| 4 TSan | ba01c38 | `ctest -R livelink`（33）。-j1 で `--repeat until-fail:20`: indep_s7_stress、indep_s7_live、v11_stress、v11_live、integration_livelink_stress。recheck の `ConcurrentStartsNeverOverlap`・`OneStartedServer`・`StructLogAndReserve` を `--filter` で 20 回ずつ | 欠陥 1 件だけ失敗、TSan の警告なし。繰り返しは全部通過（recheck の繰り返しの失敗 0） |
+| 5 Release | ba01c38 | 同じ（ctest と 20 回の繰り返し） | 欠陥 1 件だけ失敗。繰り返しは全部通過 |
+| clang Debug | ba01c38 | ビルド（警告 0）と `ctest -R livelink`（33） | 欠陥 1 件だけ失敗（各 indep_s7 を単体で回して確認） |
+| MinGW 構文検査 | 56d0cd0 | indep_s7 の 7 本（`-Wall -Wextra -Wpedantic -Wshadow -Werror`） | 全部通過 |
+
+回していないもの: 構成 6・7・8・9。
+
+### 未検証（再確認）
+
+- 言語バンク（languageId ≠ 0）を本当に持つバンクのホットリロード（言語の不一致は、言語 0 のファイルを言語 7 として要求する形でだけ確かめた）。
+- TCP での 1.1、Windows / macOS での実行（前と同じ）。
+- 構造の変更の模型は、RemoveEffect を含めていない（番号で指す外し方は偽の編集器では意味が無いため）。RemoveEffect は
+  `StructArgCountAtTheCap` などの規則の検査だけ。

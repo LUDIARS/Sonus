@@ -85,10 +85,11 @@ SND_TEST(IndepS7Fuzz, OrderViolations) {
     RawPeer p;
     SND_REQUIRE(f.StepUntil([&] { return p.Connect(f.link.connector(), 10); }));
     const ll::SetValue v = lltest::BusVolume("Sfx", -20.0f);
-    SND_REQUIRE(p.Send(ll::MessageType::SetValue, &v, sizeof(v), ll::kFrameWantsAck, 1));
-    SND_REQUIRE(p.Send(ll::MessageType::QueryBanks, nullptr, 0, ll::kFrameWantsAck, 2));
-    SND_REQUIRE(p.Send(ll::MessageType::ReadCell, &v, sizeof(v), ll::kFrameWantsAck, 3));
-    SND_REQUIRE(p.Send(ll::MessageType::RevertValue, &v, sizeof(v), ll::kFrameWantsAck, 4));
+    // the game may close the stream at the first of them (wrong state): later sends may fail
+    p.Send(ll::MessageType::SetValue, &v, sizeof(v), ll::kFrameWantsAck, 1);
+    p.Send(ll::MessageType::QueryBanks, nullptr, 0, ll::kFrameWantsAck, 2);
+    p.Send(ll::MessageType::ReadCell, &v, sizeof(v), ll::kFrameWantsAck, 3);
+    p.Send(ll::MessageType::RevertValue, &v, sizeof(v), ll::kFrameWantsAck, 4);
     std::vector<std::uint8_t> rb(16 + 6);
     ll::ReloadBank r{kLive, 0, 0, 6};
     std::memcpy(rb.data(), &r, 16);

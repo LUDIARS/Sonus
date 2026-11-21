@@ -39,10 +39,10 @@ bool WaitFramesIn(Fixture& f, std::uint64_t base, std::uint64_t n, std::uint32_t
 
 }  // namespace
 
-// §8.4 "ライブで足したバスを外すと、その分を返す": also when the struct log was full when the
-// bus was added (maxStructLog). The implementation keeps the reserve of an unlogged edit
-// taken for good, so removing that bus never gives its unit back.
-SND_TEST(IndepS7Impl, Defect_RemoveOfLiveBusAddedWithFullStructLogKeepsReserve) {
+// D-172: an edit that would not fit the revert log (maxStructLog) is refused at acceptance with
+// LIMIT_REACHED: it takes no reserve and never reaches the editor. Once a place frees (a remove that
+// cancels a live add), it fits. (Was Defect_RemoveOfLiveBusAddedWithFullStructLogKeepsReserve.)
+SND_TEST(IndepS7Impl, StructEditBeyondTheLogIsRefusedAtAcceptance) {
   FakeEditor ed;
   ll::RuntimeDesc rd;
   rd.structEditor = &ed;
@@ -54,13 +54,63 @@ SND_TEST(IndepS7Impl, Defect_RemoveOfLiveBusAddedWithFullStructLogKeepsReserve) 
   SND_REQUIRE(t.Ready());
   SND_CHECK_EQ(t.Ack(t.c->StructEdit(ll::StructOp::AddBus, HashId("B1"), kMasterArgs, 2)), SND_OK);
   SND_CHECK_EQ(t.Ack(t.c->StructEdit(ll::StructOp::AddBus, HashId("B2"), kMasterArgs, 2)), SND_OK);
-  SND_CHECK_EQ(t.Ack(t.c->StructEdit(ll::StructOp::AddBus, HashId("B3"), kMasterArgs, 2)), SND_OK);  // log full
-  SND_CHECK_EQ(f.rt->Drops().structLog, 1u);
-  SND_CHECK_EQ(f.rt->ReserveUsage().buses, 3u);
-  SND_CHECK_EQ(t.Ack(t.c->StructEdit(ll::StructOp::RemoveBus, HashId("B3"), nullptr, 0)), SND_OK);
-  SND_CHECK_EQ(f.rt->ReserveUsage().buses, 2u);  // B3 was added live and is gone
-  // so a new bus fits again
-  SND_CHECK_EQ(t.Ack(t.c->StructEdit(ll::StructOp::AddBus, HashId("B4"), kMasterArgs, 2)), SND_OK);
+  SND_CHECK_EQ(f.rt->StructLogPlaces(), 2u);
+  // D-172: the log is full: refused, no reserve, no editor call
+  SND_CHECK_EQ(t.Ack(t.c->StructEdit(ll::StructOp::AddBus, HashId("B3"), kMasterArgs, 2)), SND_ERR_LIMIT_REACHED);
+  t.c->ClearErrors();
+  SND_CHECK(t.c->StructEdit(ll::StructOp::AddBus, HashId("B3"), kMasterArgs, 2, false) != 0u);
+  SND_CHECK(f.StepUntil([&] {
+    ll::Error e[16];
+    const std::uint32_t n = t.c->CopyErrors(e, 16);
+    for (std::uint32_t i = 0; i < n; ++i)
+      if (e[i].code == SND_ERR_LIMIT_REACHED) return true;
+    return false;
+  }));
+  SND_CHECK_EQ(f.rt->ReserveUsage().buses, 2u);
+  SND_CHECK_EQ(f.rt->ReserveUsage().bytes, 2u * 80u);
+  SND_CHECK_EQ(ed.Count(), 2u);
+  SND_CHECK_EQ(f.rt->StructLogPlaces(), 2u);
+  SND_CHECK_EQ(f.rt->Drops().structLog, 0u);
+  // a remove of a bank bus also needs a place (it stays in the log for the revert): refused too
+  SND_CHECK_EQ(t.Ack(t.c->StructEdit(ll::StructOp::RemoveBus, HashId("Sfx"), nullptr, 0)), SND_ERR_LIMIT_REACHED);
+  SND_CHECK_EQ(ed.Count(), 2u);
+  // D-172: every edit takes a place at acceptance, a remove too: with the log full even the remove
+  // that would cancel B1 is refused (see "仕様の穴" in livelink-indep.md). A disconnect revert frees it.
+  SND_CHECK_EQ(t.Ack(t.c->StructEdit(ll::StructOp::RemoveBus, HashId("B1"), nullptr, 0)), SND_ERR_LIMIT_REACHED);
+  SND_CHECK_EQ(f.rt->ReserveUsage().buses, 2u);
+  t.Ack(t.c->StructEdit(ll::StructOp::AddBus, HashId("B9"), kMasterArgs, 2));  // nothing changes
+  SND_CHECK_EQ(f.rt->StructLogPlaces(), 2u);
+}
+
+// D-172: the place comes back when the edits are undone (disconnect revert): then B3 fits.
+SND_TEST(IndepS7Impl, StructLogPlacesComeBackWithTheRevert) {
+  FakeEditor ed;
+  ll::RuntimeDesc rd;
+  rd.structEditor = &ed;
+  rd.maxStructLog = 2;
+  Fixture f(Hooks::Live, ReserveConfig(3, 3, 1u << 20), nullptr, rd);
+  f.Load(IndepBank(), "a.sndb");
+  ll::ServerDesc sd;
+  sd.revertOnDisconnect = true;
+  SND_REQUIRE_EQ(f.StartServer(sd), SND_OK);
+  ll::ClientDesc d = lltest::MemoryClient(f.link);
+  d.reconnectDelayMs = 1;
+  Tool t(f, d);
+  SND_REQUIRE(t.Ready());
+  SND_CHECK_EQ(t.Ack(t.c->StructEdit(ll::StructOp::AddBus, HashId("B1"), kMasterArgs, 2)), SND_OK);
+  SND_CHECK_EQ(t.Ack(t.c->StructEdit(ll::StructOp::AddBus, HashId("B2"), kMasterArgs, 2)), SND_OK);
+  SND_CHECK_EQ(t.Ack(t.c->StructEdit(ll::StructOp::AddBus, HashId("B3"), kMasterArgs, 2)), SND_ERR_LIMIT_REACHED);
+  const std::uint32_t conns = f.server->Stats().connections;
+  t.c->Disconnect();
+  SND_REQUIRE(f.StepUntil([&] {
+    return f.server->Stats().connections > conns && t.c->State() == ll::ClientState::Ready && f.server->Connected();
+  }));
+  SND_REQUIRE(f.StepUntil([&] { return f.rt->StructLogPlaces() == 0u; }));
+  SND_CHECK_EQ(f.rt->ReserveUsage().buses, 0u);
+  SND_CHECK_EQ(t.Ack(t.c->StructEdit(ll::StructOp::AddBus, HashId("B3"), kMasterArgs, 2)), SND_OK);
+  SND_CHECK_EQ(f.rt->StructLogPlaces(), 1u);
+  SND_CHECK_EQ(f.rt->ReserveUsage().buses, 1u);
+  SND_CHECK_EQ(f.rt->Drops().structLog, 0u);
 }
 
 // A live-added bus with a live-added effect on it is removed; the disconnect revert then
@@ -84,8 +134,9 @@ SND_TEST(IndepS7Impl, RemoveLiveBusWithLiveEffectThenRevert) {
   SND_CHECK_EQ(t.Ack(t.c->StructEdit(ll::StructOp::RemoveBus, HashId("B1"), nullptr, 0)), SND_OK);
   ll::DevReserveUsage u = f.rt->ReserveUsage();
   SND_CHECK_EQ(u.buses, 0u);
-  std::printf("[indep_s7] after removing a live bus that has a live effect: effects=%u bytes=%llu\n", u.effects,
-              static_cast<unsigned long long>(u.bytes));
+  SND_CHECK_EQ(u.effects, 0u);  // D-172: the live effect on the removed live bus comes back with it
+  SND_CHECK_EQ(u.bytes, 0u);
+  SND_CHECK_EQ(f.rt->StructLogPlaces(), 0u);
   const std::uint32_t before = ed.Count();
   t.c->Disconnect();
   SND_REQUIRE(f.StepUntil([&] { return !f.server->Connected(); }));
@@ -94,10 +145,7 @@ SND_TEST(IndepS7Impl, RemoveLiveBusWithLiveEffectThenRevert) {
   SND_CHECK_EQ(u.buses, 0u);
   SND_CHECK_EQ(u.effects, 0u);
   SND_CHECK_EQ(u.bytes, 0u);
-  for (std::uint32_t i = before; i < ed.Count(); ++i) {
-    const FakeEditor::Entry e = ed.At(i);
-    std::printf("[indep_s7]   revert -> %s op %u target %08x\n", e.undo != 0u ? "Undo" : "Apply", e.op, e.targetId);
-  }
+  SND_CHECK_EQ(ed.Count(), before);  // D-172: no Undo for what went away with the removed live bus
 }
 
 // chunkSlots = 1: a second ReplaceChunk / a StructEdit while the slot is queued is
@@ -239,15 +287,15 @@ SND_TEST(IndepS7Impl, AuditionsThatNeverStartGiveTheirPlaceBack) {
   for (int i = 0; i < 6; ++i) {
     const std::int32_t r = t.Ack(t.c->Audition(HashId("NoSuchEvent"), nullptr, false, true));
     f.Steps(3);
-    SND_CHECK_MSG(r == SND_OK || r == SND_ERR_NOT_FOUND || r == SND_ERR_LIMIT_REACHED, "audition %d -> %d", i, r);
+    SND_CHECK_MSG(r == SND_OK, "audition %d -> %d", i, r);  // D-171: the Ack is the recording result
   }
   SND_CHECK(f.StepUntil([&] { return f.rt->ActiveAuditions() == 0u; }, 2000));
   SND_CHECK_EQ(t.Ack(t.c->Audition(HashId("Tone"), nullptr, false, true)), SND_OK);
   SND_CHECK_EQ(t.Ack(t.c->Audition(HashId("Tone"), nullptr, false, true)), SND_OK);
 }
 
-// Spec gap probe (§8.5): the file at `path` holds another bank than `bankId`.
-SND_TEST(IndepS7Impl, ReloadWithAFileOfAnotherBankIsRecordedBehaviour) {
+// D-173: the file at `path` holds another bank than `bankId`: Failed, the other bank is not kept.
+SND_TEST(IndepS7Impl, ReloadWithAFileOfAnotherBankFails) {
   Fixture f;
   f.Load(IndepBank(), "a.sndb");
   BankOpts two;
@@ -256,13 +304,20 @@ SND_TEST(IndepS7Impl, ReloadWithAFileOfAnotherBankIsRecordedBehaviour) {
   SND_REQUIRE_EQ(f.StartServer(), SND_OK);
   Tool t(f);
   SND_REQUIRE(t.Ready());
-  const std::int32_t r = t.Ack(t.c->ReloadBank(kLive, 0, "two.sndb"));
+  const std::uint32_t rq = t.c->ReloadBank(kLive, 0, "two.sndb");
+  const std::int32_t r = t.Ack(rq);
+  SND_CHECK_EQ(r, SND_ERR_INVALID_ARGUMENT);  // D-173: the file holds another bank: Failed
+  ll::ReloadStatus st[64];
+  const std::uint32_t ns = t.c->CopyReloadStatus(st, 64);
+  SND_REQUIRE(ns > 0u);
+  SND_CHECK_EQ(st[ns - 1u].requestSeq, rq);
+  SND_CHECK_EQ(st[ns - 1u].phase, static_cast<std::uint32_t>(ll::ReloadPhase::Failed));
+  SND_CHECK_EQ(st[ns - 1u].result, SND_ERR_INVALID_ARGUMENT);
+  f.Steps(20);
   const std::uint32_t q = t.c->QueryBanks(true);
   SND_CHECK_EQ(t.Ack(q), SND_OK);
   ll::BankEntry b[8];
   const std::uint32_t n = t.c->CopyBanks(b, 8);
-  std::printf("[indep_s7] ReloadBank(Live, \"two.sndb\") -> %d; banks now:", r);
-  for (std::uint32_t i = 0; i < n; ++i) std::printf(" %08x", b[i].bankId);
-  std::printf("\n");
-  SND_CHECK(r != 1 && r != 2);
+  SND_CHECK_EQ(n, 0u);  // the other bank is not kept, the requested one stays unloaded
+  SND_CHECK_EQ(f.server->Stats().reloadsFailed, 1u);
 }
