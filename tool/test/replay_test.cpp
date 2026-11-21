@@ -262,3 +262,17 @@ SND_TEST(ToolReplay, BrokenInputIsRefusedWithoutCrashing) {
   std::error_code ec;
   fs::remove_all(dir, ec);
 }
+
+SND_TEST(ToolReplay, OutputPlayerPlaysEverySample) {
+  // Listening to a replay: the samples go to an output device in real time. A silent timer
+  // device stands in for the platform's (none in the test machine).
+  std::vector<float> samples(2u * 256u * 8u, 0.25f);
+  OutputPlayer p;
+  std::string err;
+  SND_REQUIRE_MSG(p.Start(samples, 2, 48000, true, &err), "%s", err.c_str());
+  const auto end = std::chrono::steady_clock::now() + std::chrono::seconds(30);
+  while (!p.Done() && std::chrono::steady_clock::now() < end) std::this_thread::sleep_for(std::chrono::milliseconds(2));
+  SND_CHECK(p.Done());
+  SND_CHECK_EQ(p.FramesPlayed(), samples.size() / 2u);
+  p.Stop();
+}
