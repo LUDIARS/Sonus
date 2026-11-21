@@ -13,7 +13,7 @@
 
 #include <atomic>
 #include <cstdint>
-#include <mutex>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -118,9 +118,12 @@ class RuntimeHost {
   std::vector<float> mix_;
   std::atomic<std::uint64_t> blocks_{0};
   std::uint64_t lostPending_ = 0;  // audio thread
-  mutable std::mutex recentMutex_;
-  std::vector<float> recent_;  // ring of the last kRecentBlocks blocks
-  std::size_t recentAt_ = 0;
+  // The last blocks (meters, tests): written by the thread that renders (the audio thread in
+  // Device / Silent output) without a lock (principle 1): relaxed atomic samples and a release
+  // count of written blocks; a reader retries when the writer lapped what it copied.
+  std::unique_ptr<std::atomic<float>[]> recent_;
+  std::size_t recentSamples_ = 0;
+  std::atomic<std::uint64_t> recentWritten_{0};
 };
 
 }  // namespace snd::tool::preview
