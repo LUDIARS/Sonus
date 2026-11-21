@@ -9,6 +9,7 @@
 #include "snd/buildtool/patch.hpp"
 #include "snd/format/bank_format.hpp"
 #include "snd/livelink/client.hpp"
+#include "snd/tool/session.hpp"
 
 using namespace snd::tool;
 using livetest::Ratio;
@@ -334,4 +335,56 @@ SND_TEST(LiveSync, WhatTheRuntimeCannotTakeIsListedWithAReason) {
     if (!f.available) SND_CHECK(!f.reason.empty());
   }
   SND_CHECK(s.phase() == LivePhase::Offline);
+}
+
+SND_TEST(LiveSync, SessionCarriesTheDocumentAndTheDetailProfiler) {
+  Rig r;
+  SND_REQUIRE(r.ok);
+  const double base = PlayTone(r);
+  Project project;
+  SND_REQUIRE(project.Load(r.doc));
+  Session s;
+  s.UseProject(project);
+  LiveSyncOptions o = livetest::MakeOptions(LiveDecision::SendDiffs);
+  snd::tool::preview::PreviewEngine* e = r.engine.get();
+  o.writer = [e](const BankImage& b, std::string* path, std::string*) {
+    *path = e->PutRebuiltBank(b.file, b.bytes);
+    return true;
+  };
+  s.AttachDocument(&r.doc, o);
+  s.live()->SetBaseline(r.gameBuild);
+  s.EnableProfilerStreams(kViewCpu | kViewMemory);
+  ConnectionDesc d;
+  d.connector = r.engine->connector();
+  d.reconnectDelayMs = 20;
+  SND_REQUIRE_EQ(s.Connect(d), SND_OK);
+  auto run = [&](auto pred) {
+    const auto end = std::chrono::steady_clock::now() + std::chrono::seconds(60);
+    while (!pred()) {
+      if (std::chrono::steady_clock::now() > end) return false;
+      r.out.clear();
+      r.engine->Render(1, &r.out);
+      s.Tick();
+      std::this_thread::sleep_for(std::chrono::microseconds(200));
+    }
+    return true;
+  };
+  SND_REQUIRE(run([&] { return s.live()->phase() == LivePhase::Live; }));
+  SND_REQUIRE(r.doc.SetNumber(livetest::SfxGuid(), "volumeDb", -6.0));
+  s.Tick();
+  SND_REQUIRE(run([&] { return s.live()->phase() == LivePhase::Live; }));
+  r.Frames(6);
+  SND_CHECK_NEAR(r.Left() / base, Ratio(-6.0), 1e-5);
+  // The mixer's monitoring value on the same cell wins over later document edits.
+  SND_REQUIRE(s.mixer().Set(Target{Control::BusFader, project.FindBus(snd::HashId("Sfx")), 0, 0}, -12.0f));
+  SND_REQUIRE(run([&] { return s.sync().Count(CellState::Pending) == 0u && s.sync().Count(CellState::Unsent) == 0u; }));
+  SND_REQUIRE(r.doc.SetNumber(livetest::SfxGuid(), "volumeDb", -3.0));
+  s.Tick();
+  SND_REQUIRE(run([&] { return s.live()->phase() == LivePhase::Live; }));
+  r.Frames(8);
+  SND_CHECK_NEAR(r.Left() / base, Ratio(-12.0), 1e-5);
+  const LiveItem* it = s.live()->Find(livetest::SfxGuid(), "volumeDb");
+  SND_REQUIRE(it != nullptr);
+  SND_CHECK(it->state == LiveState::HeldByMixer);
+  SND_REQUIRE(run([&] { return s.streams().hasMemory() && !s.streams().cpu().empty(); }));
 }

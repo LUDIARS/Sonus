@@ -224,8 +224,60 @@ tool/
   ライブ用には `DiffBuilds` が編集を値の編集（SetValue の宛先付き）と構造の変更（チャンクの差し替え）に分ける。
 - buildtool は `BuildOptions::source`（ProjectSource）と `memoryOutput` で、ディスクを介さずに動く（CLI は変わらない）。
 
+## 段階5 のライブ機能・プレビュー・記録と再生（組 P）
+
+核（`Sonus::tool_core`）にモデル、ランタイムを動かす部分は別のライブラリ `Sonus::tool_preview`（`tool/preview/`、
+`SND_BUILD_TOOL_CORE` か `SND_BUILD_TOOL` で作る。Tela は要らない）。12.1 の依存表で tool は buildtool・dsp・core・
+livelink だけなので、ソースの種別・音楽・IO を組み立てるプレビューは構成ルート `sonus`（api/compose、D-93）と同じ扱いの
+別のターゲットにした（`compose::SourceKinds` を使う）。
+
+| ファイル | 役割 |
+| --- | --- |
+| `live_sync` | 文書（`ProjectDocument`）のライブ反映。接続時の照合（バンクごとの比較、差分をすべて送る／拒否、決定の保留）、編集・Undo・Redo の反映（値は SetValue、形が同じ表は ReplaceChunk、バス・エフェクト・センドの追加と削除は StructEdit、ほかはホットリロード）、間引き、背圧、項目ごとの状態、問題・未対応の一覧、ホットリロードの経過、予備容量。未対応の判定は `LiveSupportOf` の 1 か所 |
+| `preview` | プレビューエンジンの抽象 `IPreviewEngine` と試聴の振り分け `AuditionRouter`（宛先はゲームかプレビュー） |
+| `profiler_streams` | プロファイラの残り（CPU と BlockDetail、メモリの区分、ストリーム、LOD、ストール、イベントログの絞り込み）。画面に出すものだけ購読し、更新番号で取りこぼしを数える |
+| `recording_report` | 記録の要約（1.1 のレコードを含む）、再生の比較（再生どうし、記録した実行のログ）、テストの期待のファイル、不具合報告のフォルダ、Config のテキスト |
+| `cell_sync` / `mixer` / `session`（追記） | 項目単位の Revert（1.1 の相手には RevertValue）、読み返し（ReadCell）、`RevertOnly`、`Session::AttachDocument`（文書のライブ反映）、`EnableProfilerStreams` |
+| `connection`（追記） | `deferSyncDecision`、`awaitingSync` / `DecideSync`、`peerMinor` |
+| `preview/preview_engine` | ツールの中のランタイム（メモリ上のファイルシステム、IO とストリーム、ソースの種別、音楽、core、プロセス内の転送路のライブリンク）。出力は手動（テスト・WAV）、デバイス、無音（実時間） |
+| `preview/replay_host` | 記録の再生（2 回再生して比較、期待と照合、不具合報告から再生、WAV、デバイスで聞く `OutputPlayer`） |
+| `preview/cli/sonus_replay` | `sonus-replay`: UI なしで記録と不具合報告を再生する（終了コード 0 一致、1 不一致、2 入力の誤り） |
+
+使い方（ホストの UI スレッド）:
+
+```cpp
+ProjectDocument doc; doc.Load(dir);
+Session s; Project p; p.Load(doc); s.UseProject(p);   // ミキサーのバンクの値も文書から
+LiveSyncOptions o;                                      // 既定: 不一致は利用者に聞く（Ask）
+o.writer = DirectoryReloadWriter(gameDir + "/live", "live/");  // ホットリロードの書き出し先
+s.AttachDocument(&doc, o);
+s.Connect(desc);                                        // Hello のハッシュと決定の保留は LiveSync が入れる
+// 毎フレーム: s.Tick(); 画面は s.live()->phase() / check() / items() / problems() / unsupported() /
+// reloads() / reserve() を読む。不一致の質問には s.live()->ChooseSendDiffs(s.connection()) か ChooseRefuse。
+```
+
+プレビューエンジン（`tool_preview`）: `PreviewEngine::Create(desc)` → `LoadBuild(BuildDocument(doc))` →
+`desc.connector = engine->connector()` で接続する。ホットリロードの書き出しは `engine->PutRebuiltBank`。
+試聴は `AuditionRouter`（`Bind(&connection, engine)`、`SetTarget(Game / Preview)`）。
+
+スレッド: モデル（LiveSync、ProfilerStreams、AuditionRouter、Session）は UI のスレッドだけ。プレビューエンジンの関数も
+作ったスレッドだけ（`connector()` と `RecentOutput()` はどこからでも）。手動の出力では作ったスレッドが `Render` で描き、
+デバイス・無音の出力ではオーディオスレッドが描いて、作ったスレッドが毎フレーム `Pump` する。再生（`Replay`）は呼んだ
+スレッドがランタイムを 1 つ作って描く（別々のスレッドで同時に回してよい）。
+
+テスト（`tool/test`、Tela 不要）:
+
+| テスト | 内容 |
+| --- | --- |
+| `tool_live_preview_test` | プレビューエンジン: 文書から鳴らしたレベル（バスの音量）、3D（SpatialPreview の値と一致、動かす）、ライブの編集が音に効く、全停止、遷移の試聴が MusicEditor::Preview の計算どおりのブロック・サンプルで切り替わる、ゲームへの試聴 |
+| `tool_live_sync_test` | 照合の一致・不一致と 2 つの選択、SetValue / ReplaceChunk / StructEdit / ホットリロード、Undo / Redo、間引き（最後の値が届く）、失敗が問題に出る（外れたバンク）、再接続、ミキサーの監視の値の優先、未対応の一覧、Session との組み合わせ |
+| `tool_live_revert_test` | 項目単位の Revert（RevertValue、Undo で SetValue）、読み返し、`RevertOnly` |
+| `tool_profiler_streams_test` | 購読のマスク、CPU・BlockDetail・メモリ・ストリーム・LOD・イベントログの絞り込み |
+| `tool_replay_test` / `tool_replay_cli` | プレビューエンジンで記録 → 保存 → 読み込み → 2 回再生（決定とビットの一致）、記録した実行のログとの比較、期待のファイル、不具合報告の往復、WAV、壊れた入力、`sonus-replay` |
+| `tool_live_v10_test` | 1.0 のゲーム（手で動かすゲーム側）: 1.1 の機能は理由つきで無効、1.0 のメッセージは使う、待ち続けない |
+| `tool_live_concurrency_test` | 実時間のプレビューエンジンとライブリンクの中で UI スレッドが編集・読み出し・試聴・切断を繰り返す、2 スレッドで同時に再生（TSan と Release で繰り返す） |
+
 ## 段階2で入れていないもの
 
 Event / パラメータとカーブ / 3D / 音楽 / マテリアル / パッチの各エディタ、センド・スナップショット・ダッキングの編集、
-構造の変更（StructEdit）とチャンクの差し替え（ReplaceChunk）、記録の再生（Replayer で同じ結果を出すのは段階5）、
-接続先やファイル名の画面上での入力（Tela に文字入力が無い）。
+接続先やファイル名の画面上での入力（Tela に文字入力が無い）。構造の変更・チャンクの差し替え・記録の再生は組 P（上）で入れた。
