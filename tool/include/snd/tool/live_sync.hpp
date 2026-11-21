@@ -292,7 +292,8 @@ class LiveSync {
   void PlanDelta(const LiveDelta& d, const std::vector<BankImage>& before);
   void PlanBank(const BankImage* before, const BankImage& after, bool unknownBase);
   void Enqueue(Op op);
-  void Escalate(const std::string& bank, const std::string& reason, std::uint64_t revision);
+  void Escalate(const std::string& bank, const std::string& reason, std::uint64_t revision,
+                const std::vector<std::string>* guids = nullptr);
   void Send(livelink::Client* c, std::uint64_t nowNs);
   void TakeAnswers(livelink::Client* c);
   void Settle(const Op& op, std::int32_t result);

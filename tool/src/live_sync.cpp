@@ -298,12 +298,13 @@ void LiveSync::Enqueue(Op op) {
   queue_.push_back(std::move(op));
 }
 
-void LiveSync::Escalate(const std::string& bank, const std::string& reason, std::uint64_t revision) {
+void LiveSync::Escalate(const std::string& bank, const std::string& reason, std::uint64_t revision,
+                        const std::vector<std::string>* guids) {
   Op op;
   op.route = LiveRoute::Reload;
   op.bank = bank;
   op.revision = revision;
-  op.guids = ObjectsOf(bank);
+  op.guids = guids != nullptr ? *guids : ObjectsOf(bank);
   const BankImage* b = CurrentBank(bank);
   if (b != nullptr) {
     op.bankId = b->bankId;
@@ -328,8 +329,14 @@ void LiveSync::Escalate(const std::string& bank, const std::string& reason, std:
       ++it;
     }
   }
-  for (const Op& q : queue_) {
-    if (q.bank == bank && q.route == LiveRoute::Reload) return;  // one is waiting: it writes the latest build
+  for (Op& q : queue_) {
+    if (q.bank == bank && q.route == LiveRoute::Reload) {  // one is waiting: it writes the latest build
+      for (const std::string& g : op.guids) {
+        if (std::find(q.guids.begin(), q.guids.end(), g) == q.guids.end()) q.guids.push_back(g);
+      }
+      Mark(op, LiveState::Reloading, 0, reason);
+      return;
+    }
   }
   op.epoch = epoch_[bank];
   ReloadProgress p;
@@ -918,7 +925,7 @@ void LiveSync::Settle(const Op& op, std::int32_t r) {
     Escalate(op.bank,
              std::string(LiveRouteName(op.route)) + " refused (" + ResultName(r) + ")" +
                  (r == SND_ERR_OUT_OF_BUDGET ? ": dev reserve exhausted" : ""),
-             op.revision);
+             op.revision, &op.guids);
     return;
   }
   ++stats_.failed;
@@ -1033,7 +1040,8 @@ void LiveSync::UpdatePhase(Connection& c) {
     phase_ = LivePhase::Connecting;
   } else if (!sessionLive_) {
     phase_ = LivePhase::Checking;
-  } else if (!queue_.empty() || !inflight_.empty()) {
+  } else if (!queue_.empty() || !inflight_.empty() || doc_.revision() != builtRevision_) {
+    // (a document change not built yet: the throttle holds it until its interval ends)
     phase_ = LivePhase::Syncing;
   } else {
     phase_ = LivePhase::Live;
