@@ -155,6 +155,7 @@ struct Voice {
   snd_playback_handle handle;
   std::uint8_t who;
   float lastVolume, lastPitch;
+  bool seen;  // its state was seen other than NONE (applied); NONE afterwards = stale
   std::uint32_t sentCount;
   snd_physics_param sent[kMaxRequestParams];  // parameters last recorded on the playback
 };
@@ -176,6 +177,7 @@ struct Track {
   std::uint64_t objA, objB;
   float massA, massB, speed;
   snd_vec3 position;
+  snd_vec3 sentPosition;  // the position last recorded on the emitter
 };
 
 // One play request (record source of the observer).
@@ -234,6 +236,13 @@ struct snd_phys {
   // ---- time and budget ----
   std::uint64_t now;
   double carry;
+  // ---- audio-side stall (D-125) ----
+  bool haveBlock;              // lastBlock is valid
+  std::uint64_t lastBlock;     // block_index seen by the previous call
+  std::uint32_t sameBlockCalls;  // calls in a row that saw the same block_index
+  bool stalled;
+  bool haveProbeBlock;
+  std::uint64_t probeBlock;    // block_index of the last release check that recorded
   std::uint32_t stamp;
   std::uint64_t seq;
 
@@ -585,22 +594,30 @@ void DestroyHeld(snd_phys& p, std::uint32_t i) noexcept {
 // call tells them apart without changing anything (the volume the playback already has):
 // SND_ERR_INVALID_HANDLE = stale (D-29), the playback is over (it ended - played, not loaded,
 // rejected - so its position no longer matters).
-bool Applied(snd_phys& p, snd_playback_handle h, float volume) noexcept {
+// The recording check runs only when `probe` (block_index moved since the last one, D-125);
+// *probed tells that it ran.
+bool Applied(snd_phys& p, snd_playback_handle h, float volume, bool probe, bool* probed) noexcept {
   if (h.value == SND_HANDLE_INVALID_VALUE) return true;
   if (snd_get_playback_state(p.sys, h) != SND_PLAYBACK_STATE_NONE) return true;
+  if (!probe) return false;
+  *probed = true;
   return snd_set_playback_volume(p.sys, h, volume) == SND_ERR_INVALID_HANDLE;
 }
 
 // Destroys the held emitters whose playbacks have all been applied (any order).
-void ReleaseHeld(snd_phys& p) noexcept {
+// Returns true when a recording check ran.
+bool ReleaseHeld(snd_phys& p, bool probe) noexcept {
+  bool probed = false;
   for (std::uint32_t i = 0; i < p.heldCount;) {
     const Held& h = p.held[i];
-    if (Applied(p, h.playback[0], h.volume[0]) && Applied(p, h.playback[1], h.volume[1])) {
+    if (Applied(p, h.playback[0], h.volume[0], probe, &probed) &&
+        Applied(p, h.playback[1], h.volume[1], probe, &probed)) {
       DestroyHeld(p, i);
     } else {
       ++i;
     }
   }
+  return probed;
 }
 
 // An emitter at `position` for one group; false when none can be had (held ring full, no
@@ -750,6 +767,7 @@ void StartVoice(snd_phys& p, Track& t, std::uint32_t vi, bool restart) noexcept 
   Voice& v = t.v[vi];
   Request q = TrackRequest(p, t, vi);
   if (restart) q.flags |= SND_PHYSICS_RECORD_FLAG_RESTART;
+  v.seen = false;
   v.handle = snd_play(p.sys, v.event, t.emitter, nullptr);
   snd_result r = SND_OK;
   if (v.handle.value == SND_HANDLE_INVALID_VALUE) {
@@ -805,22 +823,31 @@ void StopTrack(snd_phys& p, Track& t, snd_physics_stop_reason reason) noexcept {
 bool UpdateVoice(snd_phys& p, Track& t, std::uint32_t vi) noexcept {
   Voice& v = t.v[vi];
   if (v.handle.value == SND_HANDLE_INVALID_VALUE) return false;
-  if (snd_get_playback_state(p.sys, v.handle) == SND_PLAYBACK_STATE_ENDED) return false;
+  // Stale without recording anything: ENDED, or NONE after it was once seen applied.
+  const snd_playback_state st = snd_get_playback_state(p.sys, v.handle);
+  if (st == SND_PLAYBACK_STATE_ENDED) return false;
+  if (st != SND_PLAYBACK_STATE_NONE) {
+    v.seen = true;
+  } else if (v.seen) {
+    return false;
+  }
   const Request q = TrackRequest(p, t, vi);
-  // The volume is always recorded: its result tells a stale handle (D-29).
-  const snd_result rv = snd_set_playback_volume(p.sys, v.handle, q.volume);
-  if (rv == SND_ERR_INVALID_HANDLE) return false;
+  // Only the values that changed since they were last recorded (D-125); a record refused as
+  // stale (D-29) also tells an ended playback.
+  bool stale = false;
   snd_result first = SND_OK;
   auto note = [&](snd_result r) {
-    if (r != SND_OK) {
+    if (r == SND_ERR_INVALID_HANDLE) {
+      stale = true;
+    } else if (r != SND_OK) {
       ++p.stats.api_failures;
       if (first == SND_OK) first = r;
     }
   };
-  note(rv);
-  if (q.pitch != v.lastPitch) note(snd_set_playback_pitch(p.sys, v.handle, q.pitch));
+  if (q.volume != v.lastVolume) note(snd_set_playback_volume(p.sys, v.handle, q.volume));
+  if (!stale && q.pitch != v.lastPitch) note(snd_set_playback_pitch(p.sys, v.handle, q.pitch));
   // Parameters whose value changed (or that are new).
-  for (std::uint32_t i = 0; i < q.paramCount; ++i) {
+  for (std::uint32_t i = 0; i < q.paramCount && !stale; ++i) {
     bool same = false;
     for (std::uint32_t j = 0; j < v.sentCount; ++j) {
       if (v.sent[j].id == q.params[i].id) {
@@ -830,6 +857,7 @@ bool UpdateVoice(snd_phys& p, Track& t, std::uint32_t vi) noexcept {
     }
     if (!same) note(snd_set_param_playback(p.sys, v.handle, q.params[i].id, q.params[i].value));
   }
+  if (stale) return false;
   v.lastVolume = q.volume;
   v.lastPitch = q.pitch;
   v.sentCount = q.paramCount;
@@ -1202,7 +1230,8 @@ void PlayGroups(snd_phys& p, const snd_contact* contacts, std::uint32_t groupCou
     ++used;  // a group without an emitter still uses its place in the budget
     snd_emitter_handle emitter{0};
     const snd_vec3 position{c.position[0], c.position[1], c.position[2]};
-    const bool haveEmitter = AcquireEmitter(p, position, &emitter);
+    // Audio side stalled (D-125): no emitter is made, nothing is recorded.
+    const bool haveEmitter = !p.stalled && AcquireEmitter(p, position, &emitter);
     Request base{};
     base.source = SND_PHYSICS_SOURCE_CONTACT;
     base.kind = g.kind;
@@ -1220,7 +1249,11 @@ void PlayGroups(snd_phys& p, const snd_contact* contacts, std::uint32_t groupCou
     base.objB = c.object_b;
     if (!haveEmitter) {
       // Not played: no position-less fallback (a distant hit must not sound at the listener).
-      ++p.stats.dropped_no_emitter;
+      if (p.stalled) {
+        ++p.stats.dropped_audio_stalled;
+      } else {
+        ++p.stats.dropped_no_emitter;
+      }
       snd_physics_record rec = BaseRecord(base);
       rec.kind = SND_PHYSICS_RECORD_DROP;
       rec.event = g.res.event[0];
@@ -1295,7 +1328,20 @@ void UpdateTracked(snd_phys& p, const snd_contact* contacts) noexcept {
     t->massB = swap ? c.mass_a : c.mass_b;
     t->speed = t->reportSpeed;
     t->position = snd_vec3{c.position[0], c.position[1], c.position[2]};
-    if (snd_set_transform(p.sys, t->emitter, &t->position, nullptr, nullptr) != SND_OK) ++p.stats.api_failures;
+    if (p.stalled) {
+      // Audio side stalled (D-125): the entry keeps the latest values, nothing is recorded;
+      // the first report after the stall records them.
+      ++p.stats.tracking_updated;
+      continue;
+    }
+    if (t->position.x != t->sentPosition.x || t->position.y != t->sentPosition.y ||
+        t->position.z != t->sentPosition.z) {
+      if (snd_set_transform(p.sys, t->emitter, &t->position, nullptr, nullptr) != SND_OK) {
+        ++p.stats.api_failures;
+      } else {
+        t->sentPosition = t->position;
+      }
+    }
     bool restarted = false;
     for (std::uint32_t vi = 0; vi < t->voiceCount; ++vi) {
       if (UpdateVoice(p, *t, vi)) continue;
@@ -1324,6 +1370,7 @@ void UpdateTracked(snd_phys& p, const snd_contact* contacts) noexcept {
 
 // Step (2): entries not reported in this call whose last report is >= timeout ago.
 void Timeouts(snd_phys& p) noexcept {
+  if (p.stalled) return;  // D-125: at the first call after the stall
   for (std::uint32_t i = 0; i < p.trCap; ++i) {
     Track& t = p.tracks[i];
     if (!t.used || t.reportStamp == p.stamp) continue;
@@ -1337,6 +1384,10 @@ void Timeouts(snd_phys& p) noexcept {
 // Step (3): keys that are not tracked yet. Eviction only when the table is full of entries
 // that have not timed out (step 2 ran first) and were not reported in this call.
 void StartFresh(snd_phys& p, const snd_contact* contacts) noexcept {
+  if (p.stalled) {  // D-125: new keys are not started while the audio side is stalled
+    p.stats.tracking_dropped += p.freshCount;
+    return;
+  }
   for (std::uint32_t fi = 0; fi < p.freshCount; ++fi) {
     const Group& g = p.fresh[fi];
     const snd_contact& c = contacts[g.rep];
@@ -1414,7 +1465,11 @@ void StartFresh(snd_phys& p, const snd_contact* contacts) noexcept {
     nt.massB = c.mass_b;
     nt.speed = g.value;
     nt.position = snd_vec3{c.position[0], c.position[1], c.position[2]};
-    if (snd_set_transform(p.sys, e, &nt.position, nullptr, nullptr) != SND_OK) ++p.stats.api_failures;
+    if (snd_set_transform(p.sys, e, &nt.position, nullptr, nullptr) != SND_OK) {
+      ++p.stats.api_failures;
+    } else {
+      nt.sentPosition = nt.position;
+    }
     CountStage(p, res.stage, res.unknown);
     if (res.stage != SND_PHYSICS_STAGE_PAIR) {
       Request fb = TrackRequest(p, nt, 0);
@@ -1452,7 +1507,22 @@ snd_result Submit(snd_phys& p, const snd_contact* contacts, std::uint32_t count,
     for (std::uint32_t i = 0; i < p.cdCount; ++i) p.cd[i].stamp = 0;
     p.stamp = 1;
   }
-  ReleaseHeld(p);
+  // Audio side stalled (D-125): block_index unchanged for stall_calls calls in a row.
+  snd_stats ss{};
+  const bool known = snd_get_stats(p.sys, &ss) == SND_OK;
+  if (known) {
+    p.sameBlockCalls = (p.haveBlock && ss.block_index == p.lastBlock) ? p.sameBlockCalls + 1u : 0u;
+    p.lastBlock = ss.block_index;
+    p.haveBlock = true;
+  }
+  p.stalled = known && p.cfg.stall_calls > 0u && p.sameBlockCalls >= p.cfg.stall_calls;
+  if (p.stalled) ++p.stats.audio_stalled_calls;
+  // The release check that records runs only when block_index moved since the last one.
+  const bool probe = !known || !p.haveProbeBlock || ss.block_index != p.probeBlock;
+  if (ReleaseHeld(p, probe) && known) {
+    p.haveProbeBlock = true;
+    p.probeBlock = ss.block_index;
+  }
   p.freshCount = 0;
   const float threshold = p.cfg.impulse_threshold > 0.0f ? p.cfg.impulse_threshold : p.tableThreshold;
   const float grid = p.cfg.grid_size;
