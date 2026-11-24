@@ -7,7 +7,9 @@
 //       replays a recording with the banks of <dir> (*.sndb); --expect checks the decision log
 //       and digest, --write-expect writes them, --wav writes the output, --twice compares two
 //       replays, --report writes a bug report folder.
-// Exit status: 0 ok, 1 mismatch, 2 usage / input error.
+// Exit status (D-185): 0 = everything matches, 1 = a comparison does not match (decisions, bits, the
+// expectation), 2 = the input cannot be read or the replay itself failed (also from a report), or
+// a usage error.
 #include <cstdio>
 #include <cstring>
 #include <string>
@@ -17,7 +19,12 @@
 
 namespace {
 
+const char* const kExit =
+    "exit status: 0 = match, 1 = a comparison does not match, 2 = the input cannot be read or the replay\n"
+    "failed (bad usage too)\n";
+
 int Usage() {
+  std::fprintf(stderr, "%s", kExit);
   std::fprintf(stderr,
                "usage: sonus-replay <bug-report-dir>\n"
                "       sonus-replay --recording <file> --banks <dir> [--expect <file>] [--write-expect <file>]\n"
@@ -40,7 +47,13 @@ int main(int argc, char** argv) {
       *v = argv[++i];
       return true;
     };
-    if (a == "--recording") {
+    if (a == "--help" || a == "-h") {
+      std::printf("usage: sonus-replay <bug-report-dir>\n"
+                  "       sonus-replay --recording <file> --banks <dir> [--expect <file>] [--write-expect <file>]\n"
+                  "                    [--wav <out.wav>] [--twice] [--report <dir> [--title <text>]]\n%s",
+                  kExit);
+      return 0;
+    } else if (a == "--recording") {
       if (!next(&recording)) return Usage();
     } else if (a == "--banks") {
       if (!next(&banks)) return Usage();
@@ -70,9 +83,14 @@ int main(int argc, char** argv) {
       return 2;
     }
     ExpectationResult e;
-    const ReplayComparison c = ReplayBugReport(rep, &e);
+    ReplayRun first;
+    const ReplayComparison c = ReplayBugReport(rep, &e, &first);
     std::printf("%s", c.Text().c_str());
     for (const std::string& m : e.messages) std::printf("expectation: %s\n", m.c_str());
+    if (!first.ok) {
+      std::fprintf(stderr, "sonus-replay: the replay failed: %s\n", first.error.c_str());
+      return 2;
+    }
     return c.ok && e.ok ? 0 : 1;
   }
   if (recording.empty() || banks.empty()) return Usage();

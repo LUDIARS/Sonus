@@ -8,8 +8,8 @@
 //
 // Replay: the banks load first; then blocks are rendered until the next block is the recording's
 // first block minus the lead blocks (the recorded block numbers are kept when bank loading took
-// fewer blocks: ReplayRun::blockNumbersKept), Start, and Blocks() blocks (+ extraBlocks) are
-// rendered. The ReplayRun gets the Replayer's info, conditions, decision log, the OutputDigest of
+// fewer blocks and the gap is within maxAlignBlocks: ReplayRun::blockNumbersKept), Start, and
+// Blocks() blocks (+ extraBlocks) are rendered. Recordings longer than maxBlocks are refused. The ReplayRun gets the Replayer's info, conditions, decision log, the OutputDigest of
 // the recorded blocks and (keepOutput) the output.
 //
 // ReplayTwice: two replays in two runtimes and their comparison (recording_report.hpp
@@ -48,6 +48,13 @@ struct ReplayOptions {
   std::uint32_t extraBlocks = 0;    // rendered after the recording's last block (tails)
   std::uint32_t maxDecisions = 8192;
   std::uint32_t bankTimeoutMs = 10000;
+  // D-185 limits (0 = one hour of the Config's real time). A recording whose blocks span more than
+  // maxBlocks is refused when it is read (ReplayRun::error says why). Bringing the replaying
+  // runtime up to the recording's first block number renders at most maxAlignBlocks blocks; a
+  // recording that starts later is replayed without keeping its block numbers
+  // (ReplayRun::blockNumbersKept = false, as C-21 describes).
+  std::uint64_t maxBlocks = 0;
+  std::uint64_t maxAlignBlocks = 0;
 };
 
 // The banks of a build as report banks (files, ids, content hashes, bytes).
