@@ -7,6 +7,8 @@
 #include "snd/io/io_scheduler.hpp"
 #include "callback_kind.hpp"
 #include "input_kind.hpp"
+#include "granular_kind.hpp"
+#include "patch_kind.hpp"
 #include "noise_kind.hpp"
 #include "oscillator_kind.hpp"
 #include "sample_kind.hpp"
@@ -24,6 +26,8 @@ struct Runtime::Impl {
   detail::OscillatorKind oscillator;
   detail::NoiseKind noise;
   detail::InputKind input;
+  detail::GranularKind granular;
+  detail::PatchKind patch;
   // Input ports (D-194): the port objects and their sample memory.
   InputPort* ports = nullptr;
   float* portData = nullptr;
@@ -85,7 +89,8 @@ bool Runtime::Init(const RuntimeDesc& desc) noexcept {
   }
   if (desc.enableCallback) kinds_.kinds[static_cast<std::size_t>(SourceKind::Callback)] = &impl_->callback;
   if (desc.enableUserBuffer) kinds_.kinds[static_cast<std::size_t>(SourceKind::UserBuffer)] = &impl_->userBuffer;
-  // Stage 7-D. Granular and Patch are added the same way (one member of Impl, one entry).
+  if (desc.enableGranular) kinds_.kinds[static_cast<std::size_t>(SourceKind::Granular)] = &impl_->granular;
+  if (desc.enablePatch) kinds_.kinds[static_cast<std::size_t>(SourceKind::Patch)] = &impl_->patch;
   if (desc.enableOscillator) kinds_.kinds[static_cast<std::size_t>(SourceKind::Oscillator)] = &impl_->oscillator;
   if (desc.enableNoise) kinds_.kinds[static_cast<std::size_t>(SourceKind::Noise)] = &impl_->noise;
   if (impl_->portCount != 0u) kinds_.kinds[static_cast<std::size_t>(SourceKind::Input)] = &impl_->input;
@@ -171,6 +176,8 @@ RuntimeStats Runtime::Stats() const noexcept {
   s.noiseInstances = impl_->noise.LiveInstances();
   s.inputInstances = impl_->input.LiveInstances();
   s.inputUnderruns = impl_->input.Underruns();
+  s.granularInstances = impl_->granular.LiveInstances();
+  s.patchInstances = impl_->patch.LiveInstances();
   return s;
 }
 

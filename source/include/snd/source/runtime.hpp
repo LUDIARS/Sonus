@@ -130,6 +130,8 @@ struct RuntimeDesc {
   std::uint32_t inputPorts = 4;
   std::uint32_t inputPortFrames = 8192;
   std::uint32_t inputPortChannels = 2;
+  bool enableGranular = true;
+  bool enablePatch = true;
 };
 
 // Counters (relaxed snapshot).
@@ -171,6 +173,8 @@ struct RuntimeStats {
   std::uint32_t noiseInstances = 0;
   std::uint32_t inputInstances = 0;
   std::uint64_t inputUnderruns = 0;      // beginnings of shortages after a fully supplied block
+  std::uint32_t granularInstances = 0;
+  std::uint32_t patchInstances = 0;
 };
 
 class Runtime {
