@@ -299,3 +299,45 @@ SND_REQUIRE で送っていたが、ゲームが最初の要求で接続を閉�
 - TCP での 1.1、Windows / macOS での実行（前と同じ）。
 - 構造の変更の模型は、RemoveEffect を含めていない（番号で指す外し方は偽の編集器では意味が無いため）。RemoveEffect は
   `StructArgCountAtTheCap` などの規則の検査だけ。
+
+## 再確認 2 回目（D-172・D-173 の追記と d399b0b の後。作業ツリーの先頭 d341f09 の上）
+
+### 更新したテスト（b718733、コメントに D-172 / D-173）
+
+| テスト | 内容 |
+| --- | --- |
+| `IndepS7Impl.StructEditBeyondTheLogIsRefusedAtAcceptance` | 記録が一杯でも、ライブの Add を打ち消す RemoveBus B1 は SND_OK で、B1 の枠と予備容量（buses 1、bytes 80）が返る。空いた枠に B3 が入る。一杯のときバンクのバス（Sfx）の Remove は LIMIT_REACHED で編集器は呼ばれない。枠があれば Sfx の Remove は適用され、記録に残る（枠 2） |
+| `IndepS7Recheck.StructLogAndReserveFollowTheModel` | 模型を決定に合わせた。<br>・ライブのバスの Remove は一杯でも受け付ける。<br>・バンクのバスの Remove は適用時に枠を取る（一杯なら LIMIT_REACHED。編集器の断りより先）。<br>・RemoveEffect を足した: その bus のいちばん新しいライブのエフェクトを番号に関係なく打ち消す（枠なし）。無ければバンクのものを外す（枠が要る）。<br>・種を 4 → 8（各 120 操作。編集器の断り、切断と再接続を含む）。<br>毎回、`ReserveUsage()`・`StructLogPlaces()`・`structLog` と結果を模型と比べた。 |
+| `Defect_FailedReloadUnloadsTheGamesOwnOtherBank` → `FailedReloadKeepsTheGamesOwnOtherBank` | 同じパスで言語が同じ場合と、言語違い（Two を言語 7 で要求）の場合。どちらもゲーム自身の (Two, 0) が残る。そのあと: SetValue が Two に届く（cells 1）、Live を `loadIfAbsent` で読み直せる、Two の通常のリロードが動く。バンクは 2 つ、`reloadsFailed` は 2 |
+
+テスト側の直し（f0b082c）: `IndepS7Stress.ReconnectsDuringRequests` が Release の 20 回の繰り返しで 1 回落ちた（最後の全停止の Ack が来ない）。
+診断を足して、負荷のある並行実行で再現した（80 回に 1 回）: `no Ack for seq 267: client state 3, disconnects 19->20, connects 19->20,
+timeouts 0, acksLost 0; server connections 20->21, connected 1, protocolErrors 0`。全停止を送った直後に接続が替わっていた
+（ツールのスレッドの 20 回目の `Disconnect()` が、Ready に見えた後で効いた）。Ack は接続ごとなので D-86 の違反ではない。
+接続が替わったときだけ送り直し、同じ接続で答えが無ければ失敗にした（「no Ack on an unbroken connection」）。直した後、負荷のある
+並行実行 80 回で同じ競合が 1 回起き、送り直しで通過した。Release の 20 回の繰り返しも全部通過した。
+
+### 結果
+
+- 新しい欠陥は無い。前回の欠陥 `Defect_FailedReloadUnloadsTheGamesOwnOtherBank` は直っていた（決定どおりの名前のテストにした）。
+- 記録の枠と予備容量（打ち消しの Remove、バンクの Remove、RemoveEffect、断り、切断と再接続）: 8 つの種で模型との食い違いは 0。
+  `structLog` は常に 0。
+
+### 構成と結果（ビルドは $S/livelink-indep/b-*、-j2、1 つずつ。全部消した）
+
+| 構成 | コミット | 実行 | 結果 |
+| --- | --- | --- | --- |
+| 1 gcc Debug | b718733 | 全件 ctest（223） | 全部通過（`platform_device_play_test` は Skipped。`tool_live_mixer_test` も通過） |
+| 3 ASan/UBSan | b718733 | `ctest -R livelink`（33）、`SND_FUZZ_ITERATIONS=20000` | 33 / 33 通過 |
+| 4 TSan | b718733 | `ctest -R livelink`（33）。-j1 で `--repeat until-fail:20`: indep_s7_stress、indep_s7_live、v11_stress、v11_live、integration_livelink_stress。recheck の `ConcurrentStartsNeverOverlap`・`OneStartedServer`・`StructLogAndReserve`・`FailedReloadKeeps` を `--filter` で 20 回ずつ | 全部通過、TSan の警告 0 |
+| 5 Release | b718733 → f0b082c | `ctest -R livelink`（33）、TSan と同じ繰り返し | 33 / 33 通過。繰り返しで stress が 1 回落ちた（上のテスト側の競合）→ f0b082c で直して 5 本の 20 回: 全通過。recheck の `--filter` 20 回: 失敗 0 |
+| MinGW 構文検査 | f0b082c | indep_s7_impl / recheck / stress（`-Wall -Wextra -Wpedantic -Wshadow -Werror`） | 通過 |
+
+回していないもの: f0b082c（stress のテストだけの変更）の後の TSan・ASan・gcc の回し直し。構成 6〜9。
+
+### 未検証（2 回目）
+
+- 読み込み中でまだ一覧に無いゲームのバンクと同じパスへのリロード（実装担当のメモでも未検証）。
+- 本当に言語を持つバンク（languageId ≠ 0 のファイル）のリロード。
+- `Client::Disconnect()` が「今すぐ」効かないこと（Ready に見えた後で切れる）は、テストの競合として扱った。ヘッダの
+  「Drops the connection now」と厳密には合わない（非同期で、すぐではない）。気にするならヘッダに「非同期」と書くのがよい。
