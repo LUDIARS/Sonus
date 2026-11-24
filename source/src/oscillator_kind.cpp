@@ -87,6 +87,11 @@ struct OscLoop {
     double phase = in.phase;
     double held = in.heldDt;
     std::uint32_t g = in.fadePos;
+    if (!in.gainStarted && n != 0) {
+      const double firstRatio = p0 + pd * (off / blockFrames);
+      g = baseDt * firstRatio > 0 ? fadeFrames : 0;
+      in.gainStarted = true;
+    }
     const double inv = 1.0 / static_cast<double>(fadeFrames);
     for (std::uint32_t i = 0; i < n; ++i) {
       const double a = (off + static_cast<double>(i)) / blockFrames;
@@ -195,7 +200,8 @@ void OscillatorKind::Start(const SourceStartRequest* requests, std::uint32_t cou
     in.shape = shape;
     const double f = p->frequencyHz > 0.0f && std::isfinite(p->frequencyHz) ? static_cast<double>(p->frequencyHz) : 0.0;
     in.baseDt = f / sampleRate_;
-    in.fadePos = in.baseDt > 0.0 ? fadeFrames_ : 0u;  // D-200: a voice without frequency starts at gain 0
+    in.gainStarted = false;
+    in.fadePos = 0;
     in.heldDt = in.baseDt > kMaxDt ? kMaxDt : in.baseDt;
     in.startPhase = StartPhaseOf(shape);
     in.phase = Wrap(in.startPhase + static_cast<double>(rq.startFrame) * in.baseDt);
@@ -291,6 +297,11 @@ void OscillatorKind::AdvanceVirtual(const AdvanceItem* items, std::uint32_t coun
     OscInst& in = inst_[a.sourceSlot];
     double dt = in.baseDt * static_cast<double>(a.pitch > 0.0f && std::isfinite(a.pitch) ? a.pitch : 0.0f);
     dt = dt > kMaxDt ? kMaxDt : dt;  // 0 (and NaN) -> the phase waits (D-198)
+    if (!a.outputFrames) continue;
+    if (!in.gainStarted) {
+      in.fadePos = dt > 0 ? fadeFrames_ : 0;
+      in.gainStarted = true;
+    }
     in.phase = Wrap(in.phase + dt * static_cast<double>(a.outputFrames));
     // D-200: the gain moves as it would have while rendering.
     if (dt > 0.0) {

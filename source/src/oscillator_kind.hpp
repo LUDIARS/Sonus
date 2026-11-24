@@ -70,6 +70,7 @@ struct OscInst {
   // D-200: output gain while the frequency goes to 0 and back: fadePos / fadeFrames_
   // (linear, per sample; render state). heldDt: the last positive dt (the waveform at the
   // held phase is evaluated with it while fading out).
+  bool gainStarted = false;  // first real or virtual sample chooses the starting gain
   std::uint32_t fadePos = 0;
   double heldDt = 0.0;
 };

@@ -346,12 +346,8 @@ SND_TEST(SourceOscillator, ZeroOrNonFiniteFrequencyIsSilenceAndThePhaseWaits) {
     Driver::Mod bad;
     bad.duty = snd::Ramp{std::nanf(""), std::nanf("")};
     d.Render(v, 1024, bad);
-    // D-200: the held value fades out over 240 samples (5 ms), then silence; on the way back
-    // the waveform fades in over 240 samples and is then the uninterrupted one.
-    for (std::size_t i = 0; i < 240; ++i) {
-      SND_CHECK(std::fabs(v.out[0][i]) <= std::fabs(ref[0]) * float(240 - i) / 240.0f + 1e-6f);
-    }
-    for (std::size_t i = 240; i < 768; ++i) SND_CHECK_EQ(v.out[0][i], 0.0f);
+    // The first effective frequency is zero, so the voice starts silent and fades in.
+    for (std::size_t i = 0; i < 768; ++i) SND_CHECK_EQ(v.out[0][i], 0.0f);
     for (std::size_t i = 0; i < 1024; ++i) {
       if (i < 240) {
         SND_CHECK_NEAR(v.out[0][768 + i], ref[i] * double(i + 1) / 240.0, 1e-6);
@@ -430,9 +426,9 @@ SND_TEST(SourceOscillator, ZeroFrequencyFadesOutAndBackIn) {
   Driver d(snd::SourceKind::Oscillator, Driver::Opt{});
   Driver::Voice v;
   SND_REQUIRE(d.Start(v, &p, 1));
-  d.Advance(v, 100, 0.0f);  // gain 240 -> 140, phase held at 0
+  d.Advance(v, 100, 0.0f);  // first effective frequency is zero, gain and phase stay zero
   d.Render(v, 10);
   for (std::size_t i = 0; i < 10; ++i) {
-    SND_CHECK_NEAR(v.out[0][i], std::sin(2 * kPi * dt * double(i)) * double(141 + i) / 240.0, 1e-6);
+    SND_CHECK_NEAR(v.out[0][i], std::sin(2 * kPi * dt * double(i)) * double(1 + i) / 240.0, 1e-6);
   }
 }
