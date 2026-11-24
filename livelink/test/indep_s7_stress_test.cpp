@@ -199,19 +199,35 @@ SND_TEST(IndepS7Stress, ReconnectsDuringRequests) {
   // settle, then a final disconnect revert puts every structural edit back
   SND_CHECK(f.StepUntil([&] { return c->State() == ll::ClientState::Ready && f.server->Connected(); }, 10000));
   f.Steps(50);
-  // the sender returns 0 while the client is not Ready (client.hpp): retry until queued
-  std::uint32_t seq = 0, zeros = 0;
-  SND_CHECK(f.StepUntil([&] {
-    seq = c->StopAuditions(true);
-    if (seq == 0u) ++zeros;
-    return seq != 0u;
-  }, 10000));
-  if (zeros != 0u) {
-    std::printf("[indep_s7] StopAuditions not queued %u time(s) after settling: state %u, disconnects %u, timeouts %u\n",
-                zeros, static_cast<unsigned>(c->State()), c->Stats().disconnects, c->Stats().timeouts);
-  }
+  // The sender returns 0 while the client is not Ready (client.hpp), and the tool thread's last
+  // Disconnect() may take effect after the client looked Ready (seen once in 80 loaded Release
+  // runs: the connection dropped between queueing and the Ack). An Ack belongs to its connection,
+  // so the stop is sent again when the connection changed; on one connection it must be answered.
   std::int32_t res = 0;
-  SND_CHECK(f.StepUntil([&] { return c->TakeAck(seq, &res); }, 10000));
+  bool acked = false;
+  for (int attempt = 0; attempt < 5 && !acked; ++attempt) {
+    std::uint32_t seq = 0;
+    SND_CHECK(f.StepUntil([&] {
+      seq = c->StopAuditions(true);
+      return seq != 0u;
+    }, 10000));
+    const ll::ClientStats cs0 = c->Stats();
+    const ll::ServerStats ss0 = f.server->Stats();
+    acked = f.StepUntil([&] { return c->TakeAck(seq, &res); }, 10000);
+    if (!acked) {
+      const ll::ClientStats cs1 = c->Stats();
+      const ll::ServerStats ss1 = f.server->Stats();
+      std::printf("[indep_s7] no Ack for seq %u: client state %u, disconnects %u->%u, connects %u->%u, timeouts %u, "
+                  "acksLost %u; server connections %u->%u, connected %d, protocolErrors %u\n",
+                  seq, static_cast<unsigned>(c->State()), cs0.disconnects, cs1.disconnects, cs0.connects, cs1.connects,
+                  cs1.timeouts, cs1.acksLost, ss0.connections, ss1.connections, f.server->Connected() ? 1 : 0,
+                  ss1.protocolErrors);
+      SND_CHECK_MSG(cs1.connects != cs0.connects, "no Ack on an unbroken connection (D-86)");
+      if (cs1.connects == cs0.connects) break;
+      SND_REQUIRE(f.StepUntil([&] { return c->State() == ll::ClientState::Ready && f.server->Connected(); }, 10000));
+    }
+  }
+  SND_CHECK(acked);
   SND_CHECK_EQ(res, SND_OK);
   f.Steps(50);
   c->Stop();
