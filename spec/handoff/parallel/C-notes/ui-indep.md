@@ -1,0 +1,189 @@
+# セッション C 組 U（Tela の画面）独立テストのメモ
+
+独立テスト担当のメモ。受け入れ側への引き継ぎ。ブランチ `c/ui`（実装担当のコミットと組 L の最新の取り込み 9425a07 の上、ローカルコミットのみ）。
+
+手順: 実装を読む前に、仕様（設計書 11 章、`tool/README.md`、CONTRACTS.md の D-67・D-67a・D-100・D-101）、公開ヘッダ
+（`tool/ui/include`、`tool/include`、`tool/preview/include`、Tela）、依頼書 `U-impl.md`、実装担当のメモの「作ったもの」と
+「決定の案」から性質を書き出してコミットした（d64204d、`tool/test/indep_s7_ui_properties.md`）。要素の ID は実装を読まずに、
+実行時の要素の木（ID・ラベル・位置）から探した。そのあとテストを書き、最後に実装（`tool/ui/src`）を読んで欠陥を狙うテストを足した。
+
+## 作ったもの
+
+書いた場所は `tool/test/` の新しいファイル（`indep_s7_ui_*`）と `tool/test/CMakeLists.txt` の末尾への登録、性質の一覧、このメモだけ。
+実装・既存のテストは変えていない。
+
+| ファイル | 内容 |
+| --- | --- |
+| `indep_s7_ui_properties.md` | 性質の一覧（A〜K） |
+| `indep_s7_ui_fixture.hpp` | 文書の上の App（`Rig`）、要素の ID・接頭辞・ラベルでの検索、押す・打つ・ドラッグ、大きなプロジェクトの生成（`LargeFiles`: Event 1000、40 トラック × 30 クリップ、開始 1e9 ms、長い名前 200 文字、バス 100、ルール 150 行、ノード上限 32 のパッチ、材質 64、範囲 ±1e30 のパラメータ）、要素の重複・Tela の上限の検査、`SND_INDEP_DUMP=1` で要素の木を出す |
+| `indep_s7_ui_common_test.cpp` | A（画面の名前・タブの順・F キーと Ctrl+PageUp/Down/Tab・画面の切り替えで入力が終わる）、B（画面ごとの Ctrl+Z / Y / Shift+Z、ミキサーはライブの値だけ、Ctrl+S と未保存、文書なし）、C（UTF-8、ParseNumber、FormatNumberText、TextEntry のキー・上限・数値・置き換え、Esc） |
+| `indep_s7_ui_screens_test.cpp` | D・E（Event の一覧と全ページ、クリップの箱が `ComputeTimeline` と軸のとおり、横のドラッグの絶対量と 1 手、縦のドラッグ、トラックのボタン、Delete、Undo 後の選択、名前の欄の拒否、数値の欄の規則、Buses の一覧・拒否される編集（マスターの削除、子のあるバス、循環する親、自分へのセンド）・+ Child とミキサーの追従・エフェクトの値の正規化、Params の項目と `ComposeEvent`、カーブの点のドラッグ・隣を越えない・2 点で Delete、3D の値と `Compute`・エミッタのドラッグ、Music のルール表の行数・自動の並べ替えの拒否・試聴の計算と最小先読み、Material の行・最後の材質・対称な組、Patch の上限・循環する接続・ノードのドラッグ、Problems の行と Go、文書なしのライブの画面） |
+| `indep_s7_ui_gesture_test.cpp` | F（多くの宣言をまたぐドラッグ、ドラッグ中の画面の切り替え・Tela の取り消し・要素が消える・Ctrl+Z、動かさない押下、数値の欄のドラッグ・Shift・ホイール・整数の範囲、数値のドラッグ中の画面の切り替え、ノードのドラッグ中の取り消し） |
+| `indep_s7_ui_limits_test.cpp` | G・E（全 12 画面 × {文書なし、空、基本、大きい（7 つの選択）} × DPI 0.25〜4 × 320×200〜3840×2160 を子プロセスで: 落ちない、要素 ≤ 4096、ID の重複なし、図形 ≤ 256・点 ≤ 4096、位置が有限、compose。範囲外の DPI と大きさ。フレームと画面の往復で ID が同じ）。ヘッドレスの CTest 用に大きなプロジェクトと空のプロジェクトを書く |
+| `indep_s7_ui_raster_test.cpp` | H（クリップの箱の画素、maxDistance の円の半径、カーブの点。DPI 1 と 2） |
+| `indep_s7_ui_threads_test.cpp` | J（実時間のプレビューエンジン（Silent）とライブリンクの中で、UI スレッドが全画面をポインタとキーで操作） |
+| `indep_s7_ui_defects_test.cpp` | 欠陥 4 件（`Defect_*`、失敗のまま）、書き戻しの確認 1 件、仕様の穴の記録 3 件（`SpecGap_*`、通る。今の振る舞いを出力する） |
+| `CMakeLists.txt`（末尾に追記） | 上のテストの登録、`tool_indep_s7_ui_screen_{large,empty}_<画面>`（24 本、`sonus-tool --headless --screen` が画像を書くこと）、知らない画面名 5 本（WILL_FAIL）、欠陥のテストを 1 件ずつ |
+
+## 性質の一覧と結果
+
+番号は `indep_s7_ui_properties.md`。結果は構成 9（gcc Debug、Tela 入り）。
+
+| 番号 | 要約 | テスト | 結果 |
+| --- | --- | --- | --- |
+| A1〜A3 | 画面の名前の往復、タブの順、F2〜F10・Ctrl+PageUp/Down/Tab | `IndepS7Ui.ScreenNames…`、`TabOrder…`、`FunctionKeys…` | 通過 |
+| A4 | 画面の切り替えで入力が終わる（commit しない） | `ChangingTheScreenEndsTheTextEntry` | 通過 |
+| B1・B2 | 画面ごとの取り消しの文脈 | `CtrlZUndoesTheDocumentOnEditorScreens`、`CtrlZOnTheMixerUndoesLiveValuesOnly` | 通過 |
+| B3・B4 | Ctrl+S と未保存、文書なし | `CtrlSSaves…`、`NoDocument…` | 通過 |
+| C1〜C4 | UTF-8、数値の読み書き、TextEntry | `Utf8…`、`ParseNumber…`、`FormatNumberText…`、`TextEntryKeys`、`AppEscape…` | 通過 |
+| C5 | 名前の欄（重複・空の拒否、1 手、ID が変わらない） | `EventNameFieldRefusesTakenNames` | 通過 |
+| C6 | 数値の欄がモデルの規則を通る | `EventNumberFieldsGoThroughTheModelsRules`（通過）、`Defect_TypedNumberOutsideTheFieldRangeIsClampedNotRefused` | **欠陥**（入力した範囲外の値が切り詰めて書かれる） |
+| D1 | Event | `EventList…`、`EventClipBoxes…`、`EventClipDrag…`、`EventClipVerticalDrag…`、`EventTrackButtons…`、`EventDeleteAfterUndo…`、`EventSelectedTrackRemovedFromOutside` | 通過（縦のドラッグは欠陥 3） |
+| D2 | Buses | `BusesList…`、`BusesScreenDoesNotPassRefusedEdits`、`BusesAddChild…`、`BusesEffectParam…` | 通過 |
+| D3 | Params | `ParamsFieldsAndComposition…`、`ParamsCurvePoints…` | 通過（狭い欄は欠陥 4） |
+| D4 | 3D | `SpatialValuesAndEmitterDrag` | 通過 |
+| D5 | Music | `MusicRuleTableRowsAndAutoSort`、`MusicPreview…` | 通過 |
+| D6 | Material | `MaterialRows…` | 通過 |
+| D7 | Patch | `PatchLimitAndCycleAreRefused`、`PatchNodeDrag…` | 通過 |
+| D8 | Profiler / Replay / Link（接続・サービスなし） | `LiveScreensWithoutAGameSayWhy` | 通過 |
+| D9 | Problems（行の数、エラーが先、Go） | `ProblemsRowsAreTheBuildsIssues` | 通過 |
+| D10 | 画面だけの選択と文書のずれ | `EventDeleteAfterUndo…`、`EventSelectedTrack…`、`SpecGap_ClipSelectionIsAnIndexAcrossUndo` | 通過。ただし仕様の穴 3 |
+| E1〜E5 | ID の安定と一意 | `IdsAreStableOverFramesAndRoundTrips`、`EventNameField…`（名前の変更）、`EveryScreen…`（重複なし） | 通過 |
+| F1・F2・F9 | ドラッグの量と値、範囲、動かさない押下 | `EventClipDrag…`、`EventClipVerticalDrag…`、`PressWithoutMotionIsNoStep` | 通過（欠陥 3 を除く） |
+| F3〜F5 | 点・エミッタ・ノード | `ParamsCurvePoints…`、`SpatialValues…`、`PatchNodeDrag…` | 通過 |
+| F6 | 数値の欄のドラッグとホイール | `NumberFieldDragAndWheel`（通過）、`Defect_NumberFieldWheelNotchesBetweenFramesAreLost` | **欠陥**（フレームの間の複数のノッチが 1 つになる） |
+| F7・F8 | 宣言の差し替えをまたぐ、中断（画面の切り替え、取り消し、要素が消える、Ctrl+Z） | `IndepS7UiGesture.*` | 通過（グループは閉じ、手は高々 1 つ、次の編集は別の手） |
+| G1〜G3 | 上限・DPI・大きさ | `EveryScreenEveryProjectEveryDpiStaysInTelasLimits`、`OutOfRangeViewportsAreClamped` | 通過（ASan / UBSan は下の構成の表） |
+| H1〜H3 | 画素（DPI 1・2） | `IndepS7UiRaster.*` | 通過 |
+| I1・I2 | ヘッドレスの全画面（大きい・空）、知らない画面名 | `tool_indep_s7_ui_screen_*`、`tool_indep_s7_ui_bad_screen_*`、`tool_indep_s7_ui_screen_missing_name` | 下の構成の表 |
+| J1 | UI スレッドと接続・エンジンのスレッド | `IndepS7UiThreads.ScreensDrivenWhileEngineAndLinkRun` | 下の構成の表 |
+| K | 実装を読んだ後の追加 | `indep_s7_ui_defects_test.cpp` | 欠陥 4、記録 3、確認 1（通過） |
+
+## 欠陥の一覧（`tool_indep_s7_ui_defects_test`、CTest では `tool_indep_s7_ui_<名前>`）
+
+1. **`Defect_TypedNumberOutsideTheFieldRangeIsClampedNotRefused`**（中）
+   - 再現: Event 画面で Shot を選び、Max dist. の値（`ev.f.n4`）を押して入力を始め、`-5` を打って Enter。クリップの Start でも `-20`。
+   - 期待: モデルが拒否する（maxDistance ≥ 0、startMs ≥ 0）ので文書は変わらず、入力は開いたまま（kit.hpp「Enter commits through the
+     model's setter (refused: the entry stays open)」、text_entry.hpp、README「確定はモデルの関数（拒否なら開いたまま）」）。
+   - 実際: 0 が書かれ（1 手）、入力が閉じる。`kit.cpp` の `commitText` が `ClampNumber(v, sp.minValue, sp.maxValue, …)` で欄の範囲に
+     切り詰めてから setter を呼ぶので、モデルは拒否の機会がない（画面の側の規則。打った値と違う値が黙って入る）。欄の範囲が
+     モデルの規則より狭い欄（例: Priority 0..255 なら 300 → 255）でも同じ。
+   - 実装担当のテストの「拒否」は文字の無い入力（読めない文字列）だけで、読める範囲外の値を試していない。
+2. **`Defect_NumberFieldWheelNotchesBetweenFramesAreLost`**（中）
+   - 再現: Buses 画面で Sfx を選び、Volume の値の上でホイールを 5 ノッチ、間に宣言を挟まずに送る（速いホイール、ホストがまとめて
+     渡すとき）。
+   - 期待: 5 ステップ、1 手（kit.hpp「the wheel steps (one undo step per series)」、README「ホイール（続けて回した分が取り消し 1 回）」）。
+   - 実際: 1 ステップ。`kit.cpp` のホイールは宣言の時の `sp.value` に足すので、次の宣言までの 2 つ目以降のノッチが同じ値を書く。
+     ミキサーのフェーダーとノブ（`pointer_router.cpp`）は `ControlValue` で今の値を読むので起きない。実装担当のテストは
+     ノッチごとに Frame を呼ぶので見つからない。
+3. **`Defect_ClipVerticalDragTrackComesFromThePressPointNotTheMotion`**（中）
+   - 再現: 3 トラックの Event で中央のトラックのクリップを、上端から 2 px のところで押して 5 px 上へ動かして離す（下端近くで押して
+     10 px 下も同じ）。
+   - 期待: 縦の移動が半レーン（24 px）未満ならトラックは変わらない（決定の案 e「縦の移動量をレーンの間隔（48 px）で丸めたトラックへ」）。
+   - 実際: 上のトラックへ移る。`event_view.cpp` の離した時の処理が `floor(離した点の当たり判定の中の y / 48)` で、移動量ではなく
+     押した点の位置で決まる（上端の近くで押せば 1 px 上でも移り、下端の近くでは 13 px 下で移る）。実装担当のテストは中央を押して
+     ちょうど 48 px 動かすだけ。
+4. **`Defect_NumberFieldValueHasNoRoom`**（低）
+   - 再現: 1280×800、Params 画面（パラメータ Speed）と Material 画面（Phys）。
+   - 期待: 数値の欄の値の要素に、値を出して押せる幅がある（kit.hpp「a vertical drag on the value」「a click without motion types」）。
+   - 実際: `pc.par.def.value` 2 px、`pc.par.min/max/ramp.value` 16 px、`ma.t.impulse.value` 10 px。`kit.cpp` は欄の幅を 40 px 以上に
+     するが値には欄 − 44 px しか残さない（負にもなりうる。Tela は負の幅で例外を投げなかった）。値の文字が出ず、2 px の当たり判定は
+     実質押せない。
+
+（確認して欠陥でなかったもの: `WriteBackAfterStaleMixerKeepsNewerDocumentValues` — ライブの上書きがある間に文書で別のバスの値を
+変えてから書き戻しても、上書きの無いバスの新しい値は消えない。通過。）
+
+## 仕様の穴の一覧（選択肢と推奨）
+
+1. **選択が番号（クリップ、トラック、カーブの点、アクション、ルール）で、Undo / Redo の後に別の物を指す**
+   （`SpecGap_ClipSelectionIsAnIndexAcrossUndo`）: クリップ A・B から A を消して B を選び、Ctrl+Z で A が戻ると選択は番号 0 = A になり、
+   Delete で A（選んでいない方）が消える。選択肢: (a) 今のまま（強調は A に移るので見た目とは合う）、(b) 文書の版が画面の外
+   （Undo / Redo・他の画面・ライブ）で変わったら番号の選択を外す、(c) オブジェクトの中の要素に安定したキーを持たせる（モデル）。
+   **推奨 (b)**（データを消す操作の対象が黙って入れ替わらない。安い）。
+2. **入力中の Ctrl+Z / Ctrl+Y が文書に効く**（`SpecGap_UndoKeyDuringATextEntryUndoesTheDocument`、text_entry.cpp「shortcuts pass」）:
+   入力は開いたまま、下の文書が 1 手戻る。選択肢: (a) 今のまま、(b) 入力中は取り消し・やり直しを入力が食う（入力を取り消す）、
+   (c) 入力を確定してから戻す。**推奨 (b)**（入力欄で Ctrl+Z を押す人は打った文字を消したい。開いた入力の commit は番号で物を
+   指すことが多く、下で文書が変わると別の物に書く）。
+3. **文書の構造の変更でライブの上書きが黙って消える**（決定の案 g、`SpecGap_StructuralEditDropsLiveOverridesSilently`: 上書き 1 → 0、
+   メッセージ 0）: 選択肢: (a) 今のまま、(b) メッセージを出す、(c) モデルの要望 4（キーで引き継ぐ `Rebind`）が入るまで、上書きが
+   あるときは値だけの変更と同じく待って質問する。**推奨 (c)、少なくとも (b)**。ゲームには上書きの値が残ったまま、ミキサーは
+   バンクの値を出すので、ツールとゲームがずれる（11.2「正しいデータは常にツール側」）。ライブでのずれは確かめていない。
+4. **クリップの縦のドラッグがトラックの範囲の外**: 今は何もしない（元のトラックのまま、横の移動は残る）。選択肢: 端のトラックへ
+   切り詰める／何もしない。**推奨: 端へ切り詰める**（決定の案 e の「丸めた」に素直）。テストはどちらも許している。
+5. **コーンの「無い」の表し方が画面で違う**: Event 画面は `cone` の無い Event を 360 / 360 / 0 dB と出し（画面の側の既定）、3D 画面の
+   情報行は `SpatialPreview::Cone` の 0 / 0 / 0 dB を出す。ランタイムではどちらも「コーンなし」（`sys_dsp.cpp`: outer > 0 のときだけ）。
+   **推奨**: モデルに `EventEditor::Cone()` を足し（実装担当の要望 3 と同じ）、両画面が同じ値を出す。
+6. **ID が位置の番号になる名前つきの要素**（決定の案 k）: 材質（`ma.mat.<番号>`、`ma.pair.<a>.<b>`）、State（`mu.state.<番号>`）、
+   マーカー。材質を 1 つ消すと残りの材質の ID が全部ずれる（E3 に反するが、決定の案 k の範囲）。**推奨**: 名前で一意なもの（材質、
+   State、マーカー、Stinger）は名前から ID を作る。名前の無い配列の要素（クリップ、点、ルール）は番号のまま。
+7. **3D の既定の配置で、リスナーの向きの取っ手がエミッタに重なる**（エミッタ 5 m 前、`sp.listener.yaw` 568..582 × 383..397 と
+   `sp.emitter` 563..587 × 386.9..410.9）: エミッタの上の部分を押すとリスナーが回る。**推奨**: 取っ手を本体より先に宣言する
+   （本体が上）か、既定のエミッタを横にずらす。
+8. **端の点が半分切れる**: カーブの x の範囲に余白が無く、最初と最後の点（と当たり判定）が図の端に半分かかる（画素で確認）。
+   **推奨**: x にも余白（`PlotAxes::Fit` の y と同じ割合）。
+9. **入力も一覧も無いときの Esc**: `App::Key` は Esc で接続待ち（パッチの pendingFrom）を消して false を返すので、Windows のホストは
+   Esc を Tela に渡し、Tela がウィンドウを閉じる（README の「Tela が Esc でウィンドウを閉じる」）。接続の待ちを Esc で取り消そうと
+   するとツールが終わる。コードを読んだだけで、Windows のホストでは確かめていない。**推奨**: 画面が Esc を使ったとき（pendingFrom を
+   消したとき）は true を返す。
+10. **Link 画面の未接続の文言**: 接続していないのに「the game speaks protocol 1.0」と出る（`peerMinor()` の 0 を「1.0 のゲーム」と
+    読んでいる）。**推奨**: 未接続なら「not connected」。
+11. **Problems に同じエラーが 2 行**: 知らない asset を指すクリップで、`CheckDocument` が同じ文言・位置のエラーを 2 件返す（画面は
+    そのまま出す）。モデル（buildtool の診断）の側。画面で重ねるかはモデルの担当と決める。
+
+## 実装担当の「決定の案」への賛否
+
+- **a（12 面、Buses をミキサーと分ける、F2〜F10、Ctrl+PageUp/Down）**: 賛成。キーはテスト（A3）のとおり。
+- **b（取り消しの文脈: ミキサー画面ではライブの値、ほかでは文書）**: 賛成。2 つの履歴を 1 つのキーで扱うには画面で分けるのが
+  いちばん分かりやすく、フッタに文書の Undo / Redo の件数があるので見分けられる。ただし入力中の Ctrl+Z は文書に通さない
+  （仕様の穴 2）。
+- **c（文字の入力の回避: ホストがキーを観測して `TextEntry`）**: 方式には賛成（1 つに揃っていて、Tela に足すべきもの（提案 10〜12）
+  とも合う）。ただし入力した数値を欄の範囲で切り詰めてから commit するのは反対（欠陥 1）: 打った値をそのままモデルに渡し、拒否なら
+  開いたままにする。
+- **d（ドラッグの意味: 位置は押した点からの絶対量、数値は積み上げ、ドラッグ 1 回 = 1 手）**: 賛成（F1・F6・F7・F8 で確認。中断でも
+  グループが閉じる）。ただし数値の欄のホイールは今の値から足す（欠陥 2）。
+- **e（上下でトラック）**: 方針に賛成、実装に反対（欠陥 3）: 移動量 dy を `round(dy / 48)` にし、範囲の外は端へ切り詰める（仕様の穴 4）。
+- **f（ヘッダの高さ 40、文書の操作はフッタ）**: 賛成（既存のアサーションを変えずに済む）。
+- **g（上書きがある間は値だけの変更で結び直さない）**: 値だけの変更で待つのは賛成（書き戻しても上書きの無いバスの新しい文書の値は
+  残ることを確認した）。構造の変更で上書きを黙って消すのは反対（仕様の穴 3）。
+- **h（文書があるときの不一致の既定は「聞く」）**: 賛成。文書があればツールの側が正しいデータを持っているが、ゲームのビルドが
+  新しい場合もあり、黙って差分を送るのも黙って断るのも危ない。ヘッドレスや CI は `--send-diffs` / `--refuse-mismatch` で答えを
+  決められる。
+- **i（再生のサービスを別ライブラリ）**: 賛成。
+- **j（問題の一覧は 250 ms に 1 回）**: 賛成。
+- **k（ID: GUID と、オブジェクトの中は番号）**: 名前の無い要素は賛成、名前で一意な要素は名前から（仕様の穴 6）。
+- **l（ページ送り・窓・見えている物だけ）**: 賛成（G1 で 320×200〜3840×2160、DPI 0.25〜4、大きな文書で上限の中）。
+- **m（3D の試聴の追従）**: 賛成（並行性のテストで試聴しながら動かした。音の中身は確かめていない）。
+
+## 実装担当のテストの弱い箇所
+
+- `ToolUiInput.NumberFieldDragShiftAndWheel`: ホイールのノッチごとに Frame を呼ぶので、フレームの間の複数のノッチ（欠陥 2）が出ない。
+- `ToolUiEvent.ClipDragDownMovesItToTheNextTrack`: 中央を押してちょうど 48 px なので、押した位置で決まる誤り（欠陥 3）が出ない。
+  範囲の外、半レーン未満の移動も無い。
+- 入力の拒否（`ui_event_screen_test` の 107 行目付近、`ui_editor_input_test`）は読めない文字列（空）だけで、読める範囲外の値（欠陥 1）
+  が無い。
+- `ToolUiLimits.EveryScreenOfALargeProjectAtEveryDpi`: 同じプロセスで回すので、Tela の例外が出ればテストの実行ファイルごと落ちる
+  （どの画面かが分からない）。640×400 より小さい窓は無い（本テストは 320×200 も回した）。
+- 選択が文書とずれる場面（Undo の後の Delete、入力中の Ctrl+Z）のテストが無い。
+
+## 机上で検証した並行部分と結論
+
+- UI スレッド: `App`（宣言、`PointerRouter`、`TextEntry`、`Picker`）、`Session`（`Tick` の中で `Connection::Poll`、`CellSync`、
+  `Profiler`、`LiveSync`、`ProfilerStreams`）、`ProjectDocument`、`SpatialPreview`、`AuditionRouter`、プレビューエンジンの持ち主の関数
+  （`App::Frame` の `Pump`）。画面のコードはどれもこの中からだけ呼ばれる（宣言の中の関数オブジェクトは Tela の `pointer` の中、つまり
+  UI スレッドで発火する。`App::Pointer` → `PointerRouter::Pointer` → `Runtime::pointer`）。
+- ほかのスレッド: ライブリンクのクライアントの受信スレッド（`Copy*` / `Take*` だけで UI と会う、段階2 から）、プレビューエンジンの
+  オーディオスレッド（Silent）とサーバのスレッド。組 U の画面のコードは新しいスレッドも共有の状態も足していない（`static` の
+  可変な状態は `App::Key` の `constexpr` の表だけ）。
+- 結論: 組 U の差分に新しいデータ競合の経路は無い。`IndepS7UiThreads.ScreensDrivenWhileEngineAndLinkRun` を TSan と Release で 20 回
+  （下の表）。
+
+## 回した構成と結果
+
+（作業の途中。下の表に足していく。）
+
+## 未検証の箇所
+
+- Windows / macOS のホスト（キー、Esc、WM_CHAR）。仕様の穴 9 はコードを読んだだけ。
+- ライブで上書きが消えたあとのゲームとツールのずれ（仕様の穴 3）。
+- 文字の描画（Pictor）。ヘッドレスは文字の帯だけなので、狭い欄（欠陥 4）で文字が切れる様子は画素では見ていない（幅だけ）。
+- 画素のテストは箱・円・点の位置だけ。色の区分（選択、ループの区間、フェード、重なり）は見ていない。
