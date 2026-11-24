@@ -15,3 +15,4 @@ snd_add_module(source
     src/noise_kind.cpp
     src/input_kind.cpp
     src/runtime.cpp)
+target_sources(sonus_source PRIVATE src/granular_kind.cpp)

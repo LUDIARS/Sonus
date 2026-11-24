@@ -151,9 +151,13 @@ struct NoiseParams {
   std::uint32_t color;  // 0 white, 1 pink, 2 brown
   std::uint32_t seed;
 };
+enum class GrainWindow : std::uint32_t { Hann = 0, Triangle = 1, Rectangle = 2 };
 struct GranularParams {
   const SourceAsset* asset;
   float density, lengthMs, position, pitchJitterCents;
+  GrainWindow window{};
+  float positionJitter{};  // normalised half-width around position
+  float pitchCents{};      // grain transposition before core resampling
 };
 struct PatchParams {
   const std::uint8_t* program;  // PTCH bytes, interpreted by the patch kind
@@ -268,6 +272,11 @@ struct RenderItem {
   // core writes until it fills them from Parameter curves (requests/D-01).
   Ramp dutyOffset;           // added to OscillatorParams::duty (Pulse)
   Ramp tablePositionOffset;  // added to OscillatorParams::tablePosition (wavetable, 0..1)
+  // D-203: additive modulation at block endpoints; zero leaves the start parameters intact.
+  Ramp grainDensityOffset{};
+  Ramp grainLengthMsOffset{};
+  Ramp grainPositionOffset{};
+  Ramp grainPitchJitterCentsOffset{};
 };
 
 struct RenderBatch {
