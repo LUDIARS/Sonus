@@ -6,7 +6,7 @@ LUDIARS/sonus の `int/s7-coverage` ブランチで、セッション B（段階
 
 1. `spec/handoff/parallel/README.md`（4 セッション共通の決まり）
 2. `spec/handoff/parallel/B-coverage.md`（セッション B の範囲と完了条件）
-3. `spec/handoff/parallel/B-handoff.md`（いまの状態、進め方、受け入れテストの条件、残りの作業）
+3. `spec/handoff/parallel/B-handoff.md`（いまの状態、進め方、受け入れテストの条件、残りの作業）。できていないことの一覧は 8 章
 4. `spec/handoff/parallel/B/brief-common.md`（書いてよい場所、variant の割り当て、ビルドの制限）
 
 食い違いがあれば、README と B-coverage が正です。
