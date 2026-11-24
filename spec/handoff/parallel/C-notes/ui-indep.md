@@ -284,3 +284,24 @@
   ライブ、ほかのホスト）では外さない。今の画面の操作では起きないが、決定の「画面の外で文書が変わったら」とは範囲が違う。
 - パッチのノードが重なると、下のノードの端子は押せない（生成した配置で osc1 の出力の端子が osc27 の本体の下）。重なりを避ける
   決まりは無い。
+
+### 再確認で回した構成と結果
+
+ビルドは `$S/ui-indep/b-*`、-j2、1 つずつ（終わったら消した）。9 の派生と 8 は tool のターゲットだけをビルドし `ctest -R ^tool`。
+組 U の独立テストは CTest で 70 件（前の 46 件 ＋ 再確認の 23 件（実行ファイルは DISABLED で 22 件を 1 件ずつ）＋ 1）。
+
+| 構成 | コミット | 結果 |
+| --- | --- | --- |
+| 9: Tela 入り、gcc Debug、全部 | 50f6d0f | 415 件のうち失敗 10 = 組 U の新しい `Defect_*` 6 件（N1〜N6）＋ 組 P の `tool_indep_s7_live_Defect_*` 4 件（対象外）。前の組 U の `Defect_*` 5 件と更新したテストは通過。警告 0 |
+| 9 ＋ ASan / UBSan | 93902f3 | 188 件のうち失敗 10 = 同じ 10 件だけ。ASan・UBSan の報告なし（一覧・入力欄・質問の帯を閉じるコールバックも含む。N3 の浮動小数から整数への範囲外の変換は gcc の `-fsanitize=undefined` に `float-cast-overflow` が入らないので報告されない） |
+| 9 ＋ TSan | 55574da | `tool_indep_s7_ui_threads_test` と `tool_ui_editor_concurrency_test` を -j1 で 20 回、`tool_ui_concurrency`・`tool_indep_concurrency`・`tool_live_concurrency` を 1 回: 全部通過、報告なし |
+| 9 ＋ Release | 55574da | 188 件のうち失敗 11 = 同じ 10 件 ＋ `tool_profiler_streams_test`（60 s で失敗。組 P のテストで組 U は触っていない。ほかの担当のビルドと同時に走っていた。再実行はしていない）。並行性の 2 本を 20 回: 通過 |
+| 9 ＋ clang | 55574da | 188 件のうち失敗 10 = 同じ 10 件だけ。警告 0 |
+| 8: 核だけ | 55574da | 69 件のうち失敗 5 = 組 P の `Defect_*` 4 件 ＋ `tool_profiler_streams_test`（60 s、Release と同じ）。組 U のテストは入らない（意図どおり） |
+| MinGW の構文検査 | 50f6d0f | 再確認・common・screens・defects の 4 本: 通過 |
+
+### 再確認で確かめていないこと
+
+- N3 の未定義動作の値（-1、1e300 を整数に変えた結果）は処理系によって違う。テストは「文書が変わらず入力が開いたまま」だけを見る。
+- Esc はホストを通さず `App::Key` で確かめた（Windows のホストは動かしていない）。
+- `tool_profiler_streams_test` の 60 s の失敗が負荷によるものかは、構成を消した後なので確かめていない。
