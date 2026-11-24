@@ -1465,7 +1465,7 @@ SND_TEST(IndepG4Nest, ChildEventInstanceLimitIsNotApplied) {
 // Decision 7 (added): an event with actions and no clip plays until its last action took
 // effect: a Play at 10 ms and a Play at 50 ms (2400, many blocks later) both start, and the
 // playback does not end before 2400. A Stop before 50 ms cancels the rest.
-SND_TEST(IndepG4Action, Defect_ActionOnlyEventEndsBeforeItsLaterActions) {
+SND_TEST(IndepG4Action, ActionOnlyEventLivesThroughItsLastAction) {
   {
     Rig r;
     B bk;
@@ -1574,14 +1574,9 @@ void PauseResumeCycles(int pattern) {
 // (767, 768, 769 one frame apart).
 SND_TEST(IndepG4Action, PauseAndResumeInTheSameBlockFireEachActionOnce) { PauseResumeCycles(0); }
 
-// DEFECT (D-145 rev.: the track time stops while paused, an action in a resume block is at
-// most one block late): with the parent paused and resumed in alternate blocks (1 block
-// played, 1 or 3 paused), an action that falls into a resume block is put off to the next
-// block, cancelled there by the next pause and taken again at the next resume ... so no action
-// fires during the cycles and all five fire in one burst after the last resume (pattern 1:
-// all at 3328, pattern 2: all at 6400). Expected: five starts in order, each at most one
-// block after its track time.
-SND_TEST(IndepG4Action, Defect_ActionsStarveWhilePauseAndResumeAlternate) {
+// With a pause every other block or every fourth block, a resumed action may
+// be one block late. All five starts must keep their order and their own time.
+SND_TEST(IndepG4Action, ActionsKeepTheirOrderAcrossAlternatingPauses) {
   PauseResumeCycles(1);
   PauseResumeCycles(2);
 }
