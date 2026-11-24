@@ -221,3 +221,19 @@ foreach(_d Defect_TypedNumberOutsideTheFieldRangeIsClampedNotRefused Defect_Numb
         SpecGap_ClipSelectionIsAnIndexAcrossUndo SpecGap_UndoKeyDuringATextEntryUndoesTheDocument)
   add_test(NAME tool_indep_s7_ui_${_d} COMMAND tool_indep_s7_ui_defects_test --filter ${_d})
 endforeach()
+# Re-check after D-186..D-189 (indep_s7_ui_properties.md L). Defect_* tests fail on purpose.
+_snd_tool_test(indep_s7_ui_recheck_test "${_tool_ui_screen_link}")
+target_include_directories(tool_indep_s7_ui_recheck_test PRIVATE ${PROJECT_SOURCE_DIR}/livelink/test)
+set_tests_properties(tool_indep_s7_ui_recheck_test PROPERTIES DISABLED TRUE)  # run per test below
+foreach(_r EveryKeyWhileTypingIsTheEntrys EscClosesTheEntryAndTheListAndIsAlwaysTheTools
+        EscDuringAClipDragLeavesTheHistoryAsBefore EscDuringNumberAndFaderDrags TypedNumbersOnEveryFieldGoToTheModelUnchanged
+        WheelAndButtonSeriesCountEveryStepAndStopAtTheEnd VerticalClipDragFollowsTheMotionOnly NumberFieldsHaveRoomEverywhere
+        NameMadeIdsAreUniqueWithAwkwardNames RebindCarriesWhatItCanAndAsksForTheRest
+        RebindQuestionGoesWhenTheUnplacedOverrideIsReverted RebindWriteBackWritesWhatHasAPlace ConeIsShownAlikeOnBothScreens
+        LinkNotConnectedShowsNoPeerVersion LinkFailedBanksAreListed ProblemsOnceOnScreenAndFooterCheckDocumentAsTheBuild
+        Defect_EscOnADragThatChangedNothingUndoesTheEditBefore Defect_EscOnADragLeavesItAsARedoStep
+        Defect_TypedNumberIsCutToAnIntegerBeforeTheModel Defect_HugeTypedPositionsOnThe3DScreenShowInfAndNan
+        Defect_NumberFieldsOutsideTheWindowAtSmallWindows Defect_RebindWriteBackPutsAnOverrideIntoAnotherEffect)
+  add_test(NAME tool_indep_s7_ui_recheck_${_r} COMMAND tool_indep_s7_ui_recheck_test --filter ${_r})
+  set_tests_properties(tool_indep_s7_ui_recheck_${_r} PROPERTIES TIMEOUT 3600)
+endforeach()
