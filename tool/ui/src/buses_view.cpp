@@ -80,13 +80,16 @@ void BusesTab(Kit& kit, float width, float height) {
     const std::uint32_t per = static_cast<std::uint32_t>(std::max(1.0f, (height - 112.0f) / 24.0f));
     const std::uint32_t first = kit.Pager("mx.bus.pager", static_cast<std::uint32_t>(tree.size()), per, &bv.listPage,
                                           0, 76, w);
+    KeySet keys;
+    for (std::size_t i = 0; i < first && i < tree.size(); ++i) keys.Key(tree[i].first, i);
     for (std::uint32_t i = 0; i < per && first + i < tree.size(); ++i) {
       const auto& [g, depth] = tree[first + i];
+      const std::string key = keys.Key(g, first + i);
       const DocObject* o = d->Find(g);
       const std::string name = o != nullptr ? o->name() : g;
       const std::string indent(std::min<std::uint32_t>(depth, 8u) * 2u, ' ');
       const std::string gg = g;
-      Button(kit.doc(), "mx.bus." + ObjectKey(g), (g == bv.bus ? "> " : "  ") + indent + Clip(name, 30),
+      Button(kit.doc(), "mx.bus." + key, (g == bv.bus ? "> " : "  ") + indent + Clip(name, 30),
              [bvp, gg] { bvp->bus = gg; }, 0, 100.0f + static_cast<float>(i) * 24.0f, w, 22, 0.55f);
     }
   }, 6.0f);
@@ -384,7 +387,9 @@ void SnapshotsTab(Kit& kit, float width, float height) {
     float y = 26.0f;
     std::vector<std::pair<std::string, double>> weights;
     std::uint32_t row = 0;
+    KeySet keys;
     for (const DocObject* o : d->OfKind("snapshot")) {
+      const std::string key = keys.Key(o->guid, row);
       const std::string g = o->guid;
       const double wv = bv.weights.count(g) != 0u ? bv.weights[g] : 0.0;
       weights.emplace_back(g, wv);
@@ -397,7 +402,7 @@ void SnapshotsTab(Kit& kit, float width, float height) {
         sp.decimals = 2;
         sp.document = false;
         std::map<std::string, double>* wm = &bv.weights;
-        kit.NumberField("mx.sr.w." + ObjectKey(g), Clip(o->name(), 14), sp, [wm, g](double v, std::uint32_t) {
+        kit.NumberField("mx.sr.w." + key, Clip(o->name(), 14), sp, [wm, g](double v, std::uint32_t) {
           (*wm)[g] = v;
           return true;
         }, 0, y, w, 110);

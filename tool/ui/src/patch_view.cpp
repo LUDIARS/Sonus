@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <set>
 
 #include "editor_util.hpp"
 #include "snd/buildtool/patch.hpp"
@@ -28,6 +29,25 @@ constexpr float kNodeW = 120.0f;
 tela::Rect NodeBox(const PatchNode& n, const pt::NodeKindInfo* k, float sx, float sy) {
   const std::uint32_t inputs = k != nullptr ? k->inputCount : 0u;
   return tela::Rect{n.x - sx, n.y - sy, kNodeW, 32.0f + 16.0f * static_cast<float>(std::max(1u, inputs))};
+}
+
+// Element id parts of the nodes: the node id when it is unique, short and plain, else "#<position>"
+// (a broken patch file can repeat ids; Tela refuses duplicate element ids).
+std::vector<std::string> NodeKeys(const std::vector<PatchNode>& nodes) {
+  std::vector<std::string> keys;
+  std::set<std::string> used;
+  for (std::size_t i = 0; i < nodes.size(); ++i) {
+    const std::string& id = nodes[i].id;
+    bool plain = !id.empty() && id.size() <= 64u && id[0] != '#';
+    for (char c : id) plain = plain && c > ' ' && c != '.';
+    std::string k = plain ? id : "#" + std::to_string(i);
+    if (!used.insert(k).second) {
+      k = "#" + std::to_string(i);
+      used.insert(k);
+    }
+    keys.push_back(k);
+  }
+  return keys;
 }
 
 // The input port under a point of the graph (node id and input name), false if none.
@@ -102,6 +122,7 @@ void Graph(Kit& kit, const std::string& g, float x, float y, float w, float h) {
     wire.control = fk != nullptr && fk->output == pt::Signal::Control;
     look.wires.push_back(wire);
   }
+  const std::vector<std::string> keys = NodeKeys(nodes);
   // Node hits: body (select, drag to move), output port (drag onto an input to connect, or click to
   // start a connection), input ports (complete a connection, or disconnect).
   for (std::size_t i = 0; i < nodes.size(); ++i) {
@@ -109,7 +130,7 @@ void Graph(Kit& kit, const std::string& g, float x, float y, float w, float h) {
     const pt::NodeKindInfo* k = pt::FindNodeKind(n.kind);
     const tela::Rect box = look.nodes[i].box;
     if (box.x + box.width < 0.0f || box.y + box.height < 0.0f || box.x > w || box.y > h) continue;
-    const std::string id = "pa.node." + n.id;
+    const std::string id = "pa.node." + keys[i];
     const std::string nid = n.id;
     auto body = DocumentDrag(*app, [pv, nid](float, float, std::uint32_t) { pv->node = nid; },
                              [d, g, nid, n](const DragMotion& m) {
@@ -153,7 +174,7 @@ void Graph(Kit& kit, const std::string& g, float x, float y, float w, float h) {
   for (std::size_t i = 0; i < nodes.size(); ++i) {
     const tela::Rect box = look.nodes[i].box;
     if (box.x + box.width < 0.0f || box.y < 0.0f || box.x > w || box.y > h - 16.0f) continue;
-    kit.Label("pa.node." + nodes[i].id + ".label", Clip(nodes[i].id, 14) + " " + Clip(nodes[i].kind, 12), x + box.x + 4.0f,
+    kit.Label("pa.node." + keys[i] + ".label", Clip(nodes[i].id, 14) + " " + Clip(nodes[i].kind, 12), x + box.x + 4.0f,
               y + box.y, box.width - 8.0f, 18, 0.45f);
   }
 }
@@ -185,7 +206,7 @@ void Side(Kit& kit, const std::string& g, float x, float y, float w, float h) {
     else pv->node = id;
   }, x, y, 100);
   if (!pv->pendingFrom.empty()) {
-    kit.Action("pa.pending", "connecting from " + pv->pendingFrom + " (cancel)", [pv] { pv->pendingFrom.clear(); }, x + 104, y,
+    kit.Action("pa.pending", "connecting from " + Clip(pv->pendingFrom, 24) + " (cancel)", [pv] { pv->pendingFrom.clear(); }, x + 104, y,
                w - 104);
   }
   y += kRow + 4.0f;

@@ -149,7 +149,7 @@ void SegmentsTab(Kit& kit, float width, float height) {
     kit.Toggle("mu.seg.preload", "entry preload", pre, [d, g, pre] { SegmentEditor(*d, g).SetEntryPreload(!pre); }, 0, y, 140);
     // Tap tempo and the grid (8.7).
     App* a = app;
-    kit.Action("mu.seg.tap", "Tap (" + std::to_string(mv.tap.count()) + ")", [a, mvp] {
+    kit.Action("mu.seg.tap", "Tap (" + std::to_string(mv.tap.count()) + ")", [mvp] {
       mvp->tap.Tap(static_cast<double>(Session::NowNs()) * 1e-9);
       mvp->tapBpm = mvp->tap.Bpm();
     }, 150, y, 80);

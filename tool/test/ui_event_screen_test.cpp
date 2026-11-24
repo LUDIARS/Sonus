@@ -136,7 +136,9 @@ SND_TEST(ToolUiEvent, RenameNewAndRemoveEvents) {
   t.ClearEntry();
   t.Type("Gun");
   SND_CHECK_EQ(t.doc.Find(kShot)->name(), std::string("Gun"));
+  const std::size_t undo0 = t.doc.UndoCount();
   SND_REQUIRE(t.Click("ev.list.new"));
+  SND_CHECK_EQ(t.doc.UndoCount(), undo0 + 1u);  // the event with its bank and track: one step
   const std::string g = t.app.view().event.event;
   SND_REQUIRE(g != kShot);
   SND_CHECK_EQ(t.doc.Find(g)->name(), std::string("Event 1"));

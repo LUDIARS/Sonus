@@ -4,6 +4,7 @@
 #define SND_TOOL_UI_SRC_EDITOR_UTIL_HPP
 
 #include <cstdint>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -59,6 +60,23 @@ inline void KeepSelection(const ProjectDocument& doc, const char* kind, std::str
   const std::vector<const DocObject*> all = doc.OfKind(kind);
   *guid = all.empty() ? std::string() : all.front()->guid;
 }
+
+// Element id parts of objects that are unique even in a broken project (an object without a GUID,
+// or two with the same GUID): the GUID's 32 hex digits, else / again "<key>_<position>".
+class KeySet {
+ public:
+  std::string Key(const std::string& guid, std::size_t position) {
+    std::string k = ObjectKey(guid);
+    if (k.empty() || k.size() > 64u || !used_.insert(k).second) {
+      k = (k.size() > 64u ? k.substr(0, 64) : k) + "_" + std::to_string(position);
+      used_.insert(k);
+    }
+    return k;
+  }
+
+ private:
+  std::set<std::string> used_;
+};
 
 // The screen's text when there is no document.
 inline bool NeedDocument(Kit& kit, const char* id, float width) {
