@@ -56,6 +56,18 @@ bool PrepareBankRecord(Impl& im, const cmd::BankRegister& reg) noexcept {
   off = Up64(off + sizeof(EffectInstance) * nX);
   const std::size_t oParams = off;
   off = Up64(off + sizeof(float) * dsp::kMaxEffectParams * nX);
+  // D-130: per effect, the controls and this block's ParamBlock values.
+  const std::size_t oCtl = off;
+  off = Up64(off + sizeof(EffectParamControl) * dsp::kMaxEffectParams * nX);
+  const std::size_t oBlock = off;
+  off = Up64(off + sizeof(float) * 2u * dsp::kMaxEffectParams * nX);
+  // D-131: previous-block buffers of the sidechain (DUCK kind 0) rows.
+  std::uint32_t nSc = 0;
+  for (std::uint32_t k = 0; k < nD; ++k) nSc += v.Column<bk::col::DUCK_kind>()[k] == 0u ? 1u : 0u;
+  const std::size_t oScIndex = off;
+  off = Up64(off + sizeof(std::uint32_t) * 2u * nD);
+  const std::size_t oScPrev = off;
+  off = Up64(off + sizeof(float) * kMaxChannels * im.cfg.blockFrames * nSc);
   auto* mem = static_cast<std::uint8_t*>(im.alloc->Allocate(off, 64, MemTag::Tables));
   if (mem == nullptr) return false;
   std::memset(mem, 0, off);
@@ -165,6 +177,13 @@ bool PrepareBankRecord(Impl& im, const cmd::BankRegister& reg) noexcept {
     r.busChannels[b] = ch == 0u || ch > kMaxChannels ? im.cfg.outChannels : ch;
   }
   r.events = reinterpret_cast<EventState*>(mem + oEvents);
+  // D-131: sidechain rows (memory is zero: the first "previous block" is silence).
+  r.sidechainIndex = reinterpret_cast<std::uint32_t*>(mem + oScIndex);
+  r.sidechainChannels = r.sidechainIndex + nD;
+  r.sidechainPrev = nSc != 0u ? reinterpret_cast<float*>(mem + oScPrev) : nullptr;
+  for (std::uint32_t k = 0, n = 0; k < nD; ++k) {
+    r.sidechainIndex[k] = v.Column<bk::col::DUCK_kind>()[k] == 0u ? n++ : kNoSlot;
+  }
   // Effect instances (3.3: DSP instance pool memory of this bank).
   r.effectCount = nX;
   r.effects = reinterpret_cast<EffectInstance*>(mem + oFx);
@@ -225,6 +244,9 @@ bool PrepareBankRecord(Impl& im, const cmd::BankRegister& reg) noexcept {
       e.type = d.effect_type;
       e.channels = d.channels;
       e.params = params + std::size_t{x} * dsp::kMaxEffectParams;
+      e.ctl = reinterpret_cast<EffectParamControl*>(mem + oCtl) + std::size_t{x} * dsp::kMaxEffectParams;
+      e.blockStart = reinterpret_cast<float*>(mem + oBlock) + std::size_t{x} * 2u * dsp::kMaxEffectParams;
+      e.blockEnd = e.blockStart + dsp::kMaxEffectParams;
       e.paramCount = d.param_count < dsp::kMaxEffectParams ? d.param_count : dsp::kMaxEffectParams;
       for (std::uint32_t k = 0; k < e.paramCount; ++k) e.params[k] = d.initial_params[k];
       e.plugin = nullptr;
@@ -252,6 +274,12 @@ bool PrepareBankRecord(Impl& im, const cmd::BankRegister& reg) noexcept {
           }
           if (info->paramCount > e.paramCount) e.paramCount = info->paramCount;
         }
+      }
+      // D-130: controls start at the bank values, no ramp.
+      for (std::uint32_t k = 0; k < e.paramCount; ++k) {
+        e.ctl[k] = EffectParamControl{TimedRamp{e.params[k], e.params[k], 0u, 0u, 0u}, 0.0f, e.params[k]};
+        e.blockStart[k] = e.params[k];
+        e.blockEnd[k] = e.params[k];
       }
     }
     im.alloc->Free(descs, MemTag::Misc);

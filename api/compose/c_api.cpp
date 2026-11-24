@@ -550,4 +550,24 @@ snd_result snd_get_stats(const snd_system* sys, snd_stats* out) {
   return sys->core->GetStats(out);
 }
 
+// ---------------------------------------------------------------------------------------
+// Effects at run time (stage 3, coverage: D-130, D-132). Variant commands of SetBusVolume /
+// SetSwitch / SetParam: core checks the arguments (the live link's rule table does not know
+// the variants yet; see the stage-3 report).
+// ---------------------------------------------------------------------------------------
+snd_result snd_set_effect_param(snd_system* sys, snd_id bus, uint32_t effect_index, uint32_t param_index, float value,
+                                float fade_seconds) {
+  return sys ? sys->core->SetEffectParam(bus, effect_index, param_index, value, fade_seconds) : SND_ERR_INVALID_ARGUMENT;
+}
+snd_result snd_set_event_voice_effect(snd_system* sys, snd_id event, uint32_t slot, snd_id effect_kind,
+                                      const float* params, uint32_t param_count) {
+  return sys ? sys->core->SetEventVoiceEffect(event, slot, effect_kind, params, param_count) : SND_ERR_INVALID_ARGUMENT;
+}
+snd_result snd_set_playback_effect_param(snd_system* sys, snd_playback_handle playback, uint32_t slot,
+                                         uint32_t param_index, float value) {
+  if (sys == nullptr) return SND_ERR_INVALID_ARGUMENT;
+  if (playback.value == SND_HANDLE_INVALID_VALUE) return SND_ERR_INVALID_HANDLE;
+  return sys->core->SetPlaybackEffectParam(playback, slot, param_index, value);
+}
+
 }  // extern "C"
