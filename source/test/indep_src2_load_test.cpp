@@ -68,6 +68,14 @@ SND_TEST(IndepSrc2, FullStereoBatchSteadyStateAndReturn) {
     }
     SND_CHECK(!d.Start(extra, params, 2));
     SND_CHECK_EQ(extra.endDetail, static_cast<unsigned>(SND_END_DETAIL_VOICE_LIMIT));
+    // At capacity, nullptr is always NONE. A non-null description is not inspected.
+    SND_CHECK(!d.Start(extra, nullptr, 2));
+    SND_CHECK_EQ(extra.endDetail, static_cast<unsigned>(SND_END_DETAIL_NONE));
+    src::PatchParams badPatch{};
+    src::GranularParams badGrains{};
+    const void* bad = patch ? static_cast<const void*>(&badPatch) : &badGrains;
+    SND_CHECK(!d.Start(extra, bad, 2));
+    SND_CHECK_EQ(extra.endDetail, static_cast<unsigned>(SND_END_DETAIL_VOICE_LIMIT));
     std::uint8_t ready = 0;
     d.Kind().QueryReady(&voices[0].slot, 1, &ready);
     SND_CHECK_EQ(ready, 1);
@@ -91,6 +99,10 @@ SND_TEST(IndepSrc2, FullStereoBatchSteadyStateAndReturn) {
       SND_CHECK_EQ(v.last.framesRendered, 256u);
       d.Release(v);
     }
+    SND_CHECK(!d.Start(extra, bad, 2));
+    SND_CHECK_EQ(extra.endDetail, static_cast<unsigned>(SND_END_DETAIL_NONE));
+    for (auto& v : voices) SND_REQUIRE(d.Start(v, params, 2));
+    for (auto& v : voices) d.Release(v);
     SND_CHECK_EQ(tracking.calls, baseline);
     SND_CHECK_EQ(snd::test::rt::UnexpectedTotal(), 0u);
   }

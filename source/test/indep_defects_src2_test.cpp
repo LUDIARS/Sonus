@@ -40,3 +40,36 @@ SND_TEST(IndepSrc2, Defect_GranularLongVirtualDurationIsPartitionIndependent) {
   SND_CHECK_EQ(once.ph.frame, frame);
   SND_CHECK_EQ(once.ph.fraction, fraction);
 }
+
+SND_TEST(IndepSrc2, Defect_OscillatorStartsAtFirstEffectiveFrequency) {
+  // Pulse(0.25) has a nonzero PolyBLEP value at its start, so premature sound is visible.
+  src::OscillatorParams p{};
+  p.waveform = 4;
+  p.duty = 0.25f;
+  p.frequencyHz = 375;
+  for (bool virtualStart : {false, true}) {
+    for (float first : {0.f, -1.f, float(NAN), float(INFINITY)}) {
+      Driver d(snd::SourceKind::Oscillator, {});
+      Driver::Voice actual, full;
+      SND_REQUIRE(d.Start(actual, &p, 1));
+      SND_REQUIRE(d.Start(full, &p, 1));
+      src::RenderItem it{};
+      it.pitch = {1, 1};
+      Item(d, actual, 0, it);  // an empty block cannot choose the starting gain
+      d.Advance(actual, 0, 1);
+      if (virtualStart) {
+        d.Advance(actual, 7, first);
+      } else {
+        it.pitch = {first, first};
+        SND_CHECK(Item(d, actual, 7, it) == std::vector<float>(7, 0));
+      }
+      it.pitch = {1, 1};
+      auto voice = Item(d, actual, 260, it);
+      const auto reference = Item(d, full, 260, it);
+      for (unsigned i = 0; i < voice.size(); ++i) {
+        const double gain = std::min(1.0, (i + 1) / 240.0);
+        SND_REQUIRE(std::abs(voice[i] - reference[i] * gain) <= 1.2e-7);
+      }
+    }
+  }
+}
