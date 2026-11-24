@@ -711,7 +711,11 @@ void ApplyOne(Impl& im, const cmd::CommandHeader& h, const std::uint8_t* p) noex
     case CT::PauseCategory:
     case CT::MuteCategory: {
       Id id = 0;
-      if (static_cast<CT>(h.type) == CT::SetCategoryVolume) id = Load<cmd::SetCategoryVolume>(p).category;
+      if (static_cast<CT>(h.type) == CT::SetCategoryVolume) {
+        const auto c = Load<cmd::SetCategoryVolume>(p);
+        if (c.reserved > 1u) break;
+        id = c.category;
+      }
       if (static_cast<CT>(h.type) == CT::PauseCategory) id = Load<cmd::PauseCategory>(p).category;
       if (static_cast<CT>(h.type) == CT::MuteCategory) id = Load<cmd::MuteCategory>(p).category;
       const std::uint32_t slot = id == 0u ? im.globalCategory : im.catMap.Find(id);

@@ -724,8 +724,8 @@ struct System::Impl {
 
   // Statistics (audio thread).
   snd_stats stats{};
-  // IOutputDevice::OutputLatencySeconds; CoreDesc's value until System::SetOutputLatency.
   std::atomic<bool> focusLost{false};
+  // IOutputDevice::OutputLatencySeconds; CoreDesc's value until System::SetOutputLatency.
   std::atomic<double> outputLatency{0.0};
   BlockProfile profile{};
   std::uint64_t timeSumNs = 0;
