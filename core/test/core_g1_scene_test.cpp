@@ -15,8 +15,11 @@ constexpr auto kTone = HashId("moving");
 constexpr std::array<snd_id, 4> kBuses{HashId("wet0"), HashId("wet1"), HashId("wet2"), HashId("wet3")};
 
 TestBank MovingScene() {
-  TestBank b = BasicBank();
-  for (auto id : kBuses) b.buses.push_back(TBus{id, 1u, 2, 0, -12, {}, {}});
+  TestBank b;
+  constexpr unsigned master = 1 + static_cast<unsigned>(kBuses.size());
+  b.buses.push_back(TBus{HashId("dry"), master, 2, 0, 0, {}, {}});
+  for (auto id : kBuses) b.buses.push_back(TBus{id, master, 2, 0, -12, {}, {}});
+  b.buses.push_back(TBus{HashId("master"), kNone, 2, bf::kBusMaster, 0, {}, {}});
   b.assets.push_back(TAsset{HashId("loop"), 1, 48000, Sine(8192, 320, 48000), 0, 8192});
   auto e = SimpleEvent("moving", 0, 0, -42);
   e.tracks[0].clips[0].loopCount = 0;

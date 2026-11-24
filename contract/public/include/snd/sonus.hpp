@@ -284,6 +284,7 @@ struct Config {
   SND_CONFIG_TOP_1_2(SND_CONFIG_CPP_FIELD)  // contract 1.2 (maxBuses .. maxDuckRules, D-92)
   SND_CONFIG_TOP_1_2_HOST(SND_CONFIG_CPP_FIELD)  // contract 1.2 (fileSystemRoot, outputKind; D-102, D-103)
   SND_CONFIG_TOP_S3_VOICE_FX(SND_CONFIG_CPP_FIELD)  // stage 3 (maxVoiceEffects .. voiceEffectSettings; D-132)
+  SND_CONFIG_TOP_S3_SPATIAL(SND_CONFIG_CPP_FIELD)
   MemoryConfig memory;
   CommandsConfig commands;
   JobsConfig jobs;
@@ -311,6 +312,7 @@ inline void ToC(const Config& in, snd_config* out) noexcept {
   SND_CONFIG_TOP_1_2(SND_TO_C_TOP)
   SND_CONFIG_TOP_1_2_HOST(SND_TO_C_TOP)
   SND_CONFIG_TOP_S3_VOICE_FX(SND_TO_C_TOP)
+  SND_CONFIG_TOP_S3_SPATIAL(SND_TO_C_TOP)
   SND_CONFIG_MEMORY(SND_TO_C_MEMORY)
   SND_CONFIG_COMMANDS(SND_TO_C_COMMANDS)
   SND_CONFIG_JOBS(SND_TO_C_JOBS)
