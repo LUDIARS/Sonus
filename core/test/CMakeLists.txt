@@ -75,3 +75,4 @@ snd_add_test(indep_g2_recheck_test SOURCES indep_g2_recheck_test.cpp LINK ${_cor
 set_tests_properties(indep_g2_recheck_test PROPERTIES TIMEOUT 600)
 
 snd_add_test(indep_g3_mix_test SOURCES indep_g3_mix_test.cpp LINK ${_core_test_link})
+snd_add_test(indep_g3_control_test SOURCES indep_g3_control_test.cpp LINK ${_core_test_link})
