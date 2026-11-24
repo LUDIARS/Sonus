@@ -210,6 +210,12 @@ SND_TEST(IndepG1Routing, PartialZoneCommandNeverChangesItsDestination) {
   SND_CHECK_EQ(s.h.sys->SetReverbZone(zone, kDry, 0.25f, 0), SND_ERR_COMMAND_BUFFER_FULL);
   s.h.Steps(4);
   SND_CHECK_NEAR(s.Level(), before, 0.0001);
+  for (int n = 0; n < 135; ++n)
+    SND_CHECK_EQ(s.h.sys->SetParamGlobal(HashId("unused"), 0.5f), SND_OK);
+  // B-1 cancels with a single SetSwitch. The same remaining slot suffices.
+  SND_CHECK_EQ(s.h.sys->SetReverbZone(zone, SND_ID_NONE, 0, 0), SND_OK);
+  s.h.Steps(4);
+  SND_CHECK_EQ(s.Level(), 0.0);
 }
 
 SND_TEST(IndepG1Routing, PausedAndVirtualPlaybackLeaveNoZoneSignal) {
