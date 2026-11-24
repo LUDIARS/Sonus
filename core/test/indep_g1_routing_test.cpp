@@ -1,0 +1,216 @@
+// Properties 07, 09..13. Measure each path independently at the master output.
+#include <limits>
+
+#include "indep_g1_scene.hpp"
+#include "snd/test/rt_guard.hpp"
+
+namespace {
+using namespace indep_g1;
+
+snd_emitter_handle Zone(Scene& s, snd_vec3 position = {}, float amount = 1, float fadeDistance = 4,
+                        snd::Id bus = kWet) {
+  const auto zone = s.h.sys->CreateEmitter();
+  const snd_vec3 size{1, 1, 1};
+  SND_CHECK_EQ(s.h.sys->SetTransform(zone, &position, &kFront, nullptr), SND_OK);
+  SND_CHECK_EQ(s.h.sys->SetEmitterShape(zone, SND_EMITTER_SHAPE_BOX, &size), SND_OK);
+  SND_CHECK_EQ(s.h.sys->SetReverbZone(zone, bus, amount, fadeDistance), SND_OK);
+  return zone;
+}
+
+// TestBank does not expose EVNT.curveReverbSend. Supply an event table built
+// from the frozen format and copy the remaining serialized fixture tables.
+std::vector<std::uint8_t> WithDistanceSend(float amount, bool sendRow = true) {
+  auto bank = Signal(true);
+  bank.buses[0].sends.clear();
+  if (sendRow) bank.buses[0].sends.push_back(TBus::Send{1, -120.0f, 0});
+  Curve(bank, bf::CurveTarget::ReverbSend, amount, amount);
+  const auto bytes = bank.Build(HashId("Scene"));
+  bf::FileHeader header;
+  std::memcpy(&header, bytes.data(), sizeof(header));
+  bt::BankWriter writer;
+  for (std::uint32_t i = 0; i < header.chunkCount; ++i) {
+    bf::ChunkEntry entry;
+    std::memcpy(&entry, bytes.data() + header.chunkTableOffset + i * sizeof(entry), sizeof(entry));
+    if (entry.fourcc == bf::chunk::EVNT) continue;
+    const auto* first = bytes.data() + entry.offset;
+    writer.AddBlob(entry.fourcc, {first, first + entry.bytes}, entry.flags);
+  }
+  bt::TableBuilder event(bf::chunk::EVNT);
+  auto row = event.AddRow();
+  event.U32(bf::col::EVNT_id, row, kEvent);
+  event.U32(bf::col::EVNT_trackFirst, row, 0);
+  event.U32(bf::col::EVNT_trackCount, row, 1);
+  event.U32(bf::col::EVNT_bus, row, 0);
+  event.U32(bf::col::EVNT_flags, row, bf::kEvent3D);
+  event.U32(bf::col::EVNT_curveReverbSend, row, 0);
+  writer.AddTable(event);
+  bt::BankHeaderInfo info;
+  info.bankId = HashId("Scene");
+  return writer.Finish(info);
+}
+
+SND_TEST(IndepG1Routing, DistanceSendUsesFirstBusSendAndSaturatesWithZone) {
+  auto level = [](float send, float zone, bool present) {
+    Scene s(WithDistanceSend(send, present));
+    if (zone > 0) Zone(s, {}, zone);
+    s.Start();
+    return s.Level();
+  };
+  const double residual = level(0, 0, true);
+  const double full = level(1, 0, true) - residual;
+  SND_REQUIRE(full > 0.04);
+  SND_CHECK_NEAR((level(0.25f, 0, true) - residual) / full, 0.25, 0.002);
+  SND_CHECK_NEAR((level(0.75f, 0.5f, true) - residual) / full, 1.0, 0.002);
+  SND_CHECK_EQ(level(1, 0, false), 0.0);
+}
+
+SND_TEST(IndepG1Routing, ListenerPositionControlsContinuousZoneFade) {
+  auto b = Signal(true);
+  b.events[0].curveVolume = Curve(b, bf::CurveTarget::Volume, 0, 0);
+  Scene s(b);
+  Zone(s, {}, 0.8f, 4);
+  s.Position({0, 0, 8});  // stays outside the zone at every position
+  s.Start();
+  const double inside = s.Level();
+  SND_REQUIRE(inside > 0.04);
+  for (float z : {1.0f, 3.0f, 5.0f, 6.0f}) {
+    auto listener = Listener({0, 0, z});
+    SND_CHECK_EQ(s.h.sys->SetListener(0, &listener), SND_OK);
+    s.h.Steps(8);
+    const double weight = std::max(0.0, 1.0 - (z - 1.0) / 4.0);
+    SND_CHECK_NEAR(s.Level() / inside, weight, 0.003);
+  }
+}
+
+SND_TEST(IndepG1Routing, ClearingZoneAndReusingEmitterRemoveTheSend) {
+  Scene s(Signal(true));
+  auto z = Zone(s);
+  s.Start();
+  const double on = s.Level();
+  SND_REQUIRE(on > 0.05);
+  SND_CHECK_EQ(s.h.sys->SetReverbZone(z, SND_ID_NONE, 0, 0), SND_OK);
+  s.h.Steps(8);
+  SND_CHECK_EQ(s.Level(), 0.0);
+  SND_CHECK_EQ(s.h.sys->SetReverbZone(z, kWet, 0.5f, 0), SND_OK);
+  s.h.Steps(8);
+  SND_CHECK_NEAR(s.Level(), 0.5 * on, 0.001);
+  SND_CHECK_EQ(s.h.sys->DestroyEmitter(z), SND_OK);
+  s.h.Steps(8);
+  auto next = s.h.sys->CreateEmitter();
+  SND_REQUIRE(next.value != z.value && next.value != 0);
+  s.h.Steps(8);
+  SND_CHECK_EQ(s.Level(), 0.0);
+}
+
+SND_TEST(IndepG1Routing, TwoDimensionalEventNeverFeedsTheZone) {
+  auto b = Signal(true);
+  b.events[0].flags = 0;
+  Scene s(b);
+  Zone(s);
+  s.Start();
+  SND_CHECK_EQ(s.Level(), 0.0);
+}
+
+SND_TEST(IndepG1Routing, StrongestFourZonesKeepIndependentDestinations) {
+  // Four stronger zones feed an unrelated output. The fifth would be audible
+  // at the master if selected. Raising its weight must displace the fourth.
+  auto b = Signal(true);
+  Scene s(b);
+  for (float amount : {0.9f, 0.8f, 0.7f, 0.6f}) Zone(s, {}, amount, 4, kDry);
+  const auto fifth = Zone(s, {}, 0.5f, 4);
+  s.Start();
+  SND_CHECK_EQ(s.Level(), 0.0);
+  SND_CHECK_EQ(s.h.sys->SetReverbZone(fifth, kWet, 1.0f, 4), SND_OK);
+  s.h.Steps(8);
+  SND_CHECK(s.Level() > 0.05);
+}
+
+double FilteredLevel(bool wet, const char* parameter, float hz) {
+  Scene s(Signal(wet, hz));
+  if (wet) Zone(s);
+  if (parameter) SND_CHECK_EQ(s.h.sys->SetParamEmitter(s.em, HashId(parameter), 1), SND_OK);
+  s.Start();
+  s.h.Steps(24);
+  return s.Level();
+}
+
+SND_TEST(IndepG1Routing, ObstructionFiltersOnlyDirectWhileOcclusionFiltersBoth) {
+  for (bool wet : {false, true}) {
+    const double low = FilteredLevel(wet, nullptr, 375);
+    const double high = FilteredLevel(wet, nullptr, 6000);
+    SND_REQUIRE(low > 0.02 && high > 0.02);
+    for (const auto* parameter : {"snd.occlusion", "snd.obstruction"}) {
+      const double l = FilteredLevel(wet, parameter, 375) / low;
+      const double h = FilteredLevel(wet, parameter, 6000) / high;
+      if (wet && std::strcmp(parameter, "snd.obstruction") == 0) {
+        SND_CHECK_NEAR(l, 1.0, 0.001);
+        SND_CHECK_NEAR(h, 1.0, 0.001);
+      } else {
+        SND_CHECK(l < 0.9 && l > 0.01);
+        SND_CHECK(h < l * 0.75);
+      }
+    }
+  }
+}
+
+SND_TEST(IndepG1Routing, InvalidZoneAndShapeDoNotOverwriteValidSettings) {
+  Scene s(Signal(true));
+  auto zone = Zone(s);
+  s.Start();
+  const double initial = s.Level();
+  SND_REQUIRE(initial > 0.04);
+  for (float invalid : {std::numeric_limits<float>::quiet_NaN(), std::numeric_limits<float>::infinity()}) {
+    const snd_vec3 extent{invalid, 1, 1};
+    SND_CHECK_NE(s.h.sys->SetEmitterShape(zone, SND_EMITTER_SHAPE_BOX, &extent), SND_OK);
+    SND_CHECK_NE(s.h.sys->SetReverbZone(zone, kWet, invalid, 4), SND_OK);
+    SND_CHECK_NE(s.h.sys->SetReverbZone(zone, kWet, 0, invalid), SND_OK);
+    s.h.Steps(8);
+    SND_CHECK_NEAR(s.Level(), initial, 0.0001);
+  }
+}
+
+std::vector<float> Replay(std::uint32_t workers) {
+  auto cfg = Config();
+  cfg.jobs.realtime_workers = workers;
+  cfg.jobs.voices_per_chunk = 2;
+  cfg.listener_mode = SND_LISTENER_SPLIT;
+  CountingAllocator alloc;
+  Scene s(Signal(true, 375), cfg, &alloc);
+  Zone(s, {}, 0.7f);
+  const auto second = Listener({0.5f, 0, 0});
+  SND_CHECK_EQ(s.h.sys->SetListener(1, &second), SND_OK);
+  auto before = alloc.allocations.load();
+  std::vector<snd_emitter_handle> emitters;
+  for (int i = 0; i < 10; ++i) {
+    const auto em = s.h.sys->CreateEmitter();
+    emitters.push_back(em);
+    const snd_vec3 half{0.2f, 0.3f, 0.4f};
+    const snd_vec3 pos{static_cast<float>(i) * 0.2f, 0, 1};
+    SND_CHECK_EQ(s.h.sys->SetEmitterShape(em, SND_EMITTER_SHAPE_BOX, &half), SND_OK);
+    SND_CHECK_EQ(s.h.sys->SetTransform(em, &pos, &kFront, nullptr), SND_OK);
+    SND_CHECK(s.h.sys->Play(kEvent, em, nullptr).value != 0);
+  }
+  s.h.Clear();
+  for (int i = 0; i < 12; ++i) {
+    snd_vec3 vel{1, 0, -4};
+    snd_vec3 pos{1, 0, 2.0f - static_cast<float>(i) * 0.02f};
+    auto em = emitters[static_cast<std::size_t>(i) % emitters.size()];
+    SND_CHECK_EQ(s.h.sys->SetTransform(em, &pos, &kFront, &vel), SND_OK);
+    SND_CHECK_EQ(s.h.sys->SetParamEmitter(em, HashId("snd.occlusion"), 0.3f), SND_OK);
+    s.h.Step();
+  }
+  SND_CHECK_EQ(alloc.allocations.load(), before);
+  SND_CHECK_EQ(snd::test::rt::UnexpectedTotal(), 0u);
+  SND_CHECK(s.Level() > 0.01);
+  return s.h.all;
+}
+
+SND_TEST(IndepG1Routing, SpatialChangesRepeatBitForBitAcrossWorkers) {
+  const auto first = Replay(0);
+  for (auto workers : {0u, 2u}) {
+    const auto next = Replay(workers);
+    SND_REQUIRE_EQ(first.size(), next.size());
+    SND_CHECK_EQ(std::memcmp(first.data(), next.data(), first.size() * sizeof(float)), 0);
+  }
+}
+}  // namespace
