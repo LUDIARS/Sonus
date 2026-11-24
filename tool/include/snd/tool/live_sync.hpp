@@ -13,9 +13,14 @@
 //    SendDiffs / Refuse answer at once. The game waits for the answer for its handshake timeout
 //    (5 s by default); after that it drops the link, the client reconnects and the question comes
 //    again (pending() stays true until answered).
-//    Reconnect (D-87): a new session starts from the check again. The game's overrides are assumed
-//    gone (revertOnDisconnect), its banks are what its BankList says: the document's unsaved state
-//    is sent again under the same decision (with an Accepted handshake, nothing differs).
+//    D-182: the Hello hash is the document's current build at every connection (a new client while
+//    connecting: Connection::SetProjectBuildHash). The answer is remembered for a reconnect to the
+//    same game only (its bank list: bank id, language, content hash; a 1.0 game: its build hash);
+//    another game is asked again (Checking until its bank list is in). SetDecision(Ask) forgets it.
+//    Reconnect: no assumption on whether the game kept the overrides. Every cell and table the tool
+//    ever sent (Undone ones too) goes again with the current build's value, on top of the bank-list
+//    diff (the game's content hash against the builds the tool knows): after a reconnect the game's
+//    cells are the document's build.
 // 2. Edits: every change of the document (an edit, Undo, Redo: its revision) is built (throttled:
 //    at most one build per throttleMs while edits keep coming; the last state is always built and
 //    sent: FlushNow() forces it, e.g. at the end of a drag) and compared with what the game holds
@@ -23,27 +28,37 @@
 //      value cells the runtime writes live              -> SetValue (coalesced per cell)
 //      a table whose shape is unchanged                  -> ReplaceChunk (one in flight)
 //      buses / effects / sends added or removed          -> StructEdit (within Config.dev_reserve)
+//        (a bus added in today's bank format moves the master's row, so events' bus columns change
+//        too: in practice an added bus goes by hot reload, G3)
 //      anything else, or a refused ReplaceChunk / StructEdit (UNSUPPORTED, OUT_OF_BUDGET, LIMIT)
 //                                                        -> hot reload of the bank (step 3)
 //    What cannot go anywhere (no reload writer, a 1.0 game, a bank the game does not have, the
 //    runtime does not support it: LiveSupportOf) is listed in unsupported() with the reason.
 //    Back-pressure (D-86): at most maxInFlight requests wait for their Ack; COMMAND_BUFFER_FULL,
-//    NOT_READY and a busy chunk slot (LIMIT_REACHED on ReplaceChunk) are re-sent without showing.
+//    NOT_READY and a busy chunk slot (LIMIT_REACHED on ReplaceChunk) are re-sent without showing,
+//    never over a newer value of the same cell (D-183), until giveUpMs after the first send.
+//    A value of an object a live StructEdit added (NOT_FOUND: core keeps no cell for it, C-01) goes
+//    by hot reload instead of being a problem.
 //    Other failures become problems() naming the edit (document revision), the object and the
 //    member.
 //    items(): per object (and member for value cells) whether it is Live, Queued, InFlight,
 //    Reloading, Failed, Unsupported, HeldByMixer or Offline.
 //    Saving the document changes nothing live. Mixer monitoring values (MixerModel) win over the
 //    document for the same cell while the mixer holds them (heldByMixer): such cells are not sent
-//    and show HeldByMixer (the mixer's revert or WriteBackMixer hands the cell back).
+//    and show HeldByMixer; when the mixer lets go, the document's value is sent by itself (D-183).
 // 3. Hot reload (8.5): the bank is built (the current document), written where the game can read
 //    it (options.writer: a directory relative to the game's file system root, or the preview
 //    engine's PutRebuiltBank) and ReloadBank is sent; reloads() shows the phases (Unloading,
 //    Loading, Done / Failed). Edits during a reload wait and go out after it (NOT_READY is never
-//    shown). A failed reload says why and that the bank is detached in the game.
+//    shown). A failed reload says why and that the bank is detached in the game; a rebuilt bank that
+//    cannot be written is a Failed reload with the writer's reason. Either keeps phase() Failed
+//    (failedBanks()) until a reload of that bank succeeds (D-184). Reloads load a bank the game does
+//    not hold (kReloadLoadIfAbsent). A successful reload ends the bank's live edits (its cells,
+//    tables and structural edits: reserve() counts none of them).
 //    reserve(): what the live structural edits take from Config.dev_reserve (counted by the tool
 //    from what the game accepted; limits from options.reserveLimits); structEdits() lists them;
-//    UndoStructEdit(i) sends the inverse (RemoveBus / RemoveEffect; a send has none: reload).
+//    UndoStructEdit(i) sends the inverse (RemoveBus / RemoveEffect; a send has none: reload). A Remove
+//    the document sends (its Undo of a live Add) gives the Add's cost back (D-183).
 // Protocol 1.0 games: no QueryBanks / ReloadBank / StructEdit / RevertValue / ReadCell
 // (features() says so); SetValue and ReplaceChunk still work, the rest is listed.
 //
