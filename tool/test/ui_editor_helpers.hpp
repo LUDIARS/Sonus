@@ -19,10 +19,12 @@ using uitest::Center;
 using uitest::Find;
 using uitest::Ids;
 
+using Prepare = void (*)(ProjectDocument&);
 struct DocHolder {
   ProjectDocument doc;
-  explicit DocHolder(const std::map<std::string, std::string>& files = doctest::BaseFiles()) {
+  explicit DocHolder(const std::map<std::string, std::string>& files = doctest::BaseFiles(), Prepare prepare = nullptr) {
     doctest::LoadBase(doc, files);
+    if (prepare != nullptr) prepare(doc);
   }
 };
 
@@ -33,8 +35,8 @@ struct Editor : DocHolder {
   std::uint64_t now = 1000000000ull;
   explicit Editor(ui::Screen screen, int width = 1280, int height = 800, float dpi = 1.0f,
                   const std::map<std::string, std::string>& files = doctest::BaseFiles(),
-                  ui::Workspace extra = ui::Workspace{})
-      : DocHolder(files), app(s, Desc(&doc, width, height, dpi, extra)), ptr(app) {
+                  ui::Workspace extra = ui::Workspace{}, Prepare prepare = nullptr)
+      : DocHolder(files, prepare), app(s, Desc(&doc, width, height, dpi, extra)), ptr(app) {
     Project p;
     p.Load(doc);
     s.UseProject(p);
