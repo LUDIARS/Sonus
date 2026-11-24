@@ -97,8 +97,8 @@ void Compute3D(Impl& im) noexcept {
       const Vec3 right = Normalize(Cross(up, fwd), Vec3{1, 0, 0});
       const Vec3 dir = dist > 1e-6f ? Mul(rel, 1.0f / dist) : Vec3{0, 0, 1};
       SND_W(Spatial_distance)[s] = dist;
-      SND_W(Spatial_direction)[s] = Vec3{Dot(dir, right), Dot(dir, up), Dot(dir, fwd)};
-      const Vec3 local = SND_W(Spatial_direction)[s];
+      const Vec3 local{Dot(dir, right), Dot(dir, up), Dot(dir, fwd)};
+      SND_W(Spatial_direction)[s] = local;
       SND_W(Spatial_azimuth)[s] = std::atan2(local.x, local.z);
       SND_W(Spatial_shapeSpread)[s] = radius > 0 ? radius / (radius + dist) : 0;
       SND_W(Spatial_dopplerRatio)[s] = dist > 1e-6f ? Doppler(im.config, SND_R(Listener_velocity)[l],

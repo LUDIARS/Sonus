@@ -119,6 +119,37 @@ SlotIndex CurveSendBus(const Impl& im, const BankRecord* rec, unsigned event) no
   return rec->busSlot[target];
 }
 
+// Different seats can hear different zones. Combine each seat's strongest zones
+// by its contribution to the voice, then retain at most four individual zones.
+void ListenerZones(const Impl& im, const VoiceSpatialMix& mix, ZoneSend (&selected)[kMaxZones]) noexcept {
+  if (mix.count == 1) {
+    std::copy_n(im.dp.zones[mix.dominant], kMaxZones, selected);
+    return;
+  }
+  ZoneSend candidates[SND_MAX_LISTENERS * kMaxZones]{};
+  unsigned count = 0;
+  for (unsigned l = 0; l < mix.count; ++l) {
+    const auto& seat = mix.listeners[l];
+    if (seat.weight <= 0) continue;
+    for (const auto& zone : im.dp.zones[seat.spatial % im.cfg.maxListeners]) {
+      if (!zone.amount) break;
+      unsigned at = 0;
+      while (at < count && candidates[at].emitter != zone.emitter) ++at;
+      if (at == count) candidates[count++] = {zone.bus, zone.emitter, 0};
+      candidates[at].amount += seat.weight * zone.amount;
+    }
+  }
+  for (unsigned i = 0; i < count; ++i) {
+    auto zone = candidates[i];
+    for (auto& current : selected) {
+      if (zone.amount > current.amount || (zone.amount == current.amount && zone.emitter < current.emitter)) {
+        std::swap(current, zone);
+        if (zone.amount == 0) break;
+      }
+    }
+  }
+}
+
 void ScaleMatrix(const PanMatrix& in, float g, PanMatrix* out) noexcept {
   *out = in;
   dsp::ScalePanMatrix(out, g);
@@ -598,7 +629,9 @@ void Render(Impl& im) noexcept {
         const auto* rec = RegisteredBank(im, SND_R(Voice_clipRef)[d].bankSlot);
         add(CurveSendBus(im, rec, vs.eventRow), mix.curveSend);
       }
-      for (const ZoneSend& zone : im.dp.zones[mix.dominant]) {
+      ZoneSend zones[kMaxZones]{};
+      ListenerZones(im, mix, zones);
+      for (const ZoneSend& zone : zones) {
         if (zone.amount == 0) break;
         add(im.busMap.Find(zone.bus), zone.amount);
       }
