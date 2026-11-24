@@ -377,10 +377,15 @@ SND_TEST(LiveSync, SessionCarriesTheDocumentAndTheDetailProfiler) {
   SND_CHECK_NEAR(r.Left() / base, Ratio(-6.0), 1e-5);
   // The mixer's monitoring value on the same cell wins over later document edits.
   SND_REQUIRE(s.mixer().Set(Target{Control::BusFader, project.FindBus(snd::HashId("Sfx")), 0, 0}, -12.0f));
+  s.Tick();  // CellSync sends the mixer's value in a Tick (the condition below holds before it)
+  SND_REQUIRE(s.sync().stats().sent >= 1u);
   SND_REQUIRE(run([&] { return s.sync().Count(CellState::Pending) == 0u && s.sync().Count(CellState::Unsent) == 0u; }));
   SND_REQUIRE(r.doc.SetNumber(livetest::SfxGuid(), "volumeDb", -3.0));
   s.Tick();
-  SND_REQUIRE(run([&] { return s.live()->phase() == LivePhase::Live; }));
+  SND_REQUIRE(run([&] {
+    return s.live()->phase() == LivePhase::Live && s.sync().Count(CellState::Pending) == 0u &&
+           s.sync().Count(CellState::Unsent) == 0u;
+  }));
   r.Frames(8);
   SND_CHECK_NEAR(r.Left() / base, Ratio(-12.0), 1e-5);
   const LiveItem* it = s.live()->Find(livetest::SfxGuid(), "volumeDb");
