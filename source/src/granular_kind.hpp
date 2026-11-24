@@ -1,5 +1,7 @@
 #ifndef SND_SOURCE_GRANULAR_KIND_HPP
 #define SND_SOURCE_GRANULAR_KIND_HPP
+#include <array>
+
 #include "resident_synth.hpp"
 
 namespace snd::source::detail {
@@ -20,7 +22,7 @@ struct GranularVoice {
   bool loop = false;
   std::uint64_t frame = 0, serial = 0, key = 0;
   std::uint32_t phase = UINT32_MAX;
-  double fraction = 0;
+  std::array<std::uint32_t, 5> fraction{};  // Q0.160, least significant word first
   Grain grains[kGrainSlots]{};
 };
 

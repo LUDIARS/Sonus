@@ -47,3 +47,23 @@ SND_TEST(SourceGranular, FractionalDensityControlsSpectrallyIsolatedBirths) {
   for (float x : v.out[0]) births += x == 1;
   SND_CHECK_EQ(births, 74u);
 }
+
+SND_TEST(SourceGranular, SubQ32VirtualPitchCarriesAcrossDifferentRatios) {
+  float pcm = 0;
+  src::SourceAsset a{};
+  a.codec.codec = SND_CODEC_PCM_F32;
+  a.codec.channels = 1;
+  a.codec.sample_rate = 48000;
+  a.codec.total_frames = 1;
+  a.data = reinterpret_cast<const std::uint8_t*>(&pcm);
+  a.dataBytes = sizeof(pcm);
+  src::GranularParams p{&a, 0, 0, 0, 0};
+  Driver d(snd::SourceKind::Granular, {});
+  Driver::Voice v;
+  SND_REQUIRE(d.Start(v, &p, 1));
+  d.Advance(v, 1, 0x1p-33f);
+  d.Advance(v, UINT32_MAX, 32.f);
+  d.Advance(v, 2, 0x1p-34f);
+  SND_CHECK_EQ(v.ph.frame, std::uint64_t{UINT32_MAX} * 32);
+  SND_CHECK_EQ(v.ph.fraction, 1u);
+}

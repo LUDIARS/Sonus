@@ -1,5 +1,7 @@
 #include "granular_kind.hpp"
 
+#include <bit>
+
 #include "noise_kind.hpp"
 
 namespace snd::source::detail {
@@ -33,6 +35,34 @@ void Spawn(GranularVoice& v, std::uint64_t serial, std::uint64_t birth, double l
   grain.stride = std::exp2(std::clamp(cents, -4800.0, 4800.0) / 1200.0);
 }
 
+// Binary32 has 24 significant bits and its least positive value is 2^-149.
+// Multiply exactly, then add the product into Q64.160 as seven base-2^32 words.
+// Even UINT32_MAX frames need only 56 bits before the shift. Keeping sub-Q32
+// bits internally lets a sequence of tiny ratios carry into the public playhead.
+std::uint64_t VirtualFrames(GranularVoice& voice, float pitch, std::uint32_t frames) noexcept {
+  if (!std::isfinite(pitch) || pitch <= 0 || !frames) return 0;
+  const auto bits = std::bit_cast<std::uint32_t>(std::min(pitch, 32.f));
+  const unsigned exponent = bits >> 23;
+  const unsigned significand = (bits & 0x7fffffu) + (exponent ? 0x800000u : 0u);
+  const std::uint64_t product = std::uint64_t{significand} * frames;
+  // pitch = significand * 2^(max(1, exponent) - 150).
+  const unsigned shift = 10 + std::max(1u, exponent);
+  const unsigned word = shift / 32, offset = shift % 32;
+  std::uint32_t add[7]{};
+  const std::uint64_t lo = (product & UINT32_MAX) << offset;
+  const std::uint64_t hi = (product >> 32) << offset;
+  add[word] = static_cast<std::uint32_t>(lo);
+  add[word + 1] = static_cast<std::uint32_t>(hi | (lo >> 32));
+  add[word + 2] = static_cast<std::uint32_t>(hi >> 32);
+  std::uint64_t carry = 0;
+  for (unsigned w = 0; w < voice.fraction.size(); ++w) {
+    const auto sum = std::uint64_t{voice.fraction[w]} + add[w] + carry;
+    voice.fraction[w] = static_cast<std::uint32_t>(sum);
+    carry = sum >> 32;
+  }
+  return ((std::uint64_t{add[6]} << 32) | add[5]) + carry;
+}
+
 // Advance the same Q32 accumulator as rendering. Only the newest eight births
 // can survive, independent of how many samples or whole grain cycles elapsed.
 void Skip(GranularVoice& v, std::uint64_t frames) noexcept {
@@ -52,7 +82,7 @@ void Seek(GranularVoice& v, std::uint64_t frame) noexcept {
   for (auto& g : v.grains) g.length = 0;
   v.frame = v.serial = 0;
   v.phase = UINT32_MAX;
-  v.fraction = 0;
+  v.fraction = {};
   Skip(v, frame);
 }
 
@@ -178,6 +208,7 @@ void GranularKind::RenderBatch(const source::RenderBatch& batch,
       ++v->frame;
     }
     item.playhead->frame = v->frame;
+    item.playhead->fraction = v->fraction.back();
     st.framesRendered = n;
   }
 }
@@ -192,13 +223,9 @@ void GranularKind::AdvanceVirtual(const AdvanceItem* items, std::uint32_t count,
       status[i].ended = 1;
       continue;
     }
-    const double ratio = std::clamp(Finite(a.pitch), 0.0, 32.0);
-    const double elapsed = v->fraction + double(a.outputFrames) * ratio;
-    const auto n = static_cast<std::uint64_t>(elapsed);
-    v->fraction = elapsed - double(n);
-    Skip(*v, n);
+    Skip(*v, VirtualFrames(*v, a.pitch, a.outputFrames));
     a.playhead->frame = v->frame;
-    a.playhead->fraction = static_cast<std::uint32_t>(v->fraction * kCycle);
+    a.playhead->fraction = v->fraction.back();
   }
 }
 }  // namespace snd::source::detail
