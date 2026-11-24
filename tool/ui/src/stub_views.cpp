@@ -2,7 +2,6 @@
 #include "snd/tool/ui/views.hpp"
 namespace snd::tool::ui {
 void DeclareBuses(tela::Document&, ViewContext&, float, float) {}
-void DeclareEvent(tela::Document&, ViewContext&, float, float) {}
 void DeclareParams(tela::Document&, ViewContext&, float, float) {}
 void DeclareSpatial(tela::Document&, ViewContext&, float, float) {}
 void DeclareMusic(tela::Document&, ViewContext&, float, float) {}
