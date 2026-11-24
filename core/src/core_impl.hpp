@@ -473,7 +473,7 @@ struct VoiceSpatialMix {
   std::uint32_t count;
   std::uint32_t dominant;
   float curveSend;
-  float obstruction;
+  float occlusion, obstruction;
 };
 
 struct DspPriv {
@@ -502,7 +502,7 @@ struct AuxRoute {
   PanMatrix pan;
 };
 struct PathHistory {
-  FilterState directFilter;
+  FilterState directFilter, sendFilter;
   float directGain;
   std::uint32_t sends;
   AuxRoute previous[kMaxAuxSends];
@@ -533,7 +533,7 @@ struct ItemInput {
   std::uint32_t removedCount;
   struct Removed { std::uint32_t previous, segment; } removed[kMaxAuxSends];
   AuxRoute aux[kMaxAuxSends];
-  float directGain, directLp;
+  float directGain, directLp, sendLp;
   std::uint32_t vfxSlot;     // D-132: voice-effect slot + 1 (0 = no heavy voice effect this block)
 };
 enum ItemFlags : std::uint32_t {
@@ -566,6 +566,7 @@ struct RenderSet {
 };
 
 struct RenderPriv {
+  float* sendInput = nullptr;  // separate path LP, [realTotal * maxVoiceChannels * blockFrames]
   PathHistory* paths = nullptr;  // indexed by real slot, chunk-owned
   std::uint8_t* resamplerPool = nullptr;  // [realTotal] slots of resamplerSlotBytes (D-44)
   std::uint32_t* lastAssign = nullptr;    // [realTotal] assignSeq seen at the last init
