@@ -35,7 +35,7 @@ struct TsState {
   std::uint64_t tau;      // nominal position of the current hop, 32.32 fixed point
   std::int64_t pPrev;     // segment start of the previous hop
   std::int64_t pCur;      // segment start of the current hop
-  std::int64_t end;       // input frames consumed (absolute index of the next new frame)
+  std::uint64_t end;      // total input frames consumed since Init / Reset
   std::uint32_t pad2[2];
 };
 static_assert(sizeof(TsState) % 8 == 0);
@@ -122,10 +122,16 @@ std::uint64_t Increment(const TsState& s, float speed) noexcept {
 
 std::int64_t Nominal(std::uint64_t tau) noexcept { return static_cast<std::int64_t>(tau >> 32); }
 
-// Input end (absolute, exclusive) the current call needs; also the number of
+// Hop and segment coordinates are relative to the oldest retained sample (or zero
+// during startup). Sliding this origin preserves all fractional bits of tau.
+std::int64_t LocalEnd(const TsState& s) noexcept {
+  return static_cast<std::int64_t>(s.end < s.pad ? s.end : s.pad);
+}
+
+// Input end (relative to the current origin, exclusive) the current call needs; also the number of
 // hops decided. Pure simulation of the hop decisions.
 std::int64_t Requirement(const TsState& s, std::uint32_t outFrames, float s0, float s1) noexcept {
-  std::int64_t req = s.end;
+  std::int64_t req = LocalEnd(s);
   std::uint32_t h = s.h;
   std::uint32_t started = s.started;
   std::uint64_t tau = s.tau;
@@ -172,7 +178,7 @@ std::int64_t Search(const TsState& s, float* const* in, std::int64_t base, std::
         en += v * v;
       }
     }
-    return en > 1e-30 ? corr * std::fabs(corr) / en : 0.0;
+    return en > 0.0 ? corr * std::fabs(corr) / en : 0.0;
   };
   const std::uint32_t range = static_cast<std::uint32_t>(hi - lo);
   const std::uint32_t d = s.dec;
@@ -275,7 +281,7 @@ std::uint32_t TimeStretchInputFrames(const void* state, std::uint32_t outFrames,
   const TsState& s = St(state);
   if (outFrames > kTimeStretchMaxCallFrames) outFrames = kTimeStretchMaxCallFrames;
   const std::int64_t req = Requirement(s, outFrames, speedStart, speedEnd);
-  return static_cast<std::uint32_t>(req - s.end);
+  return static_cast<std::uint32_t>(req - LocalEnd(s));
 }
 
 std::uint32_t TimeStretchProcess(void* state, float* const* in, std::uint32_t inFrames,
@@ -288,13 +294,14 @@ std::uint32_t TimeStretchProcess(void* state, float* const* in, std::uint32_t in
     outFrames = kTimeStretchMaxCallFrames;
   }
   const std::uint32_t need =
-      static_cast<std::uint32_t>(Requirement(s, outFrames, speedStart, speedEnd) - s.end);
+      static_cast<std::uint32_t>(Requirement(s, outFrames, speedStart, speedEnd) - LocalEnd(s));
   if (inFrames < need) {
     for (std::uint32_t c = 0; c < s.channels; ++c) Clear(out[c], outFrames);
     return 0;
   }
   const std::uint32_t pad = s.pad;
-  const std::int64_t base = s.end - static_cast<std::int64_t>(pad);
+  const std::int64_t localEnd = LocalEnd(s);
+  const std::int64_t base = localEnd - pad;
   float* hist = detail::At<float>(state, s.histOff);
   for (std::uint32_t c = 0; c < s.channels; ++c)
     std::memcpy(in[c], hist + std::size_t{c} * pad, sizeof(float) * pad);
@@ -337,20 +344,24 @@ std::uint32_t TimeStretchProcess(void* state, float* const* in, std::uint32_t in
     o += len;
   }
   s.end += need;
+  const auto shift = localEnd + need - LocalEnd(s);
+  s.tau -= static_cast<std::uint64_t>(shift) << 32;
+  s.pCur -= shift;
+  s.pPrev -= shift;
   for (std::uint32_t c = 0; c < s.channels; ++c)
     std::memcpy(hist + std::size_t{c} * pad, in[c] + need, sizeof(float) * pad);
   return need;
 }
 
 std::uint64_t TimeStretchConsumedFrames(const void* state) noexcept {
-  return static_cast<std::uint64_t>(St(state).end);
+  return St(state).end;
 }
 
 double TimeStretchPendingOffset(const void* state) noexcept {
   const TsState& s = St(state);
   if (s.started == 0u) return 0.0;
   const std::int64_t next = s.h >= s.hop ? s.pCur + s.hop : s.pCur + s.h;
-  return static_cast<double>(next - s.end);
+  return static_cast<double>(next - LocalEnd(s));
 }
 
 }  // namespace snd::dsp

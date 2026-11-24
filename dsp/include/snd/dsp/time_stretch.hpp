@@ -15,7 +15,7 @@
 // at p_k and overlap-adds it with a sin^2 (Hann) cross-fade over H frames:
 //   out[k H + j] = wf[j] x[p_{k-1} + H + j] + wr[j] x[p_k + j],  j < H,
 //   wr[j] = sin^2(pi (j + 0.5) / (2 H)),  wf[j] = wr[H - 1 - j].
-// The nominal position advances by speed * H per hop (32.32 fixed point; the
+// The nominal position advances by speed * H per hop (32 fractional bits relative to the retained history; the
 // speed of hop k is speed(i) at the output frame i where hop k starts). p_k is
 // chosen in [max(0, nominal - S), nominal + S] (S = search radius, default 12 ms;
 // never before the first input frame):
