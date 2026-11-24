@@ -5,6 +5,7 @@
 #include <cstdio>
 
 #include "snd/tool/names.hpp"
+#include "snd/tool/ui/app.hpp"
 #include "snd/tool/ui/layout_metrics.hpp"
 #include "snd/tool/ui/views.hpp"
 #include "snd/tool/ui/widgets.hpp"
@@ -191,7 +192,17 @@ void DeclareSide(tela::Document& doc, ViewContext& ctx, float x, float height) {
     Button(doc, "ovr.undo", "Undo", [a] { a->OnUndo(); }, 0, 26, 70, 24);
     Button(doc, "ovr.redo", "Redo", [a] { a->OnRedo(); }, 76, 26, 70, 24);
     Button(doc, "ovr.revertall", "Revert all", [a] { a->OnRevertAll(); }, 152, 26, 140, 24);
-    float y = 56.0f;
+    // 1.1 read-back of every mixer cell, and (with a document) the live values into the project.
+    if (ctx.app != nullptr) {
+      App* app = ctx.app;
+      Button(doc, "ovr.readback", "Read back", [app] {
+        if (!app->session().ReadBack()) app->Message("read back: needs a 1.1 game");
+      }, 0, 54, 100, 22, 0.6f);
+      if (app->document() != nullptr) {
+        Button(doc, "ovr.writeback", "Write back to project", [app] { app->WriteBackMixer(); }, 106, 54, 186, 22, 0.6f);
+      }
+    }
+    float y = 82.0f;
     const float paramTop = std::max(160.0f, height * 0.55f);
     std::size_t shown = 0;
     for (const OverrideItem& it : items) {
