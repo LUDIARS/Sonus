@@ -41,7 +41,7 @@ set_tests_properties(tool_replay_cli_bad_input PROPERTIES WILL_FAIL TRUE)
 # Independent tests of group P (tool/test/indep_s7_live_properties.md, written from the specs
 # before reading the code). The Defect_* tests are in their own executable, one CTest test each;
 # they fail on purpose (each documents a defect).
-foreach(_t indep_s7_live_sync_test indep_s7_live_preview_test indep_s7_live_replay_test)
+foreach(_t indep_s7_live_sync_test indep_s7_live_preview_test indep_s7_live_replay_test indep_s7_live_threads_test)
   _snd_tool_test(${_t} "${_tool_live_link}")
 endforeach()
 _snd_tool_test(indep_s7_live_defects_test "${_tool_live_link}")
