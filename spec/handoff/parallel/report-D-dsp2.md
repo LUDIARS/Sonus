@@ -32,8 +32,8 @@
 | clang-debug | 実行待ち | — | — |
 | asan | 実行待ち | — | — |
 | tsan | 実行待ち | — | — |
-| release | 実行待ち | — | — |
-| notests | ビルド中 | — | — |
+| release | ビルド中 | — | — |
+| notests | 成功 | 0 | ビルドのみ |
 | noopus | 実行待ち | — | — |
 | scalar | 実行待ち | — | — |
 | avx2 | 実行待ち | — | — |
