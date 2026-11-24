@@ -459,7 +459,8 @@ snd_result CreateImpl(Impl& im) noexcept {
   im.dp.catPlaying = Arr<std::uint32_t>(im, g.catCap, MemTag::Tables);
   im.dp.catGainPrev = Arr<float>(im, g.catCap, MemTag::Tables);
   im.dp.pan = Arr<float>(im, g.maxVirtual, MemTag::Tables);
-  if (im.dp.pan == nullptr) return SND_ERR_OUT_OF_BUDGET;
+  im.dp.spatialParams = Arr<SpatialCurveParams>(im, g.maxVirtual, MemTag::Tables);
+  if (im.dp.pan == nullptr || im.dp.spatialParams == nullptr) return SND_ERR_OUT_OF_BUDGET;
   im.sel.voiceGen = Arr<std::uint32_t>(im, g.realTotal, MemTag::Tables);
   im.sel.fadeRemaining = Arr<std::int32_t>(im, g.realTotal, MemTag::Tables);
   if (im.dp.duckDb == nullptr || im.dp.catPlaying == nullptr || im.dp.catGainPrev == nullptr ||

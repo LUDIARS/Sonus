@@ -497,6 +497,8 @@ void Render(Impl& im) noexcept {
           const std::uint32_t cb = br->view->Column<bk::col::EVNT_curveBlend3D>()[vs.eventRow];
           if (cs != bf::kNone) spread = EvaluateCurve(*br->view, cs, bestD);
           if (cb != bf::kNone) blend = EvaluateCurve(*br->view, cb, bestD);
+          spread = im.dp.spatialParams[v].spread.Apply(spread, cs != bf::kNone);
+          blend = im.dp.spatialParams[v].blend.Apply(blend, cb != bf::kNone);
           spread = spread < 0.0f ? 0.0f : (spread > 1.0f ? 1.0f : spread);
           blend = blend < 0.0f ? 0.0f : (blend > 1.0f ? 1.0f : blend);
         }

@@ -144,6 +144,8 @@ void EvaluateDspParams(Impl& im) noexcept {
     float gainDb = vs.gainDb;
     float cents = vs.pitchCents;
     float pan = vs.pan;
+    auto& spatialParams = im.dp.spatialParams[v];
+    spatialParams = SpatialCurveParams{};
     float lowpass = vs.lowpassHz > 0.0f ? vs.lowpassHz : 1.0e9f;
     float highpass = 0.0f;
     float linear = vs.linearGain * vs.musicGain;
@@ -186,7 +188,10 @@ void EvaluateDspParams(Impl& im) noexcept {
               pan += y;  // Legacy banks: preserve each addition to the clip pan, including rounding.
             }
             break;
-          default: break;  // send / effect / spread / blend: stage 3 (Render reads spread & blend curves)
+          case bf::CurveTarget::Spread: spatialParams.spread.Add(y); break;
+          case bf::CurveTarget::Blend3D: spatialParams.blend.Add(y); break;
+          case bf::CurveTarget::ReverbSend: spatialParams.send.Add(y); break;
+          default: break;  // CURV contains no SEND or EFFX row address.
         }
       }
       if (multiplyPan) pan += panProduct;
