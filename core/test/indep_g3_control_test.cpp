@@ -150,3 +150,30 @@ SND_TEST(IndepG3Action, PausingBeforeFutureActionDelaysItsTransition) {
   SND_CHECK_NEAR(Db(h.LastMean() / base), -24, 0.05);
 }
 } // namespace
+
+namespace {
+using namespace g2;
+using snd::HashId;
+
+SND_TEST(IndepG3Action, RetargetDuringScheduledParentsFirstFadeUsesItsCurrentWeight) {
+  Fx h(G2Config());
+  ActionFixture(h, 0);
+  const float base = h.LastMean();
+  SND_REQUIRE(base > 0.2f);
+  const auto when = AtClock(h.Total() + 5u * h.Frames());
+  const auto parent = h.sys->Play(HashId("Parent"), NoEmitter(), &when);
+  SND_REQUIRE(parent.value != 0u);
+  h.Steps(4);
+  SND_CHECK_NEAR(h.LastMean(), base, 1e-5);
+  h.Steps(7);
+  const auto mid = h.Total();
+  const float current = h.At(mid - 1);
+  SND_CHECK_NEAR(Db(current / base), -6, 1.1);
+  h.sys->ApplySnapshot(HashId("Quiet"), 0, 0.064f);
+  h.Steps(6);
+  SND_CHECK_NEAR(h.At(mid), current, 0.001);
+  SND_CHECK_NEAR(Db(h.LastMean() / base), -3, 1.2);
+  h.Steps(20);
+  SND_CHECK_NEAR(h.LastMean(), base, 1e-5);
+}
+} // namespace
