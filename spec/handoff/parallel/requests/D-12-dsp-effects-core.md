@@ -7,8 +7,8 @@ D は既存の dsp の行を変えられないので、変更案だけを書く�
 
 今: `effects.cpp` の `ReinitKeepingParams`（377 行目付近。`EffectReset`（463 行目）と `ProcessOne` の `if (bad) ReinitKeepingParams(state);`
 （321 行目）から呼ばれる）は、どの種別でも `InitWith` で状態全体（`layout` の大きさ）を memset し、種別の `init` を呼ぶ。
-コンボリューションでは状態が MB 単位（2 秒ステレオで 1.56 MB）なので、memset と FFT の計画の作り直し（三角関数）で
-60〜190 µs かかる（独立テストの測定、Release）。NaN を出し続けるソースでは毎ブロック走る。
+コンボリューションでは状態が MB 単位（2 秒ステレオ・B=256 で 1,581,632 バイト）なので、memset と FFT の計画の作り直し（三角関数）で
+平均 72.2〜228.7 µs かかる（独立テストの遅延 0 / B の測定、GCC 14.2 Release）。NaN を出し続けるソースでは毎ブロック走る。
 
 案（`ReinitKeepingParams` の先頭に足す）:
 
@@ -31,7 +31,7 @@ void ReinitKeepingParams(void* state) noexcept {
 - `fx_convolution.cpp` の `ConvolutionReset` は D のブランチで「新しい `ConvolutionInit` と同じ状態（FFT の計画を除く、計画は不変）」に
   直してある: 入力の履歴と FDL の出力を 0、FDL の有効な分割数を 0（FDL 自体は消さない。有効数で無効にする）、周期の位置 0、
   使用中の IR なし（次の呼び出しですぐ使い始める）、クロスフェードなし。パラメータ（`h.cur`）と遅延・テールの長さはヘッダに残る。
-- 効果の見込み: 1.56 MB の memset（60〜190 µs）と FFT の計画 → O(C·B) の 0 埋め（ステレオ、B 256 で 4 KB 程度、1 µs 未満）。
+- 効果の見込み: 状態全体の memset と FFT の計画を O(C·B) の 0 埋めに置き換える（ステレオ・B=256 で 8,256 バイト。導入時に実測する）。
 - 他の種別も、状態が大きいもの（リバーブ、エコーの遅延線）は同じ形にできるが、今は今のままでよい。
 - 確かめるテスト: `Effects.ResetEqualsFreshInit` と `RecoversFromNonFiniteInput`（既存）に `EffectKind::Convolution` が含まれれば足りる
   （`RecoversFromNonFiniteInput` は全種別を回す。`ResetEqualsFreshInit` は種別の一覧が固定なので足す）。
