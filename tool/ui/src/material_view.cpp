@@ -125,7 +125,7 @@ void MaterialProps(Kit& kit, const std::string& g, float x, float y, float w, fl
     sp.decimals = 3;
     kit.NumberField("ma.p.imp" + std::to_string(i), kThr[i], sp, [d, g, m, c, i](double v, std::uint32_t) {
       StrengthCurves n = c;
-      n.impulseToVelocity[i] = static_cast<float>(v);
+      if (!ToF32(v, &n.impulseToVelocity[i])) return false;
       return MaterialEditor(*d, g).SetCurves(m, n);
     }, x + static_cast<float>(i % 2) * (cw + 8), y, cw, 50);
     if (i % 2 == 1) y += kRow;
@@ -138,8 +138,7 @@ void MaterialProps(Kit& kit, const std::string& g, float x, float y, float w, fl
     sp.decimals = 2;
     kit.NumberField("ma.p.ms" + std::to_string(i), kMs[i], sp, [d, g, m, c, i](double v, std::uint32_t) {
       StrengthCurves n = c;
-      if (i < 2) n.massToPitchCents[i] = static_cast<float>(v);
-      else n.speedToVolumeDb[i - 2] = static_cast<float>(v);
+      if (!ToF32(v, i < 2 ? &n.massToPitchCents[i] : &n.speedToVolumeDb[i - 2])) return false;
       return MaterialEditor(*d, g).SetCurves(m, n);
     }, x + static_cast<float>(i % 2) * (cw + 8), y, cw, 64);
     if (i % 2 == 1) y += kRow;
@@ -151,13 +150,22 @@ void MaterialProps(Kit& kit, const std::string& g, float x, float y, float w, fl
   in.minValue = 0;
   in.value = mv->impulse;
   in.step = std::max(0.01, mv->impulse * 0.1);
-  kit.NumberField("ma.t.impulse", "impulse", in, [mv](double v, std::uint32_t) { return mv->impulse = v, true; }, x, y, w / 3 - 4, 48);
+  kit.NumberField("ma.t.impulse", "impulse", in, [mv](double v, std::uint32_t) {
+    float f = 0.0f;
+    return ToF32(v, &f) && (mv->impulse = v, true);
+  }, x, y, w / 3 - 4, 48);
   in.value = mv->massKg;
   in.step = std::max(0.01, mv->massKg * 0.1);
-  kit.NumberField("ma.t.mass", "kg", in, [mv](double v, std::uint32_t) { return mv->massKg = v, true; }, x + w / 3, y, w / 3 - 4, 20);
+  kit.NumberField("ma.t.mass", "kg", in, [mv](double v, std::uint32_t) {
+    float f = 0.0f;
+    return ToF32(v, &f) && (mv->massKg = v, true);
+  }, x + w / 3, y, w / 3 - 4, 20);
   in.value = mv->speed;
   in.step = 0.1;
-  kit.NumberField("ma.t.speed", "m/s", in, [mv](double v, std::uint32_t) { return mv->speed = v, true; }, x + 2 * w / 3, y, w / 3, 26);
+  kit.NumberField("ma.t.speed", "m/s", in, [mv](double v, std::uint32_t) {
+    float f = 0.0f;
+    return ToF32(v, &f) && (mv->speed = v, true);
+  }, x + 2 * w / 3, y, w / 3, 26);
   y += kRow;
   const StrengthResult r = EvaluateStrength(c, static_cast<float>(mv->impulse), static_cast<float>(mv->massKg),
                                             static_cast<float>(mv->speed));

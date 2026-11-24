@@ -49,6 +49,12 @@ class ControlSink {
   virtual void ControlEnd(const Target& t) = 0;
   // Double click: back to the bank value (one undo step). A parameter override knob is
   // released instead (App).
+  // Esc during a drag (D-186): the control and everything the drag turned on go back to where the
+  // drag started and the gesture ends without an edit. Default: the start value, then ControlEnd.
+  virtual void ControlCancel(const Target& t, float startValue) {
+    ControlSet(t, startValue, 0);
+    ControlEnd(t);
+  }
   virtual void ControlReset(const Target& t) {
     ControlBegin(t);
     ControlSet(t, ControlDefault(t), 0);

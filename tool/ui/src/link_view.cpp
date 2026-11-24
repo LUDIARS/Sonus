@@ -76,7 +76,9 @@ void Target(Kit& kit, float x, float y, float w) {
     port.decimals = 0;
     port.document = false;
     kit.NumberField("ln.port", "Port", port, [desc](double v, std::uint32_t) {
-      desc->port = static_cast<std::uint16_t>(v);
+      std::uint16_t p = 0;
+      if (!WholeU16(v, &p) || p == 0u) return false;  // 1 .. 65535 only (D-187)
+      desc->port = p;
       return true;
     }, x + w * 0.5f + 4, y, w * 0.5f - 130, 36);
   }

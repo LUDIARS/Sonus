@@ -137,7 +137,8 @@ void BusesTab(Kit& kit, float width, float height) {
     ch.integer = true;
     ch.decimals = 0;
     kit.NumberField("mx.bp.ch", "Channels", ch, [d, g](double v, std::uint32_t) {
-      return MixerEditor(*d).SetChannels(g, static_cast<std::uint32_t>(v));
+      std::uint32_t n = 0;
+      return WholeU32(v, &n) && MixerEditor(*d).SetChannels(g, n);
     }, 0, y, w);
     y += kRow;
     const float tw = (w - 8.0f) / 3.0f;
@@ -163,7 +164,8 @@ void BusesTab(Kit& kit, float width, float height) {
     lp.integer = true;
     lp.decimals = 0;
     kit.NumberField("mx.bp.lod", "LOD prio.", lp, [d, g](double v, std::uint32_t) {
-      return MixerEditor(*d).SetLodPriority(g, static_cast<std::uint32_t>(v));
+      std::uint32_t n = 0;
+      return WholeU32(v, &n) && MixerEditor(*d).SetLodPriority(g, n);
     }, 0, y, w);
     y += kRow + 6.0f;
     // Sends.
@@ -357,20 +359,20 @@ void SnapshotsTab(Kit& kit, float width, float height) {
             ix.value = v.effect;
             kit.NumberField(vid + ".effect", "fx", ix, [d, g, i, v](double x, std::uint32_t) {
               SnapshotValue n = v;
-              n.effect = static_cast<std::uint32_t>(x);
+              if (!WholeU32(x, &n.effect)) return false;
               return MixerEditor(*d).SetSnapshotValue(g, i, n);
             }, w * 0.5f + 4, y, w * 0.25f - 4, 24);
             ix.value = v.param;
             kit.NumberField(vid + ".param", "p", ix, [d, g, i, v](double x, std::uint32_t) {
               SnapshotValue n = v;
-              n.param = static_cast<std::uint32_t>(x);
+              if (!WholeU32(x, &n.param)) return false;
               return MixerEditor(*d).SetSnapshotValue(g, i, n);
             }, w * 0.75f + 4, y, w * 0.25f - 4, 20);
           } else {
             ix.value = v.send;
             kit.NumberField(vid + ".send", "send", ix, [d, g, i, v](double x, std::uint32_t) {
               SnapshotValue n = v;
-              n.send = static_cast<std::uint32_t>(x);
+              if (!WholeU32(x, &n.send)) return false;
               return MixerEditor(*d).SetSnapshotValue(g, i, n);
             }, w * 0.5f + 4, y, w * 0.5f - 4, 40);
           }
@@ -594,7 +596,8 @@ void CategoriesTab(Kit& kit, float width, float height) {
     sp.integer = true;
     sp.decimals = 0;
     kit.NumberField("mx.grp.max", "Max voices", sp, [d, g](double v, std::uint32_t) {
-      return MixerEditor(*d).SetMaxVoices(g, static_cast<std::uint32_t>(v));
+      std::uint32_t n = 0;
+      return WholeU32(v, &n) && MixerEditor(*d).SetMaxVoices(g, n);
     }, 0, std::min(bottom + 8.0f, height - 70.0f), w);
     kit.PickField("mx.grp.steal", "Steal", StringAt(j, "steal", "oldest"), "Steal mode", [] { return Names(kSteal, 4); },
                   [d, g](const std::string& v) { MixerEditor(*d).SetSteal(g, static_cast<StealMode>(ToInt(v))); }, 0,

@@ -465,7 +465,8 @@ void ClipPanel(Kit& kit, const std::string& g, float x, float y, float w, float 
       kit.NameField(base + ".switch", "Switch", text, [d, g, t, c](const std::string& s) {
         double v = 0.0;
         if (ParseNumber(s, &v) && v >= 0.0 && v == std::floor(v) && v < 4294967296.0) {
-          return EventEditor(*d, g).SetSwitchValue(t, c, static_cast<std::uint32_t>(v));
+          std::uint32_t n = 0;
+          if (WholeU32(v, &n)) return EventEditor(*d, g).SetSwitchValue(t, c, n);
         }
         return EventEditor(*d, g).SetSwitchValue(t, c, s);
       }, x, y, w, 96);
@@ -497,7 +498,7 @@ void ClipPanel(Kit& kit, const std::string& g, float x, float y, float w, float 
       s.noiseColor = StringAt(*cl, "synth.noiseColor", "white");
       s.asset = RefGuid(*d, "asset", StringAt(*cl, "synth.asset"));
       s.patch = RefGuid(*d, "patch", StringAt(*cl, "synth.patch"));
-      s.channels = static_cast<std::uint32_t>(NumberAt(*cl, "synth.channels", 1.0));
+      s.channels = SatU32(NumberAt(*cl, "synth.channels", 1.0), 1u);
       static const char* const kKinds[] = {"oscillator", "noise", "granular", "patch", "wavetable"};
       static const char* const kWaves[] = {"sine", "saw", "square", "triangle", "pulse"};
       kit.PickField(base + ".synth.kind", "Synth", s.kind, "Synth kind", [] {

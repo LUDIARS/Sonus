@@ -308,8 +308,7 @@ void LogTab(Kit& kit, const ProfilerStreams& ps, ProfilerViewState* st, float w,
   id.decimals = 0;
   id.document = false;
   kit.NumberField("prof.log.f.id", "id (0 any)", id, [st](double v, std::uint32_t) {
-    st->logId = static_cast<std::uint32_t>(v);
-    return true;
+    return WholeU32(v, &st->logId);
   }, 314, 0, 240, 80);
   LogFilter f;
   f.commands = st->logCommands;
@@ -358,7 +357,10 @@ void DeclareProfiler(tela::Document& doc, ViewContext& ctx, float width, float h
       case 2: MemoryTab(kit, ps, width, h); break;
       case 3: StreamsTab(kit, ps, st, width, h); break;
       case 4: LodTab(kit, ps, width, h); break;
-      case 5: LogTab(kit, ps, st, width, h); break;
+      case 5:
+        if (app->WindowTooSmall()) App::DeclareTooSmall(doc, "prof.log.small", width, h);
+        else LogTab(kit, ps, st, width, h);
+        break;
       default: DeclareOverview(doc, ctx, width, h); break;
     }
   });

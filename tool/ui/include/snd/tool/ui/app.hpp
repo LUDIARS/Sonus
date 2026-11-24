@@ -73,6 +73,11 @@ class App final : public ControlSink, public Actions {
   // Headless viewport (physical pixels). Ignored when the host owns the viewport.
   void SetViewport(int width, int height, float dpiScale);
   void SetInsetTop(float logicalPixels);
+  // The window (logical, below the inset) is under kMinEditorWidth x kMinEditorHeight: the screens
+  // with number fields show only "window too small" (layout_metrics.hpp).
+  bool WindowTooSmall() const;
+  // Declares that text in a body of `w` x `h`.
+  static void DeclareTooSmall(tela::Document& doc, const std::string& id, float w, float h);
   // `forward`: also hand the event to the Tela runtime (headless, tests).
   bool Pointer(const tela::HostPointerEvent& event, std::uint64_t timeMs, bool forward);
   // A key from the host (text_entry.hpp). true if used.
@@ -146,6 +151,7 @@ class App final : public ControlSink, public Actions {
   void ControlSet(const Target& t, float value, std::uint32_t mergeKey) override;
   void ControlEnd(const Target& t) override;
   void ControlReset(const Target& t) override;
+  void ControlCancel(const Target& t, float startValue) override;
   // Actions
   void OnScreen(Screen s) override;
   void OnConnectToggle() override;
@@ -162,6 +168,9 @@ class App final : public ControlSink, public Actions {
 
  private:
   void TrackDocument();
+  bool KeyImpl(const KeyEvent& key);
+  void NoteOwnEdits();
+  std::string PositionShape() const;
   void ClearPositionSelections();
   std::string MixerSignature(bool withValues) const;
   Session& session_;
@@ -177,6 +186,8 @@ class App final : public ControlSink, public Actions {
   TextEntry text_;
   std::optional<Picker> picker_;
   std::uint64_t seenDocRevision_ = ~0ull;
+  std::uint64_t knownRevision_ = ~0ull;  // the document's revision after the screens' own edits
+  std::string knownShape_;               // PositionShape() then
   std::uint64_t problemsRevision_ = ~0ull;
   std::uint64_t problemsAtNs_ = 0;
   std::vector<DocIssue> problems_;
@@ -187,6 +198,7 @@ class App final : public ControlSink, public Actions {
   std::vector<LiveValue> rebindDropped_;
   std::uint64_t rebindMixerRevision_ = 0;
   std::function<void()> deleteAction_;
+  float dragOverrideOn_ = 0.0f;  // a parameter knob's override at the start of its drag (ControlCancel)
   std::map<std::string, std::pair<std::uint64_t, double>> fieldLatest_;  // field -> (declaration, value)
   std::unique_ptr<SpatialPreview> spatial_;
   std::string spatialEvent_;

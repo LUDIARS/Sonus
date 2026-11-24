@@ -178,26 +178,26 @@ void Values(Kit& kit, SpatialPreview* sp, float x, float y, float w, float h) {
   const Vec3f lp = sp->listener().position, ep = sp->emitter().position;
   sp1.value = lp.x;
   kit.NumberField("sp.l.x", "L x", sp1, [sp, app, lp](double v, std::uint32_t) {
-    sp->MoveListener(static_cast<float>(v), lp.z);
+    if (!sp->PlaceListener(v, lp.z)) return false;
     Follow(app);
     return true;
   }, x, y, cw, 30);
   sp1.value = lp.z;
   kit.NumberField("sp.l.z", "L z", sp1, [sp, app, lp](double v, std::uint32_t) {
-    sp->MoveListener(lp.x, static_cast<float>(v));
+    if (!sp->PlaceListener(lp.x, v)) return false;
     Follow(app);
     return true;
   }, x + cw + 8, y, cw, 30);
   y += kRow;
   sp1.value = ep.x;
   kit.NumberField("sp.e.x", "E x", sp1, [sp, app, ep](double v, std::uint32_t) {
-    sp->MoveEmitter(static_cast<float>(v), ep.z);
+    if (!sp->PlaceEmitter(v, ep.z)) return false;
     Follow(app);
     return true;
   }, x, y, cw, 30);
   sp1.value = ep.z;
   kit.NumberField("sp.e.z", "E z", sp1, [sp, app, ep](double v, std::uint32_t) {
-    sp->MoveEmitter(ep.x, static_cast<float>(v));
+    if (!sp->PlaceEmitter(ep.x, v)) return false;
     Follow(app);
     return true;
   }, x + cw + 8, y, cw, 30);
@@ -209,13 +209,13 @@ void Values(Kit& kit, SpatialPreview* sp, float x, float y, float w, float h) {
   yaw.unit = "deg";
   yaw.value = Yaw(sp->listener().forward) * 180.0 / 3.14159265358979;
   kit.NumberField("sp.l.yaw", "L yaw", yaw, [sp, app](double v, std::uint32_t) {
-    sp->SetListenerYaw(static_cast<float>(v * 3.14159265358979 / 180.0));
+    if (!sp->TurnListener(v * 3.14159265358979 / 180.0)) return false;
     Follow(app);
     return true;
   }, x, y, cw, 40);
   yaw.value = Yaw(sp->emitter().forward) * 180.0 / 3.14159265358979;
   kit.NumberField("sp.e.yaw", "E yaw", yaw, [sp, app](double v, std::uint32_t) {
-    sp->SetEmitterYaw(static_cast<float>(v * 3.14159265358979 / 180.0));
+    if (!sp->TurnEmitter(v * 3.14159265358979 / 180.0)) return false;
     Follow(app);
     return true;
   }, x + cw + 8, y, cw, 40);

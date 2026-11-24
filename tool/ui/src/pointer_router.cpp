@@ -114,8 +114,10 @@ bool PointerRouter::Cancel() {
     if (h->cancel) h->cancel();
   } else {
     const ControlBinding& b = controls_[static_cast<std::size_t>(drag_)];
-    sink_.ControlSet(b.target, anchorValue_, 0);
-    EndDrag();
+    const Target t = b.target;
+    drag_ = -1;
+    dragId_.clear();
+    sink_.ControlCancel(t, anchorValue_);
   }
   armed_ = -1;
   armedId_.clear();

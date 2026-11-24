@@ -3,7 +3,10 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 
+#include "snd/tool/curve_editor.hpp"
+#include "snd/tool/event_editor.hpp"
 #include "snd/tool/live_sync.hpp"
 #include "snd/tool/mixer_editor.hpp"
 #include "snd/tool/ui/layout_metrics.hpp"
@@ -23,6 +26,7 @@ App::App(Session& session, const AppDesc& desc)
   if (!desc_.hostOwnsViewport) SetViewport(desc_.width, desc_.height, desc_.dpiScale);
   if (document() != nullptr) {
     seenDocRevision_ = document()->revision();
+    knownRevision_ = seenDocRevision_;
     mixerShape_ = MixerSignature(false);
     mixerValues_ = MixerSignature(true);
     dirty_ = document()->IsDirty();
@@ -50,6 +54,21 @@ void App::SetViewport(int width, int height, float dpiScale) {
   v.visible = true;
   v.focused = true;
   runtime_.viewport(v);
+}
+
+bool App::WindowTooSmall() const {
+  const tela::Viewport& vp = runtime_.viewport();
+  const float scale = vp.dpi_scale > 0.0f ? vp.dpi_scale : 1.0f;
+  const float inset = std::isfinite(desc_.insetTop) ? std::clamp(desc_.insetTop, 0.0f, 200.0f) : 0.0f;
+  return static_cast<float>(vp.width) / scale < kMinEditorWidth ||
+         static_cast<float>(vp.height) / scale - inset < kMinEditorHeight;
+}
+
+void App::DeclareTooSmall(tela::Document& doc, const std::string& id, float w, float h) {
+  char b[96];
+  std::snprintf(b, sizeof b, "window too small: this screen needs %.0f x %.0f", static_cast<double>(kMinEditorWidth),
+                static_cast<double>(kMinEditorHeight));
+  Text(doc, id, b, 0, 0, std::max(1.0f, w), std::min(std::max(1.0f, h), 22.0f), 0.6f);
 }
 
 void App::SetInsetTop(float logicalPixels) {
@@ -134,18 +153,31 @@ bool App::RebindProject(bool discardUnmatched) {
 
 void App::ResolveRebind(bool writeBack) {
   if (!rebindPending_) return;
-  if (writeBack) {
-    WriteBackMixer();  // the values into the document, then the rebind (nothing left to lose)
-    if (rebindPending_) RebindProject(true);
-  } else {
-    RebindProject(true);
-    Message("mixer: discarded live overrides that had no place in the changed project");
+  // D-188: the values that have a place go over by object (GUID, effect type at its place,
+  // parameter); the others are discarded and named. "Write back" then writes the carried values
+  // into the document through the new project, so nothing lands on another object.
+  std::string names;
+  for (std::size_t i = 0; i < rebindDropped_.size(); ++i) {
+    if (i < 4u) names += (i ? ", " : " ") + rebindDropped_[i].name;
   }
+  if (rebindDropped_.size() > 4u) names += " +" + std::to_string(rebindDropped_.size() - 4u);
+  const std::size_t n = rebindDropped_.size();
+  RebindProject(true);
+  if (writeBack) WriteBackMixer();
+  Message("mixer: discarded " + std::to_string(n) + " live overrides without a place:" + names);
+  ClearPositionSelections();
 }
 
 void App::TrackDocument() {
   ProjectDocument* d = document();
   if (d == nullptr) return;
+  if (knownRevision_ != d->revision()) {
+    // Changed elsewhere (a host, the live link, a reload): selections by position go when their
+    // arrays changed shape (D-186).
+    if (knownRevision_ != ~0ull && PositionShape() != knownShape_) ClearPositionSelections();
+    knownRevision_ = d->revision();
+    knownShape_ = PositionShape();
+  }
   if (d->revision() != seenDocRevision_) {
     seenDocRevision_ = d->revision();
     dirty_ = d->IsDirty();
@@ -237,8 +269,13 @@ bool App::SaveDocument() {
 std::uint32_t App::WriteBackMixer() {
   ProjectDocument* d = document();
   if (d == nullptr) return 0;
+  if (rebindPending_) {  // the mixer still has the old positions: carry by object first (D-188)
+    ResolveRebind(true);
+    return 0;
+  }
   const std::uint32_t n = snd::tool::WriteBackMixer(*d, session_.mixer());
   RebindProject(true);
+  ClearPositionSelections();
   Edited();
   Message("wrote " + std::to_string(n) + " live values into the project");
   return n;
@@ -348,6 +385,7 @@ void App::Pick(const std::string& value) {
   PickFn fn = std::move(picker_->pick);
   picker_.reset();
   if (fn) fn(chosen);
+  NoteOwnEdits();
   Edited();
 }
 
@@ -359,6 +397,12 @@ void App::PickerPage(std::int32_t delta) {
 
 // --- keys -----------------------------------------------------------------------------------
 bool App::Key(const KeyEvent& k) {
+  const bool used = KeyImpl(k);
+  NoteOwnEdits();
+  return used;
+}
+
+bool App::KeyImpl(const KeyEvent& k) {
   const bool ctrl = (k.modifiers & kModControl) != 0u;
   const bool shift = (k.modifiers & kModShift) != 0u;
   if (text_.active()) {
@@ -447,7 +491,11 @@ void App::Declare(std::uint64_t nowNs) {
     const float bodyH = h - kHeaderHeight - kFooterHeight;
     Panel(doc, "body", 0, kHeaderHeight, w, bodyH, [&] {
       const float bw = w - 12.0f, bh = bodyH - 12.0f;
-      switch (view_.screen) {
+      const bool editor = view_.screen != Screen::Mixer && view_.screen != Screen::Profiler &&
+                          view_.screen != Screen::Replay && view_.screen != Screen::Problems;
+      if (editor && WindowTooSmall()) {
+        DeclareTooSmall(doc, "body.small", bw, bh);
+      } else switch (view_.screen) {
         case Screen::Mixer: DeclareMixer(doc, ctx, bw, bh); break;
         case Screen::Profiler: DeclareProfiler(doc, ctx, bw, bh); break;
         case Screen::Buses: DeclareBuses(doc, ctx, bw, bh); break;
@@ -473,13 +521,58 @@ void App::Declare(std::uint64_t nowNs) {
 
 bool App::Pointer(const tela::HostPointerEvent& event, std::uint64_t timeMs, bool forward) {
   const bool used = router_.Pointer(runtime_, event, timeMs, forward);
+  NoteOwnEdits();
   return used;
+}
+
+void App::NoteOwnEdits() {
+  // The screens' own edits come from the pointer and the keys (D-186): the revision they leave is
+  // known; another change of the document's revision drops the selections by position when the
+  // arrays they point into changed shape (a position then names another item).
+  if (document() == nullptr) return;
+  knownRevision_ = document()->revision();
+  knownShape_ = PositionShape();
+}
+
+std::string App::PositionShape() const {
+  const ProjectDocument* d = document();
+  if (d == nullptr) return std::string();
+  ProjectDocument* md = const_cast<ProjectDocument*>(d);  // the editors' readers only
+  std::string s;
+  if (!view_.event.event.empty() && d->Find(view_.event.event) != nullptr) {
+    EventEditor ed(*md, view_.event.event);
+    s += "e" + std::to_string(ed.TrackCount());
+    for (std::uint32_t t = 0; t < ed.TrackCount(); ++t) s += "," + std::to_string(ed.ClipCount(t)) + "/" + std::to_string(ed.ActionCount(t));
+  }
+  if (!view_.params.event.empty() && !view_.params.curve.empty() && d->Find(view_.params.event) != nullptr) {
+    s += "|c" + std::to_string(CurveEditor(*md, view_.params.event, view_.params.curve).Points().size());
+  }
+  auto count = [&](const std::string& g, const char* path) {
+    const DocObject* o = g.empty() ? nullptr : d->Find(g);
+    const json::Value* a = o != nullptr ? FindPath(o->doc, path) : nullptr;
+    return a != nullptr && a->IsArray() ? a->items.size() : std::size_t{0};
+  };
+  s += "|s" + std::to_string(count(view_.music.segment, "tempo")) + "," + std::to_string(count(view_.music.segment, "stems"));
+  s += "|p" + std::to_string(count(view_.music.playlist, "entries"));
+  s += "|r" + std::to_string(count(view_.music.event, "music.transitions"));
+  return s;
 }
 
 // --- ControlSink ---------------------------------------------------------------------------
 float App::ControlValue(const Target& t) const { return session_.mixer().Get(t); }
 float App::ControlDefault(const Target& t) const { return session_.mixer().BankValue(t); }
-void App::ControlBegin(const Target&) { session_.mixer().BeginGroup(); }
+void App::ControlBegin(const Target& t) {
+  if (t.control == Control::ParamOverride) dragOverrideOn_ = session_.mixer().Get(Target{Control::ParamOverrideOn, t.a, 0, 0});
+  session_.mixer().BeginGroup();
+}
+void App::ControlCancel(const Target& t, float startValue) {
+  // The drag's changes come back to their start inside the group: the group files no edit and the
+  // live history (undo and redo) stays as before (D-186).
+  MixerModel& m = session_.mixer();
+  m.Set(t, startValue);
+  if (t.control == Control::ParamOverride) m.Set(Target{Control::ParamOverrideOn, t.a, 0, 0}, dragOverrideOn_);
+  m.EndGroup();
+}
 void App::ControlSet(const Target& t, float value, std::uint32_t mergeKey) {
   MixerModel& m = session_.mixer();
   // A parameter knob turns its override on (one edit with the value).

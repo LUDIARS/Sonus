@@ -92,7 +92,7 @@ void SegmentLine(Kit& kit, const std::string& g, float x, float y, float w, floa
         [d, g, mi, m, rate, pxPerSec](const DragMotion& mo) {
           MarkerDesc n = m;
           const double f = static_cast<double>(m.frame) + static_cast<double>(mo.dx) / pxPerSec * rate;
-          n.frame = static_cast<std::uint64_t>(std::max(0.0, std::round(f)));
+          n.frame = SatU64(std::round(f));
           SegmentEditor(*d, g).SetMarker(mi, n);
         });
     kit.Hit("mu.seg.mk." + mkeys[i], hd, x + mx - 5.0f, y, 10.0f, h);
@@ -140,13 +140,22 @@ void SegmentsTab(Kit& kit, float width, float height) {
                   [d] { return DocItems(*d, "asset"); }, [d, g](const std::string& v) { SegmentEditor(*d, g).SetAsset(v); },
                   0, y, cw, 46);
     kit.NumberField("mu.seg.bars", "Bars", Num(NumberAt(j, "bars", 1.0), 1, 1, 1e6, 0, "", true),
-                    [d, g](double v, std::uint32_t) { return SegmentEditor(*d, g).SetBars(static_cast<std::uint32_t>(v)); },
+                    [d, g](double v, std::uint32_t) {
+                      std::uint32_t n = 0;
+                      return WholeU32(v, &n) && SegmentEditor(*d, g).SetBars(n);
+                    },
                     cw + 8, y, cw, 46);
     kit.NumberField("mu.seg.entry", "Entry", Num(NumberAt(j, "entryFrame", 0.0), 480, 0, 1e12, 0, "fr", true),
-                    [d, g](double v, std::uint32_t) { return SegmentEditor(*d, g).SetEntryFrame(static_cast<std::uint64_t>(v)); },
+                    [d, g](double v, std::uint32_t) {
+                      std::uint64_t n = 0;
+                      return WholeU64(v, &n) && SegmentEditor(*d, g).SetEntryFrame(n);
+                    },
                     2 * (cw + 8), y, cw, 46);
     kit.NumberField("mu.seg.exit", "Exit", Num(NumberAt(j, "exitFrame", 0.0), 480, 0, 1e12, 0, "fr", true),
-                    [d, g](double v, std::uint32_t) { return SegmentEditor(*d, g).SetExitFrame(static_cast<std::uint64_t>(v)); },
+                    [d, g](double v, std::uint32_t) {
+                      std::uint64_t n = 0;
+                      return WholeU64(v, &n) && SegmentEditor(*d, g).SetExitFrame(n);
+                    },
                     3 * (cw + 8), y, cw, 46);
     y += kRow;
     const bool pre = BoolAt(j, "entryPreload", false);
@@ -176,7 +185,7 @@ void SegmentsTab(Kit& kit, float width, float height) {
     const double rate = se.SampleRate();
     kit.Action("mu.seg.grid.apply", "Apply grid", [d, g, mvp, rate, a] {
       const double b = mvp->tapBpm > 0.0 ? mvp->tapBpm : 120.0;
-      if (!SegmentEditor(*d, g).ApplyGrid(b, static_cast<std::uint64_t>(mvp->gridOffsetMs * 1e-3 * rate), 4, 4)) {
+      if (!SegmentEditor(*d, g).ApplyGrid(b, SatU64(mvp->gridOffsetMs * 1e-3 * rate), 4, 4)) {
         a->Message("refused: grid (no material?)");
       }
     }, 572, y, 90, 22, rate > 0.0);
@@ -205,7 +214,7 @@ void SegmentsTab(Kit& kit, float width, float height) {
         for (const MarkerDesc& o : e.Markers()) taken = taken || o.name == m.name;
         if (!taken) break;
       }
-      m.frame = static_cast<std::uint64_t>(NumberAt(a->document()->Find(g)->doc, "entryFrame", 0.0));
+      m.frame = SatU64(NumberAt(a->document()->Find(g)->doc, "entryFrame", 0.0));
       e.AddMarker(m);
     }, 2 * col + 8 - 66, y, 64);
     const json::Value* stems = j.Find("stems");
@@ -229,7 +238,7 @@ void SegmentsTab(Kit& kit, float width, float height) {
       const std::string id = "mu.tp." + std::to_string(i);
       kit.NumberField(id + ".tick", "", Num(static_cast<double>(p.tick), 960, 0, 1e15, 0, "tk", true), [d, g, i, p](double v, std::uint32_t) {
         TempoPointDesc n = p;
-        n.tick = static_cast<std::uint64_t>(v);
+        if (!WholeU64(v, &n.tick)) return false;
         return SegmentEditor(*d, g).SetTempo(i, n);
       }, 0, ry, col * 0.5f - 2);
       kit.NumberField(id + ".bpm", "", Num(p.bpm, 1, 1e-3, 1e5, 2, "bpm"), [d, g, i, p](double v, std::uint32_t) {
@@ -240,7 +249,7 @@ void SegmentsTab(Kit& kit, float width, float height) {
       kit.Action(id + ".remove", "x", [d, g, i] { SegmentEditor(*d, g).RemoveTempo(i); }, col - 24, ry, 24);
       kit.NumberField(id + ".beats", "", Num(p.beatsPerBar, 1, 1, 64, 0, "/bar", true), [d, g, i, p](double v, std::uint32_t) {
         TempoPointDesc n = p;
-        n.beatsPerBar = static_cast<std::uint32_t>(v);
+        if (!WholeU32(v, &n.beatsPerBar)) return false;
         return SegmentEditor(*d, g).SetTempo(i, n);
       }, 0, ry + kRow, col * 0.5f - 2);
       kit.PickField(id + ".unit", "", "1/" + std::to_string(p.beatUnit), "Beat unit", [] {
@@ -278,26 +287,26 @@ void SegmentsTab(Kit& kit, float width, float height) {
       }, 2 * col + 8 - 24, ry, 24);
       kit.NumberField(id + ".frame", "", Num(static_cast<double>(m.frame), 480, 0, 1e15, 0, "fr", true), [d, g, i, m](double v, std::uint32_t) {
         MarkerDesc n = m;
-        n.frame = static_cast<std::uint64_t>(v);
+        if (!WholeU64(v, &n.frame)) return false;
         return SegmentEditor(*d, g).SetMarker(i, n);
       }, col + 8, ry + kRow, col);
     }
     for (std::uint32_t i = first; i < nst && i < first + per; ++i) {
       const json::Value& sv = stems->items[i];
       StemDesc s;
-      s.channelFirst = static_cast<std::uint32_t>(NumberAt(sv, "channelFirst", 0.0));
-      s.channelCount = static_cast<std::uint32_t>(NumberAt(sv, "channelCount", 2.0));
+      s.channelFirst = SatU32(NumberAt(sv, "channelFirst", 0.0));
+      s.channelCount = SatU32(NumberAt(sv, "channelCount", 2.0), 2u);
       s.asset = RefGuid(*d, "asset", StringAt(sv, "asset"));
       const float rx = 2 * col + 16, ry = y + static_cast<float>(i - first) * 2.0f * kRow;
       const std::string id = "mu.st." + std::to_string(i);
       kit.NumberField(id + ".first", "", Num(s.channelFirst, 1, 0, 64, 0, "ch", true), [d, g, i, s](double v, std::uint32_t) {
         StemDesc n = s;
-        n.channelFirst = static_cast<std::uint32_t>(v);
+        if (!WholeU32(v, &n.channelFirst)) return false;
         return SegmentEditor(*d, g).SetStem(i, n);
       }, rx, ry, col * 0.5f - 2);
       kit.NumberField(id + ".count", "", Num(s.channelCount, 1, 1, 64, 0, "n", true), [d, g, i, s](double v, std::uint32_t) {
         StemDesc n = s;
-        n.channelCount = static_cast<std::uint32_t>(v);
+        if (!WholeU32(v, &n.channelCount)) return false;
         return SegmentEditor(*d, g).SetStem(i, n);
       }, rx + col * 0.5f + 2, ry, col * 0.5f - 30);
       kit.Action(id + ".remove", "x", [d, g, i] { SegmentEditor(*d, g).RemoveStem(i); }, rx + col - 24, ry, 24);
@@ -343,7 +352,10 @@ void PlaylistsTab(Kit& kit, float width, float height) {
                   [d, g](const std::string& v) { PlaylistEditor(*d, g).SetMode(static_cast<PlaylistMode>(ToInt(v))); }, 0, 0,
                   w * 0.5f - 4, 50);
     kit.NumberField("mu.pl.loops", "Loops", Num(NumberAt(j, "loopCount", 0.0), 1, 0, 1e6, 0, "(0=inf)", true),
-                    [d, g](double v, std::uint32_t) { return PlaylistEditor(*d, g).SetLoopCount(static_cast<std::uint32_t>(v)); },
+                    [d, g](double v, std::uint32_t) {
+                      std::uint32_t n = 0;
+                      return WholeU32(v, &n) && PlaylistEditor(*d, g).SetLoopCount(n);
+                    },
                     w * 0.5f + 4, 0, w * 0.5f - 4, 50);
     const json::Value* e = j.Find("entries");
     const std::uint32_t n = e != nullptr && e->IsArray() ? static_cast<std::uint32_t>(e->items.size()) : 0u;
@@ -358,7 +370,7 @@ void PlaylistsTab(Kit& kit, float width, float height) {
       const json::Value& en = e->items[i];
       const std::string seg = RefGuid(*d, "segment", StringAt(en, "segment"));
       const double wgt = NumberAt(en, "weight", 1.0);
-      const std::uint32_t rep = static_cast<std::uint32_t>(NumberAt(en, "repeat", 1.0));
+      const std::uint32_t rep = SatU32(NumberAt(en, "repeat", 1.0), 1u);
       const std::string id = "mu.pl.e" + std::to_string(i);
       kit.PickField(id + ".seg", "", RefName(*d, "segment", seg), "Segment", [d] { return DocItems(*d, "segment"); },
                     [d, g, i, wgt, rep](const std::string& v) { PlaylistEditor(*d, g).SetEntry(i, v, wgt, rep); }, 0, y,
@@ -367,7 +379,8 @@ void PlaylistsTab(Kit& kit, float width, float height) {
         return PlaylistEditor(*d, g).SetEntry(i, seg, v, rep);
       }, w * 0.3f + 4, y, w * 0.25f, 16);
       kit.NumberField(id + ".r", "x", Num(rep, 1, 1, 1e6, 0, "", true), [d, g, i, seg, wgt](double v, std::uint32_t) {
-        return PlaylistEditor(*d, g).SetEntry(i, seg, wgt, static_cast<std::uint32_t>(v));
+        std::uint32_t times = 0;
+        return WholeU32(v, &times) && PlaylistEditor(*d, g).SetEntry(i, seg, wgt, times);
       }, w * 0.55f + 8, y, w * 0.22f, 16);
       kit.Action(id + ".up", "^", [d, g, i] { PlaylistEditor(*d, g).MoveEntry(i, i - 1u); }, w * 0.77f + 12, y, 24, 22, i > 0u);
       kit.Action(id + ".down", "v", [d, g, i] { PlaylistEditor(*d, g).MoveEntry(i, i + 1u); }, w * 0.77f + 40, y, 24, 22,
@@ -497,7 +510,7 @@ void RulesTab(Kit& kit, float width, float height) {
                     cols[2] * w, ry, (cols[3] - cols[2]) * w - 2);
       kit.NumberField(id + ".count", "", Num(r.timingCount, 1, 0, 1e6, 0, "", true), [d, ev, i, r](double v, std::uint32_t) {
         TransitionRule n = r;
-        n.timingCount = static_cast<std::uint32_t>(v);
+        if (!WholeU32(v, &n.timingCount)) return false;
         return MusicEditor(*d, ev).SetRule(i, n);
       }, cols[3] * w, ry, (cols[4] - cols[3]) * w - 2);
       kit.NumberField(id + ".fo", "", Num(r.fadeOutBeats, 0.5, 0, 1e6, 2, "b"), [d, ev, i, r](double v, std::uint32_t) {
@@ -656,7 +669,7 @@ void StingersTab(Kit& kit, float width, float height) {
       for (int k = 0; k < 7; ++k) {
         if (StringAt(sj, "timing", "nextBeat") == kTiming[k]) s.timing = static_cast<Timing>(k);
       }
-      s.timingCount = static_cast<std::uint32_t>(NumberAt(sj, "timingCount", 0.0));
+      s.timingCount = SatU32(NumberAt(sj, "timingCount", 0.0));
       s.stack = StringAt(sj, "overlap", "replace") == "stack";
       const std::string id = "mu.sg." + skeys[i];
       kit.NameField(id + ".name", "", s.name, [d, ev, i, s](const std::string& v) {
@@ -678,7 +691,7 @@ void StingersTab(Kit& kit, float width, float height) {
                     }, w * 0.45f + 8, y, w * 0.18f);
       kit.NumberField(id + ".count", "", Num(s.timingCount, 1, 0, 1e6, 0, "", true), [d, ev, i, s](double v, std::uint32_t) {
         StingerDesc x = s;
-        x.timingCount = static_cast<std::uint32_t>(v);
+        if (!WholeU32(v, &x.timingCount)) return false;
         return MusicEditor(*d, ev).SetStinger(i, x);
       }, w * 0.63f + 12, y, w * 0.15f);
       kit.Toggle(id + ".stack", "stack", s.stack, [d, ev, i, s] {
