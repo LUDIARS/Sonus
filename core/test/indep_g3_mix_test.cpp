@@ -1,5 +1,6 @@
 // Stage 3 audio-level observations. The silent key output is separate from
 // Master, so changes on Master measure only the continuing target playback.
+#include <array>
 #include "indep_g2_fixture.hpp"
 
 namespace {
@@ -227,5 +228,66 @@ SND_TEST(IndepG3Ducking, LastCategoryVoiceReleasesRule) {
   h.sys->Stop(two, 0, nullptr);
   h.Steps(30);
   SND_CHECK_NEAR(h.LastMean() / base, 1, 0.002);
+}
+} // namespace
+
+namespace {
+using namespace g2;
+using snd::HashId;
+
+std::array<float, 2> PanSample(float spread, std::initializer_list<float> values, unsigned compose) {
+  Fx h(G2Config());
+  FxBank bank;
+  auto& event = bank.Event("Signal", 400);
+  event.tracks[0].clips[0].randPan = spread;
+  for (const float value : values) {
+    event.curves.push_back(static_cast<unsigned>(bank.b.curves.size()));
+    bank.b.curves.push_back({HashId("Position"), 4, compose, {{0, value}, {1, value}}});
+  }
+  h.Load("pan", bank.Build("Pan"));
+  h.sys->Play(HashId("Signal"), NoEmitter(), nullptr);
+  h.Steps(8);
+  return {h.out[0], h.out[1]};
+}
+
+SND_TEST(IndepG3Param, LegacyPanAddsCurvesToClipInStoredOrder) {
+  // The common binary32 spacing around 2^24 is at least 1. Every possible
+  // randomized pan in [-0.25,0.25] disappears on the first addition.
+  auto middle = PanSample(0, {}, 0);
+  auto initial = PanSample(0.25f, {}, 0);
+  auto combined = PanSample(0.25f, {16777216.0f, -16777216.0f}, 0);
+  SND_REQUIRE(middle[0] > 0.25f);
+  SND_REQUIRE(initial != middle);
+  SND_CHECK(std::memcmp(combined.data(), middle.data(), sizeof(middle)) == 0);
+}
+
+SND_TEST(IndepG3Param, ExplicitPanMultiplyCombinesContributions) {
+  auto composed = PanSample(0, {0.2f, 0.5f}, 4);
+  auto reference = PanSample(0, {0.1f}, 0);
+  SND_REQUIRE(reference[1] > reference[0]);
+  SND_CHECK(std::memcmp(composed.data(), reference.data(), sizeof(reference)) == 0);
+}
+
+SND_TEST(IndepG3Param, RampRateFollowsElapsedTimeRegardlessOfVoiceCount) {
+  for (unsigned count : {1u, 3u}) {
+    Fx h(G2Config());
+    FxBank b;
+    b.b.params.push_back({HashId("Level"), 0, 0, 1, 0, 2});
+    b.b.curves = {{HashId("Level"), 0, 0, {{0, 0}, {1, -10}}}};
+    b.Event("Signal", 80).curves = {0};
+    h.Load("rate", b.Build("Rate"));
+    for (unsigned i = 0; i < count; ++i) h.sys->Play(HashId("Signal"), NoEmitter(), nullptr);
+    h.Steps(8);
+    const float base = h.LastMean();
+    SND_REQUIRE(base > 0.04f);
+    h.sys->SetParamGlobal(HashId("Level"), 1);
+    h.Steps(24); // 128 ms at 2 units/s: gain -2.56 dB, within one block of publication.
+    SND_CHECK_NEAR(Db(h.LastMean() / base), -2.56, 0.17);
+    h.sys->SetParamGlobal(HashId("Level"), 0);
+    h.Steps(12);
+    SND_CHECK_NEAR(Db(h.LastMean() / base), -1.28, 0.17);
+    h.Steps(18);
+    SND_CHECK_NEAR(h.LastMean(), base, 1e-4);
+  }
 }
 } // namespace
