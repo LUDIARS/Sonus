@@ -228,6 +228,24 @@ UI 側で Tela に依存しないもの（プラグインでも使える、要�
 
 ## 回した構成と結果
 
+### 差し戻しの後（fab42a9 = 組 P の差し戻し c/live を取り込んだ後）
+
+ビルドは `$S/ui/b-*`、-j2、1 つずつ（終わったら消した）。警告はどの構成も 0。
+
+| 構成 | 実行したテスト | 結果 |
+| --- | --- | --- |
+| 9: gcc Debug | 全部（393） | 386 通過。失敗 7 = 組 P の新しい欠陥 `tool_indep_s7_live_Defect_*` 4 件（c/live で失敗のまま取り込んだもの）と、決定と食い違う組 U の独立テスト 3 件（`tool_indep_s7_ui_common_test`、`tool_indep_s7_ui_screens_test`、`SpecGap_ClipSelectionIsAnIndexAcrossUndo`、上の一覧）。組 U の `Defect_*` 5 件は全部通過。前の回の livelink の独立テスト 2 本も通過 |
+| 9 ＋ clang | `ctest -R tool`（175） | 168 通過、失敗は同じ 7 件 |
+| 9 ＋ ASan / UBSan | `ctest -R tool`（175） | 168 通過、失敗は同じ 7 件。ASan / UBSan の報告なし |
+| 9 ＋ TSan | 並行性 5 本（`tool_ui_concurrency`・`tool_indep_concurrency`・`tool_ui_editor_concurrency`・`tool_indep_s7_ui_threads`・`tool_ui_live_screens`）、`tool_ui_editor_concurrency` と `tool_indep_s7_ui_threads` を -j1 で 20 回 | 全部通過、報告なし |
+| 9 ＋ Release | `ctest -R tool`（175）、同じ 2 本を -j1 で 20 回 | 168 通過・失敗は同じ 7 件。20 回は全部通過 |
+| 8: 核だけ | `ctest -R tool`（78） | 74 通過、失敗 4 = 組 P の `Defect_*` 4 件だけ |
+
+MinGW の構文検査: 差し戻しで変えたファイル（`tool/ui/src/*.cpp` 全部、`tool/src/mixer.cpp`・`event_editor.cpp`・`doc_build.cpp`、
+`host_windows.cpp`、変えた・足したテスト）は全部通過。
+
+### 差し戻しの前
+
 ビルドは `$S/ui/b-*`、-j2、構成は 1 つずつ（終わったら消した。今は残っていない）。「tool の全部」は `ctest -R tool`（90 件のうち
 Disabled 2 件を除く 88 件、核だけの構成は 49 件）。
 
@@ -259,4 +277,6 @@ MinGW（`x86_64-w64-mingw32-g++ -std=c++20 -fsyntax-only -Werror -Wall -Wextra -
   テストの編集はどれも値の編集なので、テストではホットリロードの行も構造の変更の行も 0 件のまま）。
 - 大きな文書での速さ（編集ごとの `CheckDocument` と LiveSync のビルド）。計っていない。
 - 画素のテストのうち、ヘッドレスの 12 面の画像は書けることだけを見ている（中身の画素はエディタのテストで個別に見た）。
+- 差し戻し: Windows のホストで Esc が Tela に渡らずウィンドウが閉じないこと（コードと MinGW の構文検査だけ）。ミキサーの結び直しの
+  質問のあとのゲームとツールのずれ（ライブで上書きを捨てた・書き戻した後に、ゲームの値がツールと同じになること）は確かめていない。
 - livelink の独立テスト 2 本の失敗が取り込んだ状態からのものであること（出発点 ce1aa3e で回し直してはいない。組 U の差分に livelink は無い）。
