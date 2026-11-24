@@ -226,6 +226,10 @@ MinGW（`x86_64-w64-mingw32-g++ -std=c++20 -fsyntax-only -Werror -Wall -Wextra -
 | `Defect_PreviewLoadBuildAfterAHotReloadFails` | プレビューエンジンにつないでイベントを足す（ホットリロード成功）→ `LoadBuild(別のビルド)` が「the bank build/2/Main.sndb did not load」で失敗。リロードで入れ替わったバンクはエンジンが持つハンドルに無く、外されずに残る。差分を送る（不一致・知らないビルド → リロード）の後も同じ | preview.hpp `LoadBuild`「in place of the banks loaded before」 | 中（ライブの編集の後にプレビューを作り直せない） |
 | `Defect_TransitionPreviewUsesTheTargetsLeadInsteadOfTheBridges` | 規則にメモリ上のブリッジ、行き先の素材はプリロードなしのストリーム。要求 1.99 s: エンジン（ランタイム）は 2.0 s で切り替える（`FirstMaterialPrime` はブリッジのプライム = 0）が、`MusicEditor::Preview` は行き先のプライム 30 ms で遅れと判断し 4.0 s | D-184（モデルはランタイムと同じ先読み）、music `transition.cpp` | 中（遷移の予告が 1 小節ずれる。組 M のモデル） |
 
+| `Defect_RememberedAnswerGoesToAnotherGameWhenTheHelloArrivesAfterPoll` | 1.0 のゲーム（不一致、ハッシュ 0x2222）に「差分をすべて送る」と答えた後、別のビルドのゲーム（0x3333）が代わりに立つ。UI スレッドが `Connection::Poll` した後、`LiveSync::Tick` の前に HelloReply が届くと、`awaitingSync()`（クライアントの今の状態）は真なのに `hello()` は Poll が取った前のセッションの返事のままで、LiveSync は前のゲームのハッシュで「同じゲーム」と判断し、質問せずに SyncDecision（差分をすべて送る）を送る。テストは HelloReply を Poll の後まで遅らせて順序を固定（毎回再現）。`IndepS7LiveRecheck.NoQuestionBeforeTheBankListAndOneZeroByHash` が TSan の 20 回で 1 回落ちた原因 | D-182（答えを覚えるのは同じゲームのときだけ）、connection.hpp（Poll の後に読む） | 中（別のゲームに黙って全部送る。通信のスレッドとの競合で稀） |
+
+`IndepS7LiveRecheck.NoQuestionBeforeTheBankListAndOneZeroByHash` の 1.0 の後半はこの欠陥のため稀に落ちる（期待は緩めていない）。
+
 ### 残る仕様の穴
 
 - G10（新）: 覚えた答えが無い初めての不一致では、バンクの一覧が来る前に質問が出る（check() の判定は後から埋まる）。header どおりだが、
@@ -244,3 +248,29 @@ MinGW（`x86_64-w64-mingw32-g++ -std=c++20 -fsyntax-only -Werror -Wall -Wextra -
   二度と届かない（テストの順序の不備、実装の欠陥ではない見込み）。購読（subscribedMask が付く）を待ってから Play するのがよい。
 - 構造の変更と値の編集を 1 回のビルドに入れるテストが無い（欠陥 `ValueEditBuiltWithAStructuralEditIsLost`）。再接続のテストに
   ライブの構造の変更が無い。プレビューエンジンの LoadBuild をリロードの後に呼ぶテストが無い。ブリッジのある規則の先読みのテストが無い。
+
+### 再確認の構成と結果
+
+-j2、1 構成ずつ、ビルドは `$S/live-indep/b-*`（全部消した）。「新しい欠陥」= 上の `Defect_*`（5 本目の競合の欠陥は fe907ec で足したので、それより前の構成では未登録）。
+
+| 構成 | コミット | テスト | 結果 |
+| --- | --- | --- | --- |
+| 8: TOOL_CORE、gcc Debug | c2dd454 | 全部（295 本、無効 4・スキップ 1） | 失敗は新しい欠陥 4 本と `tool_profiler_streams_test`（実装担当のテストの順序の不備、上。単独で 5 回通過）。食い違っていた 2 本（F16、music_editor_test）と前の欠陥 10 本は通過 |
+| 8 + ASan/UBSan | c2dd454 | `tool\|livelink`（110 本） | 失敗は新しい欠陥 4 本だけ。サニタイザの報告 0 件 |
+| 8 + TSan | c2dd454 | `tool`（77 本）、並行性 5 本（`tool_indep_s7_live_{threads,replay,sync,recheck}_test`、`tool_live_concurrency_test`）を -j1 で 20 回 | `tool` は新しい欠陥 4 本だけ。20 回: recheck が 3 回目に 1 回失敗（上の競合の欠陥）、ほかは通過。ThreadSanitizer の報告 0 件 |
+| 8 + Release | c2dd454（テストの .cpp は fe907ec） | `tool`（77 本）、同じ 5 本を 20 回 | `tool` は新しい欠陥 4 本だけ。20 回: 全通過 |
+| 8 + clang | fe907ec | `tool`（78 本） | 失敗は新しい欠陥 5 本だけ（競合の欠陥は毎回再現） |
+
+MinGW（`-std=c++20 -fsyntax-only -Werror -Wall -Wextra -fno-exceptions -fno-rtti`）: `indep_s7_live_{recheck,defects,sync,replay}_test.cpp`、
+`indep_s7_compute_test.cpp`、`music_editor_test.cpp` 通過。
+
+回していない: 構成 1・6・7・9（変えたのはテストだけ。組 U の画面は実装担当が 9 で確認済み）。fe907ec での構成 8 の全体実行・ASan・TSan
+（その後の変更は欠陥のテスト 1 本の追加だけ、clang と構文検査で確認）。
+
+### 再確認で未検証の箇所
+
+- ReadCell で読んで違うものだけ送る経路（D-182 の「または」の側）は、送り直しの側と区別して確かめていない（結果のゲームの状態だけを見た）。
+- 1.0 のゲームでの再接続の値の送り直し（MiniGame は値を覚えない）。言語バンクを含むバンクの一覧での「同じゲーム」の判定。
+- giveUpMs の既定（5000 ms）そのもの（400 ms に設定して確かめた）。
+- 再生の上限の既定（1 時間）のちょうどの境目（40 / 100 ブロックに設定して確かめた）。先行ブロックのある（Begin のある）記録での maxBlocks の数え方（Blocks() は先行ブロックを含む）。
+- 実デバイス、TCP の本物のゲーム、Windows / macOS（前と同じ）。
