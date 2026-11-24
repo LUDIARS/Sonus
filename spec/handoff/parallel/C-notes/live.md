@@ -238,6 +238,55 @@ C-06（ストリームの詳細、ワーカーごとの CPU）、C-07（決定�
 MinGW（`x86_64-w64-mingw32-g++ -std=c++20 -fsyntax-only -Werror -Wall -Wextra -fno-exceptions -fno-rtti`）: 新しい・変えた .cpp
 （tool/src の 8、tool/preview の 5、tool/test の 8）全部通過（0a7da93）。
 
+## 差し戻し（受け入れ側の決定 D-182〜D-185）で決まったことと変えた点
+
+独立テストの結果: `C-notes/live-indep.md`（欠陥 10、仕様の穴 G1〜G9）。決定: `_briefs/P-fix.md`。
+
+| 決定 | 採った案 | 差し戻しで変えた点（コミット） |
+| --- | --- | --- |
+| D-182 照合と再接続 | 1・2・3（既定 Ask） | 答えは同じゲーム（バンクの一覧: bankId・言語・contentHash。1.0 はビルドハッシュ）のときだけ覚える。一覧が来るまでは Checking（質問を出さない）。ツール自身のリロードで変わったバンクは覚えた署名を更新。`SetDecision(Ask)` で忘れる。新しいクライアント（`Connection::opens()`）・新しい接続で照合をやり直す。Hello のハッシュは接続のたびに今のビルド（`Connection::SetProjectBuildHash`、接続中に作り直す）。再接続では、これまでに送った全セル（Undo で戻したものも）と差し替えた表を今のビルドの値で送り直す（欠陥 1、G1）。差分の基準 = 知っているビルドの contentHash ＋ 送ったセル（82a92db、b7e530f） |
+| D-183 編集のライブ反映 | 5・7・8・9 | 送り直しは同じセルの新しい値を追い越さない（セルごとに最後の編集の番号）。諦めるのは時間（`LiveSyncOptions::giveUpMs`、既定 5000 ms）（欠陥 2）。文書の Undo などの Remove で対応する Add の予備容量を返す、ホットリロードの成功でそのバンクのライブの分を 0 に（欠陥 3）。ライブで足したオブジェクトの値（NOT_FOUND）はホットリロードに回す（G7）。ミキサーが離したら文書の値を自動で送る（G8）。バスの追加は実際にはホットリロード（G3、文書だけ）。G9 は変更なし（82a92db） |
+| D-184 リロード・試聴・プレビュー | 6・10・11・12 | `LivePhase::Failed`（末尾に追加）と `failedBanks()`: ゲームでのリロードの失敗・書き出しの失敗で Failed、成功するまで戻らない。書き出しの失敗は reloads() の phase Failed と書き出しの理由（欠陥 4・5、G5）。リロードは常に「無ければ読み込む」（外れたバンクを戻せるように）。遷移の試聴: 要求は時刻以降で最初のブロックの頭、少なくとも 1 ブロック後（`AuditionRouter::PlayTransition`）。`MusicEditor::Preview` は同じブロック（新しい欄 `TransitionPreview::applySeconds`）から、ランタイム（music `transition.cpp` の HandleSetState: earliest = 適用ブロックの頭 + プライム）と同じ先読みで計算（1 ブロックを足さない）。`lookaheadMs` は 8.2 の表示の値のまま（欠陥 8・9、G4）（01a2e68） |
+| D-185 記録と再生 | 13・14・15・16 | 再生の上限: `ReplayOptions::maxBlocks`（記録の長さ、既定は実時間 1 時間、超えると読み込みで失敗・理由つき）と `maxAlignBlocks`（番号合わせの空回し、超えると合わせずに再生 `blockNumbersKept = false`）（欠陥 10、G6）。不具合報告は `notes.txt`・`description.txt`・`comparison.txt` で全項目を往復（欠陥 6）。数の読み取りは符号・範囲・型を確かめる（`ParseConfigLine`、期待のファイル、報告のバンクの id）（欠陥 7）。sonus-replay: 報告からの再生の失敗も 2、`--help`（a4547b5） |
+
+### `Defect_*` の結果
+
+`tool_indep_s7_live_Defect_*` 10 本すべて通過（82a92db 以降、構成 8）。
+
+### 決定と食い違って落ちる独立テスト・既存のテスト（変更していない）
+
+D-184「モデルは要求が適用されるブロックの頭から、ランタイムと同じ先読みで計算する」と、先読みに 1 ブロックを足していた
+前の計算を前提にしたアサーション:
+
+- `tool_indep_s7_compute_test` の `IndepS7Calc.F16_TransitionPreview`（695、703、704、709、720 行: 「ちょうど・直前の要求は
+  先読み（1 ブロック以上）で次へ」「startLate = 要求 + lookaheadMs」「小節線ちょうど 2.0 s は 4.0 s」）。ランタイムでは
+  素材がメモリにあればプライム 0 なので、その小節（またはその拍）で切り替わる。
+- `tool_music_editor_test` の `MusicEditor.MinimumLookaheadAndTransitionPreview`（306、307 行: 1.495 s の要求は 2.0 s）。
+  組 M の実装担当のテストで、common.md の「既存のアサーションは書き換えない」に従い直していない。ランタイムでは
+  1.5 s（適用は 1.4987 s のブロックの頭、次の拍 1.5 s、プライム 0）。
+
+### 画面（組 U）に影響する変更
+
+名前・引数を変えた公開関数は無い。足したもの・意味が変わったもの:
+
+- `LivePhase::Failed`（末尾、値 7）と `LivePhaseName`、`LiveSync::failedBanks()`。`switch (LivePhase)` に default が無い画面は
+  -Wswitch で止まる（今の tool/ui は LiveSync を使っていない）。
+- `LiveSync::SetDecision(Ask)` は覚えた答えも忘れる。`ChooseSendDiffs` / `ChooseRefuse` は `options.decision` を変えなくなった
+  （同じゲームのときだけ覚える）。
+- `LiveSyncOptions::giveUpMs`（末尾）。
+- `Connection::SetProjectBuildHash`、`Connection::opens()`。
+- `TransitionPreview::applySeconds`（末尾）。`MusicEditor::Preview` の `fireSeconds` などはランタイムに合わせて変わる
+  （小節線・拍のちょうど・直前の要求で、以前より 1 拍・1 小節早い値になることがある）。
+- `ReplayOptions::maxBlocks` / `maxAlignBlocks`（末尾）。
+- 不具合報告のフォルダに `notes.txt`・`description.txt`・`comparison.txt`（`summary.txt` は人向けのまま）。
+
+画面への要望（追加）: phase Failed の表示と `failedBanks()` の理由、「答えを取り消す」（`SetDecision(Ask)`）、遷移の試聴の
+予告は `applySeconds`（要求が効く時刻）と `fireSeconds`。
+
+### 差し戻しの後の構成と結果
+
+（下の「回した構成と結果」の後に追記）
+
 ## 未検証の箇所
 
 - 実デバイスでのプレビュー（`PreviewOutput::Device`）と `OutputPlayer`（コンテナにデバイスが無い。無音の出力は並行性のテストで回した。
