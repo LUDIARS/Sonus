@@ -196,3 +196,24 @@
 - schema の「読み出し宣言」（`SND_SCHEMA_READS`）の追加が「新しい列の追加だけ」の範囲に入るか。D-88 では受け入れ側が足しているので可と推測。
 - `core/test` から `sonus_livelink` をリンクしてよいか（ルートの依存規則は凍結の `CMakeLists.txt` 側）。
 - 入れ子 Event が子のルーティングを使わないのは意図か欠陥か（設計書 4.2 は「Clip として置ける」だけ）。
+
+## 7. 組②のマージ後に加わった機能テスト
+
+上の §1・§2 は `ff5df53` での調査。次は `0ffb97a` にあるテストをソース上で照合した対応表。各構成の実行結果・差し戻しは `spec/handoff/parallel/report-B.md` に記録する。
+
+| 設計 §7 の行 | 細目 | テスト名 |
+| --- | --- | --- |
+| エフェクト | リバーブ、I3DL2 | `IndepG2Kinds.ReverbDecayTimeIsTheRt60`、`EffectsCoverage.ReverbDecayHfRatioShortensTheHighFrequencyDecay`、`EffectsCoverage.ReverbLevelsDelaysAndFilters` |
+| エフェクト | エコー、ディレイ | `IndepG2Kinds.EchoDelayInSamplesAndDecayRatio`、`IndepG2Kinds.DelayPingPongAlternatesSides`、`IndepG2Dsp.ClampToMaxDelayAtAnyRateAndChannelCount` |
+| エフェクト | コーラス、フランジャー、ディストーション | `IndepG2Kinds.ChorusWithoutModulationIsAFixedDelay`、`IndepG2Kinds.FlangerCombNotchesAndMixes`、`IndepG2Kinds.DistortionClipsOutputGainAndMix` |
+| エフェクト | コンプレッサー、リミッター、ノーマライズ | `IndepG2Kinds.CompressorThresholdRatioMakeupAndAttack`、`IndepG2Kinds.LimiterCeilingAndLookAheadLatency`、`IndepG2Kinds.NormalizeRaisesAQuietSignalWithinMaximumAmp` |
+| エフェクト | EQ・フィルタ各型 | `IndepG2Kinds.ParamEqBandTypesFrequencyResponse`、`IndepG2Dsp.ParamEqAllpassBand`、`IndepG2Kinds.LowpassHighpassCutoffAndSlope` |
+| エフェクト | ピッチシフト、サラウンド | `IndepG2Kinds.PitchShifterRatioAndLatency`、`IndepG2Kinds.SurroundFeedsTheRearsOfA51Bus` |
+| エフェクト | 実行時の値と LOD | `IndepG2Param.FadeIsOneLinearRampFromTheNextBlock`、`IndepG2Impl.InitOnlyParameterAtRunTimeWarnsAndIsDropped`、`IndepG2Lod.BypassWaitsForTheTail` |
+| ダッキング | コンプレッサーのキー経路（比例ダッキングの DUCK ルールは組③） | `IndepG2Side.KeyBusDrivesTheGainReductionInTheSameBlockWhenItComesFirst`、`IndepG2Side.KeyBusAfterTheTargetActsOneBlockLater`、`IndepG2Side.SidechainIsTakenAfterTheKeyBusFader` |
+| 再生単位のフィルタ | 標準 LP・HP、距離 LP | `IndepG2VoiceFilter.ParameterCurveDrivesLowpassAndHighpass`、`IndepG2VoiceFilter.DistanceCurveLowpass` |
+| 再生単位のフィルタ | 重い処理の枠と仮想復帰 | `CoreFx.EveryStandardKindRunsAsAVoiceEffect`、`CoreFx.VoiceEffectPoolFullPlaysDryAndCounts`、`CoreFxRecheck.VoiceBackFromVirtualReadsTheEventSettingAsItIsNow`、`IndepG2Recheck.FirstBlockHasThePlaybackValuesOnEveryStage` |
+| 空間化 | プラグインをボイスに挿入。方位などをプラグインに渡す経路は B-5 依頼 | `CoreFx.PluginAsVoiceEffectGetsTheVoiceChannelsAndPlayback` |
+| §2.5・§14 横断 | 決定論・確保・RT・128 実ボイス | `CoreFxDeterminism.SameScriptSameBitsSerialAndParallel`、`CoreFxMemory.NoAllocationAfterInitialisationOnTheNewPaths`、`CoreFxRt.NewPathsHaveNoRtViolations`、`CoreFxLoad.Real128VoicesWithTheVoiceEffectPoolFull` |
+
+コンボリューションは段階6（D）の担当。表中のテストは組②の経路を対象とし、組①・③・④との組み合わせは 4 組合流後に検証する。

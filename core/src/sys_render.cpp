@@ -95,6 +95,15 @@ void PostProcessItem(Impl& im, RenderSet& set, const source::RenderItem& it, Ite
                      float* const* voiceOut, schema::Tables& t) noexcept {
   const std::uint32_t frames = im.cfg.blockFrames;
   const SlotIndex r = it.realSlot;
+  // D-132: heavy voice effects run after the voice filter and before the envelopes, so the
+  // envelopes (stop / steal fades, sample-accurate stop) also end the effect output (D-134).
+  const bool vfx = in.vfxSlot != 0u;
+  if (vfx) {
+    if (in.filterActive != 0u) {
+      dsp::VoiceFilterProcess(t.RealVoice.col.filterState[r], voiceOut, in.channels, frames, in.filter, im.cfg.sampleRate);
+    }
+    VfxProcess(im, in.vfxSlot - 1u, voiceOut, in.channels);
+  }
   // Release envelope (sample accurate): 1 before the release starts, linear to 0 at stopClock.
   if (in.releaseActive != 0u) {
     for (std::uint32_t f = 0; f < frames; ++f) {
@@ -132,7 +141,7 @@ void PostProcessItem(Impl& im, RenderSet& set, const source::RenderItem& it, Ite
   if (in.frameEnd < frames) {
     for (std::uint32_t c = 0; c < in.channels; ++c) std::memset(voiceOut[c] + in.frameEnd, 0, sizeof(float) * (frames - in.frameEnd));
   }
-  if (in.filterActive != 0u) {
+  if (in.filterActive != 0u && !vfx) {
     dsp::VoiceFilterProcess(t.RealVoice.col.filterState[r], voiceOut, in.channels, frames, in.filter, im.cfg.sampleRate);
   }
   PanMatrix from{}, to{};
@@ -514,6 +523,7 @@ void Render(Impl& im) noexcept {
   }
 
   // b) Serial preparation of the items.
+  VfxReleaseStale(im);  // D-133: slots of voices that left their real assignment go back
   const float rate = static_cast<float>(im.cfg.sampleRate);
   for (std::uint32_t c = 0; c < set.chunkCount; ++c) set.chunks[c].segCount = 0;
   for (std::uint32_t i = 0; i < set.itemCount; ++i) {
@@ -624,6 +634,7 @@ void Render(Impl& im) noexcept {
     in.filter = SND_R(Voice_filterTarget)[d];
     const bool targetOpen = in.filter.lowpassHz >= dsp::kVoiceLowpassOffHz && in.filter.highpassHz <= dsp::kVoiceHighpassOffHz;
     in.filterActive = (!targetOpen || !dsp::VoiceFilterIsOpen(t.RealVoice.col.filterState[r], im.cfg.sampleRate)) ? 1u : 0u;
+    VfxPrepareItem(im, it, in);  // D-132: voice-effect slot and this block's parameters
     ClipTimeline(im, vs, v, d, r, in);  // stage 3 (group 4): D-142 cut, CLIP.fadeOutMs, markers
     // D-146: the play's fade-in, per sample, by the voice's played frames (held while the
     // playback pauses or stops).

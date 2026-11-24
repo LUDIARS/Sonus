@@ -224,6 +224,8 @@ void Refresh(Impl& im, const BankRecord& r, std::uint32_t bankSlot, std::uint32_
       const std::uint32_t pc = pf == bf::kNone ? 0u : v.Column<bk::col::EFFX_paramCount>()[x];
       if (pf != bf::kNone && row >= pf && row - pf < pc && row - pf < r.effects[x].paramCount) {
         r.effects[x].params[row - pf] = f;
+        // D-130: the edited bank value is the new set value (from the next block).
+        if (r.effects[x].ctl != nullptr) SetEffectParam(im, r.effects[x], row - pf, f, 0.0f);
       }
     }
   }
