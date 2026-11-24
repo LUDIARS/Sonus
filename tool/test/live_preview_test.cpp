@@ -215,7 +215,7 @@ SND_TEST(LivePreview, TransitionAuditionMatchesThePreviewAtBarLinesAndTimeZero) 
     std::vector<float> all;
     r.engine->Render(static_cast<std::uint32_t>((p.fireSeconds + 0.5) * ms.sampleRate / ms.blockFrames), &all);
     const std::vector<PreviewTransition> tr = r.engine->Transitions();
-    SND_REQUIRE_MSG(tr.size() == 1u, "request %.4f: %zu transitions", request, tr.size());
+    SND_REQUIRE_MSG(tr.size() == 1u, "request %.4f: %u transitions", request, static_cast<unsigned>(tr.size()));
     const std::uint64_t want = startClock + static_cast<std::uint64_t>(std::llround(p.fireSeconds * ms.sampleRate));
     SND_CHECK_MSG(tr[0].clock == want, "request %.4f: switch at %.5f s, preview %.5f s", request,
                   static_cast<double>(tr[0].clock - startClock) / ms.sampleRate, p.fireSeconds);
