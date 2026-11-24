@@ -57,14 +57,12 @@ SND_TEST(IndepG4Steal, OldestStealsTheOldest) {
   const snd_playback_handle c = r.sys->Play(E(2), NoEm(), nullptr);
   r.Steps(4);
   SND_CHECK_NEAR(Level(r), 0.5f, 1e-3f);
-  SND_CHECK_EQ(r.CountEnds(a.value), 1u);  // the reason: SpecHole_StolenPlaybackEndReason
+  SND_CHECK_EQ(r.CountEnds(a.value), 1u);
   SND_CHECK_EQ(r.CountEnds(b.value) + r.CountEnds(c.value), 0u);
 }
 
-// Decision 1 (re-check 1): core keeps SND_END_COMPLETED for a playback whose voice its limit
-// group stole (the stage 2 test CoreVoice.LimitGroupNeverRejectsAndOldestSteals expects it;
-// the change is requested upstream). Records the reason; one end each.
-SND_TEST(IndepG4Steal, SpecHole_StolenPlaybackEndReason) {
+// Each limit-group mode that displaces an existing playback reports the same cause.
+SND_TEST(IndepG4Steal, StolenPlaybackEndReason) {
   for (std::uint32_t mode : {0u, 1u, 2u}) {
     Rig r;
     B bk = GroupBank(1, mode, {0.2f, 0.4f}, {100, 150});
@@ -75,7 +73,8 @@ SND_TEST(IndepG4Steal, SpecHole_StolenPlaybackEndReason) {
     r.Steps(4);
     const End* e = r.EndOf(a.value);
     SND_REQUIRE(e != nullptr);
-    snd::test::Note("mode %u: victim ends with reason %u detail %u", mode, e->reason, e->detail);
+    SND_CHECK_EQ(e->reason, SND_END_STOLEN);
+    SND_CHECK_EQ(e->detail, SND_END_DETAIL_LIMIT_GROUP);
     SND_CHECK_EQ(r.CountEnds(a.value), 1u);
   }
 }
