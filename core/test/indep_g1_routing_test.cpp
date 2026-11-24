@@ -83,6 +83,31 @@ SND_TEST(IndepG1Routing, ListenerPositionControlsContinuousZoneFade) {
   }
 }
 
+SND_TEST(IndepG1Routing, EachListenerContributesOnlyWhenInsideTheZone) {
+  auto gain = [](snd_listener_mode mode, float inside, float outside, bool single) {
+    auto b = Signal(true);
+    b.events[0].curveVolume = Curve(b, bf::CurveTarget::Volume, 0, 0);
+    auto cfg = Config();
+    cfg.listener_mode = mode;
+    Scene s(b, cfg);
+    Zone(s, {}, 1, 0);
+    const auto first = Listener({}, inside);
+    SND_CHECK_EQ(s.h.sys->SetListener(0, &first), SND_OK);
+    if (!single) {
+      const auto second = Listener({0, 0, 4}, outside);
+      SND_CHECK_EQ(s.h.sys->SetListener(1, &second), SND_OK);
+    }
+    s.Position({0, 0, 8});  // in front of both, equal distance-curve gain
+    s.Start();
+    return s.Level();
+  };
+  const double full = gain(SND_LISTENER_SPLIT, 1, 1, true);
+  SND_REQUIRE(full > 0.05);
+  SND_CHECK_NEAR(gain(SND_LISTENER_SPLIT, 1, 1, false) / full, 0.5, 0.002);
+  SND_CHECK_NEAR(gain(SND_LISTENER_WEIGHTED, 3, 1, false) / full, 0.75, 0.002);
+  SND_CHECK_NEAR(gain(SND_LISTENER_WEIGHTED, 1, 3, false) / full, 0.25, 0.002);
+}
+
 SND_TEST(IndepG1Routing, ClearingZoneAndReusingEmitterRemoveTheSend) {
   Scene s(Signal(true));
   auto z = Zone(s);
