@@ -22,3 +22,8 @@
 | グループに最後の音を奪われた再生 | `IndepG4Steal.StolenPlaybackEndReason` で oldest、quietest、lowest priority の 3 モードの理由・詳細・通知回数。既存 `NeverRejectsTheNewRequest` で新規拒否 |
 | 先に奪った後の残存ボイス | `SurvivingVoiceDeterminesNaturalOrStoppedEnd` は残ったボイスの発音、自然終了と明示停止の理由・詳細・回数を検査。`TwoGroupsStealingTheLastVoicesEndPlaybackOnce` は 2 グループが同一ブロック／別ブロックで全ボイスを奪った場合を検査 |
 | 無音の親の最後の制御アクション | `ActionOnlyParentAppliesFinalSnapshotBeforeEnding`。480 フレームにある Snapshot の最初の適用ブロックは 512。前ブロック末尾、適用後の信号、親の終了理由・通知時期を検査 |
+組④復元・実装閲覧前の性質（設計§4.2、4.4、commands.hpp の Play.flags、B-6）
+- 同一グループに収容しきれず最後のボイスを失った再生には STOLEN/LIMIT_GROUP が届く。新規拒否は REJECTED、全体実ボイス上限による仮想化では継続する。
+- 素材上の有限ループの反復回数は可変ピッチに依存しない。無限ループの出力から音で同定した次の反復開始点で有限再生は終了する。
+- 通常・ワンショット・位置指定の Play と各フェード指定の録音で、下位予約ビット 2〜15 はゼロ。オプションの意味とフェード長は定義済みビットで識別する。
+- 予約停止フレームより前のアクションは一回発火し、同時刻以降は取り消す。拍指定の再生は実トランスポートが示す位置に達した時点で発火する。
