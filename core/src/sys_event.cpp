@@ -736,6 +736,30 @@ void StartClip(Ctx& c, StartContext& sc, const BankRecord& r, std::uint32_t clip
 }
 
 // Starts a playback (state None/Pending -> Playing / Priming). false: ended.
+// D-145: an action-only event stays live through the block that applies its last
+// action. Pause inserts whole blocks, so the start offset used for rounding is stable.
+std::uint64_t ActionOnlyEnd(const Impl& im, const bk::BankView& v, std::uint32_t row, ClockSample start) noexcept {
+  const auto firstTrack = v.Column<bk::col::EVNT_trackFirst>()[row];
+  const auto tracks = v.Column<bk::col::EVNT_trackCount>()[row];
+  std::uint64_t end = 0u;
+  for (std::uint32_t tr = firstTrack; tr < firstTrack + tracks; ++tr) {
+    if (v.Column<bk::col::TRAK_clipCount>()[tr] != 0u) return 0u;
+    const auto first = v.Column<bk::col::TRAK_actionFirst>()[tr];
+    if (first == bf::kNone) continue;
+    const auto count = v.Column<bk::col::TRAK_actionCount>()[tr];
+    for (std::uint32_t a = first; a < first + count; ++a) {
+      auto frame = ActionFrame(im, v.Column<bk::col::ACTN_timeMs>()[a]);
+      const auto kind = static_cast<bf::ActionKind>(v.Column<bk::col::ACTN_action>()[a]);
+      if (kind == bf::ActionKind::SetParam || kind == bf::ActionKind::ApplySnapshot) {
+        const auto offset = (start + frame) % im.cfg.blockFrames;
+        if (offset != 0u) frame += im.cfg.blockFrames - offset;
+      }
+      if (end <= frame) end = frame + 1u;
+    }
+  }
+  return end;
+}
+
 bool StartPlayback(Ctx& c, std::uint32_t d, ClockSample startClock) noexcept {
   Impl& im = c.im;
   schema::Tables& t = c.t;
@@ -847,6 +871,7 @@ bool StartPlayback(Ctx& c, std::uint32_t d, ClockSample startClock) noexcept {
     // Music events are driven by the music system (segments, 8.3): it starts their voices
     // through RunMusicLogic. Without one, their tracks play like any event.
     if ((flags & bf::kEventMusic) == 0u || im.music == nullptr) StartEventTracks(c, sc, *br, row, kNoSlot, 0u, rng);
+    if (sc.created == 0u && sc.failDetail == SND_END_DETAIL_NONE) pp.actionOnlyEnd = ActionOnlyEnd(im, v, row, startClock);
     es.lastStartClock = c.clock + 1u;
     ++es.instances;
     pp.flags |= kPbInstanceCounted;
@@ -855,7 +880,7 @@ bool StartPlayback(Ctx& c, std::uint32_t d, ClockSample startClock) noexcept {
   pp.rng = rng;
   pp.categorySlot = sc.categorySlot;
   // Voices whose limit rejected them leave the playback empty: end it with the reason.
-  if (sc.created == 0u && (pp.flags & kPbMusic) == 0u) {
+  if (sc.created == 0u && pp.actionOnlyEnd == 0u && (pp.flags & kPbMusic) == 0u) {
     if (sc.failDetail == SND_END_DETAIL_NONE && SND_W(Playback_logic)[d].voiceCount == 0u) {
       EndPlayback(c, d, SND_END_COMPLETED, SND_END_DETAIL_NONE);  // nothing to play (empty event)
     } else {
@@ -1788,6 +1813,7 @@ void RunEventLogic(Impl& im) noexcept {
     }
     // All voices gone: the playback is complete (4.1).
     if (lg.voiceCount == 0u && st != PlaybackStateId::Pending &&
+        (pp.trackTime >= pp.actionOnlyEnd || (pp.flags & kPbStopping) != 0u) &&
         ((pp.flags & kPbMusic) == 0u || (pp.flags & kPbTimedStop) != 0u)) {
       // A source that refused its voices (FlushSourceCalls: DECODER_POOL_FULL,
       // NO_STREAM_SLOT, ...) left the reason in endDetail: the playback is rejected.

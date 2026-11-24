@@ -388,6 +388,7 @@ struct PlaybackPriv {
   // pauses or the stop), the track time up to which its actions were taken, the start clock
   // its actions were looked ahead with (scheduled plays), a StopEvent action's clock.
   std::uint64_t actionHorizon;
+  std::uint64_t actionOnlyEnd;  // exclusive track frame of the last effective action (zero for other events)
   std::uint64_t trackTime;
   ClockSample actionStart;
   ClockSample actionStopClock;
