@@ -11,7 +11,9 @@ set(SND_DSP_TEST_SOURCES
   indep_filter_test.cpp
   indep_pan_meter_test.cpp
   indep_effects_test.cpp
-  indep_effects_behaviour_test.cpp)
+  indep_effects_behaviour_test.cpp
+  # Stage 3 group 2: EQ band types (D-135), I3DL2 parameters.
+  effects_coverage_test.cpp)
 
 snd_add_test(dsp_test
   SOURCES ${SND_DSP_TEST_SOURCES}
@@ -36,3 +38,13 @@ set_tests_properties(dsp_test dsp_test_scalar PROPERTIES TIMEOUT 1200)
 snd_add_test(dsp_effect_rate_test SOURCES effect_rate_test.cpp LINK sonus_dsp)
 # Independent: D-48 for every standard kind, D-44 pitch-ratio limit / resampler pool slot.
 snd_add_test(dsp_indep_contract11_test SOURCES indep_contract11_dsp_test.cpp LINK sonus_dsp)
+
+# Stage 3 group 2, independent tester: ParamEq allpass band (D-135), non-finite ramps for
+# every kind. Also against the scalar SIMD path.
+snd_add_test(dsp_indep_g2_test SOURCES indep_g2_dsp_test.cpp LINK sonus_dsp sonus_mocks)
+snd_add_test(dsp_indep_g2_test_scalar SOURCES indep_g2_dsp_test.cpp ${_snd_dsp_src_abs}
+  LINK sonus_base sonus_platform sonus_mocks)
+target_include_directories(dsp_indep_g2_test_scalar PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../include
+                                                            ${CMAKE_CURRENT_SOURCE_DIR}/../src)
+target_compile_definitions(dsp_indep_g2_test_scalar PRIVATE SND_SIMD_FORCE_SCALAR=1)
+set_tests_properties(dsp_indep_g2_test dsp_indep_g2_test_scalar PROPERTIES TIMEOUT 600)
