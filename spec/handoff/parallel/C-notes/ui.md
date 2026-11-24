@@ -46,7 +46,7 @@ UI（`sonus_tool_ui`、Tela に依存。OS 非依存）:
 | `src/material_view.cpp` | マテリアル表 |
 | `src/patch_view.cpp` | 波形生成パッチ |
 | `src/profiler_view.cpp`（追記） | プロファイラのタブ（Overview = 段階2、CPU、Memory、Streams、LOD、Event log） |
-| `src/replay_view.cpp` | 記録と再生 |
+| `src/replay_view.cpp` | 記録と再生（ファイル名の入力と、同じフォルダの `*.snrec` の一覧から選んで読み込む） |
 | `src/link_view.cpp` | 接続（Matching / Items、Problems は Problems 画面へ） |
 | `src/mixer_view.cpp`（追記） | 上書きの一覧の上に Read back と Write back to project |
 
@@ -58,7 +58,8 @@ Tela に渡さない）、`host_macos.mm`（キーコードと文字を `App::Ke
 テスト（`tool/test`、Tela 入りの構成だけ）: `ui_editor_helpers.hpp`（文書の上の App、id で押す・候補を選ぶ・打つ・ドラッグ）、
 `ui_music_fixture.hpp`、`ui_event_screen_test`、`ui_buses_screen_test`、`ui_params_screen_test`、`ui_spatial_screen_test`、
 `ui_music_screen_test`、`ui_material_screen_test`、`ui_patch_screen_test`、`ui_live_screens_test`（プレビューエンジンをゲームに）、
-`ui_editor_limits_test`、`ui_editor_input_test`、`ui_editor_concurrency_test`、`tool_app_screen_<名前>`（12 面のヘッドレス）と
+`ui_editor_limits_test`、`ui_editor_input_test`、`ui_editor_concurrency_test`、`ui_editor_raster_test`（コーン・レーン・印・
+組の表のセルの画素、DPI 1・2）、`tool_app_screen_<名前>`（12 面のヘッドレス）と
 `tool_app_bad_screen`。内容は `tool/README.md` の「段階5 の画面（組 U）」の表。
 
 ## 決定の案（受け入れ側が D-番号を振る。番号は振っていない）
@@ -187,16 +188,25 @@ UI 側で Tela に依存しないもの（プラグインでも使える、要�
 
 ## 回した構成と結果
 
-ビルドは `$S/ui/b-*`、-j2、構成は 1 つずつ（終わったら消した）。
+ビルドは `$S/ui/b-*`、-j2、構成は 1 つずつ（終わったら消した。今は残っていない）。「tool の全部」は `ctest -R tool`（90 件のうち
+Disabled 2 件を除く 88 件、核だけの構成は 49 件）。
 
 | 構成 | コミット | 実行したテスト | 結果 |
 | --- | --- | --- | --- |
 | 9: Tela 入り、gcc Debug | e4a924e | 全部（305） | 303 通過。失敗 2: `livelink_indep_s7_impl_test`（`IndepS7Impl.StructEditBeyondTheLogIsRefusedAtAcceptance`）、`livelink_indep_s7_recheck_test`（`IndepS7Recheck.StructLogAndReserveFollowTheModel`）。どちらも livelink だけのテストで、組 U は livelink を変えていない（下の未検証） |
-| 9: Tela 入り、gcc Debug | 0b82894 | `tool_(ui\|app)` | 全部通過（`tool_ui_live_screens_test` の待ちを実時間にした後、3 回の繰り返しも通過） |
+| 9: Tela 入り、gcc Debug | 5f2c311 | tool の全部（88） | 全部通過。警告 0 |
+| 9 ＋ clang | 5f2c311 | tool の全部（88） | 全部通過。警告 0 |
+| 9 ＋ ASan / UBSan | 5f2c311 | tool の全部（88） | 全部通過。警告 0。（0775893 の時点の回では `tool_ui_music_screen_test` が heap-buffer-overflow: State を足すボタンが `States()` の 2 つの一時オブジェクトの反復子を比べていた。5f2c311 で直した） |
+| 9 ＋ TSan | 5f2c311 | `tool_ui_concurrency`・`tool_indep_concurrency`・`tool_ui_editor_concurrency`・`tool_ui_live_screens`、`tool_ui_editor_concurrency` を -j1 で 20 回 | 全部通過（TSan の報告なし）。警告 0 |
+| 9 ＋ Release | 5f2c311 | tool の全部（88）、`tool_ui_editor_concurrency` と `tool_ui_live_screens` を -j1 で 20 回 | 全部通過。警告 0 |
+| 8: 核だけ（Tela なし） | 5f2c311 | tool の全部（49） | 全部通過。警告 0（UI のテストは入らない） |
 
 MinGW（`x86_64-w64-mingw32-g++ -std=c++20 -fsyntax-only -Werror -Wall -Wextra -fno-exceptions -fno-rtti`、Tela のインクルードパス）:
 `tool/ui/src/*.cpp` 全部、`tool/app/main.cpp`・`options.cpp`・`host_headless.cpp`、`host_windows.cpp`（`-fexceptions`、Tela の
-`windows_view.hpp`）、新しいテスト 11 本: 全部通過（ccb6aea）。`host_macos.mm` は検査していない（Objective-C++ のコンパイラが無い）。
+`windows_view.hpp`）、新しいテスト 11 本: 全部通過（ccb6aea）。その後に変えた `common_view.cpp`・`buses_view.cpp`・`patch_view.cpp`・
+`event_view.cpp`・`music_view.cpp`・`replay_view.cpp` と `ui_editor_raster_test.cpp` は MinGW では検査し直していない（clang の
+`-Wshadow` つき構文検査と 5 構成のビルドは通った）。`host_macos.mm` は検査していない（Objective-C++ のコンパイラが無い）。
+構成 1〜7（ツールなし）は組 U の差分が `tool/` だけなので回していない（受け入れ側の全構成の確認に任せる）。
 
 ## 未検証の箇所
 
@@ -210,4 +220,5 @@ MinGW（`x86_64-w64-mingw32-g++ -std=c++20 -fsyntax-only -Werror -Wall -Wextra -
 - ライブの構造の変更（予備容量の棒、StructEdit の Undo）とホットリロードの経過の行が出ること（ランタイムが UNSUPPORTED を返し、
   テストの編集はどれも値の編集なので、テストではホットリロードの行も構造の変更の行も 0 件のまま）。
 - 大きな文書での速さ（編集ごとの `CheckDocument` と LiveSync のビルド）。計っていない。
+- 画素のテストのうち、ヘッドレスの 12 面の画像は書けることだけを見ている（中身の画素はエディタのテストで個別に見た）。
 - livelink の独立テスト 2 本の失敗が取り込んだ状態からのものであること（出発点 ce1aa3e で回し直してはいない。組 U の差分に livelink は無い）。
