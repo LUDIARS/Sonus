@@ -1,6 +1,6 @@
 # 依頼 D-11: コンボリューションの IR をバンクからバスのエフェクトへ（core = B、buildtool = C、bank-format.md = 統合担当）
 
-依頼元: セッション D（dsp 組）。決定: CONTRACTS.md「段階 7-D」の D-211〜D-215。
+依頼元: セッション D（dsp 組）。決定: CONTRACTS.md「段階 7-D」の D-211〜D-215、差し戻しの D-218 / D-219（登録の番号、寿命、切り替え）。
 dsp 側（`snd/dsp/convolution.hpp`、標準エフェクト `snd.fx.convolution`、準備済み IR の登録表、ブロブ形式 SCIR）とその単体テストは
 D のブランチで完成している（テストの中で IR を準備・登録し、エフェクトとして処理できる）。足りないのは、バンクの IR を
 ランタイムで準備して登録し、インスタンスの `IrSlot` に入れる配線と、ビルドツールの IR の取り込み。
@@ -51,18 +51,23 @@ D のブランチで完成している（テストの中で IR を準備・登�
    バンクのレコードに IR のメモリとして持つ（`dspMemory` と同じ寿命）。同じブロブ（同じオフセット）を指す行が複数あれば 1 回だけ準備して共有してよい。
 4. 準備: `const dsp::ConvolutionIr* ir = dsp::ConvolutionPrepareIrFromBlob(mem, irBytes, d.blob, d.blob_bytes, im.cfg.sampleRate, B);`
    （通常ワーカーで。2 秒・ステレオ・44.1 kHz → 48 kHz で数百 ms かかることがある。レートが同じなら FFT だけで速い）。
-5. 登録: `const std::uint32_t slot = dsp::ConvolutionRegisterIr(ir);`（0 なら登録表が満杯 → IR なしで続ける）。
+5. 登録: `const std::uint32_t num = dsp::ConvolutionRegisterIr(ir);`（世代つきの番号 1..2^24−1、D-219。0 なら登録表が満杯 → IR なしで続ける）。
+   準備は NaN / ±Inf のサンプルを含む IR を拒否する（nullptr）。そのときも IR なしで続ける（ログ）。
 6. パラメータ: `EffectInit` に渡す記述の初期値と、`EffectInstance::params` の両方で
-   `params[dsp::kConvIrSlot] = static_cast<float>(slot);`（整数のまま float で正確）。
+   `params[dsp::kConvIrSlot] = static_cast<float>(num);`（24 ビットなので float で正確）。
    さらに推奨: `params[dsp::kConvMaxIrMs]` を IR の長さに合わせる（`1000 × ConvolutionIrFrames(ir) / sampleRate` を切り上げ、
    10〜10000 に収める）と、DSP プールの状態が IR にぴったりになる。その場合は `EffectInstanceBytes` の前に入れること
    （状態の大きさは `MaxIrMs` で決まる、D-214）。
-7. 解放（バンクを外すとき）: エポックで「どのスレッドもこのバンクのエフェクトを処理していない」ことを確かめてから
-   `dsp::ConvolutionUnregisterIr(slot)` → メモリの `Free`。順序を逆にしない（登録表から外す前に解放するとぶら下がる）。
-- スナップショットやライブリンクで `IrSlot` を書き換えられないようにする（0〜1024 の任意の値を入れると、他のバンクの IR を
-  指せてしまう。メモリ安全ではある（IR の妥当性は毎回確かめる）が、意図しない音になる）。ライブリンクのパラメータの一覧では
-  読み取り専用として扱う。
-- 状態の大きさ: ステレオ・48 kHz・2 秒で約 1.55 MB（D-214）。`Config` の DSP プールの予備（`dspPoolReserve` 等）の既定値が
+7. 解放（バンクを外すとき、D-219 の寿命の約束）: `dsp::ConvolutionUnregisterIr(num)`（登録が返した番号そのもの）→
+   **その IR を使いうる全てのシステムの描画が 1 回以上終わるのを待つ**（core のエポック。インスタンスは呼び出しの先頭で表を引き、
+   外されたのを見たら古い IR を読まずにフェードアウトする、D-218）→ メモリの `Free`。順序を逆にしない。
+   番号をそのシステムの外へ渡さない（同じプロセスの別の snd_system からも番号を知れば引けてしまう）。
+- IR を差し替える（ライブリンクで IR のアセットを入れ替える等）ときは、新しい IR を準備・登録してから `IrSlot` を新しい番号に
+  書き換え、古い番号を 7 の手順で外す。インスタンスは 1 分割（B フレーム）のクロスフェードで切り替える（D-218）。
+- **`IrSlot` をライブリンクとスナップショットで読み取り専用にする**（D-219）。番号は世代つきで古い番号は無効になるが、
+  有効な番号を書けば他のバンク（他のシステム）の IR を指せる。メモリ安全ではある（IR の妥当性は毎回確かめる）が、意図しない音になる。
+  ライブリンクのパラメータの一覧では読み取り専用（または表示しない）、スナップショットの対象から外す。
+- 状態の大きさ: ステレオ・48 kHz・2 秒で約 1.56 MB（1563200 バイト、D-214。D-218 で先頭のタップの写しが増えた）。`Config` の DSP プールの予備（`dspPoolReserve` 等）の既定値が
   小さい場合は見直しが要る。
 
 ## 4. buildtool（セッション C）: IR を SCIR にしてバンクに入れる
@@ -81,3 +86,25 @@ D のブランチで完成している（テストの中で IR を準備・登�
 ## 5. ツール（任意）
 
 - エフェクトの UI で `IrSlot` を隠し、IR のアセット名を出す。`ZeroLatency` = 0 のときは遅延（B フレーム）を表示する。
+
+## 6. システムごとの登録表にする案（D-219、今回は入れていない）
+
+今の登録表はプロセスに 1 つ。システムごとにするには、`EffectProcess` まで表を届ける経路が要る（既存の dsp と core の変更）。案:
+
+```cpp
+// dsp（新しい型、呼び出し側のメモリ）
+struct ConvolutionIrTable;                                    // 枠 + 世代、ロックなし
+std::size_t ConvolutionIrTableBytes(std::uint32_t entries) noexcept;
+ConvolutionIrTable* ConvolutionIrTableInit(void* mem, std::size_t bytes, std::uint32_t entries) noexcept;
+std::uint32_t ConvolutionIrTableRegister(ConvolutionIrTable*, const ConvolutionIr*) noexcept;
+bool ConvolutionIrTableUnregister(ConvolutionIrTable*, std::uint32_t number) noexcept;
+```
+
+- 表をインスタンスへ届ける経路は 2 案:
+  1. `snd_render_context`（`ParamBlock::ctx`）に表のポインタを足す。内部の契約の構造体の末尾への追加になる（版の判断が要る）。
+     `ProcessEffectChain` の標準エフェクトの経路は今 `ctx` を `EffectProcess` に渡していないので、`EffectProcess` の引数か
+     `FxIo` に `ctx` を通す変更も要る（`effects.cpp` の既存の行）。
+  2. `EffectInit` のあとに core が `ConvolutionBindTable(state, table)` でインスタンスに表を結び付ける。状態にポインタを持つことになるので、
+     `EffectReset` / NaN からの回復（`ReinitKeepingParams` が状態全体を作り直す）で消えないよう、依頼 D-12 の
+     「種別の Reset フックを使う」変更が先に要る。
+- どちらでも、システムを壊すときに表ごと捨てれば、外し忘れの IR が他のシステムから見えることは無くなる。

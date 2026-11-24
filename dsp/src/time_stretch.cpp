@@ -27,7 +27,7 @@ struct TsState {
   float searchMs;
   std::uint32_t winOff;   // wr[hop]
   std::uint32_t histOff;  // channels * pad floats: input frames [end - pad, end)
-  std::uint32_t monoOff;  // 2 hop + 2 search floats
+  std::uint32_t reserved0;
   std::uint32_t bytes;
   std::uint32_t started;  // hop 0 decided
   std::uint32_t h;        // frames of the current hop already output (hop = finished)
@@ -50,7 +50,7 @@ bool Shape(std::uint32_t rate, float maxSpeed, float windowMs, float searchMs,
   if (rate == 0u || rate > kTimeStretchMaxRate) return false;
   windowMs = ClampMs(windowMs, 5.0f, 200.0f, kTimeStretchDefaultWindowMs);
   searchMs = ClampMs(searchMs, 0.0f, 50.0f, kTimeStretchDefaultSearchMs);
-  maxSpeed = ClampMs(maxSpeed, 1.0f, kTimeStretchMaxSpeed, kTimeStretchMaxSpeed);
+  maxSpeed = ClampMs(maxSpeed, 1.0f, kTimeStretchMaxSpeed, 1.0f);  // NaN -> 1 (D-217)
   std::uint32_t hop = static_cast<std::uint32_t>(
       std::lround(static_cast<double>(rate) * static_cast<double>(windowMs) / 2000.0));
   if (hop < 16u) hop = 16u;
@@ -71,7 +71,7 @@ bool Shape(std::uint32_t rate, float maxSpeed, float windowMs, float searchMs,
 
 struct Lay {
   TimeStretchShape s;
-  std::uint32_t winOff, histOff, monoOff;
+  std::uint32_t winOff, histOff;
   std::size_t bytes;
 };
 
@@ -82,7 +82,6 @@ bool MakeLayout(std::uint32_t channels, std::uint32_t rate, float maxSpeed, floa
   detail::Carver c(nullptr, sizeof(TsState));
   l->winOff = c.Take<float>(l->s.hopFrames);
   l->histOff = c.Take<float>(std::size_t{channels} * l->s.padFrames);
-  l->monoOff = c.Take<float>(2u * l->s.hopFrames + 2u * l->s.searchFrames + 16u);
   l->bytes = c.Size();
   return true;
 }
@@ -99,12 +98,21 @@ void ResetDynamic(TsState& s) noexcept {
   s.end = 0;
 }
 
-float SpeedAt(const TsState& s, float s0, float s1, std::uint32_t i, std::uint32_t n) noexcept {
-  float v = s0 == s1 ? s0 : s0 + (s1 - s0) * (static_cast<float>(i) / static_cast<float>(n));
-  if (!(v == v)) v = 1.0f;
-  if (v < kTimeStretchMinSpeed) v = kTimeStretchMinSpeed;
-  if (v > s.maxSpeed) v = s.maxSpeed;
+// Clamps one speed value: NaN -> 1, below the minimum (-Inf too) -> minimum, above maxSpeed
+// (+Inf too) -> maxSpeed.
+float ClampSpeed(const TsState& s, float v) noexcept {
+  if (!(v == v)) return 1.0f;
+  if (v < kTimeStretchMinSpeed) return kTimeStretchMinSpeed;
+  if (v > s.maxSpeed) return s.maxSpeed;
   return v;
+}
+
+// The endpoints are clamped BEFORE the interpolation (D-217: no Inf - Inf).
+float SpeedAt(const TsState& s, float s0, float s1, std::uint32_t i, std::uint32_t n) noexcept {
+  s0 = ClampSpeed(s, s0);
+  s1 = ClampSpeed(s, s1);
+  const float v = s0 == s1 ? s0 : s0 + (s1 - s0) * (static_cast<float>(i) / static_cast<float>(n));
+  return ClampSpeed(s, v);
 }
 
 std::uint64_t Increment(const TsState& s, float speed) noexcept {
@@ -145,30 +153,24 @@ inline float X(float* const* in, std::uint32_t c, std::int64_t base, std::int64_
   return in[c][abs - base];
 }
 
-// Best segment start in [lo, hi] for the target x[natural + j], j < hop.
-std::int64_t Search(TsState& s, float* const* in, std::int64_t base, std::int64_t natural,
+// Best segment start in [lo, hi] for the target x[natural + j], j < hop (D-217):
+// score = C |C| / E with C = sum over channels of the correlation of each channel
+// with its own target and E = sum over channels of the candidate energy. Channels in
+// anti-phase add up instead of cancelling; silent channels add nothing; all-silent
+// candidates score 0 (then the smallest position wins).
+std::int64_t Search(const TsState& s, float* const* in, std::int64_t base, std::int64_t natural,
                     std::int64_t lo, std::int64_t hi) noexcept {
   const std::uint32_t hop = s.hop;
-  const std::uint32_t span = static_cast<std::uint32_t>(hi - lo) + hop;
-  float* tgt = detail::At<float>(&s, s.monoOff);
-  float* cand = tgt + hop;
-  for (std::uint32_t j = 0; j < hop; ++j) {
-    float v = 0.0f;
-    for (std::uint32_t c = 0; c < s.channels; ++c) v += X(in, c, base, natural + j);
-    tgt[j] = v;
-  }
-  for (std::uint32_t q = 0; q < span; ++q) {
-    float v = 0.0f;
-    for (std::uint32_t c = 0; c < s.channels; ++c) v += X(in, c, base, lo + q);
-    cand[q] = v;
-  }
-  // Score = corr * |corr| / energy (orders like the normalised correlation).
-  auto score = [&](std::uint32_t off, std::uint32_t step) noexcept {
+  auto score = [&](std::int64_t p, std::uint32_t step) noexcept {
     double corr = 0.0, en = 0.0;
-    for (std::uint32_t j = 0; j < hop; j += step) {
-      const double c = cand[off + j];
-      corr += static_cast<double>(tgt[j]) * c;
-      en += c * c;
+    for (std::uint32_t c = 0; c < s.channels; ++c) {
+      const float* t = in[c] + (natural - base);
+      const float* x = in[c] + (p - base);
+      for (std::uint32_t j = 0; j < hop; j += step) {
+        const double v = x[j];
+        corr += static_cast<double>(t[j]) * v;
+        en += v * v;
+      }
     }
     return en > 1e-30 ? corr * std::fabs(corr) / en : 0.0;
   };
@@ -177,7 +179,7 @@ std::int64_t Search(TsState& s, float* const* in, std::int64_t base, std::int64_
   std::uint32_t best = 0;
   double bestScore = -1e300;
   for (std::uint32_t off = 0; off <= range; off += d) {
-    const double v = score(off, d);
+    const double v = score(lo + off, d);
     if (v > bestScore) {
       bestScore = v;
       best = off;
@@ -189,7 +191,7 @@ std::int64_t Search(TsState& s, float* const* in, std::int64_t base, std::int64_
     std::uint32_t fine = a;
     double fineScore = -1e300;
     for (std::uint32_t off = a; off <= b; ++off) {
-      const double v = score(off, 1u);
+      const double v = score(lo + off, 1u);
       if (v > fineScore) {
         fineScore = v;
         fine = off;
@@ -231,12 +233,11 @@ bool TimeStretchInit(void* state, std::size_t bytes, std::uint32_t channels,
   s.dec = l.s.decimation;
   s.look = l.s.lookaheadFrames;
   s.pad = l.s.padFrames;
-  s.maxSpeed = ClampMs(maxSpeed, 1.0f, kTimeStretchMaxSpeed, kTimeStretchMaxSpeed);
+  s.maxSpeed = ClampMs(maxSpeed, 1.0f, kTimeStretchMaxSpeed, 1.0f);
   s.windowMs = windowMs;
   s.searchMs = searchMs;
   s.winOff = l.winOff;
   s.histOff = l.histOff;
-  s.monoOff = l.monoOff;
   s.bytes = static_cast<std::uint32_t>(l.bytes);
   float* w = detail::At<float>(state, s.winOff);
   for (std::uint32_t j = 0; j < s.hop; ++j) {
@@ -272,6 +273,7 @@ std::uint32_t TimeStretchMaxInputFrames(const void* state, std::uint32_t outFram
 std::uint32_t TimeStretchInputFrames(const void* state, std::uint32_t outFrames, float speedStart,
                                      float speedEnd) noexcept {
   const TsState& s = St(state);
+  if (outFrames > kTimeStretchMaxCallFrames) outFrames = kTimeStretchMaxCallFrames;
   const std::int64_t req = Requirement(s, outFrames, speedStart, speedEnd);
   return static_cast<std::uint32_t>(req - s.end);
 }
@@ -280,6 +282,11 @@ std::uint32_t TimeStretchProcess(void* state, float* const* in, std::uint32_t in
                                  float* const* out, std::uint32_t outFrames, float speedStart,
                                  float speedEnd) noexcept {
   TsState& s = St(state);
+  if (outFrames > kTimeStretchMaxCallFrames) {  // D-217: frames past the cap are silence
+    for (std::uint32_t c = 0; c < s.channels; ++c)
+      Clear(out[c] + kTimeStretchMaxCallFrames, outFrames - kTimeStretchMaxCallFrames);
+    outFrames = kTimeStretchMaxCallFrames;
+  }
   const std::uint32_t need =
       static_cast<std::uint32_t>(Requirement(s, outFrames, speedStart, speedEnd) - s.end);
   if (inFrames < need) {

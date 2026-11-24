@@ -127,7 +127,7 @@ constexpr EffectParamInfo kSurroundParams[] = {
     {"CenterDb", "dB", -60.0f, 0.0f, -60.0f, 0},
 };
 constexpr EffectParamInfo kConvolutionParams[] = {  // convolution.hpp
-    {"IrSlot", "", 0.0f, 1024.0f, 0.0f, kInt},
+    {"IrSlot", "", 0.0f, 16777215.0f, 0.0f, kInt},  // registry number (D-219)
     {"DryMix", "", 0.0f, 1.0f, 0.0f, 0},
     {"WetMix", "", 0.0f, 1.0f, 1.0f, 0},
     {"WetGainDb", "dB", -48.0f, 24.0f, 0.0f, 0},

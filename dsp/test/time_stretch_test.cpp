@@ -93,10 +93,15 @@ SND_TEST(TimeStretch, ShapeAndInvalidArguments) {
   TimeStretchShape sh{};
   SND_REQUIRE(TimeStretchGetShape(kRate, 4.0f, &sh));
   SND_CHECK_EQ(sh.hopFrames, 720u);  // 30 ms window
-  SND_CHECK_EQ(sh.searchFrames, 384u);
+  SND_CHECK_EQ(sh.searchFrames, 576u);  // 12 ms (D-217)
   SND_CHECK_EQ(sh.decimation, 8u);
-  SND_CHECK_EQ(sh.lookaheadFrames, 384u + 1440u);
-  SND_CHECK(sh.padFrames % 16u == 0u && sh.padFrames >= 2u * 384u + 720u + 4u * 720u + 2u);
+  SND_CHECK_EQ(sh.lookaheadFrames, 576u + 1440u);
+  SND_CHECK(sh.padFrames % 16u == 0u && sh.padFrames >= 2u * 576u + 720u + 4u * 720u + 2u);
+  // NaN maxSpeed is 1 (D-217).
+  TimeStretchShape one{}, nanShape{};
+  SND_REQUIRE(TimeStretchGetShape(kRate, 1.0f, &one));
+  SND_REQUIRE(TimeStretchGetShape(kRate, std::nanf(""), &nanShape));
+  SND_CHECK_EQ(nanShape.padFrames, one.padFrames);
   SND_CHECK_EQ(TimeStretchStateBytes(0, kRate), 0u);
   SND_CHECK_EQ(TimeStretchStateBytes(9, kRate), 0u);
   SND_CHECK_EQ(TimeStretchStateBytes(2, 0), 0u);
@@ -338,5 +343,86 @@ SND_TEST(TimeStretch, Cost) {
     const double us = std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count() / blocks;
     snd::test::Note("time stretch stereo speed %.1f: %.2f us per 256 frames (incl. copying the input)",
                     static_cast<double>(speed), us);
+  }
+}
+
+// D-217: the search sums the per-channel correlations: anti-phase stereo (R = -L)
+// is stretched exactly like the mono signal, a silent channel changes nothing.
+SND_TEST(TimeStretch, PerChannelCorrelation) {
+  const Signal mono = Tone(1, 48000 * 4, 220.0);
+  Signal anti(2, mono[0]), half(2, mono[0]);
+  for (float& v : anti[1]) v = -v;
+  for (float& v : half[1]) v = 0.0f;
+  for (float speed : {0.7f, 1.5f}) {
+    Stretcher m(1), a(2), h(2);
+    Signal om(1), oa(2), oh(2);
+    for (std::uint32_t done = 0; done < 48000u * 2u; done += 256) {
+      m.Call(mono, &om, 256, speed, speed);
+      a.Call(anti, &oa, 256, speed, speed);
+      h.Call(half, &oh, 256, speed, speed);
+    }
+    SND_CHECK_MSG(oa[0] == om[0] && oh[0] == om[0], "speed %.1f: stereo choice differs from mono", static_cast<double>(speed));
+    bool neg = true;
+    for (std::size_t i = 0; i < oa[0].size(); ++i) neg &= oa[1][i] == -oa[0][i];
+    SND_CHECK(neg);
+  }
+}
+
+// D-217: ramp endpoints are clamped before the interpolation (no Inf - Inf).
+SND_TEST(TimeStretch, InfiniteEndpointsAreClampedFirst) {
+  const Signal src = NoiseSignal(1, 48000 * 4, 61);
+  Stretcher a(1, kRate, 2.0f), b(1, kRate, 2.0f);
+  Signal oa(1), ob(1);
+  for (int k = 0; k < 40; ++k) {
+    a.Call(src, &oa, 256, INFINITY, -INFINITY);
+    b.Call(src, &ob, 256, 2.0f, 0.25f);
+  }
+  SND_CHECK(oa[0] == ob[0] && a.pos == b.pos);
+}
+
+// D-217: one call handles at most kTimeStretchMaxCallFrames; the input count fits uint32.
+SND_TEST(TimeStretch, CallSizeIsCapped) {
+  Stretcher t(1);
+  const std::uint32_t n = TimeStretchInputFrames(t.st(), 0xFFFFFFFFu, 4.0f, 4.0f);
+  SND_CHECK_EQ(n, TimeStretchInputFrames(t.st(), kTimeStretchMaxCallFrames, 4.0f, 4.0f));
+  SND_CHECK(n <= TimeStretchMaxInputFrames(t.st(), kTimeStretchMaxCallFrames));
+  SND_CHECK(n > 4u * (kTimeStretchMaxCallFrames - 720u));
+}
+
+// Low frequencies (D-217, search +-12 ms): residual against a fitted sine per 20 ms window.
+SND_TEST(TimeStretch, LowFrequencyResidual) {
+  for (double hz : {50.0, 55.0, 73.0, 100.0, 220.0}) {
+    const Signal src = Tone(1, 48000 * 12, hz);
+    double worstAll = 0.0;
+    for (float speed : {0.25f, 0.5f, 0.8f, 1.25f, 1.5f, 2.0f}) {
+      Stretcher t(1);
+      Signal out(1);
+      for (std::uint32_t done = 0; done < 48000u * 3u; done += 256) t.Call(src, &out, 256, speed, speed);
+      double worst = 0.0;
+      const std::uint32_t w = 960;
+      for (std::uint32_t i = 9600; i + w <= 48000u * 3u; i += w) {
+        double ss = 0, cc = 0, sc = 0, xs = 0, xc = 0;
+        for (std::uint32_t j = 0; j < w; ++j) {
+          const double a = 2.0 * dsptest::kPi * hz * (i + j) / kRate;
+          ss += std::sin(a) * std::sin(a);
+          cc += std::cos(a) * std::cos(a);
+          sc += std::sin(a) * std::cos(a);
+          xs += out[0][i + j] * std::sin(a);
+          xc += out[0][i + j] * std::cos(a);
+        }
+        const double det = ss * cc - sc * sc;
+        const double A = (xs * cc - xc * sc) / det, B = (xc * ss - xs * sc) / det;
+        double r = 0.0;
+        for (std::uint32_t j = 0; j < w; ++j) {
+          const double a = 2.0 * dsptest::kPi * hz * (i + j) / kRate;
+          const double d = out[0][i + j] - (A * std::sin(a) + B * std::cos(a));
+          r += d * d;
+        }
+        worst = std::max(worst, std::sqrt(2.0 * r / w) / std::max(1e-9, std::hypot(A, B)));
+      }
+      worstAll = std::max(worstAll, worst);
+      snd::test::Note("%.0f Hz speed %.2f: worst residual %.4f", hz, static_cast<double>(speed), worst);
+    }
+    SND_CHECK_MSG(worstAll < 0.05, "%.0f Hz: worst residual %.4f", hz, worstAll);
   }
 }
