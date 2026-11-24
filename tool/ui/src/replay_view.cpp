@@ -6,6 +6,7 @@
 // through the host's ReplayService (services.hpp); without one the screen says so.
 #include <algorithm>
 #include <cstdio>
+#include <filesystem>
 #include <memory>
 
 #include "editor_util.hpp"
@@ -31,6 +32,21 @@ std::vector<std::string> Lines(const std::string& text) {
     if (b == std::string::npos) break;
     a = b + 1;
   }
+  return v;
+}
+
+// Recording files next to `path` (*.snrec in its folder, name order).
+std::vector<PickerItem> RecordingsNear(const std::string& path) {
+  namespace fs = std::filesystem;
+  std::vector<PickerItem> v;
+  std::error_code ec;
+  fs::path dir = fs::path(path).parent_path();
+  if (dir.empty()) dir = ".";
+  for (fs::directory_iterator it(dir, ec), end; !ec && it != end; it.increment(ec)) {
+    if (it->path().extension() == ".snrec") v.push_back(PickerItem{it->path().filename().string(), it->path().string()});
+    if (v.size() >= 1000u) break;
+  }
+  std::sort(v.begin(), v.end(), [](const PickerItem& a, const PickerItem& b) { return a.label < b.label; });
   return v;
 }
 
@@ -75,7 +91,14 @@ void DeclareReplay(tela::Document& doc, ViewContext& ctx, float width, float hei
       if (p.empty()) return false;
       a->SetRecordingPath(p);
       return true;
-    }, 0, y, w, 40);
+    }, 0, y, w - 110, 40);
+    // The recordings in the same folder: pick one to load it.
+    const std::string near = app->desc().recordingPath;
+    kit.PickField("rp.list", "", "Recordings", "Recordings in the folder", [near] { return RecordingsNear(near); },
+                  [a](const std::string& v) {
+                    a->SetRecordingPath(v);
+                    a->OnLoadRecording();
+                  }, w - 106, y, 106);
     y += kRow + 4.0f;
     // The loaded recording, described.
     const bool loaded = !prof.loadedPath().empty();

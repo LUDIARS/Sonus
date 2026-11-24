@@ -193,6 +193,12 @@ SND_TEST(ToolUiLive, RecordReplayTwiceWavAndBugReport) {
   SND_REQUIRE(t.Click("rp.save"));
   SND_REQUIRE(fs::exists(rec));
   SND_REQUIRE(t.Click("rp.load"));
+  // The recordings list of the folder loads the picked file too.
+  SND_REQUIRE(t.Click("rp.list"));
+  SND_REQUIRE(t.app->picker() != nullptr);
+  SND_REQUIRE_EQ(t.app->picker()->items.size(), 1u);
+  SND_CHECK_EQ(t.app->picker()->items[0].label, std::string("take.snrec"));
+  SND_REQUIRE(t.Click("picker.item.0"));
   SND_CHECK(t.Label("rp.desc.0").find("loaded") == 0u);
   SND_CHECK(t.El("rp.desc.3") != nullptr);  // the description, line by line
   // Replay twice with the real service.
