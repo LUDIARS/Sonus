@@ -28,6 +28,8 @@ SND_TEST(ToolUiEvent, DeclaresTheEventItsTracksAndClips) {
     SND_CHECK_MSG(t.Has(id), "missing %s", id);
   }
   SND_CHECK(t.Label("ev.f.bus").find("Sfx") == 0u);
+  SND_CHECK(t.Label("ev.play") == "(Play)");  // no audition router: disabled, the reason in the info line
+  SND_CHECK(t.Label("ev.info").find("audition: no audition router") != std::string::npos);
   // Ids do not change with frames or values.
   const std::set<std::string> a = Ids(t.app.runtime());
   t.Frame();
