@@ -111,3 +111,4 @@ snd_add_test(source_patch_test SOURCES source_patch_test.cpp LINK sonus_source s
 snd_add_test(source_resident_synth_load_test SOURCES source_resident_synth_load_test.cpp LINK sonus_source sonus_base sonus_mocks)
 snd_add_test(indep_granular_test SOURCES indep_granular_test.cpp LINK sonus_source sonus_base sonus_mocks)
 snd_add_test(indep_patch_test SOURCES indep_patch_test.cpp LINK sonus_source sonus_base sonus_mocks)
+snd_add_test(indep_defects_src2_test SOURCES indep_defects_src2_test.cpp LINK sonus_source sonus_base sonus_mocks)
