@@ -570,4 +570,11 @@ snd_result snd_set_playback_effect_param(snd_system* sys, snd_playback_handle pl
   return sys->core->SetPlaybackEffectParam(playback, slot, param_index, value);
 }
 
+snd_result snd_set_category_solo(snd_system* sys, snd_id category, int32_t solo) {
+  return sys ? sys->core->SetCategorySolo(category, solo != 0) : SND_ERR_INVALID_ARGUMENT;
+}
+snd_result snd_set_snapshot_action_transition(snd_system* sys, snd_id snapshot, float seconds) {
+  return sys ? sys->core->SetSnapshotActionTransition(snapshot, seconds) : SND_ERR_INVALID_ARGUMENT;
+}
+
 }  // extern "C"

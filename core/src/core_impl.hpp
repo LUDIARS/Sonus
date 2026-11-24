@@ -181,6 +181,7 @@ struct BankRecord {
   std::uint32_t* snapSlot = nullptr;
   std::uint32_t* groupSlot = nullptr;
   std::uint32_t* duckSlot = nullptr;
+  float* sendContrib = nullptr;  // [SEND rows] snapshot offsets in dB
   std::uint32_t* busChannels = nullptr;  // resolved channel count per BUSS row (D-54 rule)
   // RunEventLogic per-event state.
   EventState* events = nullptr;
@@ -234,6 +235,7 @@ struct CatDef {
   std::uint32_t parentSlot = kNoSlot;
   std::uint32_t flags = 0;
   float baseVolumeDb = 0;
+  bool solo = false;
 };
 struct SnapDef {
   Id id = 0;
@@ -241,6 +243,7 @@ struct SnapDef {
   std::uint16_t defBank = kNoBank;
   std::uint16_t reserved = 0;
   std::uint32_t defRow = 0;
+  std::uint32_t actionFadeFrames = 0;
 };
 struct GroupDef {
   Id id = 0;
@@ -457,6 +460,7 @@ struct LogicPriv {  // EvaluateLogicParams: generation seen per row slot (new ro
 };
 
 struct DspPriv {
+  bool hadSnapshotOffsets = false;
   float* duckDb = nullptr;           // [duckCap] current reduction (dB, <= 0)
   std::uint32_t* catPlaying = nullptr;  // [catCap] voices playing per category this block
   float* catGainPrev = nullptr;
@@ -704,6 +708,7 @@ struct System::Impl {
   // Statistics (audio thread).
   snd_stats stats{};
   // IOutputDevice::OutputLatencySeconds; CoreDesc's value until System::SetOutputLatency.
+  std::atomic<bool> focusLost{false};
   std::atomic<double> outputLatency{0.0};
   BlockProfile profile{};
   std::uint64_t timeSumNs = 0;
