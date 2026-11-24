@@ -17,6 +17,7 @@
 //   - NaN / Inf recovery, dirty memory, higher runtime rate, batch and chains
 //   - RT scopes and the cost of Process and EffectReset
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cmath>
@@ -655,17 +656,35 @@ SND_TEST(IndepConvolution, Registry) {
   alignas(64) unsigned char junk[256];
   std::memset(junk, 0x11, sizeof(junk));
   SND_CHECK_EQ(ConvolutionRegisterIr(reinterpret_cast<const ConvolutionIr*>(junk)), 0u);
+  constexpr unsigned capacity = 1024;  // D-219: ten physical slot bits
+  std::array<bool, capacity> occupied{};
+  occupied[foreign.slot & 1023u] = true;
   std::vector<std::uint32_t> owned;
   for (std::size_t i = 0; i < kConvolutionMaxIrSlots; ++i) {
     const auto id = ConvolutionRegisterIr(a.ir);
     if (id == 0u) break;
     SND_CHECK(id <= 16777215u);
     SND_CHECK(ConvolutionRegisteredIr(id) == a.ir);
+    const unsigned slot = id & 1023u;
+    SND_CHECK(!occupied[slot]);
+    occupied[slot] = true;
     owned.push_back(id);
   }
   SND_REQUIRE(!owned.empty());
   SND_CHECK(owned.size() < kConvolutionMaxIrSlots);
   SND_CHECK_EQ(ConvolutionRegisterIr(a.ir), 0u);
+  // Other tests may own entries. Resolve their possible generations without
+  // unregistering them. A prematurely full table still has a missing slot.
+  for (unsigned slot = 0; slot < capacity; ++slot) {
+    if (occupied[slot]) continue;
+    for (unsigned id = slot; id < (1u << 24); id += capacity) {
+      if (ConvolutionRegisteredIr(id) != nullptr) {
+        occupied[slot] = true;
+        break;
+      }
+    }
+  }
+  SND_CHECK_EQ(std::count(occupied.begin(), occupied.end(), true), 1024);
   const auto old = owned.back();
   SND_CHECK(ConvolutionUnregisterIr(old));
   SND_CHECK(ConvolutionRegisteredIr(old) == nullptr);
@@ -699,10 +718,14 @@ SND_TEST(IndepConvolution, RegistryConcurrency) {
   constexpr int kThreads = 4, kIters = 400;
   std::vector<std::vector<std::uint32_t>> taken(kThreads);
   std::atomic<int> badRead{0}, dup{0};
-  std::atomic<bool> stop{false};
+  std::atomic<bool> stop{false}, stableReadDuringWork{false};
   std::atomic<std::uint32_t> published[kThreads]{};
   std::thread reader([&] {
     while (!stop.load(std::memory_order_relaxed)) {
+      if (published[0].load(std::memory_order_acquire) != 0u) {
+        if (ConvolutionRegisteredIr(stable.slot) != stable.ir) ++badRead;
+        stableReadDuringWork.store(true, std::memory_order_release);
+      }
       for (auto& number : published) {
         const auto id = number.load(std::memory_order_acquire);
         const ConvolutionIr* p = ConvolutionRegisteredIr(id);
@@ -733,6 +756,9 @@ SND_TEST(IndepConvolution, RegistryConcurrency) {
         if (s == 0u) continue;
         if (slotsInUse[s & 1023u].fetch_add(1) != 0) ++dup;
         published[t].store(s, std::memory_order_release);
+        if (t == 0 && i == 0) {
+          while (!stableReadDuringWork.load(std::memory_order_acquire)) std::this_thread::yield();
+        }
         if (ConvolutionRegisteredIr(s) != other.ir) ++badRead;
         if (s == stable.slot) ++dup;
         taken[t].push_back(s);
@@ -749,6 +775,7 @@ SND_TEST(IndepConvolution, RegistryConcurrency) {
   stop.store(true);
   reader.join();
   audio.join();
+  SND_CHECK(stableReadDuringWork.load());
   SND_CHECK_EQ(dup.load(), 0);
   SND_CHECK_EQ(badRead.load(), 0);
   SND_CHECK(ConvolutionRegisteredIr(stable.slot) == stable.ir);
