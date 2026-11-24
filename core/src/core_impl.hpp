@@ -497,7 +497,7 @@ struct SelectPriv {
 // Per-item render inputs (chunk-owned, written in Render's serial part).
 struct AuxRoute {
   SlotIndex bus;
-  std::uint32_t segment, channels;
+  std::uint32_t segment, channels, generation;
   float amount;
   PanMatrix pan;
 };
@@ -530,6 +530,8 @@ struct ItemInput {
   float tail[kMaxChannels];  // last output frame per bus channel (late-chunk fade, D-15)
   VoiceRenderStatus status;
   std::uint32_t sends;
+  std::uint32_t removedCount;
+  struct Removed { std::uint32_t previous, segment; } removed[kMaxAuxSends];
   AuxRoute aux[kMaxAuxSends];
   float directGain, directLp;
   std::uint32_t vfxSlot;     // D-132: voice-effect slot + 1 (0 = no heavy voice effect this block)
