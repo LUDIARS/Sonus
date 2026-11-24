@@ -180,6 +180,7 @@ struct BankRecord {
   std::uint32_t* snapSlot = nullptr;
   std::uint32_t* groupSlot = nullptr;
   std::uint32_t* duckSlot = nullptr;
+  float* previousSendContrib = nullptr;
   float* sendContrib = nullptr;  // [SEND rows] snapshot offsets in dB
   std::uint32_t* busChannels = nullptr;  // resolved channel count per BUSS row (D-54 rule)
   // RunEventLogic per-event state.
