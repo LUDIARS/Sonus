@@ -63,11 +63,11 @@ SND_TEST(IndepG3Pause, IgnoreFlagsSurviveGlobalPauseButIndividualPauseStillStops
   for (const bool eventFlag : {false, true}) {
     Fx h(G2Config());
     FxBank bank;
-    bank.b.categories = {{HashId("Always"), kNone, eventFlag ? 0u : bf::kCategoryIgnorePause, 0},
+    bank.b.categories = {{HashId("Always"), kNone, eventFlag ? 0u : static_cast<unsigned>(bf::kCategoryIgnorePause), 0},
                          {HashId("Ordinary"), kNone, 0, 0}};
     auto& always = bank.Event("One", 200);
     always.category = 0;
-    always.flags = eventFlag ? bf::kEventIgnorePause : 0u;
+    always.flags = eventFlag ? static_cast<unsigned>(bf::kEventIgnorePause) : 0u;
     bank.Event("Two", 400).category = 1;
     h.Load("pause", bank.Build("Pause"));
     auto one = h.sys->Play(HashId("One"), NoEmitter(), nullptr);
