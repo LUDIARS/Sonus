@@ -10,6 +10,15 @@
 namespace snd::tool {
 namespace ll = livelink;
 
+MusicSettings MusicSettingsOf(const IPreviewEngine& engine) {
+  MusicSettings m;
+  const PreviewStatus st = engine.Status();
+  if (st.sampleRate != 0u) m.sampleRate = st.sampleRate;
+  if (st.blockFrames != 0u) m.blockFrames = st.blockFrames;
+  m.streamPrimeMs = engine.StreamPrimeMs();
+  return m;
+}
+
 namespace {
 constexpr const char* kGameNoMove = "the game: an audition stays at its start position (no live emitter control)";
 constexpr const char* kGameNoListener = "the game: the listener is the game's (not set by the tool)";
