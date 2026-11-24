@@ -102,6 +102,26 @@ Tela に渡さない）、`host_macos.mm`（キーコードと文字を `App::Ke
   訂正後の D-189 で画面は重複を 1 行にする（`CheckDocument` は重複を含むまま）ので、重複のある文書で行が 1 つ少ない。
 - `IndepS7UiDefects.SpecGap_ClipSelectionIsAnIndexAcrossUndo`（`tool_indep_s7_ui_SpecGap_ClipSelectionIsAnIndexAcrossUndo`）: 今の振る舞い（Undo の後の Delete で 1 つ消える）を記録する。D-186 で選択は外れ、Delete は何も消さない（クリップは 2 つのまま）。
 
+## 差し戻し 2 回目（ui-indep.md「再確認」の N1〜N6 と決定 1〜7）で変えた点
+
+先に `git merge --no-ff c/live`（8ed549d、衝突なし。`IPreviewEngine::StreamPrimeMs` が増えたが UI とテストに実装は無く直しは不要）。
+
+| 決定 | 欠陥 | 変えたこと | コミット |
+| --- | --- | --- | --- |
+| 1 | N1 / N2 | Esc の取り消しはグループを捨てる。`ProjectDocument::AbortGroup`（触った物を BeginGroup の時の状態に戻し、段を残さず Undo / Redo の一覧は変えない。中身が変わったときだけ revision を進める）。数値の欄のドラッグと文書のドラッグ（`DocumentDrag`）の cancel がこれを呼ぶ。フェーダー・ノブは `ControlSink::ControlCancel`（既定は値を戻して ControlEnd）で押した時の値と（パラメータの上書きの）on/off に戻してからグループを閉じる。`EditHistory` は行って戻った変更を段にしないので、ライブの履歴（Undo / Redo の数）も変わらない | 0629b4a, 2d8b692 |
+| 2 | N3 | 整数の欄は変換の前に、有限でない・整数でない・負・型の範囲の外を拒否（`WholeU16/U32/U64`、`commitText` も整数の欄は小数を拒否）。入力は開いたまま、文書は変わらない。Link の Port は 1〜65535。ファイルから読んだ値・ドラッグの計算は飽和（`SatU32/SatU64/SatInt`）、float へは `ToF32`（範囲で止める）。UI の浮動小数→整数の直の変換（buses・event・link・music・profiler・patch・material の 18 か所と同じ形の箇所）を全部置き換えた | 2d8b692 |
+| 3 | N4 | 窓を詰めて並べ直す方ではなく、**App が受け付ける最小の論理サイズを数値の欄のある画面で 800 × 500 に引き上げた**（`kMinEditorWidth` / `kMinEditorHeight`）。それより小さい窓では本体に「window too small: this screen needs 800 x 500」だけを出す（`body.small`、Profiler の Event log は `prof.log.small`）。対象は Buses、Event、Params、3D、Music、Material、Patch、Link と Profiler の Event log。Mixer（数値の欄なし。段階2 の `NarrowWindowPagesTheStrips` の 560 × 700 を保つ）、Profiler のほかのタブ、Replay、Problems は 320 × 240 まで描く。値は 640 × 400 で 9 個、800 × 500 で 0 個が窓の外（試した大きさ 640×400、800×500、960×600、1024×640、1280×720）から決めた。README に書いた | 2d8b692 |
+| 4 | N5 | 「書き戻す」は、行き場の無い上書きの名前を控えてから `RebindProject(true)`（GUID・エフェクトの種類・パラメータで引き継ぎ、引き継げない物は捨てる）、その後で `WriteBackMixer`。消えた・種類の変わったエフェクトの上書きは新しい物に書かれず、「mixer: discarded N live overrides without a place: 名前…」をメッセージに出す。質問が出ている間に Write back を押しても同じ道を通る | 2d8b692 |
+| 5 | N6 | `SpatialPreview::PlaceListener` / `PlaceEmitter`（±1e6 m）、`TurnListener` / `TurnEmitter`（±1e6 rad）で範囲の外と非有限を拒否。3D の欄はこれを通す。`NumberText` は非有限で「-」、`FiniteText` が printf の inf / nan を「-」に替え、`Kit::Label` の文字は全部これを通す | 0629b4a, 2d8b692 |
+| 6 | 選択 | 位置で持つ選択は、画面自身の編集（ポインタ・キー・Pick の後の revision を `knownRevision_` に控える）以外で revision が変わったとき外す。ただしホストの値だけの変更で外すと `Defect_TypedNumberOutsideTheFieldRangeIsClampedNotRefused`（選んだクリップをホストが `MoveClip` で動かしてから開始位置を打つ。組 U の Defect なので通す必要がある）が落ちるので、**選択の指す配列の形（トラックごとのクリップ数・アクション数、カーブの点の数、テンポ点・Stem・Playlist の行・ルールの数）が変わったときだけ**外す（`App::PositionShape`）。Undo / Redo、画面の切り替え、書き戻し、結び直しの答えでは今まで通り常に外す | 2d8b692 |
+| 7 | テスト | `ui_editor_fix2_test`（7 本: Esc と履歴、フェーダーの Esc、整数の欄、窓の最小、書き戻しの対応、3D の値、ホストの変更と選択） | 1e7771d |
+
+モデルに足した・直したもの（許された `document`・`spatial_preview` だけ。`event_editor`・`doc_build`・`mixer` は今回変えていない）:
+- `document.hpp/.cpp`: `ProjectDocument::AbortGroup()`。
+- `spatial_preview.hpp/.cpp`: `kMaxCoordinate`、`kMaxAngle`、`PlaceListener`、`PlaceEmitter`、`TurnListener`、`TurnEmitter`。
+- UI の公開の型: `ControlSink::ControlCancel`（`pointer_router.hpp`）、`App::WindowTooSmall` / `DeclareTooSmall`、`kit.hpp` の
+  `WholeU16/U32/U64`・`ToF32`・`SatU32/U64/Int`・`ShownNumber`・`FiniteText`、`layout_metrics.hpp` の `kMinEditorWidth/Height`。
+
 ## 決定の案（受け入れ側が D-番号を振る。番号は振っていない）
 
 a. **画面とキー**: 12 面（Mixer、Buses、Event、Params、3D、Music、Material、Patch、Profiler、Replay、Link、Problems）。ミキサーの
