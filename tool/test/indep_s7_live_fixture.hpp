@@ -363,6 +363,8 @@ class MiniGame final : public ll::FrameReader::Handler {
   std::vector<ll::BankEntry> banks;  // the BankList answer
   bool holdAcks = false;
   std::function<std::int32_t(const MiniFrame&)> ackResult;  // null: SND_OK
+  bool holdHello = false;  // keep the HelloReply until ReplyHello()
+  bool holdBanks = false;  // keep the BankList until ReplyBanks()
 
   bool ok = false;
   std::vector<MiniFrame> frames;
@@ -454,6 +456,11 @@ class MiniGame final : public ll::FrameReader::Handler {
     if (f.Is(ll::MessageType::Pong)) return;
     frames.push_back(f);
     if (f.Is(ll::MessageType::Hello)) {
+      if (holdHello) {
+        heldHelloHash_ = f.As<ll::Hello>().projectBuildHash;
+        helloHeld_ = true;
+        return;
+      }
       ll::HelloReply r{};
       r.protocolMajor = ll::kProtocolMajor;
       r.protocolMinor = minor;
@@ -469,18 +476,10 @@ class MiniGame final : public ll::FrameReader::Handler {
       if (f.As<ll::SyncDecision>().mode == static_cast<std::uint32_t>(ll::SyncMode::Disconnect)) pendingDrop_ = true;
       return;
     }
-    if (f.Is(ll::MessageType::QueryBanks) && minor >= 1u) {
-      std::vector<std::uint8_t> b(sizeof(ll::ListHeader) + banks.size() * sizeof(ll::BankEntry));
-      const ll::ListHeader lh{static_cast<std::uint32_t>(banks.size()), static_cast<std::uint32_t>(sizeof(ll::BankEntry))};
-      std::memcpy(b.data(), &lh, sizeof lh);
-      if (!banks.empty()) std::memcpy(b.data() + sizeof lh, banks.data(), banks.size() * sizeof(ll::BankEntry));
-      // The reply frame carries the request's seq (protocol §8.1).
-      std::vector<std::uint8_t> fr(ll::kFrameHeaderBytes + b.size());
-      ll::EncodeHeader(fr.data(), static_cast<std::uint16_t>(ll::MessageType::BankList), 0,
-                       static_cast<std::uint32_t>(b.size()), h.seq);
-      std::memcpy(fr.data() + ll::kFrameHeaderBytes, b.data(), b.size());
-      std::size_t sent = 0;
-      t_->Send(fr.data(), fr.size(), &sent);
+    if (f.Is(ll::MessageType::QueryBanks) && minor >= 1u && holdBanks) {
+      heldBankSeqs_.push_back(h.seq);
+    } else if (f.Is(ll::MessageType::QueryBanks) && minor >= 1u) {
+      SendBanks(h.seq);
     }
     if ((h.flags & ll::kFrameWantsAck) != 0u) {
       const std::int32_t result = ackResult ? ackResult(f) : SND_OK;
@@ -493,7 +492,45 @@ class MiniGame final : public ll::FrameReader::Handler {
   }
   void OnOversized(const ll::FrameHeader&) noexcept override {}
 
+  // Answers a held Hello (status / hash as set now; echoHash echoes the Hello's hash).
+  bool helloHeld() const { return helloHeld_; }
+  void ReplyHello() {
+    if (!helloHeld_) return;
+    helloHeld_ = false;
+    ll::HelloReply r{};
+    r.protocolMajor = ll::kProtocolMajor;
+    r.protocolMinor = minor;
+    r.status = static_cast<std::uint32_t>(status);
+    r.runtimeBuildHash = echoHash ? heldHelloHash_ : runtimeHash;
+    r.contractVersion = SND_CONTRACT_VERSION;
+    r.sampleRate = 48000;
+    r.blockSize = 256;
+    Send(ll::MessageType::HelloReply, &r, sizeof r);
+  }
+  std::uint64_t heldHelloHash() const { return heldHelloHash_; }
+  std::size_t banksAsked() const { return heldBankSeqs_.size(); }
+  void ReplyBanks() {
+    for (std::uint32_t q : heldBankSeqs_) SendBanks(q);
+    heldBankSeqs_.clear();
+  }
+  // The BankList answering QueryBanks `seq` (the reply carries the request's seq, protocol §8.1).
+  void SendBanks(std::uint32_t seq) {
+    if (t_ == nullptr) return;
+    std::vector<std::uint8_t> b(sizeof(ll::ListHeader) + banks.size() * sizeof(ll::BankEntry));
+    const ll::ListHeader lh{static_cast<std::uint32_t>(banks.size()), static_cast<std::uint32_t>(sizeof(ll::BankEntry))};
+    std::memcpy(b.data(), &lh, sizeof lh);
+    if (!banks.empty()) std::memcpy(b.data() + sizeof lh, banks.data(), banks.size() * sizeof(ll::BankEntry));
+    std::vector<std::uint8_t> fr(ll::kFrameHeaderBytes + b.size());
+    ll::EncodeHeader(fr.data(), static_cast<std::uint16_t>(ll::MessageType::BankList), 0, static_cast<std::uint32_t>(b.size()), seq);
+    std::memcpy(fr.data() + ll::kFrameHeaderBytes, b.data(), b.size());
+    std::size_t sent = 0;
+    t_->Send(fr.data(), fr.size(), &sent);
+  }
+
  private:
+  bool helloHeld_ = false;
+  std::uint64_t heldHelloHash_ = 0;
+  std::vector<std::uint32_t> heldBankSeqs_;
   ll::ITransport* t_ = nullptr;
   ll::FrameReader reader_;
   std::uint32_t seqOut_ = 0;
