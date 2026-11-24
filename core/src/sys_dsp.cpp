@@ -98,13 +98,13 @@ SpatialGain ListenerMix(const Impl& im, SlotIndex em, const bk::BankView* view, 
     const float d = SND_R(Spatial_distance)[s];
     if (nearest == kNoSlot || d < nearestD) { nearest = s; nearestD = d; }
     const float weight = im.cfg.listenerMode == SND_LISTENER_WEIGHTED ? SND_R(Listener_weight)[l] : 1;
-    mix.listeners[mix.count++] = ListenerContribution{s, std::max(0.0f, weight), 0, 1};
+    mix.listeners[mix.count++] = ListenerContribution{s, std::max(0.0f, weight), 0, 1, 0};
     hasWeight |= weight > 0;
   }
   if (nearest == kNoSlot) return out;
   if (im.cfg.listenerMode == SND_LISTENER_NEAREST) {
     mix.count = 1;
-    mix.listeners[0] = ListenerContribution{nearest, 1, 0, 1};
+    mix.listeners[0] = ListenerContribution{nearest, 1, 0, 1, 0};
   } else if (!hasWeight) {
     for (unsigned i = 0; i < mix.count; ++i) mix.listeners[i].weight = 1;
   }
@@ -115,6 +115,7 @@ SpatialGain ListenerMix(const Impl& im, SlotIndex em, const bk::BankView* view, 
     const SpatialTarget target = SpatialAt(im, item.spatial, view, row);
     item.blend = target.blend;
     item.spread = target.spread;
+    item.curveSend = target.send * target.blend;
     const float gain3 = target.inverse * DbToGain(target.distanceDb + target.coneDb);
     const float gain = (1 - target.blend) + target.blend * gain3;
     contribution[i] = static_cast<double>(item.weight) * gain;
@@ -123,13 +124,13 @@ SpatialGain ListenerMix(const Impl& im, SlotIndex em, const bk::BankView* view, 
     if (contribution[i] > best) {
       best = contribution[i];
       mix.dominant = item.spatial % im.cfg.maxListeners;
-      mix.curveSend = target.send * target.blend;
       out.filter = target.filter;
       out.ratio = target.ratio;
       out.distance = SND_R(Spatial_distance)[item.spatial];
     }
     if (mix.count == 1) {
       item.weight = 1;
+      mix.curveSend = item.curveSend;
       // Preserve the original order of dB additions at full blend.
       if (item.blend == 1) {
         out.distanceDb = target.distanceDb;
@@ -140,8 +141,11 @@ SpatialGain ListenerMix(const Impl& im, SlotIndex em, const bk::BankView* view, 
     }
   }
   out.linear = static_cast<float>(sumGain / sumWeight);
-  for (unsigned i = 0; i < mix.count; ++i)
-    mix.listeners[i].weight = sumGain > 0 ? static_cast<float>(contribution[i] / sumGain) : 0;
+  for (unsigned i = 0; i < mix.count; ++i) {
+    auto& item = mix.listeners[i];
+    item.weight = sumGain > 0 ? static_cast<float>(contribution[i] / sumGain) : 0;
+    mix.curveSend += item.weight * item.curveSend;
+  }
   return out;
 }
 

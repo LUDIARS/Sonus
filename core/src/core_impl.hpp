@@ -468,6 +468,7 @@ struct ListenerContribution {
   float weight;
   float spread;
   float blend;
+  float curveSend;
 };
 struct VoiceSpatialMix {
   ListenerContribution listeners[SND_MAX_LISTENERS];
