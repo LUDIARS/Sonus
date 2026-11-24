@@ -2,6 +2,7 @@
 // written from the specification. Expected values are analytic (Fourier series of the
 // ideal waveforms, phase sums of the pitch ramp, the D-192 table rules); the kind is
 // driven directly through synth_driver.hpp (every call in an RT scope).
+#include <algorithm>
 #include <cmath>
 #include <complex>
 #include <cstdint>
@@ -291,7 +292,7 @@ SND_TEST(IndepOsc, ExtremeFrequenciesAndRatiosStayFinite) {
   double err = 0.0;
   for (std::size_t i = 0; i < 400; ++i) err = std::fmax(err, std::fabs(x[i] - std::sin(kTwoPi * 0.4999 * double(i))));
   SND_CHECK_MSG(err < 1e-4, "clamped dt: max error %g", err);
-  // D-198 (1): a zero ratio is silence and the phase waits; the next block goes on from it.
+  // D-198 (1): a zero ratio fades to silence and the phase waits; the next block goes on from it.
   Driver d(snd::SourceKind::Oscillator, Driver::Opt{});
   Driver::Voice v;
   const src::OscillatorParams p = Osc(bf::Waveform::Sine, 1000.0f);
@@ -300,10 +301,12 @@ SND_TEST(IndepOsc, ExtremeFrequenciesAndRatiosStayFinite) {
   Driver::Mod z;
   z.pitch = snd::Ramp{0.0f, 0.0f};
   d.Block({&v}, z);
-  for (std::size_t i = 100; i < 356; ++i) SND_CHECK_EQ(v.out[0][i], 0.0f);
+  const double held = std::sin(kTwoPi * 100.0 / 48.0);
+  for (int i = 0; i < 256; ++i)
+    SND_CHECK_NEAR(v.out[0][100 + i], held * std::max(0, 239 - i) / 240, 2e-5);
   d.Block({&v});
   for (std::size_t i = 0; i < 256; ++i) {
-    SND_CHECK_NEAR(v.out[0][356 + i], std::sin(kTwoPi * double(100 + i) * 1000.0 / kRate), 2e-5);
+    SND_CHECK_NEAR(v.out[0][356 + i], std::sin(kTwoPi * double(100 + i) / 48.0) * std::min(1.0, double(i + 1) / 240), 2e-5);
   }
 }
 
@@ -623,7 +626,7 @@ SND_TEST(IndepOsc, SlotReuseLeavesNothingBehind) {
 
 // D-198 (1): an effective frequency of 0 (0, negative, NaN, -Inf frequency) is silence for
 // every waveform (no DC). A pitch ramp crossing 0 inside a block: the samples with a
-// positive ratio advance the phase by the per-sample sum, the others are 0 and hold it;
+// positive ratio advance the phase by the per-sample sum, the others fade and hold it;
 // the phase goes on from where it stopped.
 SND_TEST(IndepOsc, ZeroFrequencyIsSilentAndKeepsThePhase) {
   for (bf::Waveform w : {bf::Waveform::Sine, bf::Waveform::Saw, bf::Waveform::Square, bf::Waveform::Triangle,
@@ -647,10 +650,14 @@ SND_TEST(IndepOsc, ZeroFrequencyIsSilentAndKeepsThePhase) {
   d.Block({&v});
   SND_REQUIRE_EQ(v.out[0].size(), std::size_t{768});
   double ph = 0.0, err = 0.0;
+  int gain = 240;
   for (std::size_t i = 0; i < 768; ++i) {
     const double a = double(i % 256) / 256.0;
     const double r = i < 256 ? 1.0 - 2.0 * a : (i < 512 ? -1.0 + 2.0 * a : 1.0);
-    const double want = r > 0.0 ? std::sin(kTwoPi * ph) : 0.0;
+    gain = std::clamp(gain + (r > 0 ? 1 : -1), 0, 240);
+    const double want = std::sin(kTwoPi * ph) * gain / 240;
+    // |delta(sin)| <= 2 sin(pi dt), |delta(gain)| <= 1/240.
+    if (i) SND_CHECK(std::abs(v.out[0][i] - v.out[0][i - 1]) <= 2 * std::sin(kTwoPi * dt / 2) + 1.0 / 240 + 1e-6);
     err = std::fmax(err, std::fabs(v.out[0][i] - want));
     if (r > 0.0) ph += dt * r;
   }
@@ -658,7 +665,7 @@ SND_TEST(IndepOsc, ZeroFrequencyIsSilentAndKeepsThePhase) {
 }
 
 // D-198 (3): RenderItem inputs that are not finite are made safe per block: a pitch with a
-// non-finite end -> 0 for the block (silence, phase held), offsets -> 0. No NaN out, no
+// non-finite end -> 0 for the block (fade, phase held), offsets -> 0. No NaN out, no
 // undefined conversion (UBSan); a virtual advance with a non-finite pitch holds the phase.
 SND_TEST(IndepOsc, NonFiniteRenderInputsAreSafe) {
   const float nan = std::nanf("");
@@ -673,11 +680,12 @@ SND_TEST(IndepOsc, NonFiniteRenderInputsAreSafe) {
       Driver::Mod m;
       m.pitch = which == 0 ? snd::Ramp{b, 1.0f} : snd::Ramp{1.0f, b};
       d.Block({&v}, m);
-      for (std::size_t i = 256; i < 512; ++i) SND_CHECK_EQ(v.out[0][i], 0.0f);
+      for (int i = 0; i < 256; ++i)
+        SND_CHECK_NEAR(v.out[0][256 + i], std::sin(kTwoPi * 256 / 48.0) * std::max(0, 239 - i) / 240, 2e-5);
       d.Advance(v, 1000, b);
       d.Block({&v});
       for (std::size_t i = 0; i < 256; ++i) {
-        SND_CHECK_NEAR(v.out[0][512 + i], std::sin(kTwoPi * double(256 + i) * 1000.0 / kRate), 2e-5);
+        SND_CHECK_NEAR(v.out[0][512 + i], std::sin(kTwoPi * double(256 + i) / 48.0) * std::min(1.0, double(i + 1) / 240), 2e-5);
       }
     }
     // Pulse duty offset and wavetable position offset: as if 0.
@@ -744,5 +752,31 @@ SND_TEST(IndepOsc, WavetableTablesStartAtLoopStart) {
                     c.loopStart, c.loopEnd, double(pos), double(x[0]));
       SND_CHECK(isrc::MaxAbs(x) <= static_cast<double>(c.frames));
     }
+  }
+}
+
+// A reversal before reaching either endpoint uses the current integer gain.
+SND_TEST(IndepOsc, PartialFadesAreBitExactAcrossBlockSizes) {
+  const auto sine = Osc(bf::Waveform::Sine, 375);
+  auto sequence = [&](unsigned split) {
+    Driver d(snd::SourceKind::Oscillator, {});
+    Driver::Voice v;
+    if (!d.Start(v, &sine, 1)) return std::vector<float>{};
+    for (int length : {33, -57, 21, -118, 300}) {
+      Driver::Mod m;
+      m.pitch = length > 0 ? snd::Ramp{1, 1} : snd::Ramp{0, 0};
+      d.Render(v, static_cast<unsigned>(std::abs(length)), m, split);
+    }
+    return v.out[0];
+  };
+  const auto y = sequence(256);
+  SND_REQUIRE_EQ(y.size(), std::size_t{529});
+  SND_CHECK(y == sequence(7));
+  int gain = 240, phase = 0;
+  for (unsigned i = 0; i < y.size(); ++i) {
+    const bool moving = i < 33 || (i >= 90 && i < 111) || i >= 229;
+    gain = std::clamp(gain + (moving ? 1 : -1), 0, 240);
+    SND_CHECK_NEAR(y[i], gain / 240.0 * std::sin(kTwoPi * phase / 128), 1e-6);
+    if (moving) ++phase;
   }
 }

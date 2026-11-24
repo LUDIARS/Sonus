@@ -58,7 +58,9 @@ std::uint64_t Invariant(const src::InputPort& port) {  // written - read - skipp
 // I1 / I12: what is written comes out bit for bit at zero delay, including special values,
 // over a long run in odd chunk sizes that wrap the (small) ring many times.
 SND_TEST(IndepInput, BitExactAcrossManyWraps) {
-  Driver d(snd::SourceKind::Input, Ports(100));  // NextPow2(100) = 128 frames
+  auto options = Ports(100);
+  options.blockFrames = 32;  // small blocks retain multi-wrap coverage at the four-block floor
+  Driver d(snd::SourceKind::Input, options);
   SND_REQUIRE(d.Ok());
   src::InputPort& port = *d.runtime.InputPortOf(0);
   SND_CHECK_EQ(port.Capacity(), 128u);
@@ -209,10 +211,21 @@ SND_TEST(IndepInput, ReaderLatencyBound) {
     base += bound + 1;
     SND_CHECK_EQ(Invariant(port), std::uint64_t{0});
   }
-  // A port smaller than 2 blocks: the bound is the capacity (nothing can be trimmed).
+  // Even a one-block request enables the two-block latency floor and the live start.
   Driver s(snd::SourceKind::Input, Ports(256));
   s.runtime.InputPortOf(0)->Configure(0, 10);
-  SND_CHECK_EQ(s.runtime.InputPortOf(0)->MaxLatencyFrames(), 256u);
+  auto& small = *s.runtime.InputPortOf(0);
+  SND_CHECK_EQ(small.Capacity(), 1024u);
+  SND_CHECK_EQ(small.MaxLatencyFrames(), 512u);
+  SND_REQUIRE_EQ(WriteSeq(small, 0, 700), 700u);
+  Driver::Voice live;
+  SND_REQUIRE(s.Start(live, &p, 2));
+  s.Block({&live});
+  SND_CHECK_EQ(live.out[0].front(), 445.f);
+  SND_REQUIRE_EQ(WriteSeq(small, 700, 513), 513u);
+  s.Block({&live});
+  SND_CHECK_EQ(live.out[0][256], 958.f);
+  SND_CHECK_EQ(small.Stats().skippedFrames, std::uint64_t{444 + 257});
 }
 
 // I2 / C4 / D-197 (3): underruns. A short block is `starved` / counted only when the
@@ -454,11 +467,8 @@ SND_TEST(IndepInput, ThreadedWriterExactAccounting) {
   SND_CHECK_MSG(order == 0u, "%u frames out of order / duplicated", unsigned(order));
   SND_CHECK_MSG(foreign == 0u, "%u frames heard that were never accepted", unsigned(foreign));
   SND_CHECK(s.droppedFrames > 0u);  // the small ring did overrun
-  // D-197 (2) (4): the ring holds 256 frames = one block. The latency bound (at least 2
-  // blocks) is cut to the capacity, which can never be exceeded, and a skip to live keeps
-  // one block = everything buffered. So nothing is ever skipped here (by the decision,
-  // not by a fault; the skip itself is checked in VirtualAndControls / ReaderLatencyBound).
-  SND_CHECK_EQ(s.skippedFrames, std::uint64_t{0});
+  // Count accepted but unheard frames independently, including gaps at both ends.
+  SND_CHECK_EQ(s.skippedFrames, acceptedFrames - heard.size());
 }
 
 // I11 / D-43-like hand-over: the port's consumer moves between threads (Start / Control /
@@ -685,13 +695,16 @@ SND_TEST(IndepInput, VoiceChannelRules) {
 // channel (fewer given than the port has), across the ring's wrap, with a partial
 // overrun; finite values (also denormals and -0) are kept bit for bit.
 SND_TEST(IndepInput, NonFiniteSamplesAreWrittenAsZero) {
-  Driver d(snd::SourceKind::Input, Ports(64, 1, 2));  // 64 frames: wraps quickly
+  auto options = Ports(64, 1, 2);
+  options.blockFrames = 16;  // the four-block floor is 64; exercise a real partial overrun
+  Driver d(snd::SourceKind::Input, options);
   SND_REQUIRE(d.Ok());
   src::InputPort& port = *d.runtime.InputPortOf(0);
   src::InputParams p = In(0);
   Driver::Voice v;
   SND_REQUIRE(d.Start(v, &p, 2));
   const float nan = std::nanf("");
+  port.Configure(0, 64);  // keep all accepted samples until they have been inspected
   const float vals[] = {nan, INFINITY, -INFINITY, 1e-40f, -0.0f, 0.5f, -std::numeric_limits<float>::max()};
   std::vector<float> sent;
   std::size_t heard = 0, bad = 0;
