@@ -11,7 +11,7 @@
 //   - routing: per channel, true stereo LL LR RL RR, 3x3 matrix, modulo, fewer
 //     channels in the call
 //   - tail: exact to the frame, exact zeros afterwards, wake-up, EffectReset
-//   - registry: lowest slot, full, reuse, removed slot, shared IR, out of range
+//   - registry: generational handles, full, reuse, removed slot, shared IR, out of range
 //   - blobs: round trip, every truncation, header corruption fuzz, unaligned
 //   - IR rate conversion: impulse position, band-limited content, frame counts
 //   - NaN / Inf recovery, dirty memory, higher runtime rate, batch and chains
@@ -211,7 +211,7 @@ SND_TEST(IndepConvolution, EffectInfoAndParameters) {
     float lo, hi, def;
     std::uint32_t flags;
   };
-  const P want[7] = {{"IrSlot", 0, 1024, 0, kParamInteger},
+  const P want[7] = {{"IrSlot", 0, 16777215, 0, kParamInteger},
                      {"DryMix", 0, 1, 0, 0},
                      {"WetMix", 0, 1, 1, 0},
                      {"WetGainDb", -48, 24, 0, 0},
@@ -308,7 +308,7 @@ SND_TEST(IndepConvolution, PartitionRuleAndStateSize) {
   Conv ex(2, 0, o);
   snd::test::Note("state stereo 48k 2 s B256: %zu bytes", ex.bytes);
   SND_CHECK(ex.bytes > 1500000u && ex.bytes < 1650000u);
-  SND_CHECK_EQ(ConvolutionStateCapacityFrames(ex.st()), 96000u);
+  SND_CHECK_EQ(ConvolutionStateCapacityFrames(ex.st()), 96000u + 256u);
   // 1 GiB limit: a huge sizing rate is capped.
   snd::EffectDesc d{};
   float prm[kMaxEffectParams];
@@ -567,34 +567,34 @@ SND_TEST(IndepConvolution, IrSlotSelectionAndSharing) {
   Opt o;
   o.partition = b;
   o.dry = 0.5f;
-  // Switch at frame 2000 from a to c with a ParamBlock whose start is a, end is c.
+  // Switch at frame 1984 from a to c with a ParamBlock whose start is a, end is c.
   Conv fx(1, a.slot, o);
   std::vector<float> y(4000);
   {
-    std::vector<float> buf(x.begin(), x.begin() + 2000);
+    std::vector<float> buf(x.begin(), x.begin() + 1984);
     float* p[1] = {buf.data()};
-    EffectProcess(fx.st(), p, p, 1, 2000, nullptr, nullptr);
+    EffectProcess(fx.st(), p, p, 1, 1984, nullptr, nullptr);
     std::copy(buf.begin(), buf.end(), y.begin());
     const float s[1] = {static_cast<float>(a.slot)}, e[1] = {static_cast<float>(c.slot)};
     snd::ParamBlock pb{s, e, 1, 1, nullptr};
-    // Calls within max_frames (a longer call ramps IrSlot over its sub-blocks:
-    // Defect_ConvolutionIrSlotRampsInsideLongCalls). The first call ramps a -> c.
-    for (std::uint32_t done = 2000; done < 4000; done += 250) {
-      std::vector<float> buf2(x.begin() + done, x.begin() + done + 250);
+    // The first call requests a -> c; the whole call selects c.
+    for (std::uint32_t done = 1984; done < 4000;) {
+      const auto len = std::min(250u, 4000u - done);
+      std::vector<float> buf2(x.begin() + done, x.begin() + done + len);
       float* p2[1] = {buf2.data()};
-      EffectProcess(fx.st(), p2, p2, 1, 250, done == 2000 ? &pb : nullptr, nullptr);
+      EffectProcess(fx.st(), p2, p2, 1, len, done == 1984 ? &pb : nullptr, nullptr);
       std::copy(buf2.begin(), buf2.end(), y.begin() + done);
+      done += len;
     }
   }
   const std::vector<double> w1 = Direct(x, h1), w2 = Direct(x, h2);
   double e = 0.0;
   std::size_t eAt = 0;
-  // The partition period in progress at the switch ([2000, 2048) for B 64) still
-  // carries the old IR's FDL part (see Defect_ConvolutionIrSwitchLagsOnePartition);
-  // everywhere else the output is the old IR before and the new IR after.
+  // The switch starts at offset 0 of B=64. The linear blend reaches 1
+  // on frame 2047 and the following frames match the new IR alone.
   for (std::size_t i = 0; i < 4000; ++i) {
-    if (i >= 2000 && i < 2048) continue;
-    const double d = std::fabs(y[i] - (0.5 * x[i] + (i < 2000 ? w1[i] : w2[i])));
+    const double g = i < 1984 ? 0.0 : std::min(1.0, double(i - 1984 + 1) / b);
+    const double d = std::fabs(y[i] - (0.5 * x[i] + (1 - g) * w1[i] + g * w2[i]));
     if (d > e) {
       e = d;
       eAt = i;
@@ -604,8 +604,7 @@ SND_TEST(IndepConvolution, IrSlotSelectionAndSharing) {
                 eAt);
   SND_CHECK_EQ(ConvolutionStateActiveIrFrames(fx.st()), 900u);
   // Unusable / absent IRs: wet silent, dry passes.
-  for (std::uint32_t slot : {wrongB.slot, wrongRate.slot, 0u, 1000u, 1024u}) {
-    if (slot == 1000u || slot == 1024u) SND_CHECK(ConvolutionRegisteredIr(slot) == nullptr);
+  for (std::uint32_t slot : {wrongB.slot, wrongRate.slot, 0u, kConvolutionMaxIrNumber + 1u}) {
     Conv g(1, slot, o);
     const Multi z = Run(g, {x}, {256});
     bool dryOnly = true;
@@ -628,7 +627,7 @@ SND_TEST(IndepConvolution, IrSlotSelectionAndSharing) {
   }
   SND_CHECK(Run(alone, {x}, {200}) == y1);
   // Removing the IR of a running instance (after its calls): dry only (after the
-  // partition already computed, see Defect_ConvolutionIrSwitchLagsOnePartition).
+  // current fade has finished).
   {
     Ir t({h1}, b);
     Conv g(1, t.slot, o);
@@ -642,39 +641,45 @@ SND_TEST(IndepConvolution, IrSlotSelectionAndSharing) {
   }
 }
 
-// C11: registry. Lowest free slot, full, reuse, invalid arguments. This test
-// runs in its own executable, so the registry starts empty except for IRs
-// other tests left registered (none: every Ir unregisters).
+// Reserve only vacant entries in the process-wide table. Once full, freeing
+// exactly one of our entries forces reuse of its physical slot.
 SND_TEST(IndepConvolution, Registry) {
-  Ir a({std::vector<float>{1.0f}}, 64, kRate, 1.0f, kRate, false);
-  SND_REQUIRE(a.ir != nullptr);
+  Ir a({{1.0f}}, 64, kRate, 1.0f, kRate, false);
+  Ir foreign({{0.5f}}, 64);
+  SND_REQUIRE(a.ir != nullptr && foreign.slot != 0u);
   SND_CHECK_EQ(ConvolutionRegisterIr(nullptr), 0u);
-  std::vector<unsigned char> junk(256, 0x11);
-  SND_CHECK_EQ(ConvolutionRegisterIr(reinterpret_cast<const ConvolutionIr*>(junk.data())), 0u);
-  std::vector<std::uint32_t> got;
-  for (std::uint32_t i = 0; i < kConvolutionMaxIrSlots; ++i) got.push_back(ConvolutionRegisterIr(a.ir));
-  bool seq = true;
-  for (std::uint32_t i = 0; i < kConvolutionMaxIrSlots; ++i) seq = seq && got[i] == i + 1u;
-  SND_CHECK_MSG(seq, "slots are not 1..1024 in order");
+  alignas(64) unsigned char junk[256];
+  std::memset(junk, 0x11, sizeof(junk));
+  SND_CHECK_EQ(ConvolutionRegisterIr(reinterpret_cast<const ConvolutionIr*>(junk)), 0u);
+  std::vector<std::uint32_t> owned;
+  for (std::size_t i = 0; i < kConvolutionMaxIrSlots; ++i) {
+    const auto id = ConvolutionRegisterIr(a.ir);
+    if (id == 0u) break;
+    SND_CHECK(id <= 16777215u);
+    SND_CHECK(ConvolutionRegisteredIr(id) == a.ir);
+    owned.push_back(id);
+  }
+  SND_REQUIRE(!owned.empty());
+  SND_CHECK(owned.size() < kConvolutionMaxIrSlots);
   SND_CHECK_EQ(ConvolutionRegisterIr(a.ir), 0u);
-  SND_CHECK(ConvolutionRegisteredIr(1024) == a.ir);
-  SND_CHECK(ConvolutionUnregisterIr(700));
-  SND_CHECK(ConvolutionUnregisterIr(3));
-  SND_CHECK(!ConvolutionUnregisterIr(3));
-  SND_CHECK(ConvolutionRegisteredIr(3) == nullptr);
-  SND_CHECK_EQ(ConvolutionRegisterIr(a.ir), 3u);
-  SND_CHECK_EQ(ConvolutionRegisterIr(a.ir), 700u);
-  SND_CHECK(!ConvolutionUnregisterIr(0));
-  SND_CHECK(!ConvolutionUnregisterIr(1025));
-  SND_CHECK(!ConvolutionUnregisterIr(0xFFFFFFFFu));
-  SND_CHECK(ConvolutionRegisteredIr(0) == nullptr);
-  SND_CHECK(ConvolutionRegisteredIr(1025) == nullptr);
-  SND_CHECK(ConvolutionRegisteredIr(0xFFFFFFFFu) == nullptr);
-  for (std::uint32_t s = 1; s <= kConvolutionMaxIrSlots; ++s) SND_CHECK(ConvolutionUnregisterIr(s));
-  SND_CHECK(ConvolutionRegisteredIr(1) == nullptr);
+  const auto old = owned.back();
+  SND_CHECK(ConvolutionUnregisterIr(old));
+  SND_CHECK(ConvolutionRegisteredIr(old) == nullptr);
+  const auto fresh = ConvolutionRegisterIr(a.ir);
+  SND_CHECK(fresh != 0u && fresh != old && (fresh & 1023u) == (old & 1023u));
+  SND_CHECK(!ConvolutionUnregisterIr(old));
+  SND_CHECK(ConvolutionRegisteredIr(old) == nullptr);
+  SND_CHECK(ConvolutionRegisteredIr(fresh) == a.ir);
+  owned.back() = fresh;
+  for (auto id : owned) SND_CHECK(ConvolutionUnregisterIr(id));
+  SND_CHECK(ConvolutionRegisteredIr(foreign.slot) == foreign.ir);
+  for (auto id : {0u, 16777216u, UINT32_MAX}) {
+    SND_CHECK(!ConvolutionUnregisterIr(id));
+    SND_CHECK(ConvolutionRegisteredIr(id) == nullptr);
+  }
   // Queries on invalid IRs.
   SND_CHECK_EQ(ConvolutionIrChannels(nullptr), 0u);
-  SND_CHECK_EQ(ConvolutionIrFrames(reinterpret_cast<const ConvolutionIr*>(junk.data())), 0u);
+  SND_CHECK_EQ(ConvolutionIrFrames(reinterpret_cast<const ConvolutionIr*>(junk)), 0u);
   SND_CHECK_EQ(ConvolutionIrPartition(a.ir), 64u);
   SND_CHECK_EQ(ConvolutionIrSampleRate(a.ir), kRate);
 }
@@ -691,13 +696,13 @@ SND_TEST(IndepConvolution, RegistryConcurrency) {
   std::vector<std::vector<std::uint32_t>> taken(kThreads);
   std::atomic<int> badRead{0}, dup{0};
   std::atomic<bool> stop{false};
-  std::vector<unsigned char> owner(kConvolutionMaxIrSlots + 1u, 0);
+  std::atomic<std::uint32_t> published[kThreads]{};
   std::thread reader([&] {
     while (!stop.load(std::memory_order_relaxed)) {
-      for (std::uint32_t s = 1; s <= kConvolutionMaxIrSlots; s += 7) {
-        const ConvolutionIr* p = ConvolutionRegisteredIr(s);
-        if (p != nullptr && p != other.ir && p != stable.ir) ++badRead;
-        if (p != nullptr && ConvolutionIrPartition(p) != 64u) ++badRead;  // reads through the pointer
+      for (auto& number : published) {
+        const auto id = number.load(std::memory_order_acquire);
+        const ConvolutionIr* p = ConvolutionRegisteredIr(id);
+        if (p != nullptr && (p != other.ir || ConvolutionIrPartition(p) != 64u)) ++badRead;
       }
     }
   });
@@ -722,13 +727,15 @@ SND_TEST(IndepConvolution, RegistryConcurrency) {
       for (int i = 0; i < kIters; ++i) {
         const std::uint32_t s = ConvolutionRegisterIr(other.ir);
         if (s == 0u) continue;
-        if (slotsInUse[s].fetch_add(1) != 0) ++dup;
+        if (slotsInUse[s & 1023u].fetch_add(1) != 0) ++dup;
+        published[t].store(s, std::memory_order_release);
+        if (ConvolutionRegisteredIr(s) != other.ir) ++badRead;
         if (s == stable.slot) ++dup;
         taken[t].push_back(s);
         if (i % 3 == 2) {
           const std::uint32_t r = taken[t].back();
           taken[t].pop_back();
-          slotsInUse[r].fetch_sub(1);
+          slotsInUse[r & 1023u].fetch_sub(1);
           if (!ConvolutionUnregisterIr(r)) ++dup;
         }
       }
@@ -743,7 +750,7 @@ SND_TEST(IndepConvolution, RegistryConcurrency) {
   SND_CHECK(ConvolutionRegisteredIr(stable.slot) == stable.ir);
   for (auto& v : taken)
     for (std::uint32_t s : v) SND_CHECK(ConvolutionUnregisterIr(s));
-  (void)owner;
+
 }
 
 // C8: the tail. Done exactly after cap*B + 2B (+B with ZeroLatency 0) frames
@@ -763,8 +770,8 @@ SND_TEST(IndepConvolution, TailExactAndWakeUp) {
       o.zl = zl;
       o.maxIrMs = 30.0f;  // cap = ceil(1440 / 64) = 23
       Conv fx(1, ir.slot, o);
-      const std::uint32_t cap = ConvolutionStateCapacityFrames(fx.st()) / b;
-      SND_CHECK_EQ(cap, 23u);
+      constexpr std::uint32_t cap = (1440u + b - 1u) / b;
+      SND_CHECK_EQ(ConvolutionStateCapacityFrames(fx.st()), (cap + (zl == 1.0f ? 1u : 0u)) * b);
       SND_CHECK(EffectIsTailDone(fx.st()));
       const std::uint32_t tail = cap * b + 2u * b + (zl != 0.0f ? 0u : b);
       // 500 loud frames, the last loud frame at 499 (then 1e-6 noise: below -100 dBFS).
@@ -884,6 +891,10 @@ SND_TEST(IndepConvolution, BlobFuzz) {
     std::memcpy(&v, &bad, 4);
     const std::vector<unsigned char> c = with(5, v);
     SND_CHECK(!ConvolutionParseIrBlob(c.data(), c.size(), &bi));
+    auto samples = blob;
+    std::memcpy(samples.data() + need - 4, &v, 4);
+    SND_CHECK(!ConvolutionParseIrBlob(samples.data(), need, &bi));
+    SND_CHECK(ConvolutionPrepareIrFromBlob(m1.get(), irb, samples.data(), need, kRate, 64) == nullptr);
   }
   // Channels 1 with 600 frames reinterprets the same bytes consistently: accepted.
   {
@@ -1051,22 +1062,11 @@ SND_TEST(IndepConvolution, NanRecoveryResetAndDirtyMemory) {
     const Multi a = Run(dirty, {x, x}, {256}), b = Run(clean, {x, x}, {256}), c = Run(odd, {x, x}, {256});
     SND_CHECK(a == b && b == c);
   }
-  // An IR containing NaN samples: report what the effect does with it.
-  {
-    std::vector<float> hn(h);
-    hn[500] = std::nanf("");
-    Ir irn({hn}, 128);
-    snd::test::Note("IR with a NaN sample: prepare %s", irn.ir != nullptr ? "accepted" : "refused");
-    if (irn.slot != 0u) {
-      Opt od = o;
-      od.dry = 1.0f;
-      od.wet = 1.0f;
-      Conv fx(1, irn.slot, od);
-      const Multi y = Run(fx, {x}, {256});
-      double dryLeft = 0.0;
-      for (std::size_t i = 0; i < x.size(); ++i) dryLeft = std::max(dryLeft, static_cast<double>(std::fabs(y[0][i])));
-      snd::test::Note("IR with a NaN sample, DryMix 1: max |output| %.3g (input peak 0.5)", dryLeft);
-    }
+  for (float bad : {std::nanf(""), INFINITY, -INFINITY}) {
+    Multi taps{h, h};
+    taps[1].back() = bad;
+    Ir invalid(taps, 128);
+    SND_CHECK(invalid.ir == nullptr);
   }
 }
 
@@ -1115,7 +1115,8 @@ SND_TEST(IndepConvolution, CapacityCutsLongIrs) {
     const std::uint32_t used = ConvolutionStateActiveIrFrames(fx.st());
     snd::test::Note("MaxIrMs 10, zl %g: capacity %u frames, IR frames used %u", static_cast<double>(zl),
                     ConvolutionStateCapacityFrames(fx.st()), used);
-    SND_CHECK(used >= 480u && used < 5000u);
+    SND_CHECK_EQ(used, (8u + (zl == 1.0f ? 1u : 0u)) * 64u);
+    SND_CHECK_EQ(used, ConvolutionStateCapacityFrames(fx.st()));
     std::vector<float> hc(h.begin(), h.begin() + used);
     SND_CHECK(MaxErr(y[0], Direct(x, hc, zl != 0.0f ? 0u : 64u)) < Tol(hc, 0.5f));
   }
@@ -1204,4 +1205,110 @@ SND_TEST(IndepConvolution, CostAndResetTime) {
                       rsum / 20.0, rworst);
     }
   }
+}
+
+namespace {
+void Select(Conv& fx, float* data, std::uint32_t frames, std::uint32_t start, std::uint32_t end) {
+  const float s = static_cast<float>(start), e = static_cast<float>(end);
+  snd::ParamBlock params{&s, &e, 1, 1, nullptr};
+  float* channels[] = {data};
+  EffectProcess(fx.st(), channels, channels, 1, frames, &params, nullptr);
+}
+}
+
+SND_TEST(IndepConvolution, LongCallUsesOnlyEndNumber) {
+  Ir a({{0.5f}}, 64), middle({{8.0f}}, 64), end({{0.0f, 0.25f}}, 64);
+  SND_REQUIRE(middle.slot == a.slot + 1u && end.slot == middle.slot + 1u);
+  Opt o;
+  o.partition = 64;
+  Conv fx(1, a.slot, o);
+  auto x = Noise(1024, 4), y = x;
+  Select(fx, y.data(), 1024, a.slot, end.slot);
+  SND_CHECK_EQ(y[0], 0.0f);  // dormant instance switches immediately
+  for (unsigned i = 1; i < y.size(); ++i) SND_CHECK_EQ(y[i], 0.25f * x[i - 1]);
+}
+
+SND_TEST(IndepConvolution, IrSwitchCrossfadeMatchesDirectConvolution) {
+  constexpr unsigned b = 64;
+  const auto h1 = DecayIr(600, 1, 150), h2 = DecayIr(600, 2, 150), x = Noise(2048, 4);
+  Ir a({h1}, b), c({h2}, b);
+  SND_REQUIRE(a.slot && c.slot);
+  for (float zl : {0.0f, 1.0f}) {
+    Opt o;
+    o.partition = b;
+    o.zl = zl;
+    const auto old = Direct(x, h1, zl == 0 ? b : 0), fresh = Direct(x, h2, zl == 0 ? b : 0);
+    {
+      const unsigned start = 1024;
+      auto y = x;
+      Conv fx(1, a.slot, o);
+      Select(fx, y.data(), start, a.slot, a.slot);
+      Select(fx, y.data() + start, 2048 - start, a.slot, c.slot);
+      for (unsigned i = 0; i < y.size(); ++i) {
+        const double g = i < start ? 0.0 : std::min(1.0, double(i - start + 1) / b);
+        const double want = (1.0 - g) * old[i] + g * fresh[i];
+        SND_CHECK_NEAR(y[i], want, std::max(Tol(h1, 0.5f), Tol(h2, 0.5f)));
+      }
+    }
+  }
+}
+
+SND_TEST(IndepConvolution, SwitchStepMeasurements) {
+  constexpr unsigned b = 64;
+  Ir a({{1.0f}}, b), c({{-1.0f}}, b);
+  SND_REQUIRE(a.slot && c.slot);
+  Opt o;
+  o.partition = b;
+  for (unsigned f : {0u, b / 2, b - 8, b - 1}) {
+    const unsigned start = 256 + f;
+    Conv fx(1, a.slot, o);
+    std::vector<float> y(512, 1.0f);
+    Select(fx, y.data(), start, a.slot, a.slot);
+    Select(fx, y.data() + start, 512 - start, a.slot, c.slot);
+    float step = 0;
+    for (unsigned i = start; i < y.size(); ++i) step = std::max(step, std::fabs(y[i] - y[i - 1]));
+    snd::test::Note("DC 1, gains +1 to -1, B=%u f=%u: maximum adjacent step %.8f", b, f, step);
+  }
+}
+
+SND_TEST(IndepConvolution, FadeOutWithRetiredMemoryAndFadeInFromSilence) {
+  constexpr unsigned b = 64;
+  auto h = DecayIr(315, 11, 80);
+  Ir a({h}, b), copy({h}, b);
+  SND_REQUIRE(a.slot && copy.slot);
+  Opt o;
+  o.partition = b;
+  Conv fx(1, a.slot, o);
+  auto x = Noise(1024, 9), y = x;
+  const auto reference = Direct(x, h);
+  Select(fx, y.data(), 512, a.slot, a.slot);
+  const auto retired = a.slot;
+  SND_REQUIRE(ConvolutionUnregisterIr(retired));
+  a.slot = 0;
+  // No concurrent audio call. Retire the backing storage before rendering again.
+  std::memset(a.mem.get(), 0xff, a.mem.size());
+  Select(fx, y.data() + 512, 256, retired, retired);
+  Select(fx, y.data() + 768, 256, 0, copy.slot);
+  for (unsigned i = 512; i < 1024; ++i) {
+    const double g = i < 768 ? std::max(0.0, 1.0 - double(i - 511) / b)
+                             : std::min(1.0, double(i - 767) / b);
+    SND_CHECK_NEAR(y[i], g * reference[i], Tol(h, 0.5f));
+  }
+}
+
+SND_TEST(IndepConvolution, SubsequentSwitchAtFadeBoundary) {
+  constexpr unsigned b = 64;
+  Ir one({{1.0f}}, b), zero({{0.0f}}, b), neg({{-1.0f}}, b);
+  SND_REQUIRE(one.slot && zero.slot && neg.slot);
+  Opt o;
+  o.partition = b;
+  Conv fx(1, one.slot, o);
+  std::vector<float> y(256, 1.0f);
+  Select(fx, y.data(), 64, one.slot, one.slot);
+  Select(fx, y.data() + 64, 8, one.slot, zero.slot);
+  Select(fx, y.data() + 72, 56, zero.slot, zero.slot);
+  Select(fx, y.data() + 128, 128, zero.slot, neg.slot);
+  for (unsigned i = 64; i < 128; ++i) SND_CHECK_EQ(y[i], 1.0f - float(i - 63) / b);
+  for (unsigned i = 128; i < 192; ++i) SND_CHECK_EQ(y[i], -float(i - 127) / b);
+  for (unsigned i = 192; i < 256; ++i) SND_CHECK_EQ(y[i], -1.0f);
 }
