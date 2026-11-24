@@ -86,6 +86,10 @@ enum class LivePhase : std::uint8_t {
   Syncing = 4,           // requests queued or waiting for answers
   Live = 5,              // the game holds the document's build
   Refused = 6,           // the user refused the mismatch (nothing is sent)
+  // D-184: something the game should hold did not reach it: a hot reload failed (the bank may be
+  // detached in the game) or its rebuilt bank could not be written. failedBanks() says which and
+  // why; the phase stays Failed until a reload of that bank succeeds (or a new session finds it).
+  Failed = 7,
 };
 const char* LivePhaseName(LivePhase p);
 
@@ -211,6 +215,9 @@ struct LiveSyncOptions {
   LiveDecision decision = LiveDecision::Ask;
   std::uint32_t throttleMs = 33;
   std::uint32_t maxInFlight = 128;
+  // D-183: a request the game keeps answering as busy (COMMAND_BUFFER_FULL, NOT_READY, a busy chunk
+  // slot) is sent again until this much time passed since it was first sent; then it is a problem.
+  std::uint32_t giveUpMs = 5000;
   ReloadWriter writer;            // null: no hot reload (listed as unsupported)
   bool structEdits = true;        // try StructEdit for bus / effect / send changes
   ReserveLimits reserveLimits;
@@ -240,7 +247,11 @@ class LiveSync {
   const SyncCheck& check() const { return check_; }
   bool ChooseSendDiffs(Connection& connection);
   bool ChooseRefuse(Connection& connection);
-  void SetDecision(LiveDecision d) { options_.decision = d; }
+  // Ask also forgets the remembered answer (D-182).
+  void SetDecision(LiveDecision d) {
+    options_.decision = d;
+    if (d == LiveDecision::Ask) rememberedValid_ = false;
+  }
 
   // --- state ------------------------------------------------------------------------------
   const DocBuild& current() const { return current_; }  // the latest build
@@ -257,6 +268,8 @@ class LiveSync {
   ReserveUsage reserve() const;
   bool UndoStructEdit(std::size_t index);
   std::vector<LiveFeature> features() const;
+  // D-184: banks whose last hot reload failed (file -> reason); not empty: phase Failed.
+  const std::map<std::string, std::string>& failedBanks() const { return failedBanks_; }
   std::uint32_t queued() const { return static_cast<std::uint32_t>(queue_.size()); }
   std::uint32_t inFlight() const { return static_cast<std::uint32_t>(inflight_.size()); }
   const LiveSyncStats& stats() const { return stats_; }
@@ -285,6 +298,15 @@ class LiveSync {
     std::string member;
     std::uint32_t seq = 0;
     std::uint32_t resends = 0;
+    std::uint64_t serial = 0;       // order of the edits (a newer value of the same cell wins, D-183)
+    std::uint64_t firstSentNs = 0;  // when it was first sent (busy answers give up after giveUpMs)
+    std::uint32_t row = 0;          // SetValue: the cell's row in its table (re-sent on a reconnect)
+    std::uint64_t contentHash = 0;  // Reload: the content hash of the bank written
+  };
+  struct SentCell {
+    std::string bank;
+    std::uint32_t row = 0;
+    livelink::SetValue value{};
   };
   bool Build(std::uint64_t nowNs);
   void OnSessionStarted(Connection& c);
@@ -339,6 +361,21 @@ class LiveSync {
   bool decided_ = false;       // the user answered this mismatch
   std::uint16_t peerMinor_ = 0;
   LiveSyncStats stats_;
+  // D-182 / D-183
+  std::uint64_t serial_ = 0, nowNs_ = 0;
+  std::map<std::string, std::uint64_t> latestSerial_;            // cell key -> newest edit
+  std::map<std::string, SentCell> sentCells_;                    // every cell ever sent (re-sent on a new session)
+  std::map<std::string, std::vector<std::uint32_t>> sentChunks_;  // bank -> tables replaced live
+  std::map<std::string, Op> held_;                               // cell key -> value the mixer holds back
+  std::map<std::string, std::string> failedBanks_;               // bank -> why its last reload failed
+  bool rememberedValid_ = false;                                 // the answer to a mismatch, for the same game
+  LiveDecision remembered_ = LiveDecision::Ask;
+  std::string rememberedGame_;
+  bool rememberPending_ = false;
+  bool waitingForList_ = false;
+  std::string GameSignature() const;
+  void ResendSentState();
+  void ReleaseHeld();
 };
 
 }  // namespace snd::tool
