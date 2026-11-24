@@ -62,7 +62,7 @@ struct Cfg {
   std::uint32_t maxPlaybacks, maxEmitters, maxListeners, maxTransports, maxReservations, maxStreams;
   std::uint32_t maxBanks, maxUserBuffers, maxGlobalParams, paramOverflowBlocks;
   std::uint32_t emitterParamRows, playbackParamRows;
-  std::uint32_t voicesPerChunk, maxChunks;
+  std::uint32_t voicesPerChunk, maxChunks, segmentsPerChunk;
   std::uint32_t busCap, catCap, snapCap, groupCap, paramDefCap, duckCap;
   std::uint32_t arenaBytes, reserveBytes, arenasPerThread, maxThreads;
   std::uint32_t criticalPriority, overflowParamSlots, eventRingCapacity;
@@ -455,7 +455,31 @@ struct LogicPriv {  // EvaluateLogicParams: generation seen per row slot (new ro
   std::uint32_t* playbackGen = nullptr;
 };
 
+inline constexpr unsigned kMaxZones = 4;
+inline constexpr unsigned kMaxAuxSends = 1 + kMaxZones;
+struct ZoneSend {
+  Id bus;
+  SlotIndex emitter;
+  float amount;
+};
+struct ListenerContribution {
+  SlotIndex spatial;
+  float weight;
+  float spread;
+  float blend;
+};
+struct VoiceSpatialMix {
+  ListenerContribution listeners[SND_MAX_LISTENERS];
+  std::uint32_t count;
+  std::uint32_t dominant;
+  float curveSend;
+  float obstruction;
+};
+
 struct DspPriv {
+  ZoneSend zones[SND_MAX_LISTENERS][kMaxZones]{};
+  VoiceSpatialMix* mix = nullptr;  // [maxVirtual], EvaluateDspParams -> Render
+
   float* duckDb = nullptr;           // [duckCap] current reduction (dB, <= 0)
   std::uint32_t* catPlaying = nullptr;  // [catCap] voices playing per category this block
   float* catGainPrev = nullptr;
@@ -471,6 +495,18 @@ struct SelectPriv {
 };
 
 // Per-item render inputs (chunk-owned, written in Render's serial part).
+struct AuxRoute {
+  SlotIndex bus;
+  std::uint32_t segment, channels;
+  float amount;
+  PanMatrix pan;
+};
+struct PathHistory {
+  FilterState directFilter;
+  float directGain;
+  std::uint32_t sends;
+  AuxRoute previous[kMaxAuxSends];
+};
 struct ItemInput {
   std::uint32_t kind;        // SourceKind
   std::uint32_t flags;       // ItemFlags
@@ -493,6 +529,9 @@ struct ItemInput {
   // Outputs (chunk writes):
   float tail[kMaxChannels];  // last output frame per bus channel (late-chunk fade, D-15)
   VoiceRenderStatus status;
+  std::uint32_t sends;
+  AuxRoute aux[kMaxAuxSends];
+  float directGain, directLp;
   std::uint32_t vfxSlot;     // D-132: voice-effect slot + 1 (0 = no heavy voice effect this block)
 };
 enum ItemFlags : std::uint32_t {
@@ -525,6 +564,7 @@ struct RenderSet {
 };
 
 struct RenderPriv {
+  PathHistory* paths = nullptr;  // indexed by real slot, chunk-owned
   std::uint8_t* resamplerPool = nullptr;  // [realTotal] slots of resamplerSlotBytes (D-44)
   std::uint32_t* lastAssign = nullptr;    // [realTotal] assignSeq seen at the last init
   std::uint32_t* stateChannels = nullptr; // [realTotal]

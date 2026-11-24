@@ -2,8 +2,8 @@
 // distance, direction in the listener's frame (x right, y up, z forward),
 // cone cosine (emitter forward vs the direction to the listener), validity.
 // The emitter position is extrapolated with its velocity since its last
-// update, up to Config.tuning.emitterExtrapolateMs (2.1). Doppler is stage 3
-// (dopplerRatio = 1).
+// update, up to Config.tuning.emitterExtrapolateMs (2.1).
+#include <algorithm>
 #include <cmath>
 
 #include "access.hpp"
@@ -23,6 +23,26 @@ Vec3 Normalize(Vec3 a, Vec3 fallback) noexcept {
   const float l = std::sqrt(Dot(a, a));
   return l > 1e-9f ? Mul(a, 1.0f / l) : fallback;
 }
+// Keep the strongest zones, with stable emitter-slot order on equal weights.
+void InsertZone(ZoneSend (&zones)[kMaxZones], ZoneSend zone) noexcept {
+  for (ZoneSend& current : zones) {
+    if (zone.amount > current.amount || (zone.amount == current.amount && zone.emitter < current.emitter)) {
+      std::swap(current, zone);
+      if (zone.amount == 0) break;
+    }
+  }
+}
+
+float Doppler(const snd_config& cfg, Vec3 listenerVelocity, Vec3 emitterVelocity, Vec3 n) noexcept {
+  // n points from listener to source: positive listener velocity approaches,
+  // positive emitter velocity recedes. Limit radial speeds near the singularity.
+  const float c = cfg.speed_of_sound;
+  const float factor = cfg.doppler_factor;
+  if (factor == 0) return 1;
+  const float numerator = std::max(0.01f * c, c + factor * Dot(listenerVelocity, n));
+  const float denominator = std::max(0.01f * c, c + factor * Dot(emitterVelocity, n));
+  return std::clamp(numerator / denominator, 0.25f, 4.0f);
+}
 }  // namespace
 
 void Compute3D(Impl& im) noexcept {
@@ -30,6 +50,7 @@ void Compute3D(Impl& im) noexcept {
   const std::uint32_t L = im.cfg.maxListeners;
   const schema::TableRows& er = t.Emitter.rows;
   const float rate = static_cast<float>(im.cfg.sampleRate);
+  for (auto& listener : im.dp.zones) for (auto& zone : listener) zone = ZoneSend{};
   for (std::uint32_t d = 0; d < er.count; ++d) {
     const SlotIndex e = base::rows::SlotAt(er, d);
     const BlockIndex last = SND_R(Emitter_lastUpdateBlock)[d];
@@ -38,6 +59,11 @@ void Compute3D(Impl& im) noexcept {
     const Vec3 pos = Add(SND_R(Emitter_position)[d], Mul(SND_R(Emitter_velocity)[d], static_cast<float>(frames) / rate));
     SND_W(Emitter_renderPosition)[d] = pos;
     const Vec3 efwd = Normalize(SND_R(Emitter_forward)[d], Vec3{0, 0, 1});
+    const auto shape = SND_R(Emitter_shapeKind)[d];
+    const Vec3 extent = SND_R(Emitter_halfExtents)[d];
+    const Vec3 rightAxis = Normalize(Cross(std::fabs(efwd.y) < 0.9999f ? Vec3{0, 1, 0} : Vec3{0, 0, 1}, efwd),
+                                     Vec3{1, 0, 0});
+    const Vec3 upAxis = Cross(efwd, rightAxis);
     schema::TableRows& sr = SND_ROWS(Spatial);
     for (std::uint32_t l = 0; l < L; ++l) {
       const SlotIndex s = e * L + l;
@@ -47,7 +73,21 @@ void Compute3D(Impl& im) noexcept {
         SND_W(Spatial_valid)[s] = 0u;
         continue;
       }
-      const Vec3 rel = Sub(pos, SND_R(Listener_position)[l]);
+      Vec3 rel = Sub(pos, SND_R(Listener_position)[l]);
+      float radius = 0;
+      if (shape != SND_EMITTER_SHAPE_POINT) {
+        const Vec3 towardListener = Mul(rel, -1);
+        rel = Add(rel, Mul(rightAxis, std::clamp(Dot(towardListener, rightAxis), -extent.x, extent.x)));
+        radius = extent.x;
+        if (shape >= SND_EMITTER_SHAPE_RECTANGLE) {
+          rel = Add(rel, Mul(efwd, std::clamp(Dot(towardListener, efwd), -extent.z, extent.z)));
+          radius = std::max(radius, extent.z);
+        }
+        if (shape == SND_EMITTER_SHAPE_BOX) {
+          rel = Add(rel, Mul(upAxis, std::clamp(Dot(towardListener, upAxis), -extent.y, extent.y)));
+          radius = std::max(radius, extent.y);
+        }
+      }
       const float dist = std::sqrt(Dot(rel, rel));
       const Vec3 fwd = Normalize(SND_R(Listener_forward)[l], Vec3{0, 0, 1});
       const Vec3 up = Normalize(SND_R(Listener_up)[l], Vec3{0, 1, 0});
@@ -55,7 +95,18 @@ void Compute3D(Impl& im) noexcept {
       const Vec3 dir = dist > 1e-6f ? Mul(rel, 1.0f / dist) : Vec3{0, 0, 1};
       SND_W(Spatial_distance)[s] = dist;
       SND_W(Spatial_direction)[s] = Vec3{Dot(dir, right), Dot(dir, up), Dot(dir, fwd)};
-      SND_W(Spatial_dopplerRatio)[s] = 1.0f;
+      const Vec3 local = SND_W(Spatial_direction)[s];
+      SND_W(Spatial_azimuth)[s] = std::atan2(local.x, local.z);
+      SND_W(Spatial_shapeSpread)[s] = radius > 0 ? radius / (radius + dist) : 0;
+      SND_W(Spatial_dopplerRatio)[s] = dist > 1e-6f ? Doppler(im.config, SND_R(Listener_velocity)[l],
+                                                               SND_R(Emitter_velocity)[d], dir) : 1.0f;
+      const Id zoneBus = SND_R(Emitter_zoneBus)[d];
+      if (zoneBus != SND_ID_NONE) {
+        const float fade = SND_R(Emitter_zoneFade)[d];
+        const float amount = SND_R(Emitter_zoneAmount)[d] *
+                             (dist < 1e-6f ? 1 : fade > 0 ? std::max(0.0f, 1 - dist / fade) : 0);
+        if (amount > 0) InsertZone(im.dp.zones[l], ZoneSend{zoneBus, e, amount});
+      }
       SND_W(Spatial_coneCos)[s] = dist > 1e-6f ? -Dot(efwd, dir) : 1.0f;
       SND_W(Spatial_valid)[s] = 1u;
     }
