@@ -218,13 +218,20 @@ C-06（ストリームの詳細、ワーカーごとの CPU）、C-07（決定�
 
 ## 回した構成と結果
 
-ビルドは `$S/live/b-*`、-j2（終わったら消した）。
+ビルドは `$S/live/b-*`、-j2（終わったら消した）。「既知の livelink 独立テスト 2 本」= `livelink_indep_s7_unit_test`（`IndepS7Replay.LostStateIsReported`）と `livelink_indep_s7_impl_test`（`IndepS7Impl.Defect_RemoveOfLiveBusAddedWithFullStructLogKeepsReserve`）。組 L の決定と食い違うもので、組 P は livelink を変えていない。
 
 | 構成 | コミット | 実行したテスト | 結果 |
 | --- | --- | --- | --- |
 | 8: TOOL_CORE、gcc Debug | d017510 | 全部（266） | 263 通過。失敗 3: `embed_subproject`（session.hpp が live_sync.hpp を含めて tool_core だけのホストで通らなかった → 0a7da93 で直し、通過を確認）、`livelink_indep_s7_unit_test` / `livelink_indep_s7_impl_test`（組 L の決定と食い違う既知の独立テスト `IndepS7Replay.LostStateIsReported`、`IndepS7Impl.Defect_RemoveOfLiveBusAddedWithFullStructLogKeepsReserve`。組 P は livelink を変えていない） |
 | 8: TOOL_CORE、gcc Debug | 0a7da93 | `embed_subproject` と `tool_`（52） | 全部通過 |
-| （以下、走らせたら追記） | | | |
+| 3: ASan/UBSan ＋ TOOL_CORE | 0a7da93（新しい 2 本の追加は 87fca47 で再実行） | `tool\|livelink`（81） | 失敗は既知の livelink 独立テスト 2 本だけ。組 P のテストは UB・メモリの報告なし |
+| 4: TSan ＋ TOOL_CORE | 87fca47 | `tool`（49） | 全部通過。`tool_live_concurrency_test`・`tool_live_mixer_test`・`tool_live_sync_test` を -j1 で 20 回: 全通過 |
+| 5: Release ＋ TOOL_CORE | 87fca47 → b01f6e4 | `tool`（全部通過）、同じ 3 本を 20 回 | 87fca47 で `tool_live_sync_test`（新しい Session のテスト）が 20 回のうち 1 回失敗: テストがミキサーの値を送る Tick を待たずに条件を見ていた（待ちの漏れ、実装は不変）。b01f6e4 で直し、Release で 30 回、1 コアに縛って 10 回、`tool_live_concurrency_test`・`tool_live_mixer_test`・`tool_live_preview_test`・`tool_replay_test` を 20 回: 全通過 |
+| 2: clang ＋ TOOL_CORE | b01f6e4 | `tool\|livelink` | 失敗は既知の livelink 独立テスト 2 本だけ |
+| 9: Tela 入り | b01f6e4 | `tool`（63） | 全部通過（既存の画面のテストを含む） |
+| 1: ツールなしの通常構成（gcc Debug） | b01f6e4 | 全部 | 失敗は既知の livelink 独立テスト 2 本だけ（`platform_device_play_test` は既存の Skipped） |
+| 6: `SND_BUILD_TESTS=OFF` Release | b01f6e4 | ビルドのみ | 通過（警告 0） |
+| 7: Opus なし | — | — | 回していない |
 
 `tool_live_mixer_test` の再現と修正の確認: 上の節（1 コア 50 回、CPU を食うループと同じコアで 30 回、全通過）。
 
@@ -244,3 +251,4 @@ MinGW（`x86_64-w64-mingw32-g++ -std=c++20 -fsyntax-only -Werror -Wall -Wextra -
 - `items()` の対象は Tick の間に起きた最後の手の GUID だけ（モデルへの要望）。間の手のオブジェクトは「バンク全体」の項目になる。
 - 大きなプロジェクトでの速さ（編集ごとに文書全体をビルド）。
 - Windows / macOS での実行（MinGW の構文検査だけ）。
+- 構成 7（Opus なし）は回していない。b01f6e4 の修正（テストの待ちだけ）の後の TSan / ASan は回していない。
