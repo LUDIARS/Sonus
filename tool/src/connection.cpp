@@ -105,6 +105,18 @@ ConnectionEvents Connection::Poll() {
   return ev;
 }
 
+void Connection::SetProjectBuildHash(std::uint64_t hash) {
+  if (desc_.projectBuildHash == hash) return;
+  ConnectionDesc d = desc_;
+  d.projectBuildHash = hash;
+  if (client_ == nullptr) {
+    desc_ = d;
+    return;
+  }
+  const std::uint32_t sessions = sessions_;
+  if (Open(d) == SND_OK) sessions_ = sessions;
+}
+
 bool Connection::awaitingSync() const { return client_ != nullptr && client_->AwaitingSync(); }
 
 bool Connection::DecideSync(MismatchPolicy answer) {

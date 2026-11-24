@@ -73,6 +73,10 @@ class Connection {
   // Creates and starts the client (closes a previous one). snd_result.
   int Open(const ConnectionDesc& desc);
   void Close();
+  // 1.1 (group P, D-182): the Hello hash of the next handshakes. Re-creates the client when it
+  // changes (the client sends the hash it was created with); the session count and the open state
+  // carry on (a reconnect, not a new Open).
+  void SetProjectBuildHash(std::uint64_t hash);
   // Drops the current connection; the client reconnects (autoReconnect).
   void Drop();
   bool IsOpen() const { return client_ != nullptr; }
