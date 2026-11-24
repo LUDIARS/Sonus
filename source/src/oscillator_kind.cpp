@@ -104,6 +104,48 @@ double StartPhaseOf(std::uint32_t shape) noexcept {
   }
 }
 
+
+// Per-sample loop shared by the waveforms (D-198, D-200): dt from the pitch ramp, the
+// phase waits while dt <= 0 and the gain fades linearly (fadePos / fadeFrames) to 0 and
+// back. wave(phase, dt, a) is the band-limited value at `phase` (a = block position).
+struct OscLoop {
+  double blockFrames, off, p0, pd, baseDt;
+  std::uint32_t fadeFrames;
+  template <class Wave>
+  void Run(OscInst& in, float* out, std::uint32_t n, Wave wave) const noexcept {
+    double phase = in.phase;
+    double held = in.heldDt;
+    std::uint32_t g = in.fadePos;
+    const double inv = 1.0 / static_cast<double>(fadeFrames);
+    for (std::uint32_t i = 0; i < n; ++i) {
+      const double a = (off + static_cast<double>(i)) / blockFrames;
+      double dt = baseDt * (p0 + pd * a);
+      if (!(dt > 0.0)) {  // no frequency: the phase waits, the output fades out
+        if (g == 0u) {
+          out[i] = 0.0f;
+          continue;
+        }
+        --g;
+        out[i] = static_cast<float>(wave(phase, held, a) * (static_cast<double>(g) * inv));
+        continue;
+      }
+      dt = dt > kMaxDt ? kMaxDt : dt;
+      double y = wave(phase, dt, a);
+      if (g < fadeFrames) {
+        ++g;
+        y *= static_cast<double>(g) * inv;
+      }
+      out[i] = static_cast<float>(y);
+      held = dt;
+      phase += dt;
+      if (phase >= 1.0) phase -= 1.0;
+    }
+    in.phase = phase;
+    in.heldDt = held;
+    in.fadePos = g;
+  }
+};
+
 }  // namespace
 
 std::size_t OscillatorKind::PoolBytes(const SourceLimits& limits) const noexcept {
@@ -117,6 +159,8 @@ bool OscillatorKind::Init(void* pool, std::size_t bytes, const SourceLimits& lim
   auto* base = static_cast<std::uint8_t*>(pool);
   cap_ = n;
   sampleRate_ = limits.sampleRate == 0u ? 48000.0 : static_cast<double>(limits.sampleRate);
+  fadeFrames_ = static_cast<std::uint32_t>(sampleRate_ * 0.005 + 0.5);  // D-200: 5 ms
+  if (fadeFrames_ == 0u) fadeFrames_ = 1u;
   inst_ = reinterpret_cast<OscInst*>(base);
   freeInst_ = reinterpret_cast<std::uint32_t*>(base + Align64(sizeof(OscInst) * n));
   for (std::uint32_t i = 0; i < n; ++i) {
@@ -180,6 +224,8 @@ void OscillatorKind::Start(const SourceStartRequest* requests, std::uint32_t cou
     in.shape = shape;
     const double f = p->frequencyHz > 0.0f && std::isfinite(p->frequencyHz) ? static_cast<double>(p->frequencyHz) : 0.0;
     in.baseDt = f / sampleRate_;
+    in.fadePos = in.baseDt > 0.0 ? fadeFrames_ : 0u;  // D-200: a voice without frequency starts at gain 0
+    in.heldDt = in.baseDt > kMaxDt ? kMaxDt : in.baseDt;
     in.startPhase = StartPhaseOf(shape);
     in.phase = Wrap(in.startPhase + static_cast<double>(rq.startFrame) * in.baseDt);
     in.duty = std::isfinite(p->duty) ? p->duty : 0.5f;
@@ -250,95 +296,47 @@ void OscillatorKind::RenderBatch(const source::RenderBatch& batch, VoiceRenderSt
     const double dd = static_cast<double>(duty.end) - duty.start;
     const double t0 = static_cast<double>(in.tablePosition) + table.start;
     const double td = static_cast<double>(table.end) - table.start;
-    double phase = in.phase;
     const double baseDt = in.baseDt;
+    const OscLoop L{blockFrames, static_cast<double>(off), p0, pd, baseDt, fadeFrames_};
     switch (in.shape) {
       case static_cast<std::uint32_t>(bf::Waveform::Sine):
-        for (std::uint32_t i = 0; i < n; ++i) {
-          const double a = static_cast<double>(off + i) / blockFrames;
-          double dt = baseDt * (p0 + pd * a);
-          if (!(dt > 0.0)) {  // D-198: no frequency -> silence, the phase waits
-            out[i] = 0.0f;
-            continue;
-          }
-          dt = dt > kMaxDt ? kMaxDt : dt;
-          out[i] = static_cast<float>(std::sin(kTwoPi * phase));
-          phase += dt;
-          if (phase >= 1.0) phase -= 1.0;
-        }
+        L.Run(in, out, n, [](double ph, double, double) { return std::sin(kTwoPi * ph); });
         break;
       case static_cast<std::uint32_t>(bf::Waveform::Saw):
-        for (std::uint32_t i = 0; i < n; ++i) {
-          const double a = static_cast<double>(off + i) / blockFrames;
-          double dt = baseDt * (p0 + pd * a);
-          if (!(dt > 0.0)) {  // D-198: no frequency -> silence, the phase waits
-            out[i] = 0.0f;
-            continue;
-          }
-          dt = dt > kMaxDt ? kMaxDt : dt;
-          // Falls by 2 at the wrap.
-          out[i] = static_cast<float>(2.0 * phase - 1.0 - 2.0 * StepResidual(phase, dt));
-          phase += dt;
-          if (phase >= 1.0) phase -= 1.0;
-        }
+        // Falls by 2 at the wrap.
+        L.Run(in, out, n, [](double ph, double dt, double) { return 2.0 * ph - 1.0 - 2.0 * StepResidual(ph, dt); });
         break;
       case static_cast<std::uint32_t>(bf::Waveform::Square):
-      case static_cast<std::uint32_t>(bf::Waveform::Pulse): {
-        const bool pulse = in.shape == static_cast<std::uint32_t>(bf::Waveform::Pulse);
-        for (std::uint32_t i = 0; i < n; ++i) {
-          const double a = static_cast<double>(off + i) / blockFrames;
-          double dt = baseDt * (p0 + pd * a);
-          if (!(dt > 0.0)) {  // D-198: no frequency -> silence, the phase waits
-            out[i] = 0.0f;
-            continue;
-          }
-          dt = dt > kMaxDt ? kMaxDt : dt;
-          double d = pulse ? d0 + dd * a : 0.5;
-          d = d < 0.001 ? 0.001 : (d > 0.999 ? 0.999 : d);
-          double y = phase < d ? 1.0 : -1.0;
-          y += 2.0 * StepResidual(phase, dt);              // rises by 2 at phase 0
-          y -= 2.0 * StepResidual(Wrap(phase - d), dt);    // falls by 2 at phase d
-          if (pulse) y -= 2.0 * d - 1.0;                   // DC removed
-          out[i] = static_cast<float>(y);
-          phase += dt;
-          if (phase >= 1.0) phase -= 1.0;
-        }
+        L.Run(in, out, n, [](double ph, double dt, double) {
+          double y = ph < 0.5 ? 1.0 : -1.0;
+          y += 2.0 * StepResidual(ph, dt);            // rises by 2 at phase 0
+          y -= 2.0 * StepResidual(Wrap(ph - 0.5), dt);  // falls by 2 at phase 0.5
+          return y;
+        });
         break;
-      }
+      case static_cast<std::uint32_t>(bf::Waveform::Pulse):
+        L.Run(in, out, n, [d0, dd](double ph, double dt, double a) {
+          double d = d0 + dd * a;
+          d = d < 0.001 ? 0.001 : (d > 0.999 ? 0.999 : d);
+          double y = ph < d ? 1.0 : -1.0;
+          y += 2.0 * StepResidual(ph, dt);            // rises by 2 at phase 0
+          y -= 2.0 * StepResidual(Wrap(ph - d), dt);  // falls by 2 at phase d
+          return y - (2.0 * d - 1.0);                 // DC removed
+        });
+        break;
       case static_cast<std::uint32_t>(bf::Waveform::Triangle):
-        for (std::uint32_t i = 0; i < n; ++i) {
-          const double a = static_cast<double>(off + i) / blockFrames;
-          double dt = baseDt * (p0 + pd * a);
-          if (!(dt > 0.0)) {  // D-198: no frequency -> silence, the phase waits
-            out[i] = 0.0f;
-            continue;
-          }
-          dt = dt > kMaxDt ? kMaxDt : dt;
-          // -1 at phase 0 rising to +1 at 0.5: the slope changes by +-8 dt per sample.
-          double y = phase < 0.5 ? 4.0 * phase - 1.0 : 3.0 - 4.0 * phase;
-          y += 8.0 * dt * RampResidual(phase, dt);
-          y -= 8.0 * dt * RampResidual(Wrap(phase - 0.5), dt);
-          out[i] = static_cast<float>(y);
-          phase += dt;
-          if (phase >= 1.0) phase -= 1.0;
-        }
+        // -1 at phase 0 rising to +1 at 0.5: the slope changes by +-8 dt per sample.
+        L.Run(in, out, n, [](double ph, double dt, double) {
+          double y = ph < 0.5 ? 4.0 * ph - 1.0 : 3.0 - 4.0 * ph;
+          y += 8.0 * dt * RampResidual(ph, dt);
+          y -= 8.0 * dt * RampResidual(Wrap(ph - 0.5), dt);
+          return y;
+        });
         break;
       default:  // wavetable
-        for (std::uint32_t i = 0; i < n; ++i) {
-          const double a = static_cast<double>(off + i) / blockFrames;
-          double dt = baseDt * (p0 + pd * a);
-          if (!(dt > 0.0)) {  // D-198: no frequency -> silence, the phase waits
-            out[i] = 0.0f;
-            continue;
-          }
-          dt = dt > kMaxDt ? kMaxDt : dt;
-          out[i] = static_cast<float>(Wavetable(in, phase, t0 + td * a));
-          phase += dt;
-          if (phase >= 1.0) phase -= 1.0;
-        }
+        L.Run(in, out, n, [&in, t0, td](double ph, double, double a) { return Wavetable(in, ph, t0 + td * a); });
         break;
     }
-    in.phase = phase;
     for (std::uint32_t c = 1; c < ch; ++c) std::memcpy(it.out[c] + off, out, sizeof(float) * n);
     it.playhead->frame += n;
     st.framesRendered = n;
@@ -357,6 +355,13 @@ void OscillatorKind::AdvanceVirtual(const AdvanceItem* items, std::uint32_t coun
     double dt = in.baseDt * static_cast<double>(a.pitch > 0.0f && std::isfinite(a.pitch) ? a.pitch : 0.0f);
     dt = dt > kMaxDt ? kMaxDt : dt;  // 0 (and NaN) -> the phase waits (D-198)
     in.phase = Wrap(in.phase + dt * static_cast<double>(a.outputFrames));
+    // D-200: the gain moves as it would have while rendering.
+    if (dt > 0.0) {
+      in.heldDt = dt;
+      in.fadePos = fadeFrames_ - in.fadePos <= a.outputFrames ? fadeFrames_ : in.fadePos + a.outputFrames;
+    } else {
+      in.fadePos = in.fadePos <= a.outputFrames ? 0u : in.fadePos - a.outputFrames;
+    }
     a.playhead->frame += a.outputFrames;
   }
 }
