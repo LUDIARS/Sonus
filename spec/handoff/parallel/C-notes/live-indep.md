@@ -14,11 +14,12 @@
 | `indep_s7_live_preview_test.cpp` | D の性質（6 本） |
 | `indep_s7_live_replay_test.cpp` | E の性質（9 本）。sonus-replay の終了コードのテスト用に不具合報告のフォルダを残す |
 | `indep_s7_live_threads_test.cpp` | F の性質（1 本、TSan / Release で 20 回） |
+| `indep_s7_live_revert_test.cpp` | 項目単位の Revert と読み返し（Session）、プロファイラの CPU の budget と負荷（2 本） |
 | `indep_s7_live_defects_test.cpp` | `Defect_*` 9 本（CTest は 1 本ずつ、実行ファイルそのものは DISABLED） |
 | `indep_s7_live_hang_test.cpp` | 巨大なブロック番号の記録（fork で子プロセスに再生させ、20 秒で打ち切る。POSIX のみ）。`Defect_*` 1 本と基準の 1 本 |
 | `indep_s7_live_exit.cmake` | sonus-replay の終了コードを確かめる CTest の補助 |
 
-CTest の名前: `tool_indep_s7_live_{sync,preview,replay,threads}_test`、`tool_indep_s7_live_Defect_*`（10 本）、`tool_indep_s7_live_cli_{ok,mismatch,broken,missing,usage,no_recording}`、`tool_indep_s7_live_hang_small`。
+CTest の名前: `tool_indep_s7_live_{sync,preview,replay,threads,revert}_test`、`tool_indep_s7_live_Defect_*`（10 本）、`tool_indep_s7_live_cli_{ok,mismatch,broken,missing,usage,no_recording}`、`tool_indep_s7_live_hang_small`。
 
 ## 性質の一覧と結果
 
@@ -73,6 +74,8 @@ CTest の名前: `tool_indep_s7_live_{sync,preview,replay,threads}_test`、`tool
 | E8 | 変異させたレコード列と任意のバイト列の DescribeRecording / Summarize | `DescribeArbitraryBytes` | 通過 |
 | E9 | WAV: RIFF / fmt（float 32、チャンネル、レート）/ data がサンプルそのもの、半端なフレームは落とす、0 チャンネル・0 レート・書けない場所は false | `WavFileIsExact` | 通過 |
 | E10 | sonus-replay: 一致 0、期待と不一致 1、壊れた報告 2、無いフォルダ 2、引数不足 2、無い記録 2 | `tool_indep_s7_live_cli_*` | 通過 |
+| — | Session::RevertOnly でゲームの上書きが消える（ReadCell の kCellOverridden が 0、値はバンクの値）、2 度目は false、Undo で上書き中に戻る、ReadBack で全セルの read* が埋まる | `IndepS7LiveRevert.RevertOnlyForgetsTheOverrideAndUndoSetsItAgain` | 通過 |
+| — | D-174: BlockTiming / BlockDetail の budget = 1e6 × block / rate × load_target / 100、load = (logic + render) / budget、BlockDetail は 1.1 で利用可、取りこぼし 0、メモリの合計 > 0 | `IndepS7LiveRevert.ProfilerCpuBudgetAndLoad` | 通過 |
 | F1 / F2 | 実時間（Silent）のエンジン＋ライブリンク＋ホットリロード＋切断の中で UI スレッドが編集・Undo・試聴・移動・全停止・読み出し、別スレッドが RecentOutput / connector()、別スレッドが再生を繰り返す。最後に Live、出力は有限、再生は毎回同じ digest | `IndepS7LiveThreads.OwnerEditsWhileAudioReaderAndReplayRun` | 通過（TSan / Release の 20 回は下） |
 
 ## 欠陥の一覧
@@ -117,8 +120,8 @@ CTest の名前: `tool_indep_s7_live_{sync,preview,replay,threads}_test`、`tool
 7. 間引き（33 ms、最後の状態は次の Tick で必ず）: **賛成**。FlushNow なしで最後の値が届くことを確かめた。
 8. ミキサーとの優先（監視の値が勝つ）: **賛成**。離したときに自動で送らないのは**反対**（G8）。
 9. 予備容量をツールで数える: 暫定として**賛成**（プロトコルに読む手段が無い）。ただし文書の Undo での Remove が返らない（欠陥 3）、再接続（revertOnDisconnect）・ホットリロードで実際の使用量と合わなくなる。新しいセッションとリロードで structs_ を見直すこと、livelink への要望（使用量のメッセージ）を推奨。
-10. 項目単位の Revert: **賛成**（独立テストでは深く試していない。未検証に記す）。
-11. プロファイラの購読: **賛成**（独立テストでは試していない）。
+10. 項目単位の Revert: **賛成**（RevertOnly → RevertValue で上書きが消え、Undo は SetValue で上書き中に戻ることを確かめた）。
+11. プロファイラの購読: **賛成**（budget と負荷の式だけ確かめた）。
 12. 試聴（ゲームでは移動・リスナーなし、遷移はブロックの粒度）: 方針は**賛成**。ブロックの粒度の丸め方（要求を含むブロックの頭 = 早める）は**反対**: 次のブロックの頭（遅らせる）か、モデル側で同じ丸めを使う（G4、欠陥 2 本）。時刻 0 の要求は Play の次のブロックに送る。
 13. 再生の Config とブロック番号: Config の選び方は**賛成**。ブロック番号をそろえるために最初のブロックまで描く方式は、上限なしだと巨大な番号で終わらない（欠陥、G6）。上限を付ける。
 14. 不具合報告の形（フォルダ、key = value）: 形は**賛成**。notes と比較の文が往復しない（欠陥）ので `notes.txt`・`comparison.txt` を分けるか key に入れる。Config の数値の解析は範囲を確かめる（欠陥）。
@@ -153,7 +156,7 @@ CTest の名前: `tool_indep_s7_live_{sync,preview,replay,threads}_test`、`tool
 
 ## 未検証の箇所
 
-- プロファイラの残りのモデル（ProfilerStreams）、項目単位の Revert と読み返し（CellSync / MixerModel::RevertOnly / Session::RevertItem）は独立テストを足していない（時間の都合。実装担当のテストだけ）。
+- ProfilerStreams はマスク・CPU の budget と負荷だけ（ストリーム、LOD、イベントログの絞り込み、取りこぼしが 0 でない場合は実装担当のテストだけ）。項目単位の Revert は RevertOnly だけ（RevertItem、1.0 のゲームでの SetValue への切り替えは実装担当のテストだけ）。
 - 未対応（PHYS / XPCH）を文書の編集から一覧に出す経路（B13）。スナップショット・ダッキングの出力のレベル。
 - 実デバイスのプレビュー出力と OutputPlayer（コンテナにデバイスが無い）。TCP の本物のゲーム。
 - 言語バンク、依存のあるバンクのホットリロード。予備容量を超える（OUT_OF_BUDGET）StructEdit。
