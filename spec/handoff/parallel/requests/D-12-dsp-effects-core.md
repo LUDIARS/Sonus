@@ -61,3 +61,8 @@ for (std::uint32_t i = 0; i < info.paramCount; ++i) {
 
 （ParamEq の Type などは今、長い呼び出しの途中で中間の型を取りうる。音は壊れないが、意図しない型のフィルタが一瞬掛かる。）
 D のテスト `Convolution.LongCallUsesTheEndSlot` がこの性質を見ている。
+
+## 4. MinGW で共有テストの整列確保を使えるようにする
+
+`dsp/test/dsp_test_util.hpp:31` で使う `std::aligned_alloc` は MinGW-w64 の標準ライブラリにはない。
+共有ヘルパーの所有者に、Windows では `_aligned_malloc` と `_aligned_free` を対にし、他の環境の整列・解放の契約を保つ実装を依頼する。
