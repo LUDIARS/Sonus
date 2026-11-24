@@ -346,9 +346,18 @@ SND_TEST(SourceOscillator, ZeroOrNonFiniteFrequencyIsSilenceAndThePhaseWaits) {
     Driver::Mod bad;
     bad.duty = snd::Ramp{std::nanf(""), std::nanf("")};
     d.Render(v, 1024, bad);
-    for (std::size_t i = 0; i < 768; ++i) SND_CHECK_EQ(v.out[0][i], 0.0f);
+    // D-200: the held value fades out over 240 samples (5 ms), then silence; on the way back
+    // the waveform fades in over 240 samples and is then the uninterrupted one.
+    for (std::size_t i = 0; i < 240; ++i) {
+      SND_CHECK(std::fabs(v.out[0][i]) <= std::fabs(ref[0]) * float(240 - i) / 240.0f + 1e-6f);
+    }
+    for (std::size_t i = 240; i < 768; ++i) SND_CHECK_EQ(v.out[0][i], 0.0f);
     for (std::size_t i = 0; i < 1024; ++i) {
-      SND_CHECK_MSG(v.out[0][768 + i] == ref[i], "wave %u at %u", unsigned(w), unsigned(i));
+      if (i < 240) {
+        SND_CHECK_NEAR(v.out[0][768 + i], ref[i] * double(i + 1) / 240.0, 1e-6);
+      } else {
+        SND_CHECK_MSG(v.out[0][768 + i] == ref[i], "wave %u at %u", unsigned(w), unsigned(i));
+      }
     }
   }
 }
@@ -380,4 +389,50 @@ SND_TEST(SourceOscillator, WavetableTablesStartAtTheLoopStart) {
   m.table = snd::Ramp{1.0f, 1.0f};
   const std::vector<float> x1 = Render(p, 9600, m);
   SND_CHECK_NEAR(Tone(x1, 0, 9600, 800.0), 1.0, 0.01);
+}
+
+// D-200: the effective frequency going to 0 and back fades linearly over 5 ms (240
+// samples at 48 kHz) instead of jumping; the phase waits meanwhile. The gain is one state
+// per voice (a fade may turn around) and the result does not depend on the block size.
+SND_TEST(SourceOscillator, ZeroFrequencyFadesOutAndBackIn) {
+  const src::OscillatorParams p = Osc(bf::Waveform::Sine, 1000.0f);
+  auto run = [&](std::uint32_t block) {
+    Driver d(snd::SourceKind::Oscillator, Driver::Opt{});
+    Driver::Voice v;
+    if (!d.Start(v, &p, 1)) return std::vector<float>{};
+    Driver::Mod zero;
+    zero.pitch = snd::Ramp{0.0f, 0.0f};
+    // 12 frames at pitch 1 (phase 12 dt), 100 at 0 (fade out 240 -> 140), 1024 at 1 (back up).
+    d.Render(v, 12, {}, block);
+    d.Render(v, 100, zero, block);
+    d.Render(v, 1024, {}, block);
+    return v.out[0];
+  };
+  const std::vector<float> a = run(256), b = run(64), c = run(1024);
+  SND_REQUIRE(a.size() == 1136u);
+  SND_CHECK(a == b);
+  SND_CHECK(a == c);
+  const double dt = 1000.0 / kRate;
+  for (std::size_t i = 0; i < 12; ++i) SND_CHECK_NEAR(a[i], std::sin(2 * kPi * dt * double(i)), 1e-6);
+  // Fade out: the held phase (12 dt), gain (239 - i) / 240.
+  for (std::size_t i = 0; i < 100; ++i) {
+    SND_CHECK_NEAR(a[12 + i], std::sin(2 * kPi * dt * 12.0) * double(239 - i) / 240.0, 1e-6);
+  }
+  // Back: from gain 140 / 240 up by 1 / 240 per sample, the phase going on from 12 dt.
+  for (std::size_t i = 0; i < 1024; ++i) {
+    const double g = std::fmin(1.0, double(141 + i) / 240.0);
+    SND_CHECK_NEAR(a[112 + i], std::sin(2 * kPi * dt * double(12 + i)) * g, 1e-6);
+  }
+  // A voice whose frequency is 0 at its start starts at gain 0 (silence throughout).
+  const std::vector<float> z = Render(Osc(bf::Waveform::Square, 0.0f), 512);
+  for (float x : z) SND_CHECK_EQ(x, 0.0f);
+  // The virtual advance moves the gain the same way.
+  Driver d(snd::SourceKind::Oscillator, Driver::Opt{});
+  Driver::Voice v;
+  SND_REQUIRE(d.Start(v, &p, 1));
+  d.Advance(v, 100, 0.0f);  // gain 240 -> 140, phase held at 0
+  d.Render(v, 10);
+  for (std::size_t i = 0; i < 10; ++i) {
+    SND_CHECK_NEAR(v.out[0][i], std::sin(2 * kPi * dt * double(i)) * double(141 + i) / 240.0, 1e-6);
+  }
 }
