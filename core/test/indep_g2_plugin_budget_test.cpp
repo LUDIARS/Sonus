@@ -45,7 +45,7 @@ void CheckBudget(bool includeFirstStage) {
   SND_REQUIRE_EQ(fx.created, SND_OK);
   indep::Bank bank;
   bank.Event("dry", 200.0f);
-  bank.Event("wet", 400.0f);
+  bank.Event("wet", 300.0f);
   const auto loaded = fx.Load("plugin_budget", bank.Build("plugin_budget"));
   SND_REQUIRE_EQ(fx.sys->GetBankState(loaded), SND_BANK_STATE_LOADED);
   if (includeFirstStage) {
@@ -61,16 +61,19 @@ void CheckBudget(bool includeFirstStage) {
   for (float sample : fx.out) SND_CHECK_NEAR(sample, 0.2f * indep::kCenter, 1e-6);
   SND_CHECK_EQ(tooLarge.inits, 0u);
   SND_CHECK_EQ(tooLarge.processes, 0u);
+  SND_CHECK_EQ(fits.inits, 0u);
   SND_CHECK_EQ(fits.processes, 0u);
   SND_REQUIRE_EQ(fx.errors.size(), 1u);
   SND_CHECK_EQ(fx.errors.front().code, SND_ERR_LIMIT_REACHED);
   SND_CHECK_EQ(fx.errors.front().detail, SND_END_DETAIL_VOICE_EFFECT_SLOTS);
+  SND_CHECK_EQ(fx.errors.front().object, rejected.value);
 
   // Leave the dry voice playing while the second voice takes the only slot at exact fit.
   const auto accepted = fx.sys->Play(wetEvent, indep::NoEmitter(), nullptr);
   SND_REQUIRE(accepted.value != 0);
   fx.Steps(3);
-  for (float sample : fx.out) SND_CHECK_NEAR(sample, (0.2f + 0.4f * 0.5f) * indep::kCenter, 1e-6);
+  for (float sample : fx.out) SND_CHECK_NEAR(sample, (0.2f + 0.3f * 0.5f) * indep::kCenter, 1e-6);
+  SND_CHECK_EQ(fits.inits, 1u);
   SND_CHECK(fits.processes > 0);
   SND_CHECK_EQ(fx.errors.size(), 1u);
 }
