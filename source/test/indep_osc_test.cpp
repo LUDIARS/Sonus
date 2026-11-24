@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "indep_src1_util.hpp"
+#include "indep_src2_util.hpp"
 #include "snd/format/bank_format.hpp"
 #include "snd/test/test.hpp"
 #include "synth_driver.hpp"
@@ -779,4 +780,65 @@ SND_TEST(IndepOsc, PartialFadesAreBitExactAcrossBlockSizes) {
     SND_CHECK_NEAR(y[i], gain / 240.0 * std::sin(kTwoPi * phase / 128), 1e-6);
     if (moving) ++phase;
   }
+}
+
+SND_TEST(IndepOsc, StartsAtFirstEffectiveFrequency) {
+  // Pulse(0.25) has a nonzero PolyBLEP value at its start, so premature sound is visible.
+  src::OscillatorParams p{};
+  p.waveform = 4;
+  p.duty = 0.25f;
+  p.frequencyHz = 375;
+  for (bool virtualStart : {false, true}) {
+    for (float first : {0.f, -1.f, float(NAN), float(INFINITY)}) {
+      Driver d(snd::SourceKind::Oscillator, {});
+      Driver::Voice actual, full;
+      SND_REQUIRE(d.Start(actual, &p, 1));
+      SND_REQUIRE(d.Start(full, &p, 1));
+      src::RenderItem it{};
+      it.pitch = {1, 1};
+      indep2::Item(d, actual, 0, it);  // an empty block cannot choose the starting gain
+      d.Advance(actual, 0, 1);
+      if (virtualStart) {
+        d.Advance(actual, 7, first);
+      } else {
+        it.pitch = {first, first};
+        SND_CHECK(indep2::Item(d, actual, 7, it) == std::vector<float>(7, 0));
+      }
+      it.pitch = {1, 1};
+      auto voice = indep2::Item(d, actual, 260, it);
+      const auto reference = indep2::Item(d, full, 260, it);
+      for (unsigned i = 0; i < voice.size(); ++i) {
+        const double gain = std::min(1.0, (i + 1) / 240.0);
+        SND_REQUIRE(std::abs(voice[i] - reference[i] * gain) <= 1.2e-7);
+      }
+    }
+  }
+}
+
+SND_TEST(IndepOsc, FirstGainUsesTheFirstRequestedFrameOfTheBlock) {
+  Driver::Opt opt;
+  opt.sampleRate = 44100;
+  Driver d(snd::SourceKind::Oscillator, opt);
+  std::vector<float> dc(32, 0.5f);
+  auto a = indep2::Pcm(dc,opt.sampleRate);
+  auto p = Osc(bf::Waveform::Sine, 375);
+  p.wavetable = &a;
+  Driver::Voice v;
+  for (unsigned off : {31u,32u,33u}) {
+    SND_REQUIRE(d.Start(v,&p,1));
+    Driver::Mod m;
+    m.pitch = {-1,1};
+    d.Block({&v},m,64-off,off,64);
+    const unsigned duration = 221; // round(44100 * 0.005)
+    for (unsigned at = off; at < 64; ++at) {
+      const double gain = off>32 ? 1 : std::max(0,int(at)-32)/double(duration);
+      SND_CHECK_NEAR(v.out[0][at-off], 0.5*gain, 1e-7);
+    }
+    d.Release(v);
+  }
+  // A positive first virtual interval chooses full gain, even before the first render.
+  SND_REQUIRE(d.Start(v,&p,1));
+  d.Advance(v,1,2);
+  d.Render(v,1);
+  SND_CHECK_EQ(v.out[0][0],0.5f);
 }
