@@ -100,7 +100,7 @@ void ComputeCfg(const snd_config& c, const CoreLimits& lim, Cfg& g) noexcept {
   g.maxChunks = (g.realTotal + g.voicesPerChunk - 1u) / g.voicesPerChunk;
   g.busCap = lim.maxBuses + c.dev_reserve.buses;
   // Dry path plus current sends and any old sends being ramped out this block.
-  g.segmentsPerChunk = std::min(g.busCap + 1u, g.voicesPerChunk * (1u + 2u * kMaxAuxSends));
+  g.segmentsPerChunk = 1u + std::min(g.busCap, g.voicesPerChunk * (1u + 2u * kMaxAuxSends) - 1u);
   g.catCap = lim.maxCategories + 1u;
   g.snapCap = lim.maxSnapshots;
   g.groupCap = lim.maxLimitGroups;
@@ -286,9 +286,11 @@ bool InitRenderSet(Impl& im, RenderSet& s) noexcept {
   s.items = Arr<source::RenderItem>(im, g.realTotal, MemTag::Tables);
   s.inputs = Arr<ItemInput>(im, g.realTotal, MemTag::Tables);
   s.chunks = Arr<ChunkInfo>(im, g.maxChunks, MemTag::Tables);
-  s.segs = Arr<ChunkSeg>(im, std::size_t{g.maxChunks} * g.segmentsPerChunk, MemTag::Tables);
-  s.accum = Arr<float>(im, std::size_t{g.maxChunks} * g.segmentsPerChunk * kMaxChannels * g.blockFrames,
-                       MemTag::Tables);
+  std::size_t segments, samples;
+  if (!base::CheckedMul(g.maxChunks, g.segmentsPerChunk, &segments) ||
+      !base::CheckedMul(segments, kMaxChannels * g.blockFrames, &samples)) return false;
+  s.segs = Arr<ChunkSeg>(im, segments, MemTag::Tables);
+  s.accum = Arr<float>(im, samples, MemTag::Tables);
   return s.items != nullptr && s.inputs != nullptr && s.chunks != nullptr && s.segs != nullptr &&
          s.accum != nullptr;
 }
@@ -477,7 +479,9 @@ snd_result CreateImpl(Impl& im) noexcept {
   // Render.
   RenderPriv& rd = im.rd;
   rd.paths = Arr<PathHistory>(im, g.realTotal, MemTag::Tables);
-  rd.sendInput = Arr<float>(im, std::size_t{g.realTotal} * g.maxVoiceChannels * g.blockFrames, MemTag::Tables);
+  std::size_t sendSamples;
+  if (!base::CheckedMul(g.realTotal, g.maxVoiceChannels * g.blockFrames, &sendSamples)) return SND_ERR_OUT_OF_BUDGET;
+  rd.sendInput = Arr<float>(im, sendSamples, MemTag::Tables);
   if (!rd.paths || !rd.sendInput) return SND_ERR_OUT_OF_BUDGET;
   rd.resamplerPool = Arr<std::uint8_t>(im, im.cfg.resamplerSlotBytes * g.realTotal, MemTag::Tables);
   rd.lastAssign = Arr<std::uint32_t>(im, g.realTotal, MemTag::Tables);
