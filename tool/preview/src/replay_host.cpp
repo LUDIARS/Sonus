@@ -149,6 +149,15 @@ bool Replay(const Recording& rec, const std::vector<ReportBank>& banks, const Re
     ll::Replayer* r;
     ~Guard() { ll::Replayer::Destroy(r); }
   } guard{r};
+  // D-185: bounded work for any input (a corrupt or hostile file can carry huge block numbers).
+  const std::uint32_t bf = replayCfg.block_size == 0u ? 256u : replayCfg.block_size;
+  const std::uint64_t hour = std::uint64_t{3600} * replayCfg.sample_rate / bf;
+  const std::uint64_t maxBlocks = o.maxBlocks != 0u ? o.maxBlocks : hour;
+  const std::uint64_t maxAlign = o.maxAlignBlocks != 0u ? o.maxAlignBlocks : hour;
+  if (r->Blocks() > maxBlocks) {
+    return fail(SND_ERR_CORRUPT, "the recording spans " + std::to_string(r->Blocks()) + " blocks, more than the limit " +
+                                     std::to_string(maxBlocks));
+  }
   RuntimeHost host;
   RuntimeHostDesc hd;
   hd.config = replayCfg;
@@ -164,8 +173,9 @@ bool Replay(const Recording& rec, const std::vector<ReportBank>& banks, const Re
   const std::uint64_t lead = info.leadBlocks;
   const std::uint32_t ch = host.Channels();
   std::vector<float> block(std::size_t{host.BlockFrames()} * ch);
-  out->blockNumbersKept = host.BlocksRendered() + lead <= info.firstBlock;
-  while (host.BlocksRendered() + lead < info.firstBlock) host.Step(block.data());
+  out->blockNumbersKept = host.BlocksRendered() + lead <= info.firstBlock &&
+                          info.firstBlock - (host.BlocksRendered() + lead) <= maxAlign;
+  while (out->blockNumbersKept && host.BlocksRendered() + lead < info.firstBlock) host.Step(block.data());
   r->Start();
   ll::OutputDigest digest;
   const std::uint64_t total = r->Blocks() + o.extraBlocks;
