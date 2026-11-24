@@ -197,6 +197,68 @@ SND_TEST(IndepG1Spatial, WeightedListenersSwapChannelsAndSplitIsSymmetric) {
   SND_CHECK(std::hypot(split.first, split.second) <= 0.101);
 }
 
+SND_TEST(IndepG1Spatial, BlendCutoffAtMidpointMatchesGeometricMean) {
+  auto signal = [](float blend, float cutoff) {
+    auto b = Signal(false, 6000);
+    b.events[0].curveVolume = Curve(b, bf::CurveTarget::Volume, 0, 0);
+    b.events[0].curveLowpass = Curve(b, bf::CurveTarget::Lowpass, cutoff, cutoff);
+    b.events[0].curveBlend = Curve(b, bf::CurveTarget::Blend3D, blend, blend);
+    Scene s(b);
+    s.Start();
+    s.h.Steps(16);
+    return s.Level();
+  };
+  const double open = signal(0, 800);
+  const double closed = signal(1, 800);
+  const double middle = signal(0.5f, 800);
+  SND_REQUIRE(open > 0.03);
+  SND_CHECK(closed < middle && middle < open);
+  SND_CHECK_NEAR(middle, signal(1, 4000), 0.0002);
+}
+
+SND_TEST(IndepG1Spatial, CollocatedListenersPreserveSingleListenerGain) {
+  for (auto mode : {SND_LISTENER_NEAREST, SND_LISTENER_WEIGHTED, SND_LISTENER_SPLIT}) {
+    auto cfg = Config();
+    cfg.listener_mode = mode;
+    Scene s(Signal(), cfg);
+    s.Position({0.5f, 0, 2});
+    s.Start();
+    const double left = s.Level(0), right = s.Level(1);
+    SND_REQUIRE(left > 0.01 && right > 0.01);
+    auto listener = Listener();
+    SND_CHECK_EQ(s.h.sys->SetListener(1, &listener), SND_OK);
+    s.h.Steps(8);
+    SND_CHECK_NEAR(s.Level(0), left, 1e-5);
+    SND_CHECK_NEAR(s.Level(1), right, 1e-5);
+  }
+}
+
+SND_TEST(IndepG1Spatial, DominantListenerSelectsDopplerRatio) {
+  for (auto mode : {SND_LISTENER_WEIGHTED, SND_LISTENER_SPLIT}) {
+    auto cfg = Config();
+    cfg.listener_mode = mode;
+    Scene s(Signal(false, 600, 48000), cfg);
+    const snd_vec3 position{0, 0, 10};
+    s.Position(position);
+    auto near = Listener({0, 0, 9});
+    auto far = Listener({0, 0, 1});
+    near.velocity.z = 85.75f;
+    far.velocity.z = -85.75f;
+    SND_CHECK_EQ(s.h.sys->SetListener(0, &far), SND_OK);
+    SND_CHECK_EQ(s.h.sys->SetListener(1, &near), SND_OK);
+    s.Play();
+    s.h.Steps(24);
+    SND_CHECK_NEAR(Frequency(s.h.all), 750, 3);
+    near.position.z = 0;
+    far.position.z = 9;
+    SND_CHECK_EQ(s.h.sys->SetListener(0, &far), SND_OK);
+    SND_CHECK_EQ(s.h.sys->SetListener(1, &near), SND_OK);
+    s.h.Clear();
+    s.h.Steps(24);
+    SND_CHECK_NEAR(Frequency(s.h.all), 450, 3);
+  }
+}
+
 SND_TEST(IndepG1Spatial, LineRectangleAndBoxUseNearestPoint) {
   for (const auto kind : {SND_EMITTER_SHAPE_LINE, SND_EMITTER_SHAPE_RECTANGLE, SND_EMITTER_SHAPE_BOX}) {
     Scene s(Signal());
