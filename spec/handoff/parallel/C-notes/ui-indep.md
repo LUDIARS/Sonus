@@ -195,6 +195,11 @@
 | --- | --- | --- | --- |
 | 9 ＋ ASan / UBSan | 2e0a455（Pick の欠陥のテストと画面のテストの直しは 05a7e87 で、その 2 本を再実行） | tool のテストの実行ファイルと sonus-tool / sonus-replay だけをビルドし `ctest -R tool`（135 件。`-R tool` に当たる buildtool のテスト 9 件はビルドしていないので Not Run） | 組 U の独立テストで ASan が heap-use-after-free を報告（`App::Pick`、欠陥 5）。テストの側は値を写して渡すようにし、欠陥は `Defect_Pick…` に分けた。それ以外の tool のテストは全部通過（実装担当のテストも）、UBSan の報告なし。失敗は `Defect_*` だけ |
 | 9: Tela 入り、gcc Debug | 3c601eb（テストの中身は 2e0a455 と同じ。その後は書式の変更だけ） | 全部（350、Skipped 1・Disabled 3 を除く） | 346 通過、失敗 4 = 組 U の `Defect_*` 4 件だけ（意図どおり）。警告 0。以前の実装担当の回で失敗していた livelink の独立テスト 2 本は通過 |
+| 9 ＋ TSan | 05a7e87 | `tool_indep_s7_ui_threads_test` を -j1 で `--repeat until-fail:20`、実装担当と前の独立テストの並行性のテスト（`tool_ui_editor_concurrency`・`tool_ui_concurrency`・`tool_indep_concurrency`）を 1 回ずつ（必要なターゲットだけビルド） | 全部通過、ThreadSanitizer の報告なし。警告 0 |
+| 9 ＋ Release | 50bd934 | tool のテストのターゲットだけビルドし `ctest -R ^tool`（124 件、Disabled 2）、`tool_indep_s7_ui_threads_test` を -j1 で 20 回 | 119 通過、失敗 5 = `Defect_*` 5 件だけ（Pick の欠陥も ASan なしで失敗する）。繰り返し 20 回は通過。警告 0 |
+| 9 ＋ clang | 50bd934 | tool のテストのターゲットだけビルドし `ctest -R ^tool`（124 件） | 119 通過、失敗 5 = `Defect_*` 5 件だけ。警告 0 |
+| 8: 核だけ（Tela なし） | 50bd934 | tool のテストのターゲットだけビルドし `ctest -R ^tool`（40 件、Disabled 1） | 全部通過。組 U の独立テストは Tela 入りの構成だけに登録されるので 0 件（意図どおり） |
+| MinGW の構文検査 | 2e0a455 以降 | `x86_64-w64-mingw32-g++ -std=c++20 -fsyntax-only -Werror -Wall -Wextra -fno-exceptions -fno-rtti`、Tela のインクルードパス、新しいテスト 7 本（fixture を含む） | 全部通過（最初は `%zu` で `-Wformat` の誤り、2e0a455 で直した。05a7e87 で足した Pick のテストも同じ書き方で検査し直した） |
 
 ## 未検証の箇所
 
@@ -202,3 +207,6 @@
 - ライブで上書きが消えたあとのゲームとツールのずれ（仕様の穴 3）。
 - 文字の描画（Pictor）。ヘッドレスは文字の帯だけなので、狭い欄（欠陥 4）で文字が切れる様子は画素では見ていない（幅だけ）。
 - 画素のテストは箱・円・点の位置だけ。色の区分（選択、ループの区間、フェード、重なり）は見ていない。
+
+回していない構成: 1〜7（ツールなし。組 U の独立テストは `tool/test` の Tela 入りの部分だけなので入らない）、9 の全体（全モジュール）は gcc Debug だけ
+（ほかの 9 の派生は tool のターゲットだけをビルドした）。
