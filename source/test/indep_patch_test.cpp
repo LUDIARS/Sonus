@@ -112,7 +112,7 @@ SND_TEST(IndepPatch, InvalidByteSlicesAreRejectedByValidatorAndStart) {
         break;
       }
       default:
-        blob[36 + state % 16] = static_cast<std::uint8_t>(1 + (state % 255));
+        blob[36 + state % 16] = static_cast<std::uint8_t>(1 + (state % 127));
         break;
     }
     SND_REQUIRE(rejected(blob));
