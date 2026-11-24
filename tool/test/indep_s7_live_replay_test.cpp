@@ -377,6 +377,9 @@ SND_TEST(IndepS7LiveReplay, BugReportRoundTripReplays) {
     if (!bad.expectation.decisions.empty()) bad.expectation.decisions[0].id ^= 1u;
     bad.expectation.digest ^= 1u;
     SND_CHECK(WriteBugReport(std::string(where) + "/mismatch", bad, &err));
+    BugReport fails = rep;  // banks that do not load: the replay itself fails (exit 2, D-185)
+    for (ReportBank& bk : fails.banks) std::fill(bk.bytes.begin(), bk.bytes.end(), std::uint8_t{0x5A});
+    SND_CHECK(WriteBugReport(std::string(where) + "/replayfail", fails, &err));
     fs::create_directories(std::string(where) + "/broken");
     WriteFile(std::string(where) + "/broken/report.txt", "format = sonus-bug-report 1\nbanks = 1\n");
   }

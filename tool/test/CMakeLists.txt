@@ -41,7 +41,8 @@ set_tests_properties(tool_replay_cli_bad_input PROPERTIES WILL_FAIL TRUE)
 # Independent tests of group P (tool/test/indep_s7_live_properties.md, written from the specs
 # before reading the code). The Defect_* tests are in their own executable, one CTest test each;
 # they fail on purpose (each documents a defect).
-foreach(_t indep_s7_live_sync_test indep_s7_live_preview_test indep_s7_live_replay_test indep_s7_live_threads_test indep_s7_live_revert_test)
+foreach(_t indep_s7_live_sync_test indep_s7_live_preview_test indep_s7_live_replay_test indep_s7_live_threads_test indep_s7_live_revert_test
+        indep_s7_live_recheck_test)
   _snd_tool_test(${_t} "${_tool_live_link}")
 endforeach()
 _snd_tool_test(indep_s7_live_defects_test "${_tool_live_link}")
@@ -67,8 +68,9 @@ _snd_indep_live_cli(ok 0 ${_indep_live_reports}/ok)
 _snd_indep_live_cli(mismatch 1 ${_indep_live_reports}/mismatch)
 _snd_indep_live_cli(broken 2 ${_indep_live_reports}/broken)
 _snd_indep_live_cli(missing 2 ${_indep_live_reports}/missing)
+_snd_indep_live_cli(replayfail 2 ${_indep_live_reports}/replayfail)
 set_tests_properties(tool_indep_s7_live_cli_ok tool_indep_s7_live_cli_mismatch tool_indep_s7_live_cli_broken
-                     tool_indep_s7_live_cli_missing PROPERTIES FIXTURES_REQUIRED tool_indep_live_reports)
+                     tool_indep_s7_live_cli_missing tool_indep_s7_live_cli_replayfail PROPERTIES FIXTURES_REQUIRED tool_indep_live_reports)
 _snd_indep_live_cli(usage 2 --recording)
 _snd_indep_live_cli(no_recording 2 --recording ${_indep_live_reports}/none.snrec --banks ${_indep_live_reports})
 # A recording with absurd block numbers must not replay for ever (POSIX: the test forks).

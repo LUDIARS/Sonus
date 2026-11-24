@@ -295,11 +295,9 @@ SND_TEST(IndepS7Live, StructuralEditsTakeTheReserveAndUndoGivesItBack) {
   SND_CHECK(!r.sync->UndoStructEdit(99));  // out of range
 }
 
-// Records today's behaviour (a spec gap, notes): an added bus always moves the master bus's row
-// (BUSS rows are children first), so events on the master change (EVNT.bus) and the edit is not
-// "buses only": it goes by reload even with a structural editor in core; StructEdit AddBus is
-// never chosen for this project.
-SND_TEST(IndepS7Live, Record_AddedBusGoesByReloadEvenWithAnEditor) {
+// D-183 (G3): an added bus moves the master bus's row (BUSS rows are children first), so events
+// on the master change: it goes by reload even with a structural editor in core.
+SND_TEST(IndepS7Live, AddedBusGoesByReloadEvenWithAnEditor) {
   AcceptAll editor;
   preview::PreviewEngineDesc ed;
   ed.structEditor = &editor;
@@ -310,15 +308,16 @@ SND_TEST(IndepS7Live, Record_AddedBusGoesByReloadEvenWithAnEditor) {
   const json::Value bus = Json("{\"bank\": \"Main\", \"parent\": \"Master\"}");
   SND_REQUIRE(!r.doc.Create("bus", "Zed", &bus).empty());
   SND_REQUIRE(r.Settle());
-  std::printf("record: AddBus: struct edits %u, editor applied %u, reloads %u\n",
-              static_cast<unsigned>(r.sync->structEdits().size()), editor.applied, static_cast<unsigned>(r.sync->reloads().size()));
+  SND_CHECK_EQ(r.sync->structEdits().size(), 0u);
+  SND_CHECK_EQ(editor.applied, 0u);
+  SND_REQUIRE(!r.sync->reloads().empty());
+  SND_CHECK(r.sync->reloads().back().phase == ll::ReloadPhase::Done);
   SND_CHECK(r.sync->problems().empty());
-  // The new bus is in the game either way.
-  bool zed = false;
+  std::uint64_t main = 0;
   for (const ll::BankEntry& e : r.GameBanks()) {
-    if (e.bankId == snd::HashId("Main")) zed = e.contentHash == BuildDocument(r.doc).FindBank("Main")->contentHash || editor.applied == 1u;
+    if (e.bankId == snd::HashId("Main")) main = e.contentHash;
   }
-  SND_CHECK(zed);
+  SND_CHECK_EQ(main, BuildDocument(r.doc).FindBank("Main")->contentHash);
 }
 
 // C1: edits while a reload runs are kept, in order (the last value wins), in both banks.
@@ -596,9 +595,9 @@ SND_TEST(IndepS7Live, RefusedValueIsAProblemWithItsEdit) {
   conn.Close();
 }
 
-// Records today's behaviour (spec gap, notes, 案 3): the answer to a mismatch is remembered for
-// the reconnect of the same LiveSync (the user is not asked again).
-SND_TEST(IndepS7Live, Record_MismatchAnswerIsRememberedOnReconnect) {
+// D-182: the answer to a mismatch is remembered for a reconnect to the same game (same build hash
+// and bank list): not asked again.
+SND_TEST(IndepS7Live, MismatchAnswerIsRememberedForTheSameGame) {
   Rig r({}, Options(LiveDecision::Ask), [](ProjectDocument& g) { g.SetNumber(SfxG(), "volumeDb", -7.0); });
   SND_REQUIRE(r.ok);
   SND_REQUIRE(r.Connect());
@@ -611,16 +610,16 @@ SND_TEST(IndepS7Live, Record_MismatchAnswerIsRememberedOnReconnect) {
   r.Run([&] {
     askedAgain = askedAgain || r.sync->pending();
     return r.sync->phase() == LivePhase::Live;
-  }, 5000);
-  std::printf("record: after a reconnect the mismatch was %s\n", askedAgain ? "asked again" : "answered as before");
-  SND_CHECK(r.sync->phase() == LivePhase::Live || askedAgain);
+  }, 10000);
+  SND_CHECK(!askedAgain);
+  SND_CHECK(r.sync->phase() == LivePhase::Live);
   SND_CHECK_EQ(r.GameF32(snd::HashId("Sfx"), bf::chunk::BUSS, bf::col::BUSS_volumeDb), -1.0f);
 }
 
-// Records today's behaviour (spec gap, notes): an effect added live by StructEdit (an editor in
-// core that changes nothing, C-01) and then a parameter edit of that effect: the SetValue targets
-// a cell the game's tables do not have.
-SND_TEST(IndepS7Live, Record_ValueEditOfALiveAddedEffect) {
+// D-183 (G7): an effect added live by StructEdit (an editor in core that changes nothing, C-01)
+// and then a parameter edit of that effect: not a NOT_FOUND problem; it needs a hot reload, which
+// brings the game to the document's build.
+SND_TEST(IndepS7Live, ValueEditOfALiveAddedEffectGoesByReload) {
   AcceptAll editor;
   preview::PreviewEngineDesc ed;
   ed.structEditor = &editor;
@@ -633,13 +632,20 @@ SND_TEST(IndepS7Live, Record_ValueEditOfALiveAddedEffect) {
   SND_REQUIRE(r.Settle());
   SND_REQUIRE_EQ(editor.applied, 1u);
   SND_REQUIRE(r.doc.SetNumber(AmbG(), "effects[0].params[0]", 20.0));
-  r.Settle();
+  SND_REQUIRE(r.Settle());
   r.Frames(10);
   const LiveItem* it = r.sync->Find(AmbG(), "effects[#].params[#]");
   std::printf("record: param edit of a live-added effect: %u problems, %u reloads, item %s\n",
               static_cast<unsigned>(r.sync->problems().size()), static_cast<unsigned>(r.sync->reloads().size()),
               it != nullptr ? LiveStateName(it->state) : "(none)");
   for (const LiveProblem& p : r.sync->problems()) std::printf("  problem: %s (%s)\n", p.message.c_str(), p.member.c_str());
-  // Whatever the route, the user is not told "live" while the game has no such cell.
-  SND_CHECK(!r.sync->problems().empty() || !r.sync->reloads().empty());
+  SND_CHECK(r.sync->problems().empty());
+  SND_REQUIRE(!r.sync->reloads().empty());
+  SND_CHECK(r.sync->reloads().back().phase == ll::ReloadPhase::Done);
+  SND_CHECK(r.sync->phase() == LivePhase::Live);
+  std::uint64_t main = 0;
+  for (const ll::BankEntry& e : r.GameBanks()) {
+    if (e.bankId == snd::HashId("Amb") || e.bankId == snd::HashId("Main")) main = e.bankId == snd::HashId("Main") ? e.contentHash : main;
+  }
+  SND_CHECK_EQ(main, BuildDocument(r.doc).FindBank("Main")->contentHash);
 }
