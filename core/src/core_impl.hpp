@@ -381,6 +381,7 @@ enum PlaybackPrivFlags : std::uint32_t {
   kPbSourceStarted = 1u << 8,  // a source accepted at least one voice (FlushSourceCalls)
   kPbTimedStop = 1u << 9,    // stopping by voice releases from a clock (sample accurate)
   // Stage 3 (group 4).
+  kPbVoiceDropped = 1u << 10,  // D-140: a voice ended because it went virtual ("never" return)
   kPbCancelled = 1u << 11,     // D-145: child of an action whose parent did not start
   kPbActionStop = 1u << 12,    // D-145: a StopEvent action of a start block asks to stop
 };
@@ -400,7 +401,6 @@ struct PlaybackPriv {
   // pauses or the stop), the track time up to which its actions were taken, the start clock
   // its actions were looked ahead with (scheduled plays), a StopEvent action's clock.
   std::uint64_t actionHorizon;
-  std::uint32_t lastVoiceDetail;  // why the last contributing voice ended, before any steal fade tail
   std::uint64_t actionOnlyEnd;  // exclusive track frame of the last effective action (zero for other events)
   std::uint64_t trackTime;
   ClockSample actionStart;
@@ -424,7 +424,6 @@ enum VoiceStaticFlags : std::uint32_t {
   // Stage 3 (group 4).
   kVsRestartReturn = 1u << 13,  // D-140: promoted with "restart": Render starts it at startFrame (SelectVoices sets, Render clears)
   kVsKillVirtual = 1u << 14,    // D-140: went virtual with "never": RunEventLogic ends it (SelectVoices sets)
-  kVsGroupStolen = 1u << 16,    // the group took this voice; only its release tail remains
   kVsFadeInHold = 1u << 15,     // D-146: the play's fade-in does not advance (pausing / stopping; RunEventLogic)
 };
 // Static per-voice values set by RunEventLogic at creation; read by
