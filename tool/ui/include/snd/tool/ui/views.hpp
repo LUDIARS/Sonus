@@ -7,6 +7,7 @@
 
 #include <cstdint>
 #include <map>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -19,6 +20,10 @@
 #include "snd/tool/session.hpp"
 #include "snd/tool/ui/palette.hpp"
 #include "snd/tool/ui/pointer_router.hpp"
+
+namespace snd::tool {
+struct ReplayRun;  // recording_report.hpp
+}
 
 namespace snd::tool::ui {
 
@@ -125,6 +130,7 @@ struct ReplayViewState {
   std::string reportDir = "sonus-report";
   std::string wavPath = "sonus-replay.wav";
   std::vector<std::string> result;  // the last replay / comparison / report, line by line
+  std::shared_ptr<ReplayRun> lastRun;  // the first replay of the last comparison (WAV, listening)
 };
 struct LinkViewState {
   std::uint32_t tab = 0;      // 0 matching, 1 items, 2 problems
