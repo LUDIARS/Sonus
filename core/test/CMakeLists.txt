@@ -82,6 +82,6 @@ snd_add_test(core_g3_mix_test SOURCES core_g3_mix_test.cpp LINK ${_core_test_lin
 # interfaces together. Group 3 in isolation has only its own API plus group 2.
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/indep_g1_scene.hpp" AND
    EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/indep_g4_fixture.hpp")
-  snd_add_test(indep_b_cross_test SOURCES indep_b_cross_test.cpp LINK ${_core_test_link})
+  snd_add_test(indep_b_cross_test SOURCES indep_b_cross_test.cpp indep_g3_spatial_curves_test.cpp LINK ${_core_test_link})
   set_tests_properties(indep_b_cross_test PROPERTIES TIMEOUT 600)
 endif()
