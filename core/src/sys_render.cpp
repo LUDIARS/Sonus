@@ -179,7 +179,7 @@ void PostProcessItem(Impl& im, RenderSet& set, const source::RenderItem& it, Ite
     else {
       for (unsigned n = 0; n < history.sends; ++n) {
         const auto& previous = history.previous[n];
-        if (previous.bus == route.bus && previous.channels == route.channels) {
+        if (previous.bus == route.bus && previous.generation == route.generation) {
           ScaleMatrix(previous.pan, in.gain0 * previous.amount, &old);
           break;
         }
@@ -190,6 +190,16 @@ void PostProcessItem(Impl& im, RenderSet& set, const source::RenderItem& it, Ite
     float* segment = SegBuffer(im, set, chunk, route.segment);
     for (unsigned c = 0; c < route.channels; ++c) output[c] = segment + std::size_t{c} * frames;
     dsp::ApplyPanMatrix(voiceOut, in.channels, output, route.channels, frames, old, next, true);
+  }
+  for (unsigned j = 0; j < in.removedCount; ++j) {
+    const auto removed = in.removed[j];
+    const auto& previous = history.previous[removed.previous];
+    PanMatrix old{}, silent{};
+    ScaleMatrix(previous.pan, in.gain0 * previous.amount, &old);
+    float* output[kMaxChannels];
+    float* segment = SegBuffer(im, set, chunk, removed.segment);
+    for (unsigned c = 0; c < previous.channels; ++c) output[c] = segment + std::size_t{c} * frames;
+    dsp::ApplyPanMatrix(voiceOut, in.channels, output, previous.channels, frames, old, silent, true);
   }
   history.sends = in.sends;
   for (unsigned j = 0; j < in.sends; ++j) history.previous[j] = in.aux[j];
@@ -561,6 +571,7 @@ void Render(Impl& im) noexcept {
         auto& route = in.aux[in.sends++];
         route.bus = target;
         route.amount = amount;
+        route.generation = t.Bus.rows.generation[target];
         route.channels = im.busDefs[target].channels;
         route.segment = Segment(ci, segs, target, route.channels);
         if (route.channels == in.outChannels) route.pan = in.pan;
@@ -573,6 +584,16 @@ void Render(Impl& im) noexcept {
       for (const ZoneSend& zone : im.dp.zones[mix.dominant]) {
         if (zone.amount == 0) break;
         add(im.busMap.Find(zone.bus), zone.amount);
+      }
+    }
+    if ((in.flags & kItemInitPan) == 0u) {
+      const PathHistory& history = rd.paths[r];
+      for (unsigned n = 0; n < history.sends; ++n) {
+        const auto& previous = history.previous[n];
+        if (!base::rows::IsLive(t.Bus.rows, previous.bus) || previous.generation != t.Bus.rows.generation[previous.bus]) continue;
+        bool retained = false;
+        for (unsigned j = 0; j < in.sends; ++j) retained |= in.aux[j].bus == previous.bus;
+        if (!retained) in.removed[in.removedCount++] = {n, Segment(ci, segs, previous.bus, previous.channels)};
       }
     }
     // Filter.
