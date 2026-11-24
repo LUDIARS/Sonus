@@ -395,6 +395,13 @@ typedef struct snd_callbacks {
                           uint64_t arg1);
 } snd_callbacks;
 
+/* Local axes: line = right, rectangle = right and forward, box = all three. */
+typedef uint32_t snd_emitter_shape;
+#define SND_EMITTER_SHAPE_POINT     0u
+#define SND_EMITTER_SHAPE_LINE      1u
+#define SND_EMITTER_SHAPE_RECTANGLE 2u
+#define SND_EMITTER_SHAPE_BOX       3u
+
 SND_EXTERN_C_END
 
 #endif /* SND_TYPES_H */

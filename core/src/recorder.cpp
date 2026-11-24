@@ -915,6 +915,50 @@ snd_result System::SetPlaybackEffectParam(snd_playback_handle playback, std::uin
   return ResultOf(RecordVariant(im, *pr, c));
 }
 
+snd_result System::SetEmitterShape(snd_emitter_handle emitter, snd_emitter_shape kind, const snd_vec3* extent) noexcept {
+  SND_PRODUCER_OR(SND_ERR_THREAD_NOT_REGISTERED)
+  const HandleRef h = Ref(emitter.value);
+  if (!im.emitterSlots.IsCurrent(h)) return SND_ERR_INVALID_HANDLE;
+  if (kind > SND_EMITTER_SHAPE_BOX || (kind != SND_EMITTER_SHAPE_POINT && !extent)) return SND_ERR_INVALID_ARGUMENT;
+  const Vec3 e = extent ? *extent : Vec3{};
+  if (!std::isfinite(e.x) || !std::isfinite(e.y) || !std::isfinite(e.z) || e.x < 0 || e.y < 0 || e.z < 0)
+    return SND_ERR_INVALID_ARGUMENT;
+  cmd::SetParam c{};
+  c.scope = static_cast<std::uint8_t>(ParamScope::Emitter);
+  c.target = h;
+  c.reserved[0] = cmd::kParamVariantShape;
+  c.reserved[1] = static_cast<std::uint8_t>(kind);
+  c.param = std::bit_cast<Id>(e.x);
+  c.value = e.y;
+  c.reserved2 = std::bit_cast<std::uint32_t>(e.z);
+  return ResultOf(RecordVariant(im, *pr, c));
+}
+
+snd_result System::SetReverbZone(snd_emitter_handle emitter, Id bus, float amount, float fadeDistance) noexcept {
+  SND_PRODUCER_OR(SND_ERR_THREAD_NOT_REGISTERED)
+  const HandleRef h = Ref(emitter.value);
+  if (!im.emitterSlots.IsCurrent(h)) return SND_ERR_INVALID_HANDLE;
+  if (!std::isfinite(amount) || amount < 0 || amount > 1 || !std::isfinite(fadeDistance) || fadeDistance < 0)
+    return SND_ERR_INVALID_ARGUMENT;
+  if (!ArenaFits(im, *pr, cmd::CommandTraits<cmd::SetSwitch>::kSize + cmd::CommandTraits<cmd::SetParam>::kSize)) {
+    im.reserveOverflows.fetch_add(1u, std::memory_order_relaxed);
+    return SND_ERR_COMMAND_BUFFER_FULL;
+  }
+  cmd::SetSwitch sw{};
+  sw.scope = static_cast<std::uint8_t>(ParamScope::Emitter);
+  sw.target = h;
+  sw.reserved[0] = cmd::kSwitchVariantZone;
+  sw.value = bus;
+  if (RecordVariant(im, *pr, sw) != Rec::Ok) return SND_ERR_COMMAND_BUFFER_FULL;
+  cmd::SetParam c{};
+  c.scope = sw.scope;
+  c.target = h;
+  c.reserved[0] = cmd::kParamVariantZone;
+  c.value = amount;
+  c.reserved2 = std::bit_cast<std::uint32_t>(fadeDistance);
+  return ResultOf(RecordVariant(im, *pr, c));
+}
+
 System::VoiceFxStats System::GetVoiceFxStats() const noexcept {
   const Impl& im = *impl_;
   VoiceFxStats s;
