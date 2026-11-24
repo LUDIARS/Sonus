@@ -189,8 +189,6 @@ void PostProcessItem(Impl& im, RenderSet& set, const source::RenderItem& it, Ite
       dsp::VoiceFilterProcess(history.sendFilter, wet, in.channels, frames, FilterTarget{in.sendLp, 0}, im.cfg.sampleRate);
       cut(wet);
     }
-  } else if (history.sends) {
-    dsp::VoiceFilterInit(history.sendFilter, FilterTarget{in.sendLp, 0});
   }
   for (unsigned j = 0; j < in.sends; ++j) {
     const auto& route = in.aux[j];
@@ -221,6 +219,7 @@ void PostProcessItem(Impl& im, RenderSet& set, const source::RenderItem& it, Ite
     for (unsigned c = 0; c < previous.channels; ++c) output[c] = segment + std::size_t{c} * frames;
     dsp::ApplyPanMatrix(wet, in.channels, output, previous.channels, frames, old, silent, true);
   }
+  if (history.sends && !in.sends) dsp::VoiceFilterInit(history.sendFilter, FilterTarget{in.sendLp, 0});
   history.sends = in.sends;
   for (unsigned j = 0; j < in.sends; ++j) history.previous[j] = in.aux[j];
   if (in.directLp < dsp::kVoiceLowpassOffHz || !dsp::VoiceFilterIsOpen(history.directFilter, im.cfg.sampleRate)) {
