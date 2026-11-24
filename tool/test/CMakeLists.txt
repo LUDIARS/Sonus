@@ -41,7 +41,7 @@ set_tests_properties(tool_replay_cli_bad_input PROPERTIES WILL_FAIL TRUE)
 # Independent tests of group P (tool/test/indep_s7_live_properties.md, written from the specs
 # before reading the code). The Defect_* tests are in their own executable, one CTest test each;
 # they fail on purpose (each documents a defect).
-foreach(_t indep_s7_live_sync_test indep_s7_live_preview_test)
+foreach(_t indep_s7_live_sync_test indep_s7_live_preview_test indep_s7_live_replay_test)
   _snd_tool_test(${_t} "${_tool_live_link}")
 endforeach()
 _snd_tool_test(indep_s7_live_defects_test "${_tool_live_link}")
@@ -53,6 +53,32 @@ foreach(_d Defect_ReconnectKeepsCellsTheToolPutBackWhileOffline Defect_ResentBus
         Defect_TransitionAuditionAtTimeZeroSkipsTheFromState)
   add_test(NAME tool_indep_s7_live_${_d} COMMAND tool_indep_s7_live_defects_test --filter ${_d})
 endforeach()
+# sonus-replay's exit status on the reports indep_s7_live_replay_test leaves (0 ok, 1 mismatch,
+# 2 input error).
+set(_indep_live_reports ${CMAKE_CURRENT_BINARY_DIR}/indep-live-reports)
+set_tests_properties(tool_indep_s7_live_replay_test PROPERTIES FIXTURES_SETUP tool_indep_live_reports
+                     ENVIRONMENT "SND_INDEP_LIVE_REPORTS=${_indep_live_reports}")
+function(_snd_indep_live_cli name expect)
+  add_test(NAME tool_indep_s7_live_cli_${name}
+           COMMAND ${CMAKE_COMMAND} -DCMD=$<TARGET_FILE:sonus-replay> "-DARGS=${ARGN}" -DEXPECT=${expect}
+                   -P ${CMAKE_CURRENT_SOURCE_DIR}/indep_s7_live_exit.cmake)
+endfunction()
+_snd_indep_live_cli(ok 0 ${_indep_live_reports}/ok)
+_snd_indep_live_cli(mismatch 1 ${_indep_live_reports}/mismatch)
+_snd_indep_live_cli(broken 2 ${_indep_live_reports}/broken)
+_snd_indep_live_cli(missing 2 ${_indep_live_reports}/missing)
+set_tests_properties(tool_indep_s7_live_cli_ok tool_indep_s7_live_cli_mismatch tool_indep_s7_live_cli_broken
+                     tool_indep_s7_live_cli_missing PROPERTIES FIXTURES_REQUIRED tool_indep_live_reports)
+_snd_indep_live_cli(usage 2 --recording)
+_snd_indep_live_cli(no_recording 2 --recording ${_indep_live_reports}/none.snrec --banks ${_indep_live_reports})
+# A recording with absurd block numbers must not replay for ever (POSIX: the test forks).
+if(UNIX)
+  _snd_tool_test(indep_s7_live_hang_test "${_tool_live_link}")
+  set_tests_properties(tool_indep_s7_live_hang_test PROPERTIES DISABLED TRUE)  # per test below
+  add_test(NAME tool_indep_s7_live_hang_small COMMAND tool_indep_s7_live_hang_test --filter SmallBlockNumbers)
+  add_test(NAME tool_indep_s7_live_Defect_ReplayOfAHugeBlockNumberDoesNotEnd
+           COMMAND tool_indep_s7_live_hang_test --filter Defect_ReplayOfAHugeBlockNumberDoesNotEnd)
+endif()
 
 # The runtime comparisons read the music module's time line and rule lookup (music/src).
 target_link_libraries(tool_runtime_compare_test PRIVATE sonus_music)
