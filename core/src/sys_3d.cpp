@@ -39,9 +39,12 @@ float Doppler(const snd_config& cfg, Vec3 listenerVelocity, Vec3 emitterVelocity
   const float c = cfg.speed_of_sound;
   const float factor = cfg.doppler_factor;
   if (factor == 0) return 1;
-  const float numerator = std::max(0.01f * c, c + factor * Dot(listenerVelocity, n));
-  const float denominator = std::max(0.01f * c, c + factor * Dot(emitterVelocity, n));
-  return std::clamp(numerator / denominator, 0.25f, 4.0f);
+  const auto radial = [n](Vec3 v) {
+    return static_cast<double>(n.x) * v.x + static_cast<double>(n.y) * v.y + static_cast<double>(n.z) * v.z;
+  };
+  const double numerator = std::max(0.01 * c, c + factor * radial(listenerVelocity));
+  const double denominator = std::max(0.01 * c, c + factor * radial(emitterVelocity));
+  return static_cast<float>(std::clamp(numerator / denominator, 0.25, 4.0));
 }
 }  // namespace
 
