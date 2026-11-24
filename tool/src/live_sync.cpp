@@ -384,6 +384,13 @@ struct StructPlan {
     std::vector<std::uint64_t> args;
   };
   std::vector<Edit> edits;
+  // D-183: value changes of the same tables (buses, effect parameters and sends that exist before
+  // and after) go as SetValue after the structural edits, so that no value of the build is lost.
+  struct Value {
+    std::uint32_t chunk, column, runtimeId, index, row;
+    std::uint64_t bits;
+  };
+  std::vector<Value> values;
 };
 
 // Bus / effect / send changes that StructEdit can carry: buses added or removed (other rows keep
@@ -415,11 +422,34 @@ StructPlan DeriveStructEdits(const ParsedBank& a, const ParsedBank& b) {
       const std::uint32_t n = x.U32(ch::BUSS, col, row);
       return n == bf::kNone ? 0u : n;
     };
+    // The bus's own cells: the volume is a live value; the others need a rebuild.
+    for (const std::uint32_t col : {co::BUSS_channels, co::BUSS_flags, co::BUSS_lodPriority}) {
+      std::uint64_t x = 0, y = 0;
+      a.Cell(ch::BUSS, col, ra, &x);
+      b.Cell(ch::BUSS, col, r, &y);
+      if (x != y) return p;
+    }
+    {
+      std::uint64_t x = 0, y = 0;
+      a.Cell(ch::BUSS, co::BUSS_volumeDb, ra, &x);
+      b.Cell(ch::BUSS, co::BUSS_volumeDb, r, &y);
+      if (x != y) p.values.push_back(StructPlan::Value{ch::BUSS, co::BUSS_volumeDb, ib[r], 0u, r, y});
+    }
     const std::uint32_t ea = count(a, ra, co::BUSS_effectCount), eb = count(b, r, co::BUSS_effectCount);
     const std::uint32_t fa = a.U32(ch::BUSS, co::BUSS_effectFirst, ra), fb = b.U32(ch::BUSS, co::BUSS_effectFirst, r);
     const std::uint32_t common = std::min(ea, eb);
     for (std::uint32_t k = 0; k < common; ++k) {  // the kept effects must be the same kinds
       if (a.U32(ch::EFFX, co::EFFX_effectType, fa + k) != b.U32(ch::EFFX, co::EFFX_effectType, fb + k)) return p;
+      if (a.U32(ch::EFFX, co::EFFX_flags, fa + k) != b.U32(ch::EFFX, co::EFFX_flags, fb + k)) return p;
+      const std::uint32_t pa = a.U32(ch::EFFX, co::EFFX_paramFirst, fa + k), pca = a.U32(ch::EFFX, co::EFFX_paramCount, fa + k);
+      const std::uint32_t pb = b.U32(ch::EFFX, co::EFFX_paramFirst, fb + k), pcb = b.U32(ch::EFFX, co::EFFX_paramCount, fb + k);
+      if (pca != pcb) return p;
+      for (std::uint32_t q = 0; pa != bf::kNone && pb != bf::kNone && pca != bf::kNone && q < pca; ++q) {
+        std::uint64_t x = 0, y = 0;
+        a.Cell(ch::EFPV, co::EFPV_value, pa + q, &x);
+        b.Cell(ch::EFPV, co::EFPV_value, pb + q, &y);
+        if (x != y) p.values.push_back(StructPlan::Value{ch::EFPV, co::EFPV_value, ib[r], (k << 16) | q, pb + q, y});
+      }
     }
     for (std::uint32_t k = ea; k < eb; ++k) {
       StructPlan::Edit e{ll::StructOp::AddEffect, ib[r], {b.U32(ch::EFFX, co::EFFX_effectType, fb + k), 0xFFFFFFFFu}};
@@ -437,6 +467,11 @@ StructPlan DeriveStructEdits(const ParsedBank& a, const ParsedBank& b) {
     const std::uint32_t ga = a.U32(ch::BUSS, co::BUSS_sendFirst, ra), gb = b.U32(ch::BUSS, co::BUSS_sendFirst, r);
     for (std::uint32_t k = 0; k < sa; ++k) {
       if (a.U32(ch::SEND, co::SEND_targetBus, ga + k) != b.U32(ch::SEND, co::SEND_targetBus, gb + k)) return p;
+      if (a.U32(ch::SEND, co::SEND_preFader, ga + k) != b.U32(ch::SEND, co::SEND_preFader, gb + k)) return p;
+      std::uint64_t x = 0, y = 0;
+      a.Cell(ch::SEND, co::SEND_levelDb, ga + k, &x);
+      b.Cell(ch::SEND, co::SEND_levelDb, gb + k, &y);
+      if (x != y) p.values.push_back(StructPlan::Value{ch::SEND, co::SEND_levelDb, ib[r], k, gb + k, y});
     }
     for (std::uint32_t k = sa; k < sb; ++k) {
       const std::uint32_t target = b.U32(ch::SEND, co::SEND_targetBus, gb + k);
@@ -554,6 +589,39 @@ void LiveSync::PlanDelta(const LiveDelta& d, const std::vector<BankImage>& befor
             op.args = e.args;
             op.structIndex = static_cast<std::int32_t>(structs_.size() - 1u);
             op.guids = ObjectsOf(file);
+            Enqueue(std::move(op));
+          }
+          // The values of the same tables, after the structural edits (D-183). A refused edit
+          // sends the bank by reload, which carries them too.
+          for (const StructPlan::Value& x : sp.values) {
+            Op op;
+            op.route = LiveRoute::SetValue;
+            op.revision = rev;
+            op.bank = file;
+            op.bankId = after->bankId;
+            op.member = MemberOf(x.chunk, x.column);
+            ll::SetValue& v = op.value;
+            std::uint64_t lo = 0, hi = 0;
+            if (vb->Guid(x.runtimeId, &lo, &hi)) {
+              v.guidLo = lo;
+              v.guidHi = hi;
+              const std::string g = GuidText(Guid{lo, hi});
+              if (!g.empty()) op.guids.push_back(g);
+            }
+            v.runtimeId = x.runtimeId;
+            v.chunk = x.chunk;
+            v.column = x.column;
+            v.valueType = static_cast<std::uint32_t>(ll::ValueType::F32);
+            v.index = x.index;
+            v.value = x.bits;
+            op.cellKey = CellKey(file, v);
+            op.row = x.row;
+            if (options_.heldByMixer && options_.heldByMixer(v.runtimeId, v.chunk, v.column, v.index)) {
+              Mark(op, LiveState::HeldByMixer, 0, "the mixer's monitoring value holds this cell");
+              latestSerial_[op.cellKey] = ++serial_;
+              held_[op.cellKey] = op;
+              continue;
+            }
             Enqueue(std::move(op));
           }
           continue;
@@ -699,6 +767,19 @@ void LiveSync::Reconcile(Connection& c) {
       m.gameContentHash = e->contentHash;
       m.gameBuildHash = e->projectBuildHash;
       m.writable = e->writable != 0u;
+      bool liveStruct = false;
+      for (const StructEditInfo& x : structs_) liveStruct = liveStruct || (x.bank == b.file && x.applied && !x.undone);
+      if (liveStruct) {
+        // D-182 / D-183: whether the game kept the live structural edits is not known. They are not
+        // sent again (an editor would get a second Add); the bank is reloaded from the document,
+        // and a successful reload ends them (reserve() and structEdits() start from zero).
+        m.verdict = e->contentHash == b.contentHash ? BankVerdict::Same : BankVerdict::Differs;
+        m.knownBase = known_.count(e->contentHash) != 0u;
+        sent_.push_back(b);
+        check_.banks.push_back(m);
+        Escalate(b.file, "live structural edits before the reconnect: the game's structure is not known", builtRevision_);
+        continue;
+      }
       if (e->contentHash == b.contentHash) {
         m.verdict = BankVerdict::Same;
         m.knownBase = true;
@@ -1035,9 +1116,21 @@ void LiveSync::Settle(const Op& op, std::int32_t r) {
         }
       }
       if (rememberedValid_ && !rememberPending_) rememberedGame_ = GameSignature();
-      for (StructEditInfo& s : structs_) {
-        if (s.bank == op.bank) s.undone = s.applied ? true : s.undone;
+      // The bank's live structural edits are gone with the reload: the list and the reserve start
+      // from zero (D-182). Requests that point at removed entries no longer do.
+      std::vector<std::int32_t> remap(structs_.size(), -1);
+      std::vector<StructEditInfo> kept;
+      for (std::size_t i = 0; i < structs_.size(); ++i) {
+        if (structs_[i].bank == op.bank) continue;
+        remap[i] = static_cast<std::int32_t>(kept.size());
+        kept.push_back(structs_[i]);
       }
+      structs_ = std::move(kept);
+      auto fix = [&](Op& o) {
+        if (o.structIndex >= 0) o.structIndex = remap[static_cast<std::size_t>(o.structIndex)];
+      };
+      for (Op& o : queue_) fix(o);
+      for (Op& o : inflight_) fix(o);
     }
     return;
   }
@@ -1254,7 +1347,7 @@ void LiveSync::Tick(Connection& c, const ConnectionEvents& ev, std::uint64_t now
   }
   ll::Client* cl = c.client();
   // A new client (Open) or a new connection of the client: what the old one showed is gone.
-  const std::uint64_t link = (std::uint64_t{c.opens()} << 32) | (cl != nullptr ? cl->Stats().disconnects : 0u);
+  const std::uint64_t link = (std::uint64_t{c.opens()} << 32) | (cl != nullptr ? c.generation() : 0u);
   const bool newLink = link != seenLink_;
   seenLink_ = link;
   if (ev.sessionLost || cl == nullptr || newLink) {
@@ -1328,16 +1421,13 @@ void LiveSync::Tick(Connection& c, const ConnectionEvents& ev, std::uint64_t now
       }
     }
     LiveDecision d = options_.decision;
-    waitingForList_ = false;
-    if (d == LiveDecision::Ask && rememberedValid_) {
-      // The answer given before stands only for the same game (D-182); the bank list must be in to tell
-      // (until then the phase is Checking, not a question).
-      const bool known = check_.banksKnown || !cl->Supports(ll::MessageType::QueryBanks);
-      if (known) {
-        d = GameSignature() == rememberedGame_ ? remembered_ : LiveDecision::Ask;
-      } else {
-        waitingForList_ = true;
-      }
+    // A 1.1 game: no question and no remembered answer before its bank list is in (the question
+    // shows the verdict per bank; the answer given before stands only for the same game, D-182).
+    // Until then the phase is Checking. A 1.0 game has no list: its build hash decides at once.
+    const bool known = check_.banksKnown || !cl->Supports(ll::MessageType::QueryBanks);
+    waitingForList_ = d == LiveDecision::Ask && !known;
+    if (d == LiveDecision::Ask && rememberedValid_ && known) {
+      d = GameSignature() == rememberedGame_ ? remembered_ : LiveDecision::Ask;
     }
     if (d == LiveDecision::SendDiffs) {
       refused_ = false;
