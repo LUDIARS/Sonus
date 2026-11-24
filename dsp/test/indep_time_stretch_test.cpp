@@ -433,6 +433,7 @@ SND_TEST(IndepTimeStretch, BackToSpeedOneIsAConstantOffset) {
     for (int i = 0; i < 150; ++i) {
       ts.Call(src, &out, 256, speed, speed);
     }
+    const auto initialFrames = out[0].size();
     for (int i = 0; i < 6; ++i) {  // > 2 hops at speed 1
       ts.Call(src, &out, 256, 1.0f, 1.0f);
     }
@@ -446,7 +447,11 @@ SND_TEST(IndepTimeStretch, BackToSpeedOneIsAConstantOffset) {
     const double nominal = std::floor(initialHops * 720.0 * speed) +
                            static_cast<double>(out[0].size()) - initialHops * 720.0;
     SND_CHECK_MSG(std::fabs(P - nominal) <= 576.0, "speed %g: offset %g", speed, P - nominal);
-    Signal tail(2);
+    const double speedIntegral = static_cast<double>(initialFrames) * speed +
+                                 static_cast<double>(out[0].size() - initialFrames);
+    // 12 ms at 48 kHz, plus one frame for rounding to an integer input position.
+    SND_CHECK_MSG(std::fabs(P - speedIntegral) <= 577.0, "speed %g: playhead %g, integral %g, error %g",
+                  speed, P, speedIntegral, P - speedIntegral);
     const std::size_t from = out[0].size();
     for (int i = 0; i < 100; ++i) ts.Call(src, &out, 256, 1.0f, 1.0f);
     bool exact = true;
