@@ -29,10 +29,10 @@ struct EventRig : Rig {
   void CheckClosed(const char* what) {
     SND_CHECK_MSG(!doc.InGroup(), "%s: the document's group is still open", what);
     const std::size_t u = doc.UndoCount();
-    SND_CHECK_MSG(u <= 1, "%s: %zu steps", what, u);
+    SND_CHECK_MSG(u <= 1, "%s: %u steps", what, static_cast<unsigned>(u));
     SND_REQUIRE(ed.SetNumber(EventNumber::Priority, 7.0));
-    SND_CHECK_MSG(doc.UndoCount() == u + 1, "%s: the next edit merged into the drag (%zu -> %zu)", what, u,
-                  doc.UndoCount());
+    SND_CHECK_MSG(doc.UndoCount() == u + 1, "%s: the next edit merged into the drag (%u -> %u)", what,
+                  static_cast<unsigned>(u), static_cast<unsigned>(doc.UndoCount()));
     SND_REQUIRE(doc.Undo());
     SND_CHECK_EQ(ed.NumberOf(EventNumber::Priority), 128.0);
   }

@@ -158,7 +158,8 @@ SND_TEST(IndepS7UiLimits, IdsAreStableOverFramesAndRoundTrips) {
       // Only the screen's own elements are compared (the header / footer show messages).
       std::size_t missing = 0;
       for (const std::string& id : a) missing += b.count(id) == 0 ? 1u : 0u;
-      SND_CHECK_MSG(missing == 0, "%s: %zu ids gone after a round trip", ui::ScreenName(sc), missing);
+      SND_CHECK_MSG(missing == 0, "%s: %u ids gone after a round trip", ui::ScreenName(sc),
+                    static_cast<unsigned>(missing));
     }
   }
 }

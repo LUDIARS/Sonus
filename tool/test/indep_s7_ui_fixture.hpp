@@ -270,7 +270,7 @@ inline std::string LimitProblem(const tela::Runtime& rt) {
 // Writes the declared tree (id, label, bounds) to stdout when SND_INDEP_DUMP is set.
 inline void Dump(const tela::Runtime& rt, const char* title) {
   if (std::getenv("SND_INDEP_DUMP") == nullptr) return;
-  std::printf("=== %s (%zu)\n", title, rt.elements().size());
+  std::printf("=== %s (%u)\n", title, static_cast<unsigned>(rt.elements().size()));
   for (const tela::PlacedElement& p : rt.elements()) {
     std::printf("%s | %s | %.1f %.1f %.1f %.1f\n", p.element.id.c_str(), p.element.label.c_str(), p.bounds.x,
                 p.bounds.y, p.bounds.width, p.bounds.height);
