@@ -79,6 +79,7 @@ struct ObjectListSpec {
   std::function<bool(const std::string&)> remove;  // null: ProjectDocument::Remove
   std::function<bool(const DocObject&)> filter;    // null: every object of the kind
   std::function<std::string(const DocObject&)> label;  // null: the name
+  bool manage = true;      // New / Remove / Copy / Name (false: a selection list only)
 };
 float ObjectList(Kit& kit, const ObjectListSpec& spec, float x, float y, float w, float h);
 
