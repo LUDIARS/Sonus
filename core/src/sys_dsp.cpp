@@ -22,7 +22,6 @@ namespace snd::core {
 
 namespace {
 constexpr schema::SystemId kSys = schema::SystemId::EvaluateDspParams;
-constexpr float kPi = 3.14159265358979f;
 
 float Unit(float x) noexcept { return std::clamp(x, 0.0f, 1.0f); }
 
@@ -58,7 +57,7 @@ SpatialTarget SpatialAt(const Impl& im, SlotIndex spatial, const bk::BankView* v
   const float inner = view->Column<bk::col::EVNT_coneInnerDeg>()[row];
   const float outer = view->Column<bk::col::EVNT_coneOuterDeg>()[row];
   if (outer > 0 && outer >= inner) {
-    const float angle = 2.0f * std::acos(std::clamp(SND_R(Spatial_coneCos)[spatial], -1.0f, 1.0f)) * 180.0f / kPi;
+    const float angle = SND_R(Spatial_coneAngle)[spatial];
     if (angle > inner) {
       const float f = angle >= outer ? 1.0f : (angle - inner) / std::max(outer - inner, 1e-6f);
       result.coneDb = view->Column<bk::col::EVNT_coneOuterDb>()[row] * f;
