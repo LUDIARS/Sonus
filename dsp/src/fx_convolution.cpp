@@ -682,11 +682,21 @@ void ConvolutionInit(void* state, const FxConfig& cfg) noexcept {
   s.h.tailFrames = tail > 0x7FFFFFFFu ? 0x7FFFFFFFu : static_cast<std::uint32_t>(tail);
 }
 
+// Same state as ConvolutionInit after Layout, without the full memset and without
+// rebuilding the FFT plan (it does not change): O(C B). Not called by the effect
+// framework yet; proposed for EffectReset / NaN recovery in requests/D-12.
 void ConvolutionReset(void* state) noexcept {
   ConvState& s = *static_cast<ConvState*>(state);
-  GoDormant(s);
+  GoDormant(s);  // input history, FDL output, valid = 0 (the FDL is invalidated, not cleared)
   s.f = 0;
   s.w = 0;
+  s.active = 0;
+  s.curNum = 0;  // the next call adopts the IR at once (dormant)
+  s.curBank = 0;
+  s.curRoute = s.oldRoute = 0;
+  s.curIrCh = s.oldIrCh = 0;
+  s.fading = 0;
+  s.fadeFrom = 0;
 }
 
 void ConvolutionProcess(void* state, const FxIo& io, const FxParams& p) noexcept {
