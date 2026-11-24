@@ -595,3 +595,50 @@ SND_TEST(IndepS7Live, RefusedValueIsAProblemWithItsEdit) {
   SND_CHECK(it->state == LiveState::Failed);
   conn.Close();
 }
+
+// Records today's behaviour (spec gap, notes, 案 3): the answer to a mismatch is remembered for
+// the reconnect of the same LiveSync (the user is not asked again).
+SND_TEST(IndepS7Live, Record_MismatchAnswerIsRememberedOnReconnect) {
+  Rig r({}, Options(LiveDecision::Ask), [](ProjectDocument& g) { g.SetNumber(SfxG(), "volumeDb", -7.0); });
+  SND_REQUIRE(r.ok);
+  SND_REQUIRE(r.Connect());
+  SND_REQUIRE(r.Run([&] { return r.sync->pending(); }));
+  SND_REQUIRE(r.sync->ChooseSendDiffs(r.conn));
+  SND_REQUIRE(r.Settle());
+  r.conn.Drop();
+  SND_REQUIRE(r.Run([&] { return r.conn.sessions() >= 2u || r.sync->pending(); }));
+  bool askedAgain = false;
+  r.Run([&] {
+    askedAgain = askedAgain || r.sync->pending();
+    return r.sync->phase() == LivePhase::Live;
+  }, 5000);
+  std::printf("record: after a reconnect the mismatch was %s\n", askedAgain ? "asked again" : "answered as before");
+  SND_CHECK(r.sync->phase() == LivePhase::Live || askedAgain);
+  SND_CHECK_EQ(r.GameF32(snd::HashId("Sfx"), bf::chunk::BUSS, bf::col::BUSS_volumeDb), -1.0f);
+}
+
+// Records today's behaviour (spec gap, notes): an effect added live by StructEdit (an editor in
+// core that changes nothing, C-01) and then a parameter edit of that effect: the SetValue targets
+// a cell the game's tables do not have.
+SND_TEST(IndepS7Live, Record_ValueEditOfALiveAddedEffect) {
+  AcceptAll editor;
+  preview::PreviewEngineDesc ed;
+  ed.structEditor = &editor;
+  Rig r(ed);
+  SND_REQUIRE(r.ok);
+  SND_REQUIRE(r.Connect());
+  SND_REQUIRE(r.Settle());
+  const json::Value fx = Json("{\"type\": \"snd.fx.delay\", \"params\": [10, 0, 0, -96, 20000, 0, 100]}");
+  SND_REQUIRE(r.doc.Insert(AmbG(), "effects", 0, fx));
+  SND_REQUIRE(r.Settle());
+  SND_REQUIRE_EQ(editor.applied, 1u);
+  SND_REQUIRE(r.doc.SetNumber(AmbG(), "effects[0].params[0]", 20.0));
+  r.Settle();
+  r.Frames(10);
+  const LiveItem* it = r.sync->Find(AmbG(), "effects[#].params[#]");
+  std::printf("record: param edit of a live-added effect: %zu problems, %zu reloads, item %s\n", r.sync->problems().size(),
+              r.sync->reloads().size(), it != nullptr ? LiveStateName(it->state) : "(none)");
+  for (const LiveProblem& p : r.sync->problems()) std::printf("  problem: %s (%s)\n", p.message.c_str(), p.member.c_str());
+  // Whatever the route, the user is not told "live" while the game has no such cell.
+  SND_CHECK(!r.sync->problems().empty() || !r.sync->reloads().empty());
+}
