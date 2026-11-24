@@ -125,6 +125,73 @@ SND_TEST(IndepG1Routing, StrongestFourZonesKeepIndependentDestinations) {
   SND_CHECK(s.Level() > 0.05);
 }
 
+SND_TEST(IndepG1Routing, RemovingZoneRampsWithinTheBlock) {
+  Scene s(Signal(true));
+  const auto zone = Zone(s);
+  s.Start();
+  const float before = s.h.out[s.h.out.size() - 2];
+  SND_REQUIRE(before > 0.04f);
+  SND_CHECK_EQ(s.h.sys->SetReverbZone(zone, SND_ID_NONE, 0, 0), SND_OK);
+  s.h.Step();
+  const auto halfway = s.h.out[s.h.Frames()];
+  SND_CHECK(s.h.out[0] > 0.9f * before);
+  SND_CHECK(halfway > 0.1f * before && halfway < 0.9f * before);
+  s.h.Steps(3);
+  SND_CHECK_EQ(s.Level(), 0.0);
+}
+
+SND_TEST(IndepG1Routing, PartialZoneCommandNeverChangesItsDestination) {
+  auto cfg = Config();
+  cfg.commands.arena_bytes = 4096;
+  cfg.commands.reserve_bytes = 256;
+  Scene s(Signal(true), cfg);
+  const auto zone = Zone(s);
+  s.Start();
+  const double before = s.Level();
+  SND_REQUIRE(before > 0.05);
+  // 32-byte parameter records: 128 fill normal storage, seven leave one
+  // record in the reserve. A zone change needs two records.
+  for (int n = 0; n < 135; ++n)
+    SND_CHECK_EQ(s.h.sys->SetParamGlobal(HashId("unused"), 0.5f), SND_OK);
+  SND_CHECK_EQ(s.h.sys->SetReverbZone(zone, kDry, 0.25f, 0), SND_ERR_COMMAND_BUFFER_FULL);
+  s.h.Steps(4);
+  SND_CHECK_NEAR(s.Level(), before, 0.0001);
+}
+
+SND_TEST(IndepG1Routing, PausedAndVirtualPlaybackLeaveNoZoneSignal) {
+  auto cfg = Config();
+  cfg.max_real_voices = 1;
+  auto bank = Signal(true);
+  auto other = SimpleEvent("Competing2D", 0);
+  other.priority = 255;
+  other.tracks[0].clips[0].loopCount = 0;
+  bank.events.push_back(other);
+  Scene s(bank, cfg);
+  Zone(s);
+  const auto p = s.Play();
+  s.h.Steps(8);
+  const double on = s.Level();
+  SND_REQUIRE(on > 0.04);
+  SND_CHECK_EQ(s.h.sys->Pause(p, 0), SND_OK);
+  s.h.Steps(10);
+  SND_CHECK_EQ(s.Level(), 0.0);
+  SND_CHECK_EQ(s.h.sys->ResumePlayback(p, 0), SND_OK);
+  s.h.Steps(10);
+  SND_CHECK_NEAR(s.Level(), on, 0.001);
+  // The 2D winner never feeds the zone. Keep it playing until the loser
+  // has completed its steal fade and released the real slot.
+  const auto competitor = s.h.sys->Play(HashId("Competing2D"), {}, nullptr);
+  SND_REQUIRE(competitor.value != 0u);
+  s.h.Steps(6);
+  snd_stats stats{};
+  SND_CHECK_EQ(s.h.sys->GetStats(&stats), SND_OK);
+  SND_REQUIRE(stats.virtual_voices > 0);
+  SND_CHECK_EQ(s.Level(), 0.0);
+  SND_CHECK_EQ(s.h.sys->Stop(competitor, 0, nullptr), SND_OK);
+  s.h.Steps(8);
+  SND_CHECK_NEAR(s.Level(), on, 0.001);
+}
+
 double FilteredLevel(bool wet, const char* parameter, float hz) {
   Scene s(Signal(wet, hz));
   if (wet) Zone(s);
@@ -199,6 +266,10 @@ std::vector<float> Replay(std::uint32_t workers) {
     SND_CHECK_EQ(s.h.sys->SetParamEmitter(em, HashId("snd.occlusion"), 0.3f), SND_OK);
     s.h.Step();
   }
+  snd_stats stats{};
+  s.h.sys->Update();
+  SND_CHECK_EQ(s.h.sys->GetStats(&stats), SND_OK);
+  SND_CHECK_EQ(stats.late_chunks, 0u);
   SND_CHECK_EQ(alloc.allocations.load(), before);
   SND_CHECK_EQ(snd::test::rt::UnexpectedTotal(), 0u);
   SND_CHECK(s.Level() > 0.01);
