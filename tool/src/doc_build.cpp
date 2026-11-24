@@ -725,6 +725,8 @@ DocBuild BuildDocument(const ProjectDocument& doc, const DocBuildOptions& option
   return out;
 }
 
+std::vector<DocIssue> CheckDocument(const ProjectDocument& doc) { return BuildDocument(doc).issues; }
+
 std::vector<DocIssue> DistinctIssues(const std::vector<DocIssue>& issues) {
   std::vector<DocIssue> out;
   for (const DocIssue& i : issues) {
@@ -736,10 +738,6 @@ std::vector<DocIssue> DistinctIssues(const std::vector<DocIssue>& issues) {
     if (!seen) out.push_back(i);
   }
   return out;
-}
-
-std::vector<DocIssue> CheckDocument(const ProjectDocument& doc) {
-  return DistinctIssues(BuildDocument(doc).issues);  // D-189: each problem once
 }
 
 std::vector<DocIssue> IssuesOf(const std::vector<DocIssue>& issues, const std::string& guid) {
