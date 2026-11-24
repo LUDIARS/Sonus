@@ -349,7 +349,7 @@ WM_KEYDOWN と WM_CHAR、macOS は NSEvent のローカルモニタ）、ツー�
 - 名前で一意な物（材質、State、マーカー、Stinger）の要素の ID は名前から作る（`NameKey`）。位置の番号は名前の無い行だけ。
 - コーンは `EventEditor::Cone()`（無いときは 0 / 0 / 0 dB = コーンなし）で Event と 3D の両画面に同じ値を出す。3D の既定のエミッタは
   maxDistance の半分（無ければ 5 m）だけ右前に置く。カーブの図は x にも余白（`kCurveXMargin`）。Link は未接続なら相手の版を出さない。
-  Problems の一覧は同じ問題を 1 回にする（`DistinctIssues(CheckDocument(doc))`。`CheckDocument` は buildtool と一語一語同じまま）。
+  `CheckDocument` は同じ問題を 1 回にする（`DistinctIssues`。buildtool の診断は不変）。
 
 **ドラッグの受け口**（`pointer_router.hpp` の `ControlKind::Custom` / `DragHandler`）: 描いた物（クリップ、点、リスナー、ノード、
 数値の欄）の下に排他入力のボタンを置き、押下・移動・離す・ダブルクリック・ホイールを渡す。押した時のハンドラを
