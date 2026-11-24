@@ -643,7 +643,8 @@ SND_TEST(IndepS7UiScreens, PatchLimitAndCycleAreRefused) {
   SND_REQUIRE_EQ(pe.Nodes().size(), std::size_t{32});
   const std::size_t u0 = r.Undos();
   if (r.ClickId("pa.add") && r.app->picker() != nullptr && !r.app->picker()->items.empty()) {
-    r.app->Pick(r.app->picker()->items.front().value);
+    const std::string v = r.app->picker()->items.front().value;  // a copy: see Defect_PickWithAnItemOfTheOpenList...
+    r.app->Pick(v);
     r.Frame();
   }
   r.app->ClosePicker();
