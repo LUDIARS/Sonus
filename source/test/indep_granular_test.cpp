@@ -305,3 +305,94 @@ SND_TEST(IndepGranular, AllBinary32FractionalPlacesCarryThroughAFullFrame) {
     SND_CHECK_EQ(voice->ph.fraction, 0u);
   }
 }
+
+SND_TEST(IndepGranular, HannEndpointsAndVirtualReturnAtEveryAnchorOffset) {
+  const std::vector<float> dc{0.75f};
+  auto asset = Pcm(dc, 384000);
+  Driver driver(snd::SourceKind::Granular, {});
+  for (unsigned length : {1u, 2u, 3u, 31u, 32u, 33u, 63u, 65u, 1920u, 384000u}) {
+    src::GranularParams p{&asset, 0.5f, 1000.f * length / 384000, 0, 0, Window::Hann};
+    Driver::Voice ref, skipped;
+    SND_REQUIRE(driver.Start(ref, &p, 1));
+    SND_REQUIRE(driver.Start(skipped, &p, 1));
+    SetLoop(driver, ref, 0, 1);
+    SetLoop(driver, skipped, 0, 1);
+    driver.Render(ref, length + 1, {}, 127);
+    // Includes the first zero, last in-window age, and first expired sample.
+    for (unsigned i = 0; i <= length; ++i) {
+      const double weight = i < length ? (1 - std::cos(tau * i / length)) * 0.5 : 0.0;
+      const double expected = 0.75 * weight;
+      // At most 32 recurrence steps per anchor. Allow one binary32 ulp plus
+      // a conservative double-rounding budget (32^2 * 8 * double epsilon).
+      const auto rounded = static_cast<float>(expected);
+      const double ulp = std::nextafter(rounded, 1.f) - rounded;
+      SND_REQUIRE(std::abs(ref.out[0][i] - expected) <= ulp + 2e-12);
+    }
+    for (unsigned offset = 0; offset < 32; ++offset) {
+      const unsigned start = length / 2 + offset;
+      if (start > length) break;
+      driver.Control(skipped, src::ControlOp::Seek, 0);
+      driver.Advance(skipped, start);
+      const unsigned n = std::min(33u, length + 1 - start);
+      const auto resumed = Item(driver, skipped, n);
+      SND_CHECK(std::equal(resumed.begin(), resumed.end(), ref.out[0].begin() + start));
+    }
+    driver.Release(ref);
+    driver.Release(skipped);
+  }
+}
+
+SND_TEST(IndepGranular, WeightedEightGrainStereoInterpolationMatchesDirectSum) {
+  constexpr unsigned rate = 8192, frames = 64, length = 173, interval = 16;
+  std::vector<float> pcm(2 * frames);
+  std::vector<std::uint8_t> pcm16(4 * frames);
+  for (unsigned i = 0; i < frames; ++i) {
+    const int left = static_cast<int>((i * 9173) % 65023) - 32511;
+    const int right = static_cast<int>((i * i * 337) % 64007) - 32003;
+    for (unsigned c = 0; c < 2; ++c) {
+      const auto sample = static_cast<std::int16_t>(c ? right : left);
+      const auto bits = static_cast<std::uint16_t>(sample);
+      pcm[2 * i + c] = sample / 32768.f;
+      pcm16[4 * i + 2 * c] = static_cast<std::uint8_t>(bits);
+      pcm16[4 * i + 2 * c + 1] = static_cast<std::uint8_t>(bits >> 8);
+    }
+  }
+  for (bool integral : {false, true}) {
+    auto asset = Pcm(pcm, rate, 2);
+    if (integral) {
+      asset.codec.codec = SND_CODEC_PCM_S16;
+      asset.data = pcm16.data();
+      asset.dataBytes = pcm16.size();
+    }
+    const src::GranularParams p{
+        &asset, rate / float(interval), 1000.f * length / rate, 0.125f, 0, Window::Hann, 0, 600};
+    Driver driver(snd::SourceKind::Granular, {});
+    Driver::Voice stereo, expanded;
+    SND_REQUIRE(driver.Start(stereo, &p, 2));
+    SND_REQUIRE(driver.Start(expanded, &p, 3));
+    SetLoop(driver, stereo, 2, 61);
+    SetLoop(driver, expanded, 2, 61);
+    driver.Render(stereo, 1021, {}, 97);
+    driver.Render(expanded, 1021, {}, 17);
+    // Different PCM strides, fractional positions crossing the loop, and a
+    // different right-channel waveform expose channel or frame address errors.
+    for (unsigned f = 0; f < 1021; ++f) {
+      double weight = 0, sums[2]{};
+      const auto newest = f / interval;
+      for (unsigned j = 0; j < std::min(8u, newest + 1); ++j) {
+        const auto age = f - (newest - j) * interval;
+        const double w = (1 - std::cos(tau * age / length)) * 0.5;
+        const double pos = 2 + std::fmod(0.125 * 58 + age * std::sqrt(2.0), 59.0);
+        const unsigned a = static_cast<unsigned>(pos), b = a == 60 ? 2 : a + 1;
+        for (unsigned c = 0; c < 2; ++c)
+          sums[c] += w * ((1 - (pos - a)) * pcm[2 * a + c] + (pos - a) * pcm[2 * b + c]);
+        weight += w;
+      }
+      for (unsigned c = 0; c < 2; ++c) {
+        SND_REQUIRE(std::abs(stereo.out[c][f] - sums[c] / std::max(1.0, weight)) < 8e-8);
+        SND_CHECK_EQ(stereo.out[c][f], expanded.out[c][f]);
+      }
+      SND_CHECK_EQ(expanded.out[1][f], expanded.out[2][f]);
+    }
+  }
+}
