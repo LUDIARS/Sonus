@@ -163,15 +163,35 @@ void PostProcessItem(Impl& im, RenderSet& set, const source::RenderItem& it, Ite
     dsp::VoiceFilterProcess(t.RealVoice.col.filterState[r], voiceOut, in.channels, frames, in.filter, im.cfg.sampleRate);
   }
   // Stop both paths after all shared stateful processing (finite loops and scheduled stops).
-  auto cut = [&] {
+  auto cut = [&](float* const* buffers) {
     if (in.frameEnd < frames) {
       for (unsigned c = 0; c < in.channels; ++c)
-        std::memset(voiceOut[c] + in.frameEnd, 0, sizeof(float) * (frames - in.frameEnd));
+        std::memset(buffers[c] + in.frameEnd, 0, sizeof(float) * (frames - in.frameEnd));
     }
   };
-  if (in.filterActive && !vfx) cut();
+  if (in.filterActive && !vfx) cut(voiceOut);
   PathHistory& history = im.rd.paths[r];
   const bool fresh = (in.flags & kItemInitPan) != 0u;
+  if (fresh) {
+    dsp::VoiceFilterInit(history.directFilter, FilterTarget{in.directLp, 0});
+    dsp::VoiceFilterInit(history.sendFilter, FilterTarget{in.sendLp, 0});
+    history.directGain = in.directGain;
+  }
+  float* wet[kMaxChannels];
+  for (unsigned c = 0; c < in.channels; ++c) wet[c] = voiceOut[c];
+  if (in.sends || in.removedCount) {
+    if (in.sendLp < dsp::kVoiceLowpassOffHz || !dsp::VoiceFilterIsOpen(history.sendFilter, im.cfg.sampleRate)) {
+      float* memory = im.rd.sendInput + std::size_t{r} * im.cfg.maxVoiceChannels * frames;
+      for (unsigned c = 0; c < in.channels; ++c) {
+        wet[c] = memory + std::size_t{c} * frames;
+        std::memcpy(wet[c], voiceOut[c], sizeof(float) * frames);
+      }
+      dsp::VoiceFilterProcess(history.sendFilter, wet, in.channels, frames, FilterTarget{in.sendLp, 0}, im.cfg.sampleRate);
+      cut(wet);
+    }
+  } else if (history.sends) {
+    dsp::VoiceFilterInit(history.sendFilter, FilterTarget{in.sendLp, 0});
+  }
   for (unsigned j = 0; j < in.sends; ++j) {
     const auto& route = in.aux[j];
     PanMatrix old{}, next{};
@@ -189,7 +209,7 @@ void PostProcessItem(Impl& im, RenderSet& set, const source::RenderItem& it, Ite
     float* output[kMaxChannels];
     float* segment = SegBuffer(im, set, chunk, route.segment);
     for (unsigned c = 0; c < route.channels; ++c) output[c] = segment + std::size_t{c} * frames;
-    dsp::ApplyPanMatrix(voiceOut, in.channels, output, route.channels, frames, old, next, true);
+    dsp::ApplyPanMatrix(wet, in.channels, output, route.channels, frames, old, next, true);
   }
   for (unsigned j = 0; j < in.removedCount; ++j) {
     const auto removed = in.removed[j];
@@ -199,17 +219,13 @@ void PostProcessItem(Impl& im, RenderSet& set, const source::RenderItem& it, Ite
     float* output[kMaxChannels];
     float* segment = SegBuffer(im, set, chunk, removed.segment);
     for (unsigned c = 0; c < previous.channels; ++c) output[c] = segment + std::size_t{c} * frames;
-    dsp::ApplyPanMatrix(voiceOut, in.channels, output, previous.channels, frames, old, silent, true);
+    dsp::ApplyPanMatrix(wet, in.channels, output, previous.channels, frames, old, silent, true);
   }
   history.sends = in.sends;
   for (unsigned j = 0; j < in.sends; ++j) history.previous[j] = in.aux[j];
-  if (fresh) {
-    dsp::VoiceFilterInit(history.directFilter, FilterTarget{in.directLp, 0});
-    history.directGain = in.directGain;
-  }
   if (in.directLp < dsp::kVoiceLowpassOffHz || !dsp::VoiceFilterIsOpen(history.directFilter, im.cfg.sampleRate)) {
     dsp::VoiceFilterProcess(history.directFilter, voiceOut, in.channels, frames, FilterTarget{in.directLp, 0}, im.cfg.sampleRate);
-    cut();
+    cut(voiceOut);
   }
   PanMatrix from{}, to{};
   const PanMatrix& prev = (in.flags & kItemInitPan) != 0u ? in.pan : t.RealVoice.col.panMatrix[r];
@@ -560,6 +576,8 @@ void Render(Impl& im) noexcept {
     SpatialMatrix(im, vs, mix, im.dp.pan[v], in.outChannels, in.pan);
     in.directGain = mix.obstruction > 0 ? DbToGain(-18 * mix.obstruction) : 1;
     in.directLp = mix.obstruction > 0 ? dsp::kVoiceLowpassOffHz * std::pow(0.04f, mix.obstruction) : dsp::kVoiceLowpassOffHz;
+    in.sendLp = mix.occlusion > 0 ? dsp::kVoiceLowpassOffHz * std::pow(0.05f, mix.occlusion) : dsp::kVoiceLowpassOffHz;
+    in.directLp = std::min(in.directLp, in.sendLp);
     if (mix.count) {
       auto add = [&](SlotIndex target, float amount) {
         if (target == kNoSlot || amount <= 0) return;
