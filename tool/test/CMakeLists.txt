@@ -53,7 +53,8 @@ foreach(_d Defect_ReconnectKeepsCellsTheToolPutBackWhileOffline Defect_ResentBus
         Defect_ConfigLineAcceptsNegativeAndOutOfRangeIntegers Defect_TransitionAuditionNearABarLineDisagreesWithThePreview
         Defect_TransitionAuditionAtTimeZeroSkipsTheFromState Defect_ValueEditBuiltWithAStructuralEditIsLost
         Defect_ReconnectSendsALiveStructuralEditAgain Defect_PreviewLoadBuildAfterAHotReloadFails
-        Defect_TransitionPreviewUsesTheTargetsLeadInsteadOfTheBridges)
+        Defect_TransitionPreviewUsesTheTargetsLeadInsteadOfTheBridges
+        Defect_RememberedAnswerGoesToAnotherGameWhenTheHelloArrivesAfterPoll)
   add_test(NAME tool_indep_s7_live_${_d} COMMAND tool_indep_s7_live_defects_test --filter ${_d})
 endforeach()
 # sonus-replay's exit status on the reports indep_s7_live_replay_test leaves (0 ok, 1 mismatch,
