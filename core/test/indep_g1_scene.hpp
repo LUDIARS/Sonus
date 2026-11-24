@@ -34,8 +34,8 @@ inline snd_listener_desc Listener(snd_vec3 pos = {}, float weight = 1.0f) {
 
 inline TestBank Signal(bool wet = false, float hz = 0, std::size_t frames = 8192) {
   TestBank b;
-  b.buses.push_back(TBus{kDry, wet ? kNone : 2u, 2, wet ? bf::kBusOutput : 0u, 0, {}, {}});
-  b.buses.push_back(TBus{kWet, wet ? 2u : kNone, 2, wet ? 0u : bf::kBusOutput, 0, {}, {}});
+  b.buses.push_back(TBus{kDry, wet ? kNone : 2u, 2, wet ? static_cast<std::uint32_t>(bf::kBusOutput) : 0u, 0, {}, {}});
+  b.buses.push_back(TBus{kWet, wet ? 2u : kNone, 2, wet ? 0u : static_cast<std::uint32_t>(bf::kBusOutput), 0, {}, {}});
   b.buses.push_back(TBus{HashId("Master"), kNone, 2, bf::kBusMaster, 0, {}, {}});
   std::vector<float> data(frames, 0.1f);
   if (hz != 0) {
