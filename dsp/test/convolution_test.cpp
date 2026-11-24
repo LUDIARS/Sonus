@@ -560,8 +560,7 @@ double ConvAt(const std::vector<float>& x, const std::vector<float>& h, std::siz
 }
 }  // namespace
 
-// D-218: switching the IR cross-fades linearly from the switch to the end of the
-// partition period (B frames when the switch is on a period boundary), old side =
+// D-218: switching the IR cross-fades linearly for B frames from the switch, old side =
 // the old IR on the full history, new side = the new IR on the full history; after
 // the fade the new IR alone. The same with the switch inside a period, and
 // bit-identical however the calls are split around the same switch frame.
@@ -593,13 +592,13 @@ SND_TEST(Convolution, IrSwitchCrossFades) {
       }
       SND_CHECK_MSG(outs[0] == outs[1], "switch at %u zl %d: depends on the call split", sw, static_cast<int>(zl));
       const std::uint32_t lat = zl != 0.0f ? 0u : b;
-      const std::uint32_t f0 = sw % b, end = sw - f0 + b;
+      const std::uint32_t end = sw + b;
       double err = 0.0;
       for (std::size_t i = lat; i < 3000u; ++i) {
         const double o = ConvAt(x, h1, i - lat), n = ConvAt(x, h2, i - lat);
         double want = i < sw ? o : n;
         if (i >= sw && i < end) {
-          const double g = static_cast<double>(i - sw + 1u) / static_cast<double>(b - f0);
+          const double g = static_cast<double>(i - sw + 1u) / static_cast<double>(b);
           want = o + g * (n - o);
         }
         err = std::max(err, std::fabs(outs[0][i] - want));
@@ -637,6 +636,37 @@ SND_TEST(Convolution, UnregisterFadesOutWithoutReadingTheIr) {
   }
   SND_CHECK_MSG(err < 2e-5, "fade out after unregister: err %g", err);
   SND_CHECK_EQ(ConvolutionStateActiveIrFrames(fx.st()), 0u);
+}
+
+// Once the target is also retired during the first fade, its copied coefficients
+// must cover both the remainder of that fade and the following full fade.
+SND_TEST(Convolution, RetiredTargetFinishesBothFades) {
+  constexpr unsigned b = 64, start = 512 + 31;
+  const auto h = DecayIr(401, 251, 100);
+  const auto x = NoiseVec(1024, 252);
+  for (float zl : {0.0f, 1.0f}) {
+    Ir silent({{0.0f}}, b), target({h}, b);
+    Conv fx(1, silent.slot, 13, b, zl);
+    auto y = x;
+    auto render = [&](unsigned at, unsigned n, unsigned id) {
+      const float slot = static_cast<float>(id);
+      snd::ParamBlock pb{&slot, &slot, 1, 1, nullptr};
+      float* io[] = {y.data() + at};
+      SND_RT_SCOPE();
+      EffectProcess(fx.st(), io, io, 1, n, &pb, nullptr);
+    };
+    render(0, start, silent.slot);
+    render(start, 1, target.slot);
+    SND_REQUIRE(ConvolutionUnregisterIr(target.slot));
+    target.slot = 0;
+    std::memset(target.mem.get(), 0xff, target.mem.size());
+    render(start + 1, static_cast<unsigned>(y.size()) - start - 1, 0);
+    const auto ref = Direct(x, h, zl == 0.0f ? b : 0);
+    for (unsigned j = 0; j < 2 * b; ++j) {
+      const auto g = static_cast<double>(j < b ? j + 1u : 2u * b - j - 1u) / b;
+      SND_CHECK_NEAR(y[start + j], g * ref[start + j], 2e-5);
+    }
+  }
 }
 
 // D-219: IRs with NaN / Inf samples are refused (arrays and blobs).

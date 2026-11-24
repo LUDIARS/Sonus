@@ -214,30 +214,22 @@ struct ConvState {
   std::uint32_t planOff;
   std::uint32_t inOff;    // chans x (2b + 8): input of the previous and current period
   std::uint32_t fdlOff;   // chans x cap x 2b: input spectra
-  std::uint32_t outOff;   // chans x b: FDL output for the current period
-  std::uint32_t accOff;   // 2b: spectrum accumulator
-  std::uint32_t timeOff;  // 2b: inverse FFT output
-  std::uint32_t workOff;  // 2b: FFT scratch
-  std::uint32_t tmpOff;   // b + 8: wet of one output channel (new side)
-  // D-218: IR switch with a cross-fade; the IR's direct-head taps are copied into the
-  // state, so the old IR is never read once a switch has been seen.
-  std::uint32_t headCh;   // head taps kept per bank: min(16, chans^2)
-  std::uint32_t headOff;  // 2 banks x headCh x b floats
-  std::uint32_t newOff;   // chans x b: FDL output of the new IR during a fade
-  std::uint32_t oldTmpOff;  // b + 8: wet of one output channel (old side)
-  std::uint32_t curNum;   // IR number in use (0 = none)
-  std::uint32_t curBank;  // head bank of the IR in use
-  std::uint32_t curRoute, curIrCh;
-  std::uint32_t oldRoute, oldIrCh;
-  std::uint32_t fading;   // 1 while cross-fading from the old IR (until the period ends)
-  std::uint32_t fadeFrom; // period position the fade started at
-  std::uint32_t pad[3];
+  std::uint32_t accOff, timeOff, workOff;  // 2B floats each for FFT processing
+  std::uint32_t tmpOff;   // 2 x (B + 8): wet channels, also scratch between periods
+  std::uint32_t headCh;   // maximum number of reachable IR channels
+  std::uint32_t headOff;  // directly convolved time-domain taps in each bank
+  std::uint32_t outputOff[2], nextOff[2]; // C x B: output and next period's known contribution
+  std::uint32_t extraOff; // C x B: one further period at the start of a fade
+  std::uint32_t nearOff[3]; // B taps per IR channel: nearest FDL part per bank, second part of target
+  std::uint32_t curNum, curBank;
+  std::uint32_t irChannels[2], parts[2];
+  Route route[2];
+  std::uint32_t fadeLeft;
 };
-static_assert(sizeof(ConvState) % 64 == 0);
 
 std::uint32_t HeadChannels(std::uint32_t chans) noexcept {
   const std::uint32_t sq = chans * chans;
-  return sq < kConvolutionMaxIrChannels ? sq : kConvolutionMaxIrChannels;
+  return sq <= kConvolutionMaxIrChannels ? sq : chans;
 }
 
 std::size_t LayoutFor(ConvState* s, const fx::FxConfig& cfg) noexcept {
@@ -247,22 +239,26 @@ std::size_t LayoutFor(ConvState* s, const fx::FxConfig& cfg) noexcept {
   double frames = std::ceil(ms * 0.001 * static_cast<double>(cfg.sizingRate));
   if (frames < 1.0) frames = 1.0;
   std::uint64_t cap = (static_cast<std::uint64_t>(frames) + b - 1u) / b;
-  const std::uint64_t capMax = kMaxStateBytes / (8ull * b * ch);
-  if (cap > capMax) cap = capMax;
   if (cap < 1u) cap = 1u;
   const std::uint32_t hc = HeadChannels(ch);
   detail::Carver c(s, sizeof(ConvState));
   const std::uint32_t planOff = c.Take<unsigned char>(FftPlanBytes(2u * b));
   const std::uint32_t inOff = c.Take<float>(std::size_t{ch} * (2u * b + 8u));
-  const std::uint32_t fdlOff = c.Take<float>(std::size_t{ch} * cap * 2u * b);
-  const std::uint32_t outOff = c.Take<float>(std::size_t{ch} * b);
   const std::uint32_t accOff = c.Take<float>(2u * b);
   const std::uint32_t timeOff = c.Take<float>(2u * b);
   const std::uint32_t workOff = c.Take<float>(2u * b);
-  const std::uint32_t tmpOff = c.Take<float>(b + 8u);
+  const std::uint32_t tmpOff = c.Take<float>(2u * (b + 8u));
   const std::uint32_t headOff = c.Take<float>(2u * std::size_t{hc} * b);
-  const std::uint32_t newOff = c.Take<float>(std::size_t{ch} * b);
-  const std::uint32_t oldTmpOff = c.Take<float>(b + 8u);
+  std::uint32_t output[2], next[2], near[3];
+  for (unsigned bank = 0; bank < 2; ++bank) {
+    output[bank] = c.Take<float>(std::size_t{ch} * b);
+    next[bank] = c.Take<float>(std::size_t{ch} * b);
+  }
+  const auto extra = c.Take<float>(std::size_t{ch} * b);
+  for (auto& off : near) off = c.Take<float>(std::size_t{hc} * b);
+  const auto capMax = (kMaxStateBytes - c.Size()) / (8ull * b * ch);
+  if (cap > capMax) cap = capMax;
+  const auto fdlOff = c.Take<float>(std::size_t{ch} * cap * 2u * b);
   if (s != nullptr) {
     s->b = b;
     s->cap = static_cast<std::uint32_t>(cap);
@@ -271,15 +267,16 @@ std::size_t LayoutFor(ConvState* s, const fx::FxConfig& cfg) noexcept {
     s->planOff = planOff;
     s->inOff = inOff;
     s->fdlOff = fdlOff;
-    s->outOff = outOff;
     s->accOff = accOff;
     s->timeOff = timeOff;
     s->workOff = workOff;
     s->tmpOff = tmpOff;
     s->headCh = hc;
     s->headOff = headOff;
-    s->newOff = newOff;
-    s->oldTmpOff = oldTmpOff;
+    std::memcpy(s->outputOff, output, sizeof(output));
+    std::memcpy(s->nextOff, next, sizeof(next));
+    std::memcpy(s->nearOff, near, sizeof(near));
+    s->extraOff = extra;
   }
   return c.Size();
 }
@@ -290,11 +287,8 @@ float* InBuf(ConvState& s, std::uint32_t c) noexcept {
 float* Fdl(ConvState& s, std::uint32_t c, std::uint32_t slot) noexcept {
   return detail::At<float>(&s, s.fdlOff) + (std::size_t{c} * s.cap + slot) * 2u * s.b;
 }
-float* OutBuf(ConvState& s, std::uint32_t c) noexcept {
-  return detail::At<float>(&s, s.outOff) + std::size_t{c} * s.b;
-}
-float* NewBuf(ConvState& s, std::uint32_t c) noexcept {
-  return detail::At<float>(&s, s.newOff) + std::size_t{c} * s.b;
+float* ChannelBuf(ConvState& s, std::uint32_t offset, std::uint32_t c) noexcept {
+  return detail::At<float>(&s, offset) + std::size_t{c} * s.b;
 }
 float* HeadTaps(ConvState& s, std::uint32_t bank, std::uint32_t irCh) noexcept {
   return detail::At<float>(&s, s.headOff) + (std::size_t{bank} * s.headCh + irCh) * s.b;
@@ -362,18 +356,17 @@ void MacSpectrum(float* acc, const float* x, const float* hsp, std::uint32_t b, 
   *ny = *ny + xi[0] * hi[0];
 }
 
-// FDL output of the period that starts now: sum over the valid slots (newest = s.w)
-// of input spectrum x IR partition, inverse FFT, second half. `out(o)` = destination.
-template <class Dst>
-void Engine(ConvState& s, const ActiveIr& a, Dst out) noexcept {
+// Known input contributions to the period 'ahead' periods from now. The newest
+// available input uses IR part first + ahead; earlier spectra follow in order.
+void Engine(ConvState& s, const ActiveIr& a, std::uint32_t ahead, std::uint32_t dst) noexcept {
   const std::uint32_t b = s.b;
   const void* plan = detail::At<unsigned char>(&s, s.planOff);
   float* work = detail::At<float>(&s, s.workOff);
-  const std::uint32_t n = a.ir != nullptr ? (s.valid < a.engine ? s.valid : a.engine) : 0u;
+  const auto n = a.engine > ahead ? detail::Min(s.valid, a.engine - ahead) : 0u;
   float* acc = detail::At<float>(&s, s.accOff);
   float* time = detail::At<float>(&s, s.timeOff);
   for (std::uint32_t o = 0; o < s.chans; ++o) {
-    float* y = out(o);
+    float* y = ChannelBuf(s, dst, o);
     if (n == 0u) {
       std::memset(y, 0, sizeof(float) * b);
       continue;
@@ -385,11 +378,11 @@ void Engine(ConvState& s, const ActiveIr& a, Dst out) noexcept {
       if (a.route == Route::Matrix) {
         for (std::uint32_t i = 0; i < s.chans; ++i)
           MacSpectrum(acc, Fdl(s, i, fs),
-                      Spectrum(a, IrChannel(a.route, a.ir->channels, s.chans, i, o), a.first + p),
+                      Spectrum(a, IrChannel(a.route, a.ir->channels, s.chans, i, o), a.first + ahead + p),
                       b, &dc, &ny);
       } else {
         MacSpectrum(acc, Fdl(s, o, fs),
-                    Spectrum(a, IrChannel(a.route, a.ir->channels, s.chans, o, o), a.first + p), b,
+                    Spectrum(a, IrChannel(a.route, a.ir->channels, s.chans, o, o), a.first + ahead + p), b,
                     &dc, &ny);
       }
     }
@@ -400,8 +393,53 @@ void Engine(ConvState& s, const ActiveIr& a, Dst out) noexcept {
   }
 }
 
-// End of a period: transform the input, run the FDL, prepare the next period's output.
-void Step(ConvState& s, const ActiveIr& a) noexcept {
+// Finish a partial prediction with the newest input block. A retired IR is
+// represented only by the time-domain coefficients in the instance. Transform
+// those taps on demand so the state does not duplicate entire IR spectra.
+void Complete(ConvState& s, std::uint32_t bank, std::uint32_t part, const ActiveIr* live,
+              std::uint32_t partial, std::uint32_t dst) noexcept {
+  const auto b = s.b;
+  auto* plan = detail::At<unsigned char>(&s, s.planOff);
+  auto* time = detail::At<float>(&s, s.timeOff);
+  auto* work = detail::At<float>(&s, s.workOff);
+  auto* acc = detail::At<float>(&s, s.accOff);
+  auto* scratch = detail::At<float>(&s, s.tmpOff);
+  for (unsigned o = 0; o < s.chans; ++o) {
+    auto* y = ChannelBuf(s, dst, o);
+    const auto* known = ChannelBuf(s, partial, o);
+    if (s.parts[bank] <= part) {
+      std::memcpy(y, known, sizeof(float) * b);
+      continue;
+    }
+    std::memset(acc, 0, sizeof(float) * 2u * b);
+    float dc = 0, ny = 0;
+    const auto route = s.route[bank];
+    const bool matrix = route == Route::Matrix;
+    for (unsigned i = matrix ? 0u : o; i < (matrix ? s.chans : o + 1u); ++i) {
+      const auto ch = IrChannel(route, s.irChannels[bank], s.chans, i, o);
+      const float* coeff = nullptr;
+      if (live != nullptr) {
+        coeff = Spectrum(*live, ch, live->first + part);
+      } else {
+        const auto* taps = ChannelBuf(s, s.nearOff[part == 0u ? bank : 2u], ch);
+        std::memcpy(time, taps, sizeof(float) * b);
+        std::memset(time + b, 0, sizeof(float) * b);
+        FftRealForward(plan, time, scratch, scratch + b, work);
+        coeff = scratch;
+      }
+      MacSpectrum(acc, Fdl(s, i, s.w), coeff, b, &dc, &ny);
+    }
+    acc[0] = dc;
+    acc[b] = ny;
+    FftRealInverse(plan, acc, acc + b, time, work);
+    for (unsigned j = 0; j < b; ++j) y[j] = known[j] + time[b + j];
+  }
+}
+
+// End of an input period. Complete both audible sides from the same new FDL
+// entry. Only the requested IR can be read. If the target was retired during
+// its own fade, its second prediction bridges the following fade as well.
+void Step(ConvState& s, const ActiveIr& requested) noexcept {
   const std::uint32_t b = s.b;
   const void* plan = detail::At<unsigned char>(&s, s.planOff);
   float* work = detail::At<float>(&s, s.workOff);
@@ -412,7 +450,18 @@ void Step(ConvState& s, const ActiveIr& a) noexcept {
   }
   s.w = slot;
   if (s.valid < s.cap) ++s.valid;
-  Engine(s, a, [&](std::uint32_t o) noexcept { return OutBuf(s, o); });
+  const auto bank = s.curBank;
+  const bool current = requested.number == s.curNum;
+  Complete(s, bank, 0, current ? &requested : nullptr, s.nextOff[bank], s.outputOff[bank]);
+  if (s.fadeLeft != 0u) {
+    const auto old = bank ^ 1u;
+    Complete(s, old, 0, nullptr, s.nextOff[old], s.outputOff[old]);
+  }
+  if (current) {
+    Engine(s, requested, 1, s.nextOff[bank]);
+  } else {
+    Complete(s, bank, 1, nullptr, s.extraOff, s.nextOff[bank]);
+  }
   for (std::uint32_t c = 0; c < s.chans; ++c) {
     float* x = InBuf(s, c);
     std::memcpy(x, x + b, sizeof(float) * b);
@@ -422,33 +471,55 @@ void Step(ConvState& s, const ActiveIr& a) noexcept {
 void GoDormant(ConvState& s) noexcept {
   for (std::uint32_t c = 0; c < s.chans; ++c) {
     std::memset(InBuf(s, c), 0, sizeof(float) * (2u * s.b + 8u));
-    std::memset(OutBuf(s, c), 0, sizeof(float) * s.b);
+    std::memset(ChannelBuf(s, s.outputOff[s.curBank], c), 0, sizeof(float) * s.b);
+    std::memset(ChannelBuf(s, s.nextOff[s.curBank], c), 0, sizeof(float) * s.b);
   }
   s.valid = 0;
   s.dormant = 1;
-  s.fading = 0;
+  s.fadeLeft = 0;
 }
 
-// Makes `a` the IR in use: its head taps go to bank `bank` (the only read of the
-// IR's head; afterwards the head runs from the copy).
-void Adopt(ConvState& s, const ActiveIr& a, std::uint32_t bank) noexcept {
-  s.curNum = a.number;
+// Rebuild the new side at the current FDL position and prepare the contribution
+// of known history one period ahead. During a fade the new side can itself be
+// unregistered: one more partial sum and its second nearest part cover that case.
+void Adopt(ConvState& s, const ActiveIr& a) noexcept {
+  const auto bank = s.curBank ^ 1u;
   s.curBank = bank;
-  s.curRoute = static_cast<std::uint32_t>(a.route);
-  s.curIrCh = a.ir != nullptr ? a.ir->channels : 0u;
+  s.curNum = a.number;
+  s.route[bank] = a.route;
+  s.irChannels[bank] = a.ir == nullptr ? 0u : a.ir->channels;
+  s.parts[bank] = a.engine;
+  s.active = a.ir == nullptr ? 0u : detail::Min(a.ir->frames, (a.engine + a.first) * s.b);
+  s.fadeLeft = s.dormant == 0u ? s.b : 0u;
+  Engine(s, a, 0, s.outputOff[bank]);
+  Engine(s, a, 1, s.nextOff[bank]);
+  if (s.fadeLeft != 0u) Engine(s, a, 2, s.extraOff);
   if (a.ir == nullptr) return;
-  const std::uint32_t n = s.curIrCh < s.headCh ? s.curIrCh : s.headCh;
-  const float* src = detail::At<float>(a.ir, a.ir->headOff);
-  for (std::uint32_t c = 0; c < n; ++c)
-    std::memcpy(HeadTaps(s, bank, c), src + std::size_t{c} * s.b, sizeof(float) * s.b);
+  const auto b = s.b;
+  const auto n = detail::Min(s.irChannels[bank], s.headCh);
+  const auto* src = detail::At<float>(a.ir, a.ir->headOff);
+  auto* time = detail::At<float>(&s, s.timeOff);
+  auto* work = detail::At<float>(&s, s.workOff);
+  auto* plan = detail::At<unsigned char>(&s, s.planOff);
+  const auto count = detail::Min(a.engine, s.fadeLeft != 0u ? 2u : 1u);
+  for (unsigned c = 0; c < n; ++c) {
+    if (s.zl != 0u) std::memcpy(HeadTaps(s, bank, c), src + std::size_t{c} * b, sizeof(float) * b);
+    for (unsigned part = 0; part < count; ++part) {
+      const auto* coeff = Spectrum(a, c, a.first + part);
+      FftRealInverse(plan, coeff, coeff + b, time, work);
+      auto* taps = ChannelBuf(s, s.nearOff[part == 0u ? bank : 2u], c);
+      const float scale = 1.0f / static_cast<float>(2u * b);
+      for (unsigned k = 0; k < b; ++k) taps[k] = time[k] * scale;
+    }
+  }
 }
 
 // Direct head from the copied taps: dst[j] = sum_i sum_k head[k] x_i[B + f + j - k],
 // groups of 8 outputs (each lane is one output frame: independent of the grouping).
-void HeadFir(ConvState& s, std::uint32_t bank, std::uint32_t route, std::uint32_t irCh,
+void HeadFir(ConvState& s, std::uint32_t bank, Route route, std::uint32_t irCh,
              std::uint32_t o, std::uint32_t len, float* dst) noexcept {
   const std::uint32_t b = s.b;
-  const Route r = static_cast<Route>(route);
+  const Route r = route;
   for (std::uint32_t j0 = 0; j0 < len; j0 += 8u) {
     F32x8 acc = F32x8::Zero();
     const auto run = [&](std::uint32_t in, std::uint32_t ch) noexcept {
@@ -467,7 +538,7 @@ void HeadFir(ConvState& s, std::uint32_t bank, std::uint32_t route, std::uint32_
 
 // Wet of output o for frames [f, f + len) from engine output `eng` and the head of
 // bank / route / irCh (no head when irCh == 0 or without the direct head).
-void Wet(ConvState& s, const float* eng, std::uint32_t bank, std::uint32_t route,
+void Wet(ConvState& s, const float* eng, std::uint32_t bank, Route route,
          std::uint32_t irCh, std::uint32_t o, std::uint32_t len, float* dst) noexcept {
   if (irCh != 0u && s.zl != 0u) {
     HeadFir(s, bank, route, irCh, o, len, dst);
@@ -681,10 +752,9 @@ void ConvolutionInit(void* state, const FxConfig& cfg) noexcept {
   s.active = 0;
   s.curNum = 0;
   s.curBank = 0;
-  s.curRoute = s.oldRoute = 0;
-  s.curIrCh = s.oldIrCh = 0;
-  s.fading = 0;
-  s.fadeFrom = 0;
+  s.irChannels[0] = s.irChannels[1] = 0;
+  s.parts[0] = s.parts[1] = 0;
+  s.fadeLeft = 0;
   s.h.latency = s.zl != 0u ? 0u : s.b;
   const std::uint64_t tail = (std::uint64_t{s.cap} + 2u) * s.b + (s.zl != 0u ? 0u : s.b);
   s.h.tailFrames = tail > 0x7FFFFFFFu ? 0x7FFFFFFFu : static_cast<std::uint32_t>(tail);
@@ -695,16 +765,16 @@ void ConvolutionInit(void* state, const FxConfig& cfg) noexcept {
 // framework yet; proposed for EffectReset / NaN recovery in requests/D-12.
 void ConvolutionReset(void* state) noexcept {
   ConvState& s = *static_cast<ConvState*>(state);
+  s.curBank = 0;
   GoDormant(s);  // input history, FDL output, valid = 0 (the FDL is invalidated, not cleared)
   s.f = 0;
   s.w = 0;
   s.active = 0;
   s.curNum = 0;  // the next call adopts the IR at once (dormant)
   s.curBank = 0;
-  s.curRoute = s.oldRoute = 0;
-  s.curIrCh = s.oldIrCh = 0;
-  s.fading = 0;
-  s.fadeFrom = 0;
+  s.irChannels[0] = s.irChannels[1] = 0;
+  s.parts[0] = s.parts[1] = 0;
+  s.fadeLeft = 0;
 }
 
 void ConvolutionProcess(void* state, const FxIo& io, const FxParams& p) noexcept {
@@ -718,36 +788,17 @@ void ConvolutionProcess(void* state, const FxIo& io, const FxParams& p) noexcept
       slotParam > 0.0f && slotParam <= static_cast<float>(kConvolutionMaxIrNumber)
           ? static_cast<std::uint32_t>(slotParam)
           : 0u;
-  ActiveIr a = Resolve(s, number);
-  if (a.number != s.curNum) {
-    if (s.dormant != 0u) {
-      Adopt(s, a, s.curBank);  // nothing is sounding: switch at once
-    } else if (s.fading == 0u) {
-      // Cross-fade from the switch to the end of the period: the old side is what was
-      // already computed (OutBuf, head taps in the other bank), the new side is the
-      // new IR on the same input history.
-      s.oldRoute = s.curRoute;
-      s.oldIrCh = s.curIrCh;
-      Adopt(s, a, s.curBank ^ 1u);
-      Engine(s, a, [&](std::uint32_t o) noexcept { return NewBuf(s, o); });
-      s.fading = 1;
-      s.fadeFrom = s.f;
-    } else {
-      a = Resolve(s, s.curNum);  // a fade is running: the next switch waits for its end
-    }
-  }
-  s.active = a.ir == nullptr
-                 ? 0u
-                 : static_cast<std::uint32_t>(
-                       detail::Min<std::uint64_t>(a.ir->frames, std::uint64_t{a.engine + a.first} * b));
+  const ActiveIr requested = Resolve(s, number);
   const bool rampDry = p.Ramps(kConvDryMix);
   const bool rampWet = p.Ramps(kConvWetMix) || p.Ramps(kConvWetGainDb);
   const float wetConst = p.s[kConvWetMix] * detail::DbToLin(p.s[kConvWetGainDb]);
   const float inv = 1.0f / static_cast<float>(io.frames);
   float* tmp = detail::At<float>(&s, s.tmpOff);
-  float* oldTmp = detail::At<float>(&s, s.oldTmpOff);
+  float* oldTmp = tmp + b + 8u;
   for (std::uint32_t done = 0; done < io.frames;) {
-    const std::uint32_t len = io.frames - done < b - s.f ? io.frames - done : b - s.f;
+    if (requested.number != s.curNum && s.fadeLeft == 0u) Adopt(s, requested);
+    auto len = detail::Min(io.frames - done, b - s.f);
+    if (s.fadeLeft != 0u) len = detail::Min(len, s.fadeLeft);
     float peak = 0.0f;
     std::uint32_t loudEnd = 0;  // 1 + index of the last frame at or above the tail threshold
     for (std::uint32_t c = 0; c < s.chans; ++c) {
@@ -776,13 +827,15 @@ void ConvolutionProcess(void* state, const FxIo& io, const FxParams& p) noexcept
       s.valid = 0;
     }
     for (std::uint32_t o = 0; o < io.channels; ++o) {
-      const float* eng = (s.fading != 0u ? NewBuf(s, o) : OutBuf(s, o)) + s.f;
-      Wet(s, eng, s.curBank, s.curRoute, s.curIrCh, o, len, tmp);
-      if (s.fading != 0u) {
-        Wet(s, OutBuf(s, o) + s.f, s.curBank ^ 1u, s.oldRoute, s.oldIrCh, o, len, oldTmp);
-        const float span = static_cast<float>(b - s.fadeFrom);
-        for (std::uint32_t j = 0; j < len; ++j) {
-          const float g = static_cast<float>(s.f + j - s.fadeFrom + 1u) / span;
+      const auto bank = s.curBank;
+      Wet(s, ChannelBuf(s, s.outputOff[bank], o) + s.f, bank, s.route[bank], s.irChannels[bank],
+          o, len, tmp);
+      if (s.fadeLeft != 0u) {
+        const auto old = bank ^ 1u;
+        Wet(s, ChannelBuf(s, s.outputOff[old], o) + s.f, old, s.route[old], s.irChannels[old],
+            o, len, oldTmp);
+        for (unsigned j = 0; j < len && j + 1u < s.fadeLeft; ++j) {
+          const float g = static_cast<float>(b - s.fadeLeft + j + 1u) / static_cast<float>(b);
           tmp[j] = oldTmp[j] + g * (tmp[j] - oldTmp[j]);
         }
       }
@@ -808,10 +861,10 @@ void ConvolutionProcess(void* state, const FxIo& io, const FxParams& p) noexcept
     }
     fx::TailUpdate(s.h, 0.0f, len - loudEnd);
     s.f += len;
+    if (s.fadeLeft != 0u) s.fadeLeft -= len;
     if (s.f == b) {
-      Step(s, a);
+      Step(s, requested);
       s.f = 0;
-      s.fading = 0;
     }
     if (fx::TailShouldClear(s.h)) GoDormant(s);
     done += len;

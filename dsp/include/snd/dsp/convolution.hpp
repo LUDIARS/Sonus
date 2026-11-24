@@ -40,22 +40,16 @@
 // (the framework stores the end value in the state before splitting; the
 // interpolated sub-block values are ignored), so no number between the start
 // and end values is ever looked up.
-// IR switch (D-218), seen at the start of a call (the number differs from the one
-// in use, or the IR in use was unregistered / became unusable): the output
-// cross-fades linearly from the switch frame to the end of the current partition
-// period (B frames when the switch is on a period boundary, which is always the
-// case when calls are multiples of B; B - f frames when it is f frames into the
-// period). Old side: the FDL output the old IR had already produced for this
-// period plus its direct head from taps the state copied when that IR was
-// adopted, so the old IR's memory is never read after the switch. New side: the
-// new IR on the same input history (one extra FDL pass at the switch). After the
-// fade the output equals the new IR used from the start (within the history the
-// FDL holds). Switching to or from "no IR" fades the same way; an instance whose
-// tail is done switches at once. A switch seen while a fade is running waits for
-// the first call that starts after the fade (period) ends. The result does not
-// depend on how calls are split as long as the switch happens at the same frame.
+// An active instance cross-fades for exactly B frames after observing an IR
+// change (including unregistration, incompatibility and transitions to silence).
+// At transition frame j = 0..B-1, the new IR's weight is (j+1)/B. Both sides
+// use the same input history. The old IR can be retired: copied near taps and
+// partially computed future output finish its fade without reading its memory.
+// The last request observed during a fade takes effect on the next sample after
+// the fade, regardless of call and max_frames boundaries. A dormant instance
+// adopts the requested IR immediately.
 //
-// Channel routing (prepared IR with I channels, instance with C channels):
+//// Channel routing (prepared IR with I channels, instance with C channels):
 //   - I == C:                 per channel, output c = input c * IR c (stereo IR on stereo)
 //   - I == C * C, C >= 2:     matrix ("true stereo" for C = 2): output o = sum_i input i *
 //                              IR (i * C + o); for stereo the IR order is LL, LR, RL, RR
@@ -72,7 +66,8 @@
 // ceil(MaxIrMs * sizing rate / 1000 / B) FDL partitions.
 //
 // State (DSP pool): about 8 bytes per input channel per FDL frame (cap B) +
-// O(C B) + 2 x min(16, C^2) x B floats of copied head taps; see EffectStateBytes.
+// O(C B) scratch and 5 x R x B floats of copied taps. R is C^2 when matrix
+// routing is possible (C^2 <= 16), otherwise C. See EffectStateBytes.
 // The state never holds a pointer to the IR; the registry is read at the start
 // of every call.
 //
