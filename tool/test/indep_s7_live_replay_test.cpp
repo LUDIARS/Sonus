@@ -54,8 +54,19 @@ Rec RecordOnce() {
   r.doc.SetNumber(SfxG(), "volumeDb", -4.0);
   r.Settle();
   const float pos[3] = {1.0f, 0.0f, 2.0f};
-  c->Audition(snd::HashId("Spot"), pos, false, true);
-  c->OverrideParam(snd::HashId("Knob"), 0.75f, true, true);
+  // Wait for both answers (the live link thread records them; the blocks below are rendered at
+  // once, without waiting): they must be inside the recording.
+  const std::uint32_t s1 = c->Audition(snd::HashId("Spot"), pos, false, true);
+  const std::uint32_t s2 = c->OverrideParam(snd::HashId("Knob"), 0.75f, true, true);
+  std::int32_t a1 = 0, a2 = 0;
+  bool got1 = false, got2 = false;
+  if (s1 == 0u || s2 == 0u || !r.Run([&] {
+        got1 = got1 || c->TakeAck(s1, &a1);
+        got2 = got2 || c->TakeAck(s2, &a2);
+        return got1 && got2;
+      })) {
+    return out;
+  }
   r.Frames(8);
   r.engine->Play(snd::HashId("Hum"), nullptr);
   r.Frames(5);
