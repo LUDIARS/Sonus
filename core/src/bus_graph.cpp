@@ -23,11 +23,12 @@ float* BusBuffer(Impl& im, SlotIndex s) noexcept {
   return im.rd.busBuf + std::size_t{s} * kMaxChannels * im.cfg.blockFrames;
 }
 
-void Downmix(const float* src, std::uint32_t inCh, float* dst, std::uint32_t outCh, std::uint32_t frames, float gain) noexcept {
-  if (gain == 0.0f) return;
+void DownmixRamp(const float* src, std::uint32_t inCh, float* dst, std::uint32_t outCh, std::uint32_t frames,
+                 float first, float last) noexcept {
+  if (first == 0.0f && last == 0.0f) return;
   if (inCh == outCh) {
     for (std::uint32_t c = 0; c < inCh; ++c) {
-      dsp::MixGainRamp(dst + std::size_t{c} * frames, src + std::size_t{c} * frames, frames, gain, gain);
+      dsp::MixGainRamp(dst + std::size_t{c} * frames, src + std::size_t{c} * frames, frames, first, last);
     }
     return;
   }
@@ -39,12 +40,21 @@ void Downmix(const float* src, std::uint32_t inCh, float* dst, std::uint32_t out
     dsp::ClearPanMatrix(&m);
     for (std::uint32_t i = 0; i < inCh; ++i) m.gain[i][i < outCh ? i : outCh - 1u] = 1.0f;
   }
-  dsp::ScalePanMatrix(&m, gain);
+  PanMatrix end{};
+  if (last != first) {
+    end = m;
+    dsp::ScalePanMatrix(&end, last);
+  }
+  dsp::ScalePanMatrix(&m, first);
   const float* in[kMaxChannels];
   float* out[kMaxChannels];
   for (std::uint32_t c = 0; c < inCh; ++c) in[c] = src + std::size_t{c} * frames;
   for (std::uint32_t c = 0; c < outCh; ++c) out[c] = dst + std::size_t{c} * frames;
-  dsp::ApplyPanMatrix(in, inCh, out, outCh, frames, m, m, true);
+  dsp::ApplyPanMatrix(in, inCh, out, outCh, frames, m, last == first ? m : end, true);
+}
+
+void Downmix(const float* src, std::uint32_t inCh, float* dst, std::uint32_t outCh, std::uint32_t frames, float gain) noexcept {
+  DownmixRamp(src, inCh, dst, outCh, frames, gain, gain);
 }
 
 }  // namespace
@@ -149,7 +159,7 @@ void MixBuses(Impl& im) noexcept {
       }
     }
     // Pre-fader sends (graph order: targets come later).
-    auto doSends = [&](bool pre, float g) {
+    auto doSends = [&](bool pre) {
       if (rec == nullptr) return;
       const bk::BankView& v = *rec->view;
       for (std::uint32_t k = 0; k < sends[d].count; ++k) {
@@ -160,15 +170,20 @@ void MixBuses(Impl& im) noexcept {
         const SlotIndex ts = rec->busSlot[tb];
         if (ts == kNoSlot || !base::rows::IsLive(br, ts)) continue;
         if (go[base::rows::DenseOf(br, ts)] <= oi) continue;  // would close a cycle: ignored
-        Downmix(buf, ch, BusBuffer(im, ts), im.busDefs[ts].channels, frames, g * DbToGain(v.Column<bk::col::SEND_levelDb>()[row] + rec->sendContrib[row]));
+        const float base = v.Column<bk::col::SEND_levelDb>()[row];
+        const float offset = rec->sendContrib[row], previous = rec->previousSendContrib[row];
+        const float last = DbToGain(base + offset);
+        DownmixRamp(buf, ch, BusBuffer(im, ts), im.busDefs[ts].channels, frames,
+                    previous == offset ? last : DbToGain(base + previous), last);
+        rec->previousSendContrib[row] = offset;
       }
     };
-    doSends(true, 1.0f);
+    doSends(true);
     // Fader: ramp from the gain actually applied last block to the target.
     const float g0 = busGain[d], g1 = gainTarget[d];
     for (std::uint32_t c = 0; c < ch; ++c) dsp::CopyGainRamp(chans[c], chans[c], frames, g0, g1);
     busGain[d] = g1;
-    doSends(false, 1.0f);
+    doSends(false);
     // Meters.
     dsp::PeakMeterProcess(rd.peak[s], chans, frames);
     dsp::RmsMeterProcess(rd.rms[s], chans, frames);
