@@ -11,6 +11,7 @@ std::vector<float> StopSignal(bool wet, Ending ending) {
   if (ending == Ending::LoopCount) b.events[0].tracks[0].clips[0].loopCount = 2;
   Scene s(b);
   SND_CHECK_EQ(s.h.sys->SetParamEmitter(s.em, HashId("snd.occlusion"), 1), SND_OK);
+  if (!wet) SND_CHECK_EQ(s.h.sys->SetParamEmitter(s.em, HashId("snd.obstruction"), 1), SND_OK);
   if (wet) {
     const auto zone = s.h.sys->CreateEmitter();
     const snd_vec3 ext{1, 1, 1};
