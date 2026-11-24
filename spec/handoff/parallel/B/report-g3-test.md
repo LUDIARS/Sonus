@@ -50,7 +50,7 @@
 | 共有キーバスの解放と再駆動 | `IndepG3Shared.SurvivingKeyRedrivesCompressorAfterOwnerUnload`, `IndepG3Shared.SurvivingKeyRedrivesLevelDuckAfterOwnerUnload` |
 | カテゴリ・フォーカス・独立出力 | `IndepG3Category.ParentAndLeafSolosCombineAndClear`, `IndepG3Category.RegainingFocusPreservesExplicitMute`, `IndepG3Category.IndependentOutputIsAbsentFromMasterButPublishesItsOwnPeak` |
 | ポーズの優先順位 | `IndepG3Pause.IgnoreFlagsSurviveGlobalPauseButIndividualPauseStillStops` |
-| 親アクションの受理・拒否・再開 | `IndepG3Action.AcceptedInitialActionUsesTransitionDuration`, `IndepG3Action.RejectedInitialActionPreservesAlreadyRunningTransition`, `IndepG3Action.PausingBeforeFutureActionDelaysItsTransition` |
+| 親アクションの受理・拒否・再開 | `IndepG3Action.AcceptedInitialActionUsesTransitionDuration`, `IndepG3Action.RejectedInitialActionPreservesAlreadyRunningTransition`, `IndepG3Action.PausingBeforeFutureActionDelaysItsTransition`, `IndepG3Action.RetargetDuringScheduledParentsFirstFadeUsesItsCurrentWeight` |
 | 全組横断の出力・RT・CPU | `IndepCrossStage3.SerialReplayAndTwoWorkersMatchAudioNotificationsAndSpectrum`, `IndepCrossStage3.Real128VoicesRunWithinBudgetWithoutAllocationOrRtViolation` |
 
-単独ターゲットは `indep_g3_mix_test`、`indep_g3_control_test`。組①・④を含む先頭には `indep_b_cross_test` も登録される。性能試験はRTワーカー0と2のプロセスCPU時間をRenderBlockごとに測定し、ブロック時間に対する平均比を記録する。独立計画とソースを照合した時点では組③単独24ケース、全組横断2ケース。実行結果は別途記載する。
+単独ターゲットは `indep_g3_mix_test`、`indep_g3_control_test`。組①・④を含む先頭には `indep_b_cross_test` も登録される。性能試験はRTワーカー0と2のプロセスCPU時間をRenderBlockごとに測定し、ブロック時間に対する平均比を記録する。独立計画とソースを照合した時点では組③単独25ケース、全組横断2ケース。実行結果は別途記載する。
