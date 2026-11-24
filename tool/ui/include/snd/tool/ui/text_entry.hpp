@@ -11,7 +11,8 @@
 // with the current text; typed characters are appended (UTF-8), Backspace removes the last
 // character, Enter commits (the field's commit function: the model's setter; refused -> the
 // entry stays open with a message), Escape cancels. Starting another entry, changing the screen
-// or a commit that succeeded ends it. Numeric entries take digits, sign, '.', 'e' only.
+// or a commit that succeeded ends it. Numeric entries take digits, sign, '.', 'e' only. While an
+// entry is open it takes every key (D-186): Ctrl+Z / Ctrl+Y, Delete and the screen keys do nothing.
 #ifndef SND_TOOL_UI_TEXT_ENTRY_HPP
 #define SND_TOOL_UI_TEXT_ENTRY_HPP
 
@@ -62,7 +63,8 @@ class TextEntry {
   const std::string& field() const { return field_; }
   const std::string& text() const { return text_; }
   bool numeric() const { return numeric_; }
-  // A key while active: true if used. `refused` is set when Enter was refused by the commit.
+  // A key while active (every key is used: true). `refused` is set when Enter was refused by the
+  // commit.
   bool Key(const KeyEvent& key, bool* refused = nullptr);
   // Commits as Enter does (true: committed and ended).
   bool CommitNow();

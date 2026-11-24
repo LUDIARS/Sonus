@@ -8,8 +8,8 @@
 // constructors and synchronize() throw, and everything is caught here.
 //
 // Keys go to App::Key: Ctrl+Z / Ctrl+Y / Ctrl+Shift+Z, Ctrl+S, F2..F10 screens, Ctrl+PageUp /
-// PageDown, and the tool's text entry (WM_CHAR). Tela sees every message first (Esc closes the
-// window, F11 full screen), except Esc while a text entry or a candidate list is open.
+// PageDown, and the tool's text entry (WM_CHAR). Tela sees every message first (F11 full screen),
+// except Esc: the tool takes it and Tela never closes the window with it.
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
@@ -130,9 +130,9 @@ void Char(WPARAM ch) {
 }
 
 LRESULT CALLBACK Procedure(HWND window, UINT message, WPARAM wp, LPARAM lp) {
-  // Esc while typing or choosing cancels that (Tela would close the window): not passed to Tela.
-  if (message == WM_KEYDOWN && wp == VK_ESCAPE && g_subclass.app != nullptr &&
-      (g_subclass.app->text().active() || g_subclass.app->picker() != nullptr)) {
+  // Esc is the tool's (D-186: it cancels a text entry, a list, a drag or a pending connection, else
+  // nothing); Tela would close the window, so it never gets it.
+  if (message == WM_KEYDOWN && wp == VK_ESCAPE && g_subclass.app != nullptr) {
     Key(wp);
     return 0;
   }

@@ -78,6 +78,30 @@ class KeySet {
   std::set<std::string> used_;
 };
 
+// Element id parts of items named uniquely inside an object (materials, states, markers,
+// stingers; D-189): NameKey(name), "<key>_<position>" when a broken file repeats a name.
+class NameKeys {
+ public:
+  std::string Key(const std::string& name, std::size_t position) {
+    std::string k = NameKey(name);
+    if (!used_.insert(k).second) {
+      k += "_" + std::to_string(position);
+      used_.insert(k);
+    }
+    return k;
+  }
+  // Keys of a whole list (the same key for an item on every page).
+  static std::vector<std::string> Of(const std::vector<std::string>& names) {
+    NameKeys k;
+    std::vector<std::string> v;
+    for (std::size_t i = 0; i < names.size(); ++i) v.push_back(k.Key(names[i], i));
+    return v;
+  }
+
+ private:
+  std::set<std::string> used_;
+};
+
 // The screen's text when there is no document.
 inline bool NeedDocument(Kit& kit, const char* id, float width) {
   if (kit.app().document() != nullptr) return true;

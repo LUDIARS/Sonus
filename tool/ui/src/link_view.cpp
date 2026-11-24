@@ -102,7 +102,12 @@ void Matching(Kit& kit, float w, float h) {
     return;
   }
   const SyncCheck& chk = live->check();
-  if (chk.valid) {
+  // D-189: without a connection there is no game to describe (no version, no 1.0 reasons).
+  const bool connected = c.state() == LinkState::Online || c.state() == LinkState::Handshake;
+  if (!connected) {
+    kit.Label("ln.check", "not connected", 0, y, w, 20, 0.55f);
+    y += 20.0f;
+  } else if (chk.valid) {
     std::snprintf(b, sizeof b, "protocol %u.%u  tool build %s  game build %s%s", chk.peerMajor, chk.peerMinor,
                   Hash(chk.toolBuildHash).c_str(), Hash(chk.gameBuildHash).c_str(),
                   chk.toolBuildHash == chk.gameBuildHash ? "  (match)" : "  (mismatch)");
@@ -136,9 +141,9 @@ void Matching(Kit& kit, float w, float h) {
     y += 18.0f;
   }
   y += 6.0f;
-  // Features of the game (1.0 games lack some).
-  const std::vector<LiveFeature> feats = live->features();
-  std::string fl = "features:";
+  // Features of the game (1.0 games lack some); only for a connected game.
+  const std::vector<LiveFeature> feats = connected ? live->features() : std::vector<LiveFeature>{};
+  std::string fl = connected ? "features:" : "features: (not connected)";
   for (const LiveFeature& f : feats) fl += std::string(" ") + f.name + (f.available ? "" : " (no)");
   kit.Label("ln.features", Clip(fl, 160), 0, y, w, 18, 0.5f);
   y += 18.0f;

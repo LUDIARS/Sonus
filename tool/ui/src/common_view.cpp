@@ -86,6 +86,21 @@ float ObjectList(Kit& kit, const ObjectListSpec& spec, float x, float y, float w
   return rowsTop + static_cast<float>(std::min<std::size_t>(per, all.size())) * 24.0f;
 }
 
+void DeclareRebindQuestion(tela::Document& doc, ViewContext& ctx, float width) {
+  App* app = ctx.app;
+  if (app == nullptr || !app->rebindPending()) return;
+  const float w = std::min(640.0f, width - 12.0f);
+  Panel(doc, "rebind", width - w - 6.0f, kHeaderHeight + 2.0f, w, 30, [&] {
+    Kit kit(doc, ctx);
+    std::string names;
+    for (std::size_t i = 0; i < app->rebindDropped().size() && i < 3u; ++i) names += " " + app->rebindDropped()[i].name;
+    kit.Label("rebind.text", std::to_string(app->rebindDropped().size()) + " live overrides do not fit the changed project:" + names,
+              0, 0, w - 220, 22, 0.5f);
+    kit.Action("rebind.writeback", "Write back", [app] { app->ResolveRebind(true); }, w - 214, 0, 100);
+    kit.Action("rebind.discard", "Discard", [app] { app->ResolveRebind(false); }, w - 110, 0, 100);
+  }, 4.0f);
+}
+
 void DeclarePicker(tela::Document& doc, ViewContext& ctx, float width, float height) {
   App* app = ctx.app;
   const Picker* p = app != nullptr ? app->picker() : nullptr;

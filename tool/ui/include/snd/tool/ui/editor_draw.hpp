@@ -72,7 +72,7 @@ struct TopDownLook {
   float listenerYaw = 0.0f;      // radians, 0 = up the screen, positive = toward +x (right)
   float emitterYaw = 0.0f;
   float maxDistancePx = 0.0f;    // circle around the emitter (0 = none)
-  float innerDeg = 360.0f, outerDeg = 360.0f;  // cone (full angles); 360 = none
+  float innerDeg = 0.0f, outerDeg = 0.0f;  // cone (full angles); drawn when 0 < outerDeg < 360
   float coneLengthPx = 60.0f;
   bool emitter3D = true;
   float handlePx = 28.0f;        // distance of the facing handles from their centre

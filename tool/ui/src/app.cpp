@@ -101,17 +101,46 @@ std::string App::MixerSignature(bool withValues) const {
   return s;
 }
 
-void App::RebindProject() {
+void App::RebindProject() { RebindProject(false); }
+
+bool App::RebindProject(bool discardUnmatched) {
   const ProjectDocument* d = document();
-  if (d == nullptr) return;
+  if (d == nullptr) return false;
   Project p;
   p.Load(*d);
   p.SetBuildHash(session_.project().buildHash());
+  // D-188: the live values go over by object; a value whose object (or effect) is gone is not
+  // dropped silently: the rebind waits for the user's answer (write back / discard).
+  const std::vector<LiveValue> values = session_.mixer().LiveValues();
+  std::vector<LiveValue> unmatched = MixerModel::Unmatched(p, values);
+  if (!unmatched.empty() && !discardUnmatched) {
+    if (!rebindPending_) Message("mixer: " + std::to_string(unmatched.size()) +
+                                 " live overrides have no place in the changed project: write back or discard");
+    rebindPending_ = true;
+    rebindDropped_ = std::move(unmatched);
+    rebindMixerRevision_ = session_.mixer().revision();
+    return false;
+  }
   session_.UseProject(p);
+  session_.mixer().Rebind(session_.project(), values);
   mixerShape_ = MixerSignature(false);
   mixerValues_ = MixerSignature(true);
   staleMixer_ = false;
+  rebindPending_ = false;
+  rebindDropped_.clear();
   view_.mixerPage = 0;
+  return true;
+}
+
+void App::ResolveRebind(bool writeBack) {
+  if (!rebindPending_) return;
+  if (writeBack) {
+    WriteBackMixer();  // the values into the document, then the rebind (nothing left to lose)
+    if (rebindPending_) RebindProject(true);
+  } else {
+    RebindProject(true);
+    Message("mixer: discarded live overrides that had no place in the changed project");
+  }
 }
 
 void App::TrackDocument() {
@@ -123,17 +152,22 @@ void App::TrackDocument() {
     const std::string shape = MixerSignature(false);
     const std::string values = MixerSignature(true);
     if (shape != mixerShape_) {
-      RebindProject();  // new / removed buses, categories, parameters: the mixer must follow
+      RebindProject(false);  // new / removed buses, categories, parameters: the mixer must follow
+    } else if (rebindPending_) {
+      rebindPending_ = false;  // the structure came back (undo): nothing to ask any more
+      rebindDropped_.clear();
     } else if (values != mixerValues_) {
       if (session_.mixer().Overrides().empty()) {
-        RebindProject();
+        RebindProject(false);
       } else if (!staleMixer_) {
         staleMixer_ = true;
         Message("mixer: project values changed under live overrides (write back or revert all to refresh)");
       }
     }
   }
-  if (staleMixer_ && session_.mixer().Overrides().empty()) RebindProject();
+  // A pending question goes away when the overrides that could not go over are reverted.
+  if (rebindPending_ && session_.mixer().revision() != rebindMixerRevision_) RebindProject(false);
+  if (staleMixer_ && !rebindPending_ && session_.mixer().Overrides().empty()) RebindProject(false);
   // Problems: the build's check after an edit, at most every 250 ms.
   if (problemsRevision_ != d->revision() && (nowNs_ - problemsAtNs_ >= 250000000ull || problemsRevision_ == ~0ull)) {
     RefreshProblems();
@@ -155,9 +189,21 @@ void App::Edited() {
   if (session_.live() != nullptr) session_.live()->FlushNow();
 }
 
+void App::ClearPositionSelections() {
+  // D-186: selections that are positions inside an object (a clip, an action, a curve point, a
+  // tempo point, a stem, a playlist entry, a rule) cannot follow their item when the document
+  // changes elsewhere: they are dropped. Selections by GUID, name or node id stay while their
+  // object exists (each screen checks).
+  view_.event.clip = -1;
+  view_.event.action = -1;
+  view_.params.point = -1;
+  view_.music.tempo = view_.music.stem = view_.music.entry = view_.music.rule = -1;
+}
+
 bool App::DocUndo() {
   ProjectDocument* d = document();
   if (d == nullptr || !d->Undo()) return false;
+  ClearPositionSelections();
   Edited();
   return true;
 }
@@ -165,6 +211,7 @@ bool App::DocUndo() {
 bool App::DocRedo() {
   ProjectDocument* d = document();
   if (d == nullptr || !d->Redo()) return false;
+  ClearPositionSelections();
   Edited();
   return true;
 }
@@ -191,7 +238,7 @@ std::uint32_t App::WriteBackMixer() {
   ProjectDocument* d = document();
   if (d == nullptr) return 0;
   const std::uint32_t n = snd::tool::WriteBackMixer(*d, session_.mixer());
-  RebindProject();
+  RebindProject(true);
   Edited();
   Message("wrote " + std::to_string(n) + " live values into the project");
   return n;
@@ -208,6 +255,12 @@ SpatialPreview* App::spatial() {
       spatialEvent_.clear();
       return nullptr;
     }
+    // D-189: the emitter starts at half the maxDistance (5 m without one) to the front right, off the
+    // listener's facing line and far enough on the fitted view that the listener's facing handle
+    // and the emitter do not cover each other; the view fits the maxDistance circle.
+    const float md = spatial_->MaxDistance();
+    const float dist = md > 0.0f ? md * 0.5f : 5.0f;
+    spatial_->MoveEmitter(0.6f * dist, 0.8f * dist);
     spatial_->FitView(560.0f, 420.0f);
   }
   return spatial_.get();
@@ -267,6 +320,16 @@ void App::Navigate(const std::string& guid) {
   }
 }
 
+double App::FieldBase(const std::string& field, double declared) const {
+  const auto it = fieldLatest_.find(field);
+  return it != fieldLatest_.end() && it->second.first == declarations_ ? it->second.second : declared;
+}
+
+void App::FieldWrote(const std::string& field, double value) {
+  if (fieldLatest_.size() > 256u) fieldLatest_.clear();
+  fieldLatest_[field] = {declarations_, value};
+}
+
 // --- text entry and pickers -------------------------------------------------------------------
 void App::BeginText(const std::string& field, const std::string& initial, TextEntry::Commit commit, bool numeric) {
   picker_.reset();
@@ -299,15 +362,21 @@ bool App::Key(const KeyEvent& k) {
   const bool ctrl = (k.modifiers & kModControl) != 0u;
   const bool shift = (k.modifiers & kModShift) != 0u;
   if (text_.active()) {
+    // D-186: while typing every key is the entry's (no undo, delete or screen keys underneath).
     bool refused = false;
-    if (text_.Key(k, &refused)) {
-      if (refused) Message("refused: " + text_.text());
-      else Edited();
-      return true;
-    }
+    text_.Key(k, &refused);
+    if (refused) Message("refused: " + text_.text());
+    else if (!text_.active()) Edited();
+    return true;
   }
   if (picker_ && k.key == kKeyEscape) {
     picker_.reset();
+    return true;
+  }
+  if (k.key == kKeyEscape) {
+    // D-186: Esc is the tool's (never the window's): it cancels what is in progress (a drag, a
+    // pending connection), else nothing.
+    if (!router_.Cancel() && !view_.patch.pendingFrom.empty()) view_.patch.pendingFrom.clear();
     return true;
   }
   const bool mixerLive = view_.screen == Screen::Mixer;
@@ -348,10 +417,6 @@ bool App::Key(const KeyEvent& k) {
     fn();
     Edited();
     return true;
-  }
-  if (k.key == kKeyEscape) {
-    view_.patch.pendingFrom.clear();
-    return false;
   }
   return false;
 }
@@ -398,6 +463,7 @@ void App::Declare(std::uint64_t nowNs) {
       }
     }, 6.0f);
     Panel(doc, "footer", 0, h - kFooterHeight, w, kFooterHeight, [&] { DeclareFooter(doc, ctx, w); });
+    if (rebindPending_) DeclareRebindQuestion(doc, ctx, w);
     if (picker_) DeclarePicker(doc, ctx, w, h);
   });
   runtime_.document(std::move(doc));
@@ -446,6 +512,7 @@ void App::OnScreen(Screen s) {
   if (s != view_.screen) {
     text_.Cancel();
     picker_.reset();
+    ClearPositionSelections();  // the other screen may change the document
   }
   view_.screen = s;
 }

@@ -104,6 +104,24 @@ void PointerRouter::EndDrag() {
   dragId_.clear();
 }
 
+bool PointerRouter::Cancel() {
+  if (drag_ < 0 && custom_ == nullptr) return false;
+  if (custom_ != nullptr) {
+    const std::shared_ptr<DragHandler> h = std::move(custom_);
+    custom_.reset();
+    drag_ = -1;
+    dragId_.clear();
+    if (h->cancel) h->cancel();
+  } else {
+    const ControlBinding& b = controls_[static_cast<std::size_t>(drag_)];
+    sink_.ControlSet(b.target, anchorValue_, 0);
+    EndDrag();
+  }
+  armed_ = -1;
+  armedId_.clear();
+  return true;
+}
+
 void PointerRouter::Tick(const tela::Runtime& runtime) {
   if (drag_ >= 0 && !Pressed(runtime, drag_)) EndDrag();
   if (armed_ >= 0 && drag_ < 0 && !Pressed(runtime, armed_) && !runtime.captured()) {

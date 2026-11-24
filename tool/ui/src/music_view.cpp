@@ -77,21 +77,25 @@ void SegmentLine(Kit& kit, const std::string& g, float x, float y, float w, floa
     look.marks.push_back(Mark{static_cast<float>(map.SecondsAtTick(static_cast<double>(p.tick)) * pxPerSec), MarkKind::Tempo});
   }
   const std::vector<MarkerDesc> markers = se.Markers();
+  std::vector<std::string> markerNames;
+  for (const MarkerDesc& m : markers) markerNames.push_back(m.name);
+  const std::vector<std::string> mkeys = NameKeys::Of(markerNames);
   // Marker hits: drag horizontally to move the marker's frame (one undo step).
   for (std::size_t i = 0; i < markers.size() && i < 64u; ++i) {
     const MarkerDesc m = markers[i];
     const float mx = rate > 0.0 ? static_cast<float>((static_cast<double>(m.frame) - entry) / rate * pxPerSec) : 0.0f;
-    look.marks.push_back(Mark{mx, MarkKind::Marker, mv->marker == static_cast<std::int32_t>(i)});
+    look.marks.push_back(Mark{mx, MarkKind::Marker, mv->marker == m.name});
     const std::uint32_t mi = static_cast<std::uint32_t>(i);
+    const std::string mname = m.name;
     auto hd = DocumentDrag(
-        *app, [mv, mi](float, float, std::uint32_t) { mv->marker = static_cast<std::int32_t>(mi); },
+        *app, [mv, mname](float, float, std::uint32_t) { mv->marker = mname; },
         [d, g, mi, m, rate, pxPerSec](const DragMotion& mo) {
           MarkerDesc n = m;
           const double f = static_cast<double>(m.frame) + static_cast<double>(mo.dx) / pxPerSec * rate;
           n.frame = static_cast<std::uint64_t>(std::max(0.0, std::round(f)));
           SegmentEditor(*d, g).SetMarker(mi, n);
         });
-    kit.Hit("mu.seg.mk." + std::to_string(i), hd, x + mx - 5.0f, y, 10.0f, h);
+    kit.Hit("mu.seg.mk." + mkeys[i], hd, x + mx - 5.0f, y, 10.0f, h);
   }
   Canvas(kit.doc(), "mu.seg.line", DrawMarks(look, kit.palette()), x, y, w, h);
   char b[160];
@@ -249,23 +253,28 @@ void SegmentsTab(Kit& kit, float width, float height) {
         if (!SegmentEditor(*d, g).SetTempo(i, n)) a->Message("refused: a signature changes on a bar line only");
       }, col * 0.5f + 2, ry + kRow, col * 0.5f - 2);
     }
+    std::vector<std::string> mnames;
+    for (const MarkerDesc& m : markers) mnames.push_back(m.name);
+    const std::vector<std::string> mkeys = NameKeys::Of(mnames);
     for (std::uint32_t i = first; i < markers.size() && i < first + per; ++i) {
       const MarkerDesc m = markers[i];
       const float ry = y + static_cast<float>(i - first) * 2.0f * kRow;
-      const std::string id = "mu.mk." + std::to_string(i);
-      kit.NameField(id + ".name", "", (mv.marker == static_cast<std::int32_t>(i) ? "> " : "") + m.name, [d, g, i, m](const std::string& s) {
+      const std::string id = "mu.mk." + mkeys[i];
+      kit.NameField(id + ".name", mv.marker == m.name ? ">" : "", m.name, [d, g, i, m, mvp](const std::string& s) {
         MarkerDesc n = m;
-        n.name = s.rfind("> ", 0) == 0 ? s.substr(2) : s;
-        return SegmentEditor(*d, g).SetMarker(i, n);
-      }, col + 8, ry, col * 0.6f);
+        n.name = s;
+        if (!SegmentEditor(*d, g).SetMarker(i, n)) return false;
+        if (mvp->marker == m.name) mvp->marker = s;  // the selection follows the rename
+        return true;
+      }, col + 8, ry, col * 0.6f, 10);
       kit.PickField(id + ".kind", "", kMarkerKind[static_cast<int>(m.kind)], "Marker kind", [] { return Names(kMarkerKind, 4); },
                     [d, g, i, m](const std::string& v) {
                       MarkerDesc n = m;
                       n.kind = static_cast<MarkerKind>(ToInt(v));
                       SegmentEditor(*d, g).SetMarker(i, n);
                     }, col + 8 + col * 0.6f + 4, ry, col * 0.4f - 32);
-      kit.Action(id + ".remove", "x", [d, g, i, mvp] {
-        if (SegmentEditor(*d, g).RemoveMarker(i)) mvp->marker = -1;
+      kit.Action(id + ".remove", "x", [d, g, i, mvp, m] {
+        if (SegmentEditor(*d, g).RemoveMarker(i) && mvp->marker == m.name) mvp->marker.clear();
       }, 2 * col + 8 - 24, ry, 24);
       kit.NumberField(id + ".frame", "", Num(static_cast<double>(m.frame), 480, 0, 1e15, 0, "fr", true), [d, g, i, m](double v, std::uint32_t) {
         MarkerDesc n = m;
@@ -429,10 +438,11 @@ void RulesTab(Kit& kit, float width, float height) {
     }, 204, y, 70);
     y += 24.0f;
     const float sw = (w - 8.0f) / 2.0f;
+    const std::vector<std::string> skeys = NameKeys::Of(states);
     for (std::size_t i = 0; i < states.size() && i < 8u; ++i) {
       const std::string s = states[i];
       const float sx = static_cast<float>(i % 2u) * (sw + 8.0f), sy = y + static_cast<float>(i / 2u) * kRow;
-      const std::string id = "mu.state." + std::to_string(i);
+      const std::string id = "mu.state." + skeys[i];
       kit.NameField(id + ".name", "", s, [d, ev, s](const std::string& n) { return MusicEditor(*d, ev).RenameState(s, n); },
                     sx, sy, sw * 0.35f);
       const std::string pl = StringAt(d->Find(ev)->doc, "music.states[" + std::to_string(i) + "].playlist");
@@ -635,6 +645,9 @@ void StingersTab(Kit& kit, float width, float height) {
                     MusicEditor(*d, ev).AddStinger(s);
                   }, 204, 0, 100);
     float y = 26.0f;
+    std::vector<std::string> snames;
+    for (std::uint32_t i = 0; i < n; ++i) snames.push_back(StringAt(st->items[i], "name"));
+    const std::vector<std::string> skeys = NameKeys::Of(snames);
     for (std::uint32_t i = 0; i < n && y < height - kRow; ++i) {
       const json::Value& sj = st->items[i];
       StingerDesc s;
@@ -645,7 +658,7 @@ void StingersTab(Kit& kit, float width, float height) {
       }
       s.timingCount = static_cast<std::uint32_t>(NumberAt(sj, "timingCount", 0.0));
       s.stack = StringAt(sj, "overlap", "replace") == "stack";
-      const std::string id = "mu.sg." + std::to_string(i);
+      const std::string id = "mu.sg." + skeys[i];
       kit.NameField(id + ".name", "", s.name, [d, ev, i, s](const std::string& v) {
         StingerDesc x = s;
         x.name = v;

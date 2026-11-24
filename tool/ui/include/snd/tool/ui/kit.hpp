@@ -5,8 +5,13 @@
 //   NameField   a name: a click starts the tool's text entry (text_entry.hpp) with the current
 //               text; Enter commits through the model's setter (refused: the entry stays open).
 //   NumberField [-] value [+]: the buttons step, a vertical drag on the value changes it
-//               (kNumberDragPixels per step, Shift 1/10; one undo step per drag), the wheel steps
-//               (one undo step per series), a click without motion types the value (as a name).
+//               (kNumberDragPixels per step, Shift 1/10; one undo step per drag; Esc takes it
+//               back), the wheel steps (one undo step per series), a click without motion types the
+//               value (as a name). Steps add to the model's latest value (several between two
+//               declarations count each); the buttons, the drag and the wheel stop at the field's
+//               range; a typed value goes to the model unchanged (refused: the entry stays open).
+//               The value is at least kMinNumberValue wide (the label shrinks, then moves into
+//               the value's text; a field too narrow for the buttons has none).
 //   PickField   a reference or a choice: a click opens the candidate list (App::OpenPicker) over
 //               the screen; picking one calls the setter; outside the list closes it.
 //   Toggle      an on / off button ("[x] label").
@@ -47,6 +52,9 @@ struct Picker {
   PickFn pick;
   std::uint32_t page = 0;
 };
+
+// The narrowest a number field's value gets (D-187: readable and pressable).
+inline constexpr float kMinNumberValue = 48.0f;
 
 struct NumberSpec {
   double value = 0.0;

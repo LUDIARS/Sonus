@@ -57,28 +57,47 @@ void Kit::NameField(const std::string& id, const std::string& label, const std::
 
 void Kit::NumberField(const std::string& id, const std::string& label, const NumberSpec& spec, NumberSetter set,
                       float x, float y, float w, float labelW) {
-  if (!label.empty()) Text(doc_, id + ".label", label, x, y, labelW, 22.0f, 0.55f);
-  const float fx = label.empty() ? x : x + labelW;
-  const float fw = std::max(40.0f, w - (fx - x));
+  // Room (D-187): the value keeps at least kMinNumberValue px. The label gives way first; when it
+  // would get less than 24 px it goes into the value's text. A field narrower than the buttons need
+  // has no buttons (the value still drags, wheels and types).
+  constexpr float kButtons = 44.0f;
+  const float minField = kButtons + kMinNumberValue;
+  float lw = label.empty() ? 0.0f : std::min(labelW, std::max(0.0f, w - minField));
+  const bool inlineLabel = !label.empty() && lw < 24.0f;
+  if (inlineLabel) lw = 0.0f;
+  if (lw > 0.0f) Text(doc_, id + ".label", label, x, y, lw, 22.0f, 0.55f);
+  const float fx = x + lw;
+  const float fw = std::max(kMinNumberValue, w - lw);
+  const bool buttons = fw >= minField;
   App* app = ctx_.app;
   const TextEntry& te = app->text();
   const bool editing = te.active() && te.field() == id;
-  const std::string text = editing ? te.text() + "_" : NumberText(spec.value, spec.decimals, spec.unit);
+  std::string text = editing ? te.text() + "_" : NumberText(spec.value, spec.decimals, spec.unit);
+  if (inlineLabel && !editing) text = label + " " + text;
   if (!spec.enabled) {
     Text(doc_, id + ".value", "(" + text + ")", fx, y, fw, 22.0f, 0.55f);
     return;
   }
   const NumberSpec sp = spec;
-  auto commitText = [set, sp](const std::string& t) {
+  // A typed value goes to the model as typed: the model refuses what breaks its rules and the entry
+  // then stays open (D-187; the field's own range only bounds the buttons, the drag and the wheel).
+  auto commitText = [set](const std::string& t) {
     double v = 0.0;
     if (!ParseNumber(t, &v)) return false;
-    return set(ClampNumber(v, sp.minValue, sp.maxValue, sp.integer), 0u);
+    return set(v, 0u);
   };
-  Button(doc_, id + ".dec", "-",
-         [set, sp, app] {
-           if (set(ClampNumber(sp.value - sp.step, sp.minValue, sp.maxValue, sp.integer), 0u)) app->Edited();
-         },
-         fx, y, 20.0f, 22.0f, 0.6f);
+  // Steps (buttons, wheel) start from the model's latest value: several of them between two
+  // declarations add up (D-187).
+  auto step = [set, sp, app, id](double delta, std::uint32_t key) {
+    const double base = app->FieldBase(id, sp.value);
+    const double v = ClampNumber(base + delta, sp.minValue, sp.maxValue, sp.integer);
+    if (!set(v, key)) return;
+    app->FieldWrote(id, v);
+    app->Edited();
+  };
+  const float vx = buttons ? fx + 22.0f : fx;
+  const float vw = buttons ? fw - kButtons : fw;
+  if (buttons) Button(doc_, id + ".dec", "-", [step, sp] { step(-sp.step, 0u); }, fx, y, 20.0f, 22.0f, 0.6f);
   // The value: a drag hit with the text above it.
   struct State {
     double anchor = 0.0;
@@ -87,8 +106,8 @@ void Kit::NumberField(const std::string& id, const std::string& label, const Num
   };
   auto st = std::make_shared<State>();
   auto h = std::make_shared<DragHandler>();
-  h->press = [st, sp](float, float, std::uint32_t) {
-    st->anchor = sp.value;
+  h->press = [st, sp, app, id](float, float, std::uint32_t) {
+    st->anchor = app->FieldBase(id, sp.value);
     st->up = 0.0f;
   };
   h->drag = [st, sp, set, app](const DragMotion& m) {
@@ -105,17 +124,21 @@ void Kit::NumberField(const std::string& id, const std::string& label, const Num
     }
     if (!moved) app->BeginText(id, FormatNumberText(sp.value, std::max(sp.decimals, 6)), commitText, true);
   };
-  h->wheel = [sp, set, app](float notches, std::uint32_t mods, std::uint32_t key) {
-    const double step = sp.step * ((mods & kModShift) != 0u ? kFineFactor : 1.0);
-    if (set(ClampNumber(sp.value + step * notches, sp.minValue, sp.maxValue, sp.integer), key)) app->Edited();
+  h->cancel = [st, sp, app] {  // Esc during the drag: the drag's step is taken back
+    if (!st->grouped) return;
+    st->grouped = false;
+    if (sp.document && app->document() != nullptr) {
+      app->document()->EndGroup();
+      app->document()->Undo();
+    }
+    app->Edited();
   };
-  Hit(id, h, fx + 22.0f, y, fw - 44.0f, 22.0f);
-  Text(doc_, id + ".value", text, fx + 22.0f, y, fw - 44.0f, 22.0f, 0.55f);
-  Button(doc_, id + ".inc", "+",
-         [set, sp, app] {
-           if (set(ClampNumber(sp.value + sp.step, sp.minValue, sp.maxValue, sp.integer), 0u)) app->Edited();
-         },
-         fx + fw - 20.0f, y, 20.0f, 22.0f, 0.6f);
+  h->wheel = [step, sp](float notches, std::uint32_t mods, std::uint32_t key) {
+    step(sp.step * ((mods & kModShift) != 0u ? kFineFactor : 1.0) * notches, key);
+  };
+  Hit(id, h, vx, y, vw, 22.0f);
+  Text(doc_, id + ".value", text, vx, y, vw, 22.0f, 0.55f);
+  if (buttons) Button(doc_, id + ".inc", "+", [step, sp] { step(sp.step, 0u); }, fx + fw - 20.0f, y, 20.0f, 22.0f, 0.6f);
 }
 
 void Kit::PickField(const std::string& id, const std::string& label, const std::string& current,
@@ -199,6 +222,15 @@ std::shared_ptr<DragHandler> DocumentDrag(App& app, std::function<void(float, fl
     if (!*grouped && a->document() != nullptr) a->document()->BeginGroup();
     *grouped = true;
     if (apply) apply(m);
+  };
+  h->cancel = [a, grouped] {  // Esc during the drag: its step is taken back
+    if (!*grouped) return;
+    *grouped = false;
+    if (a->document() != nullptr) {
+      a->document()->EndGroup();
+      a->document()->Undo();
+    }
+    a->Edited();
   };
   h->release = [a, grouped, release](bool moved, float x, float y) {
     if (release) release(moved, x, y);  // inside the group: a release edit is part of the step

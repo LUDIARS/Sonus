@@ -92,9 +92,13 @@ struct PlotAxes {
   float Y(double y) const;
   double ValueX(float px) const;
   double ValueY(float py) const;
-  // Axes that hold [x0, x1] x [y0, y1] with `margin` (a fraction of the range) on y.
-  static PlotAxes Fit(double x0, double x1, double y0, double y1, float width, float height, double yMargin = 0.08);
+  // Axes that hold [x0, x1] x [y0, y1] with margins (fractions of the ranges) on y and x.
+  static PlotAxes Fit(double x0, double x1, double y0, double y1, float width, float height, double yMargin = 0.08,
+                      double xMargin = 0.0);
 };
+
+// Curves keep their end points inside the plot (D-189): this x margin on each side.
+inline constexpr double kCurveXMargin = 0.04;
 
 // Number fields: a vertical drag of kNumberDragPixels changes the value by one step (1/10 with
 // Shift); the value is clamped and, for integers, rounded.
