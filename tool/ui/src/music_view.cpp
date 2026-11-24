@@ -464,7 +464,7 @@ void RulesTab(Kit& kit, float width, float height) {
     const float cols[] = {0.0f, 0.09f, 0.18f, 0.28f, 0.35f, 0.47f, 0.59f, 0.69f, 0.78f, 0.87f};
     for (int c = 0; c < 10; ++c) kit.Label("mu.rule.h" + std::to_string(c), kHead[c], cols[c] * w, y, 80, 16, 0.45f);
     y += 16.0f;
-    const float tableH = std::max(kRow, height * 0.42f - y);
+    const float tableH = std::max(kRow * 3.0f, height * 0.58f - y);
     const std::uint32_t per = static_cast<std::uint32_t>(std::max(1.0f, tableH / kRow));
     const std::uint32_t first = kit.Pager("mu.rule.pager", static_cast<std::uint32_t>(rules.size()), per, &mv.rulePage, w - 200, y - 40, 200);
     for (std::uint32_t i = first; i < rules.size() && i < first + per; ++i) {

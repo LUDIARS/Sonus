@@ -76,7 +76,7 @@ endforeach()
 # Group U: the stage 5 screens (declarations, gestures, CPU-rendered pixels, large projects). The
 # replay and preview screens use the real replay service and preview engine (Sonus::tool_preview).
 set(_tool_ui_screen_link sonus_tool_ui_replay sonus_tool_preview ${_tool_test_link})
-foreach(_t ui_event_screen_test ui_buses_screen_test ui_params_screen_test ui_spatial_screen_test ui_music_screen_test ui_material_screen_test ui_patch_screen_test ui_live_screens_test)
+foreach(_t ui_event_screen_test ui_buses_screen_test ui_params_screen_test ui_spatial_screen_test ui_music_screen_test ui_material_screen_test ui_patch_screen_test ui_live_screens_test ui_editor_limits_test ui_editor_input_test ui_editor_concurrency_test)
   _snd_tool_test(${_t} "${_tool_ui_screen_link}")
 endforeach()
 
@@ -87,6 +87,16 @@ add_test(NAME tool_app_headless
                  --project ${PROJECT_SOURCE_DIR}/buildtool/test/data/sample
                  --build-dir ${CMAKE_CURRENT_BINARY_DIR}/sample-build
                  --snapshot ${CMAKE_CURRENT_BINARY_DIR}/headless-mixer.ppm)
+# Every screen, headless, on the sample project (group U): each writes its image.
+foreach(_screen mixer buses event params spatial music material patch profiler replay link problems)
+  add_test(NAME tool_app_screen_${_screen}
+           COMMAND sonus-tool --headless --no-connect --frames 2 --frame-ms 1 --text-placeholders --screen ${_screen}
+                   --project ${PROJECT_SOURCE_DIR}/buildtool/test/data/sample
+                   --build-dir ${CMAKE_CURRENT_BINARY_DIR}/screen-${_screen}-build
+                   --snapshot ${CMAKE_CURRENT_BINARY_DIR}/screen-${_screen}.ppm)
+endforeach()
+add_test(NAME tool_app_bad_screen COMMAND sonus-tool --headless --screen nope)
+set_tests_properties(tool_app_bad_screen PROPERTIES WILL_FAIL TRUE)
 add_test(NAME tool_app_bad_option COMMAND sonus-tool --size 10x10)
 set_tests_properties(tool_app_bad_option PROPERTIES WILL_FAIL TRUE)
 
