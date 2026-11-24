@@ -4,10 +4,10 @@
 
 #include <cmath>
 #include <cstdint>
-#include <cstdlib>
 #include <cstring>
 #include <vector>
 
+#include "snd/base/allocator.hpp"
 #include "snd/test/golden.hpp"
 
 namespace dsptest {
@@ -21,14 +21,15 @@ class AlignedMem {
   // fill: initial byte value. DSP states are created on dirty memory (0xFF =
   // NaN floats) to prove that every Init writes all of its state.
   explicit AlignedMem(std::size_t bytes, int fill = 0) { Reset(bytes, fill); }
-  ~AlignedMem() { std::free(p_); }
+  ~AlignedMem() { snd::base::DefaultAllocator().Free(p_, snd::MemTag::DspPool); }
   AlignedMem(const AlignedMem&) = delete;
   AlignedMem& operator=(const AlignedMem&) = delete;
   void Reset(std::size_t bytes, int fill = 0) {
-    std::free(p_);
+    auto& alloc = snd::base::DefaultAllocator();
+    alloc.Free(p_, snd::MemTag::DspPool);
     bytes_ = (bytes + 63u) & ~std::size_t{63};
     if (bytes_ == 0) bytes_ = 64;
-    p_ = std::aligned_alloc(64, bytes_);
+    p_ = alloc.Allocate(bytes_, 64, snd::MemTag::DspPool);
     std::memset(p_, fill, bytes_);
   }
   void* get() const { return p_; }
