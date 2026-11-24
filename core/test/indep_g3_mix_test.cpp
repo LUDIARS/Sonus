@@ -336,3 +336,80 @@ SND_TEST(IndepG3Category, IndependentOutputIsAbsentFromMasterButPublishesItsOwnP
   SND_CHECK_NEAR(h.LastMean(), 0.08f * kCenter, 1e-4);
 }
 } // namespace
+
+namespace {
+using namespace g2;
+using snd::HashId;
+
+SND_TEST(IndepG3Snapshot, SharedBusEffectOffsetsResolveInEachBanksOwnRowSpace) {
+  Fx h(G2Config());
+  FxBank owner;
+  owner.b.buses[0].effects = {owner.Effect(dsp::kEffectEcho, EchoGain(0.5f))};
+  owner.Event("Signal", 400);
+  auto a = h.Load("definition", owner.Build("Definition"));
+  SND_REQUIRE_EQ(h.sys->GetBankState(a), SND_BANK_STATE_LOADED);
+  FxBank contributor;
+  // The other bank's same bus has local EFFX row 1; dummy's EFFX row 0
+  // must never be used as the target of the snapshot contribution.
+  contributor.b.buses = {{HashId("Dummy"), 2, 2, 0, 0, {}, {}},
+                         {HashId("Sfx"), 2, 2, 0, 0, {}, {}},
+                         {HashId("Master"), kNone, 2, bf::kBusMaster, 0, {}, {}}};
+  contributor.b.buses[0].effects = {contributor.Effect(dsp::kEffectLowpass, {2000, 0.707f})};
+  contributor.b.buses[1].effects = {contributor.Effect(dsp::kEffectEcho, EchoGain(0.5f))};
+  contributor.b.snapshots = {{HashId("InOtherBank"), {{1, 1, 2, 0.25f}}}};
+  const auto b = h.Load("contributor", contributor.Build("Contributor"));
+  SND_REQUIRE_EQ(h.sys->GetBankState(b), SND_BANK_STATE_LOADED);
+  const auto playback = h.sys->Play(HashId("Signal"), NoEmitter(), nullptr);
+  h.Steps(10);
+  const float base = h.LastMean();
+  SND_REQUIRE(std::fabs(base - 0.2f * kCenter) < 0.001f);
+  h.sys->ApplySnapshot(HashId("InOtherBank"), 1, 0);
+  h.Steps(10);
+  SND_CHECK_NEAR(h.LastMean() / base, 1.5f, 0.001f);
+  h.sys->UnloadBank(b, SND_UNLOAD_STOP_AND_UNLOAD);
+  h.Steps(20);
+  SND_CHECK(!h.Ended(playback.value, SND_END_STOPPED));
+  SND_CHECK_NEAR(h.LastMean(), base, 1e-4f);
+}
+
+SND_TEST(IndepG3Curve, ExponentBelongsOnlyToItsOutgoingInterval) {
+  Fx h(G2Config());
+  FxBank bank;
+  bank.Event("Signal", 400).curves = {0};
+  bank.b.params.push_back({HashId("X"), 0, 0, 2, 0, 0});
+  bank.b.curves.push_back({HashId("X"), 0, 0, {{0, 0}, {1, -16}, {2, 0}}});
+  auto original = bank.Build("Shaped");
+  bf::FileHeader header{};
+  std::memcpy(&header, original.data(), sizeof(header));
+  bt::BankWriter writer;
+  for (unsigned i = 0; i < header.chunkCount; ++i) {
+    bf::ChunkEntry entry{};
+    std::memcpy(&entry, original.data() + header.chunkTableOffset + i * sizeof(entry), sizeof(entry));
+    if (entry.fourcc == bf::chunk::CPNT) continue;
+    const auto* data = original.data() + entry.offset;
+    writer.AddBlob(entry.fourcc, {data, data + entry.bytes}, entry.flags);
+  }
+  bt::TableBuilder points(bf::chunk::CPNT);
+  for (unsigned i = 0; i < 3; ++i) {
+    auto row = points.AddRow();
+    points.F32(bf::col::CPNT_x, row, static_cast<float>(i));
+    points.F32(bf::col::CPNT_y, row, i == 1 ? -16.f : 0.f);
+    if (i == 0) points.F32(bf::col::CPNT_shape, row, 2);
+  }
+  writer.AddTable(points);
+  bt::BankHeaderInfo info;
+  info.bankId = header.bankId;
+  const auto b = h.Load("shaped", writer.Finish(info));
+  SND_REQUIRE_EQ(h.sys->GetBankState(b), SND_BANK_STATE_LOADED);
+  h.sys->Play(HashId("Signal"), NoEmitter(), nullptr);
+  h.Steps(6);
+  const float base = h.LastMean();
+  SND_REQUIRE(base > 0.25f);
+  h.sys->SetParamGlobal(HashId("X"), 0.5f);
+  h.Steps(8);
+  SND_CHECK_NEAR(Db(h.LastMean() / base), -4, 0.005);
+  h.sys->SetParamGlobal(HashId("X"), 1.5f);
+  h.Steps(8);
+  SND_CHECK_NEAR(Db(h.LastMean() / base), -8, 0.005);
+}
+} // namespace
