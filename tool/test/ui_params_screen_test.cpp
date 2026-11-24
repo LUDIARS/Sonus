@@ -50,7 +50,8 @@ SND_TEST(ToolUiParams, CurvePointsDragAddAndRemove) {
   const tela::PlacedElement* plot = t.El("pc.plot");
   SND_REQUIRE(plot != nullptr);
   // The plot's axes: x 0..10 (Speed's range), y 0..1200 with 12 % margin.
-  const ui::PlotAxes axes = ui::PlotAxes::Fit(0.0, 10.0, 0.0, 1200.0, plot->bounds.width, plot->bounds.height, 0.12);
+  const ui::PlotAxes axes =
+      ui::PlotAxes::Fit(0.0, 10.0, 0.0, 1200.0, plot->bounds.width, plot->bounds.height, 0.12, ui::kCurveXMargin);
   const std::size_t undo0 = t.doc.UndoCount();
   t.Drag("pc.pt.1", 0.0f, 30.0f, 3);
   const std::vector<CurvePoint> p = ce.Points();
@@ -61,7 +62,8 @@ SND_TEST(ToolUiParams, CurvePointsDragAddAndRemove) {
   // Double click on the plot at x = 5 (the plot rescaled to the moved point: new axes).
   plot = t.El("pc.plot");
   SND_REQUIRE(plot != nullptr);
-  const ui::PlotAxes axes2 = ui::PlotAxes::Fit(0.0, 10.0, 0.0, ce.Points()[1].y, plot->bounds.width, plot->bounds.height, 0.12);
+  const ui::PlotAxes axes2 = ui::PlotAxes::Fit(0.0, 10.0, 0.0, ce.Points()[1].y, plot->bounds.width, plot->bounds.height, 0.12,
+                                                ui::kCurveXMargin);
   const tela::Point at{plot->bounds.x + axes2.X(5.0), plot->bounds.y + axes2.Y(300.0)};
   t.ptr.Down(at.x, at.y);
   t.ptr.Up(at.x, at.y);
@@ -122,7 +124,8 @@ SND_TEST(ToolUiParams, CurvePointsAreDrawnAtTheirValues) {
     SND_REQUIRE(plot != nullptr);
     tela::PixelSurface img;
     SND_REQUIRE(ui::Compose(t.app.runtime(), ui::ComposeOptions{}, &img));
-    const ui::PlotAxes axes = ui::PlotAxes::Fit(0.0, 10.0, 0.0, 1200.0, plot->bounds.width, plot->bounds.height, 0.12);
+    const ui::PlotAxes axes =
+        ui::PlotAxes::Fit(0.0, 10.0, 0.0, 1200.0, plot->bounds.width, plot->bounds.height, 0.12, ui::kCurveXMargin);
     const tela::Color accent = t.app.palette().accent;
     for (const auto& [x, y] : {std::pair<double, double>{0.0, 0.0}, {10.0, 1200.0}}) {
       unsigned char rgb[3];

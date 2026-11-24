@@ -67,7 +67,8 @@ SND_TEST(ToolUiInput, TextEntryUtf8NumbersAndKeys) {
   k = ui::KeyEvent{};
   k.key = 'S';
   k.modifiers = ui::kModControl;
-  SND_CHECK(!te.Key(k));
+  SND_CHECK(te.Key(k));  // D-186: the entry takes every key, shortcuts do nothing
+  SND_CHECK_EQ(te.text(), std::string("7"));
   k = ui::KeyEvent{};
   k.key = ui::kKeyEscape;
   te.Key(k);

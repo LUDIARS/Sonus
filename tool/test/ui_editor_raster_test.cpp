@@ -132,8 +132,8 @@ SND_TEST(ToolUiEditorRaster, PairTableCellsSitInTheirGrid) {
     f["materials/T.json"] = "{\"type\": \"materialTable\", \"guid\": \"" + doctest::G(300) + "\", \"name\": \"T\", \"bank\": \"Main\", "
                             "\"materials\": [\"a\", \"b\", \"c\"]}";
     Editor t(ui::Screen::Material, static_cast<int>(1280 * dpi), static_cast<int>(800 * dpi), dpi, f);
-    const tela::PlacedElement* c00 = t.El("ma.pair.0.0");
-    const tela::PlacedElement* c12 = t.El("ma.pair.1.2");
+    const tela::PlacedElement* c00 = t.El("ma.pair." + ui::NameKey("a") + "." + ui::NameKey("a") + "");
+    const tela::PlacedElement* c12 = t.El("ma.pair." + ui::NameKey("b") + "." + ui::NameKey("c") + "");
     SND_REQUIRE(c00 != nullptr && c12 != nullptr);
     // Row 1 is one row (24 px) below row 0, column 2 two cells right of column 0.
     SND_CHECK_NEAR(c12->bounds.y - c00->bounds.y, 24.0f, 1e-3f);
