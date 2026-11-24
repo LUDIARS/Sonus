@@ -386,3 +386,64 @@ SND_TEST(IndepS7LiveDefects, Defect_TransitionPreviewUsesTheTargetsLeadInsteadOf
   SND_CHECK_MSG(std::fabs(p.fireSeconds - engine) < 1e-9, "model %g (late %d), engine %g", p.fireSeconds, p.lateApplied ? 1 : 0,
                 engine);
 }
+
+// D-182 (the answer is remembered for the same game only). Connection::awaitingSync() asks the
+// client now, Connection::hello() is the reply Poll last took. When the game's HelloReply arrives
+// after the UI thread's Poll and before its LiveSync::Tick (the network thread runs on its own),
+// LiveSync judges the new game by the previous session's hello (its build hash) and gives the
+// remembered answer to another game without asking. Found as a 1-in-20 failure of
+// IndepS7LiveRecheck.NoQuestionBeforeTheBankListAndOneZeroByHash under TSan; here the order is
+// forced (the game holds its HelloReply until after Poll).
+SND_TEST(IndepS7LiveDefects, Defect_RememberedAnswerGoesToAnotherGameWhenTheHelloArrivesAfterPoll) {
+  ProjectDocument doc;
+  Load(doc);
+  LiveSync sync(doc, Options(LiveDecision::Ask));
+  MiniGame g;
+  SND_REQUIRE(g.ok);
+  g.minor = 0;
+  g.status = ll::HelloStatus::BuildMismatch;
+  g.echoHash = false;
+  g.runtimeHash = 0x2222;
+  Connection conn;
+  ConnectionDesc d;
+  d.connector = &g.link.connector();
+  d.profilerMask = 0;
+  d.reconnectDelayMs = 20;
+  SND_REQUIRE_EQ(conn.Open(sync.Prepare(d)), SND_OK);
+  auto run = [&](auto pred) {
+    const auto end = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    while (!pred()) {
+      if (std::chrono::steady_clock::now() > end) return false;
+      g.Pump();
+      sync.Tick(conn, conn.Poll(), Now());
+      std::this_thread::sleep_for(std::chrono::microseconds(300));
+    }
+    return true;
+  };
+  SND_REQUIRE(run([&] { return sync.pending(); }));
+  SND_REQUIRE(sync.ChooseSendDiffs(conn));
+  SND_REQUIRE(run([&] { return sync.phase() == LivePhase::Live; }));
+  // Another game (another build) comes up in its place.
+  g.runtimeHash = 0x3333;
+  g.holdHello = true;
+  const std::size_t decisionsBefore = g.Of(ll::MessageType::SyncDecision).size();
+  g.Drop();
+  SND_REQUIRE(run([&] { return g.helloHeld(); }));
+  const ConnectionEvents ev = conn.Poll();  // the UI thread polls ...
+  g.ReplyHello();                           // ... the reply arrives ...
+  const auto end = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+  while (!conn.client()->AwaitingSync() && std::chrono::steady_clock::now() < end) {
+    g.Pump();
+    std::this_thread::sleep_for(std::chrono::microseconds(200));
+  }
+  SND_REQUIRE(conn.client()->AwaitingSync());
+  sync.Tick(conn, ev, Now());  // ... and LiveSync ticks with the events of that Poll
+  bool asked = false;
+  run([&] {
+    asked = asked || sync.pending();
+    return asked || g.Of(ll::MessageType::SyncDecision).size() > decisionsBefore;
+  });
+  SND_CHECK_MSG(asked, "the new game (another build) was not asked");
+  SND_CHECK_MSG(g.Of(ll::MessageType::SyncDecision).size() == decisionsBefore, "a SyncDecision went to the new game unasked");
+  conn.Close();
+}
