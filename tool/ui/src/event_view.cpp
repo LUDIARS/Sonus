@@ -9,6 +9,7 @@
 
 #include "editor_util.hpp"
 #include "snd/tool/event_editor.hpp"
+#include "snd/tool/preview.hpp"
 #include "snd/tool/ui/app.hpp"
 #include "snd/tool/ui/editor_draw.hpp"
 #include "snd/tool/ui/kit.hpp"
@@ -223,6 +224,20 @@ float Timeline(Kit& kit, const std::string& g, float x, float y, float w, float 
              x + w - 36, y, 16);
   kit.Action("ev.scroll.right", ">", [evp, laneW] { evp->scrollMs += laneW * 0.5 * evp->msPerPx; }, x + w - 18, y, 16);
   y += 26.0f;
+  // Audition of the event (2D; the 3D screen places it) through the AuditionRouter.
+  AuditionRouter* router = app->workspace().audition;
+  std::string why = "no audition router";
+  const bool ready = router != nullptr && router->Ready(&why);
+  const std::string evName = d->Find(g)->name();
+  kit.Action("ev.play", "Play", [router, evName, g, app] {
+    AuditionRequest q;
+    q.eventId = HashId(evName);
+    q.eventGuid = g;
+    q.atPosition = false;
+    const AuditionResult r = router->PlayEvent(q);
+    if (!r.ok) app->Message("play: " + (r.error.empty() ? std::string("refused") : r.error));
+  }, x, y, 36, 18, ready);
+  kit.Action("ev.stop", "Stop", [router] { router->StopAll(); }, x + 38, y, 36, 18, ready);
   // Ruler and its labels.
   const TimeAxis axis{ev.scrollMs, ev.msPerPx};
   std::vector<double> ticks;
@@ -346,7 +361,7 @@ float Timeline(Kit& kit, const std::string& g, float x, float y, float w, float 
   std::snprintf(b, sizeof b, "length %s%s  clips %u  overlaps %u%s", tl.infinite ? "infinite / " : "",
                 (FormatNumberText(tl.lengthMs, 1) + " ms").c_str(), static_cast<unsigned>(tl.clips.size()),
                 static_cast<unsigned>(tl.overlaps.size()), tl.oneClipPerPlay ? "  (one clip per play)" : "");
-  kit.Label("ev.info", b, x, below + 24.0f, w, 20, 0.55f);
+  kit.Label("ev.info", std::string(b) + (ready ? "" : "   audition: " + why), x, below + 24.0f, w, 20, 0.55f);
   const std::vector<std::string> unused = ed.UnusedMembers();
   if (!unused.empty()) {
     std::string u = "not used by " + std::string(SequenceName(ed.sequence())) + ":";

@@ -71,12 +71,14 @@ struct LiveUi {
     engine->Render(1, nullptr);
     app->Frame(livetest::Now());
   }
+  // Frames until `pred`, at most 30 s of wall time (some reports are periodic in real time).
   template <class Pred>
-  bool Until(Pred pred, int frames = 4000) {
-    for (int i = 0; i < frames; ++i) {
+  bool Until(Pred pred) {
+    const std::uint64_t end = livetest::Now() + 30000000000ull;
+    while (livetest::Now() < end) {
       Frame();
       if (pred()) return true;
-      if (i % 50 == 49) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+      std::this_thread::sleep_for(std::chrono::microseconds(500));
     }
     return false;
   }

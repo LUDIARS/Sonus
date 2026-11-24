@@ -58,7 +58,11 @@ sonus-tool --headless --project game/audio --connect 127.0.0.1:27460 --frames 60
 | `--refuse-mismatch` | ビルドハッシュが違えば接続を断る（既定はツールの値を全部送る） |
 | `--font <ttf>` | 文字の TrueType フォント。ウィンドウのホストでは必須（Tela はフォントを同梱しない） |
 | `--recording <path>` | プロファイラの Save / Load が使うファイル（既定 `sonus-recording.snrec`） |
-| `--headless`, `--snapshot`, `--screen`, `--frames`, `--frame-ms`, `--size WxH`, `--dpi 0.25..4`, `--text-placeholders` | ヘッドレス実行（上記） |
+| `--send-diffs` | 文書があるとき、ビルドの不一致に「差分をすべて送る」で即答する（既定は利用者に聞く。文書が無いときは従来どおりミキサーの値を送る） |
+| `--preview silent\|device` | プレビューエンジン（ツールの中のランタイム）を動かし、それに接続する（試聴・ホットリロードの書き出し先もそれ） |
+| `--reload-dir <dir>` / `--reload-prefix <p>` | ホットリロードの再ビルドしたバンクの書き出し先と、ゲームから見たその場所 |
+| `--report-dir <dir>` | 記録と再生の画面の不具合報告のフォルダ（既定 `sonus-report`） |
+| `--headless`, `--snapshot`, `--screen <名前>`, `--frames`, `--frame-ms`, `--size WxH`, `--dpi 0.25..4`, `--text-placeholders` | ヘッドレス実行（上記）。画面の名前は mixer buses event params spatial music material patch profiler replay link problems |
 
 ## 構成
 
@@ -87,7 +91,12 @@ tool/
     patch_editor     波形生成パッチ: ノード、接続の規則、検査と依存順の配列（表は buildtool の patch.hpp）
   ui/                sonus_tool_ui: Tela の宣言を作る層（OS 非依存）
     app              Tela の Runtime、画面の宣言、ポインタの振り分け
-    mixer_view, profiler_view, status_view   画面の宣言
+    mixer_view, profiler_view, status_view   画面の宣言（段階2）
+    buses_view, event_view, params_view, spatial_view, music_view, material_view, patch_view,
+    replay_view, link_view, common_view       段階5 の画面（common_view: 候補の一覧と Problems）
+    kit, text_entry  画面の部品（名前・数値・候補・トグル・ページ送り・ドラッグの受け口）とツールの文字の入力
+    editor_draw      タイムライン、カーブ、上から見た図、印のタイムライン、パッチ、系列の図形
+    services, replay_service   再生のサービス（実装は sonus_tool_ui_replay）
     widgets          フェーダー・ノブ・メータ・グラフの図形（canvas に描く）
     control_math     値と画素の対応（下記の規則）
     pointer_router   ドラッグ・ダブルクリック・ホイール
@@ -102,9 +111,10 @@ tool/
 
 ## 画面と操作の仕様
 
-**ヘッダ**: 画面の切り替え（Mixer / Profiler）、プロジェクト名、接続の状態（ランプ: 緑 = 接続、黄 = 接続中・ビルド不一致で
-ツールの値を送った、赤 = 拒否）、レート・ブロック長・往復時間、Connect / Disconnect。**フッタ**: 最新のメッセージと、
-送信待ち・Ack 待ち・拒否された値の数。
+**ヘッダ**: 画面の切り替え（12 面のタブ。下の「段階5 の画面」）、接続の状態（ランプ: 緑 = 接続、黄 = 接続中・ビルド不一致で
+ツールの値を送った、赤 = 拒否）、レート・ブロック長・往復時間・ライブ反映の段階、ビルド不一致の質問（Send diffs / Refuse）、
+Connect / Disconnect。**フッタ**: 最新のメッセージ、プロジェクト名と未保存の印・文書の Undo / Redo / Save（文書があるとき）、
+問題の数（Problems 画面へ）、送信待ち・Ack 待ち・拒否された値の数。
 
 **ミキサー**（左にストリップ、右に上書きの一覧とパラメータ）
 
@@ -139,7 +149,10 @@ tool/
   新しい BusMeters が届いたときだけ更新し、1.5 秒保持してから 20 dB/秒で落ちる。0 dBFS に達するとクリップを点け、
   Profiler の「Reset clips」まで残る。新しいメータが 500 ms 来なければ（切断・ゲーム停止）、peak / rms も 20 dB/秒で下がり、
   最後は −∞ になる（凍結しない）。
-- ショートカット: Ctrl+Z（macOS は Cmd+Z）取り消し、Ctrl+Y / Ctrl+Shift+Z やり直し、F2 ミキサー、F3 プロファイラ。
+- ショートカット: Ctrl+Z（macOS は Cmd+Z）取り消し、Ctrl+Y / Ctrl+Shift+Z やり直し（ミキサー画面ではライブの値の履歴、
+  ほかの画面では文書の履歴）、Ctrl+S 文書の保存、F2 ミキサー、F3 プロファイラ、F4 Buses、F5 Event、F6 Params、F7 3D、
+  F8 Music、F9 Material、F10 Patch、Ctrl+PageDown / Ctrl+PageUp（Ctrl+Tab / Ctrl+Shift+Tab）でタブを順に、Delete / Backspace
+  で選んだもの（クリップ、カーブの点、パッチのノード）を消す。
 
 **プロファイラ**
 
@@ -277,7 +290,68 @@ s.Connect(desc);                                        // Hello のハッシュ
 | `tool_live_v10_test` | 1.0 のゲーム（手で動かすゲーム側）: 1.1 の機能は理由つきで無効、1.0 のメッセージは使う、待ち続けない |
 | `tool_live_concurrency_test` | 実時間のプレビューエンジンとライブリンクの中で UI スレッドが編集・読み出し・試聴・切断を繰り返す、2 スレッドで同時に再生（TSan と Release で繰り返す） |
 
+## 段階5 の画面（組 U）
+
+設計書 11.1 の全画面を、ミキサー・プロファイラと同じ作り方（位置指定の要素、排他入力のボタン＋入力を通す canvas、
+`SafeDrawing`）で作った。画面はモデル（`tool/include/snd/tool/*.hpp`）を読んで宣言を作り、操作はモデルの関数に渡すだけ
+（編集の規則も計算もモデルの側。どの編集も文書の 1 つの履歴で取り消せる）。文書（`Workspace::document`）が無いときは
+エディタの画面は「`--project` で起動する」と出す。
+
+| タブ（`--screen`） | ファイル | 中身 |
+| --- | --- | --- |
+| Mixer（`mixer`） | `mixer_view` | 段階2 のストリップ。右の一覧に「Read back」（1.1 の読み返し）と「Write back to project」（ライブの値を文書へ、1 手） |
+| Buses（`buses`） | `buses_view` | Buses: バスの木（追加・削除・名前）、音量・親・チャンネル・フラグ・LOD 優先度、センド（宛先・レベル・pre/post・追加・削除）、エフェクトの鎖（追加・並べ替え・削除・全パラメータ）、graph order。Snapshots: 値（種類・バス・値・番号）、ミキサーから取り込み、重みと結果。Ducking: 種類・元・先・量・アタック・リリース・しきい値。Categories: 親・音量・フラグとボイスリミットグループ |
+| Event（`event`） | `event_view` | 一覧、Event の項目（シーケンス種別・バス・カテゴリ・数値・フラグ・コーン）、タイムライン（トラックとクリップ、ルーラー、ズームとスクロール、ドラッグで開始位置、上下でトラック、ダブルクリックで素材を足す）、クリップの項目（ランダム幅、フェード、weight、switch、layer、loop、synth）、トラックのバスとアクション、試聴 |
+| Params（`params`） | `params_view` | パラメータ（種類・スコープ・範囲・既定値・追従速度と軌跡）、カーブの図（点のドラッグ・ダブルクリックで追加・Delete で削除、shape、対象・合成・入力）、合成の規則の確認（値とスコープ、距離 → 対象ごとの結果と内訳、警告） |
+| 3D（`spatial`） | `spatial_view` | 上から見た図（リスナー・エミッタ・向きの取っ手のドラッグ、背景のドラッグで移動・ホイールで拡大）、maxDistance の円とコーン、計算の値、出力の利得、距離カーブと今の距離、試聴（動かすと追従。宛先が無ければ理由つきで無効） |
+| Music（`music`） | `music_view` | Segments（素材・小節・入口と出口、拍子と小節のタイムライン、マーカーのドラッグ、テンポ点・マーカー・Stem の表、タップとグリッド）、Playlists、States & rules（State の表、遷移ルール表の編集・並べ替え・自動の並べ替え・到達できない行の印、遷移の試聴の計算をタイムラインに、試聴の要求、最小先読み）、Stingers |
+| Material（`material`） | `material_view` | 表、材質と番号（付け替えの表示）、単体音・足音、強さのカーブと入力の結果、組の表（8×8 の窓をスクロール）、既定、接触の解決、代替の一覧 |
+| Patch（`patch`） | `patch_view` | ノードの図（ドラッグで移動、出力の端子から入力の端子へドラッグで接続、または端子を選んでつなぐ、つながった入力を押すと切断、背景のドラッグでスクロール）、ノードの追加・削除・名前・パラメータ、接続の一覧、検査と依存順 |
+| Profiler（`profiler`） | `profiler_view` | Overview（段階2）、CPU（負荷のグラフと BlockDetail の表）、Memory、Streams（スロットとストール）、LOD（段と履歴）、Event log（絞り込みと取りこぼしの数）。タブを開くとその View を購読する |
+| Replay（`replay`） | `replay_view` | 記録・保存・読み込み（ファイル名は入力）、記録の要約、2 回の再生と比較、記録した実行との比較、WAV と試聴、不具合報告の書き出しと読み込み・再生（`ReplayService`） |
+| Link（`link`） | `link_view` | 接続先の入力、状態と段階、照合（版・ハッシュ・バンクごとの判定）、不一致の質問、1.0 の相手で無い機能、ホットリロードの経過、予備容量と構造の変更（行ごとに Undo）、数、Resync。Items: オブジェクトごとの経路と状態 |
+| Problems（`problems`） | `common_view` | ビルドの検査の問題（エラーが先）、ライブの問題、ライブに出せないもの。行の Go でその編集画面へ |
+
+**文字の入力（Tela に無い。回避は 1 つに揃えた）**: ホストがキーボードを観測して `App::Key(KeyEvent)` に渡し（Windows は
+WM_KEYDOWN と WM_CHAR、macOS は NSEvent のローカルモニタ）、ツールの中の `TextEntry` が文字列を組む。
+- 名前: 欄を押すと今の名前で入力が始まる。Enter で確定（モデルが拒否すれば入力は開いたままメッセージ）、Esc で取り消し、
+  Backspace で 1 文字消す。新しいオブジェクトは「Event 1」のように連番の名前で作り、あとで名前を変える。
+- 数値: `[-] 値 [+]`。ボタンで 1 ステップ、値の上を縦にドラッグ（4 px で 1 ステップ、Shift で 1/10、ドラッグ 1 回が取り消し 1 回）、
+  ホイール（続けて回した分が取り消し 1 回）、動かさずに押すと数字の入力。
+- 参照と選択肢: 欄を押すと候補の一覧（画面の上に重ねる。外を押すか Esc で閉じる。多ければページ送り）。
+- Windows では Tela が Esc でウィンドウを閉じるので、入力中・一覧が開いている間の Esc だけは Tela に渡さない。
+
+**ドラッグの受け口**（`pointer_router.hpp` の `ControlKind::Custom` / `DragHandler`）: 描いた物（クリップ、点、リスナー、ノード、
+数値の欄）の下に排他入力のボタンを置き、押下・移動・離す・ダブルクリック・ホイールを渡す。押した時のハンドラを
+ジェスチャーの終わりまで使う（宣言が毎フレーム差し替わっても状態を保つ）。要素が消えれば離したことにする。
+文書の編集は最初の移動でグループを開き、離した時に閉じる（1 手）。位置のドラッグは押した点からの絶対量、数値の
+ドラッグは移動量の積み上げ（Shift で 1/10）。
+
+**ミキサーと文書**: 文書のバス・カテゴリ・パラメータの構成が変われば、セッションのプロジェクトを文書から作り直して
+ミキサーを結び直す（`MixerModel::Bind`）。値だけの変更は、ミキサーに上書きが無ければ結び直し、あればメッセージを出して
+書き戻すか全部戻すまで待つ（上書きを消さない）。
+
+**記録と再生のサービス**: 再生はランタイムを要るので、UI のライブラリ（`sonus_tool_ui`、核だけに依存）は `ReplayService`
+（`services.hpp`）を通す。実装は `sonus_tool_ui_replay`（`Sonus::tool_preview` を使う）。`sonus-tool` は両方をリンクする。
+
+テスト（Tela 入り、`tool/test`）:
+
+| テスト | 内容 |
+| --- | --- |
+| `tool_ui_event_screen_test` | Event: 宣言と ID の安定、クリップのドラッグ（開始位置・トラック、取り消し 1 回）、ボタンと候補、数値の入力と拒否、名前、ズームとスクロール、クリップの箱の画素（DPI 1・2） |
+| `tool_ui_buses_screen_test` | バスの木と項目、新しいバスでミキサーが追従、センド、エフェクト、スナップショット（重みの結果、取り込み）、ダッキング、カテゴリ、グループ、書き戻し |
+| `tool_ui_params_screen_test` | パラメータの項目と軌跡、点のドラッグ（値の単位）・追加・削除、対象と合成、合成の確認が `ComposeEvent` と一致、点の画素 |
+| `tool_ui_spatial_screen_test` | エミッタと向きのドラッグ、拡大、値が `Compute` と一致、プレビューエンジンへの試聴と追従、宛先が無いときの無効、円と点の画素 |
+| `tool_ui_music_screen_test` | Segment のマーカーのドラッグ、テンポ・マーカー・Stem、グリッド、Playlist、ルール表（到達できない行、自動の並べ替えの拒否と実行）、試聴の計算が `Preview` と一致、Stinger |
+| `tool_ui_material_screen_test` | 材質と番号の付け替え、単体音・足音・組（対称）・既定、解決、強さ、64 材質の窓 |
+| `tool_ui_patch_screen_test` | ノードの追加・移動（取り消し 1 回）・パラメータ・削除、ドラッグとクリックでの接続、切断、検査と順、上限 |
+| `tool_ui_live_screens_test` | プレビューエンジンをゲームにして: Link（照合、不一致の質問をヘッダと画面から）、プロファイラのタブ、記録 → 保存 → 読み込み → 2 回の再生 → WAV → 不具合報告 |
+| `tool_ui_editor_limits_test` | 大きなプロジェクト（Event 300、40 トラック × 30 クリップ、ルール 100 行、ノード上限、64 材質、バス 60）の全画面を DPI 0.25・1・2・4 で: 要素の数、ID の重複なし、図形の上限、画像。ページ送り |
+| `tool_ui_editor_input_test` | 文字の入力（UTF-8、数値、拒否）、キー（画面、文書とミキサーの取り消し、保存）、ドラッグの受け口（差し替えをまたぐ、要素が消える）、数値の欄（ドラッグ、Shift、ホイール）、候補の一覧 |
+| `tool_ui_editor_concurrency_test` | 実時間のプレビューエンジンとライブリンクの中で、UI スレッドが画面から編集・試聴・切断を繰り返す（TSan） |
+| `tool_app_screen_<名前>` | `sonus-tool --headless --screen <名前>` が全画面で画像を書く |
+
 ## 段階2で入れていないもの
 
-Event / パラメータとカーブ / 3D / 音楽 / マテリアル / パッチの各エディタ、センド・スナップショット・ダッキングの編集、
-接続先やファイル名の画面上での入力（Tela に文字入力が無い）。構造の変更・チャンクの差し替え・記録の再生は組 P（上）で入れた。
+（段階5 の組 M・P・U で、各エディタ、センド・スナップショット・ダッキングの編集、接続先やファイル名の画面上での入力
+（ツールの中の文字の入力）、構造の変更・チャンクの差し替え・記録の再生を入れた。）
