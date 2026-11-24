@@ -1,0 +1,21 @@
+# 組③ 実装担当の復元記録
+
+公開先頭 `700b4fd` に統合先 `c86901f` を取り込み、旧環境の未公開コミットを参照できない状態から復元した。下表のテスト名はこの作業ツリーにあるケース。旧環境の性能や合格件数は転記していない。
+
+| 判断候補 | 実装と検査 |
+| --- | --- |
+| D-160 | SetParamValue で定義済み PARM の不許可スコープを取り除き、ParamValueOf は現在のマスクで Playback → Emitter → Global → 既定の順に読む。未定義 ID とマスク省略は従来どおり3スコープ。追従は共有する行ごとに既存の Step が1ブロックに1回行う。CoreG3.ForbiddenScopeKeepsAllowedValue。 |
+| D-161 | 音量は dB 加算、ピッチは cents 加算、LP は最小、HP は最大。Pan の乗算指定は複数寄与を積にしてクリップ値に加える。旧パンはクリップ値から行ごとに加算する。独立試験 IndepG3Param.LegacyPanAddsCurvesToClipInStoredOrder。 |
+| D-162 | Spread、Blend3D、ReverbSend の寄与を声ごとに保持。指定したカーブの積を距離評価後に掛ける。距離カーブを省略して Parameter カーブだけを指定したときの積の始点は1。組①のリスナー別評価と送りには統合時に接続する。 |
+| D-163 / 164 | SNPV の重みをバス・送りでは dB、FX ではネイティブ単位に掛ける。FX は D-130 の制御値に加算し、最終値に範囲制限を適用。初期化時のみの値には加算しない。共有バンクでは元の行をバスIDとチェーン内位置で実体へ移し、FX種別、あるいは送り先と pre/post の一致を必要とする。送りはブロック内で前回値から補間。CoreG3.WeightedMixReplaysBitExactly。 |
+| D-165 | ApplySnapshot の reserved=1 は今後の当該スナップショットアクションの遷移時間を設定する。再指定は直前の重みから開始する。親の初期発火を仮適用する処理は組④にあり、統合時に親の受理・拒否を確認する。 |
+| D-166 | 前ブロックのフェーダー後ピークがしきい値を超える dB を amountDb の絶対値で制限して減衰。既存の指数型 attack/release を使う。キーの初フレームはバスの世代で確認する。ルール型はカテゴリ内の発音数が正の間働く。 |
+| D-167 / 168 | Solo はカテゴリ部分木の和集合。最後の定義を解放すると状態を破棄。FocusLost は SND_FOCUS_PER_CATEGORY で対象フラグがある親を含むカテゴリだけに働き、ミュート・ソロや再生時間は保持する。CoreG3.SoloSubtreeAndFocusRestoreIndependentMute。 |
+
+公開関数は snd_set_category_solo と snd_set_snapshot_action_transition。C++ ラッパーおよび core の同名操作、core の SetFocusLost(bool) を追加した。予約フィールドは SetCategoryVolume.reserved=1 と ApplySnapshot.reserved=1。追加のコマンド種別、設定フィールド、スキーマ列は使用していない。
+
+B-1 は新 variant のライブリンク記録再生、B-2 は Send／EffectParam の宛先列と ACTN 遷移時間、B-3 はフォーカス通知から core への接続および C API の一巡を担当する。
+
+## 試験状況
+
+`825cf18` 時点で組③のセルフ試験5ケースと独立試験を作業ブランチに収録した。セルフの複合台本はパラメータ、多重スナップショット値、プリ送り、ダッキング2方式、ソロを同時に有効にし、直列2回／RTワーカー2、確保、RT違反、128実声のCPUを検査する。構成別の実行結果は排他ビルドの完了後に追記する。
