@@ -20,6 +20,7 @@ void SharedKey(bool compressor) {
   SND_REQUIRE(h.sys != nullptr);
   FxBank owner;
   KeyBus(owner);
+  owner.b.buses.erase(owner.b.buses.begin() + 1); // The target belongs only to the survivor.
   owner.Event("OldKey", 960, 0);
   const auto first = h.Load("owner", owner.Build("Owner"));
   SND_REQUIRE_EQ(h.sys->GetBankState(first), SND_BANK_STATE_LOADED);
@@ -147,5 +148,110 @@ SND_TEST(IndepG3Param, TwoCurvesAddDecibelsAndClampToEndpoints) {
     const float attenuation = -14.0f * std::fmin(1.0f, std::fabs(x));
     SND_CHECK_NEAR(h.LastMean() / base, Linear(attenuation), 0.001f);
   }
+}
+} // namespace
+
+namespace {
+using namespace g2;
+using snd::HashId;
+
+SND_TEST(IndepG3Snapshot, EffectContributionTracksChangingBaseAndReleases) {
+  Fx h(G2Config());
+  FxBank b;
+  b.b.buses[0].effects = {b.Effect(dsp::kEffectEcho, EchoGain(0.5f))};
+  b.Event("Signal", 400);
+  b.b.snapshots.push_back({HashId("Wet"), {{1, 0, 2, 0.25f}}});
+  h.Load("effects", b.Build("Effects"));
+  h.sys->Play(HashId("Signal"), NoEmitter(), nullptr);
+  h.Steps(10);
+  const float unity = 2 * h.LastMean();
+  SND_REQUIRE(unity > 0.25f);
+  h.sys->ApplySnapshot(HashId("Wet"), 0.5f, 0);
+  h.Steps(10);
+  SND_CHECK_NEAR(h.LastMean() / unity, 0.625, 1e-3);
+  h.sys->SetEffectParam(HashId("Sfx"), 0, 2, 0.75f, 0);
+  h.Steps(10);
+  SND_CHECK_NEAR(h.LastMean() / unity, 0.875, 1e-3);
+  h.sys->ApplySnapshot(HashId("Wet"), 0, 0);
+  h.Steps(10);
+  SND_CHECK_NEAR(h.LastMean() / unity, 0.75, 1e-3);
+}
+
+SND_TEST(IndepG3Snapshot, SendContributionsRespectPreAndPostFaderTaps) {
+  for (const auto pre : {0u, 1u}) {
+    Fx h(G2Config());
+    FxBank b;
+    // Source is an auxiliary output: the only path to Master is its send.
+    b.b.buses[0].parent = kNone;
+    b.b.buses[0].flags = bf::kBusOutput;
+    b.b.buses[0].sends = {{1, -12, pre}};
+    b.Event("Signal", 400);
+    b.b.snapshots = {{HashId("SendUp"), {{2, 0, 0, 6}}}};
+    h.Load("send", b.Build("Send"));
+    h.sys->Play(HashId("Signal"), NoEmitter(), nullptr);
+    h.Steps(6);
+    const float base = h.LastMean();
+    SND_REQUIRE(base > 0.05f && base < 0.1f);
+    h.sys->ApplySnapshot(HashId("SendUp"), 0.5f, 0);
+    h.sys->SetBusVolume(HashId("Sfx"), Linear(-6), 0);
+    h.Steps(8);
+    SND_CHECK_NEAR(h.LastMean() / base, Linear(pre ? 3.f : -3.f), 1e-3);
+    h.sys->ApplySnapshot(HashId("SendUp"), 0, 0);
+    h.Steps(8);
+    SND_CHECK_NEAR(h.LastMean() / base, Linear(pre ? 0.f : -6.f), 1e-3);
+  }
+}
+
+SND_TEST(IndepG3Ducking, LevelTracksDifferentOverThresholdInputsAndCaps) {
+  Fx h(G2Config());
+  FxBank b;
+  KeyBus(b);
+  b.Event("Key", 960, 0);
+  b.Event("Bed", 80, 1);
+  b.b.ducks.push_back({0, 0, 1, 12, 1, 1, -30});
+  h.Load("duck", b.Build("Duck"));
+  h.sys->Play(HashId("Bed"), NoEmitter(), nullptr);
+  h.Steps(8);
+  const float base = h.LastMean();
+  SND_REQUIRE(base > 0.04f);
+  h.sys->SetBusVolume(HashId("Key"), Linear(-40), 0);
+  const auto key = h.sys->Play(HashId("Key"), NoEmitter(), nullptr);
+  h.Steps(20);
+  SND_CHECK_NEAR(h.LastMean(), base, 1e-4);
+  h.sys->SetBusVolume(HashId("Key"), Linear(-23), 0);
+  h.Steps(20);
+  const float middle = h.LastMean();
+  h.sys->SetBusVolume(HashId("Key"), 1, 0);
+  h.Steps(20);
+  SND_CHECK_MSG(middle < base && middle > h.LastMean(), "base %.6f middle %.6f full %.6f", base, middle, h.LastMean());
+  SND_CHECK_NEAR(h.LastMean() / base, Linear(-12), 0.005);
+  h.sys->Stop(key, 0, nullptr);
+  h.Steps(80);
+  SND_CHECK_NEAR(h.LastMean(), base, 1e-4);
+}
+
+SND_TEST(IndepG3Ducking, LastCategoryVoiceReleasesRule) {
+  Fx h(G2Config());
+  FxBank b;
+  KeyBus(b);
+  b.Event("Key", 960, 0).category = 0;
+  b.Event("Bed", 80, 1);
+  b.b.categories.push_back({HashId("Dialog"), kNone, 0, 0});
+  b.b.ducks.push_back({1, 0, 1, 8, 1, 3, 0});
+  h.Load("duck", b.Build("Duck"));
+  h.sys->Play(HashId("Bed"), NoEmitter(), nullptr);
+  h.Steps(8);
+  const float base = h.LastMean();
+  SND_REQUIRE(base > 0.04f);
+  const auto one = h.sys->Play(HashId("Key"), NoEmitter(), nullptr);
+  const auto two = h.sys->Play(HashId("Key"), NoEmitter(), nullptr);
+  h.Steps(20);
+  SND_CHECK_NEAR(h.LastMean() / base, Linear(-8), 0.002);
+  h.sys->Stop(one, 0, nullptr);
+  h.Steps(30);
+  SND_CHECK_NEAR(h.LastMean() / base, Linear(-8), 0.002);
+  h.sys->Stop(two, 0, nullptr);
+  h.Steps(30);
+  SND_CHECK_NEAR(h.LastMean() / base, 1, 0.002);
 }
 } // namespace
