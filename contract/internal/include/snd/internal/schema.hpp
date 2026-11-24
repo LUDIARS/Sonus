@@ -439,10 +439,8 @@ using F32 = float;
   R(Publish, Transport_signature, Current)                                     \
   R(Publish, Stream_control, Current)                                          \
   R(Publish, Stream_stallCount, Current)                                       \
-  /* stage 3 (group 4): steal mode "quietest" (4.4) reads the last audibility; */ \
-  /* clip markers name the voice's playback (on_marker)                       */ \
-  R(RunEventLogic, Voice_audibility, Previous)                                 \
-  R(Render, Voice_playbackSlot, Current)
+  /* Stage 3 group 4: the quietest steal mode reads the last audibility. */    \
+  R(RunEventLogic, Voice_audibility, Previous)
 
 // Per-block data that is not a table (owner = only writer).
 #define SND_SCHEMA_FRAME_DATA(F)                                                  \
