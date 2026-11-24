@@ -1,5 +1,6 @@
 // Oscillator kind (oscillator_kind.hpp).
 #include "oscillator_kind.hpp"
+#include "waveform.hpp"
 
 #include <cmath>
 #include <cstring>
@@ -15,7 +16,6 @@ namespace bf = snd::bank_format;
 
 constexpr std::size_t Align64(std::size_t n) noexcept { return (n + 63u) & ~std::size_t{63u}; }
 std::uint32_t Cap(const SourceLimits& l) noexcept { return l.maxVoices == 0u ? 1u : l.maxVoices; }
-constexpr double kTwoPi = 6.283185307179586476925;
 constexpr double kMaxDt = 0.4999;  // just below Nyquist
 constexpr std::uint32_t kDefaultTableLength = 2048;
 
@@ -24,35 +24,6 @@ std::uint32_t LoadState(const OscInst& in) noexcept {
 }
 
 double Wrap(double p) noexcept { return p - std::floor(p); }
-
-// Band-limited step residual (2-point PolyBLEP) for a unit upward step at phase 0:
-// t = phase after the step in cycles, dt = cycles per sample.
-inline double StepResidual(double t, double dt) noexcept {
-  if (t < dt) {
-    const double x = t / dt;  // [0, 1)
-    return -0.5 * (1.0 - x) * (1.0 - x);
-  }
-  if (t > 1.0 - dt) {
-    const double x = (t - 1.0) / dt;  // (-1, 0)
-    return 0.5 * (1.0 + x) * (1.0 + x);
-  }
-  return 0.0;
-}
-
-// Band-limited ramp residual (2-point PolyBLAMP, the integral of StepResidual) for a
-// unit change of slope (per sample) at phase 0.
-inline double RampResidual(double t, double dt) noexcept {
-  double x;
-  if (t < dt) {
-    x = t / dt;
-  } else if (t > 1.0 - dt) {
-    x = (1.0 - t) / dt;
-  } else {
-    return 0.0;
-  }
-  const double y = 1.0 - x;
-  return y * y * y * (1.0 / 6.0);
-}
 
 inline float PcmAt(const OscInst& in, std::uint32_t frame) noexcept {
   const std::size_t i = std::size_t{frame} * in.tableChannels;
@@ -298,44 +269,10 @@ void OscillatorKind::RenderBatch(const source::RenderBatch& batch, VoiceRenderSt
     const double td = static_cast<double>(table.end) - table.start;
     const double baseDt = in.baseDt;
     const OscLoop L{blockFrames, static_cast<double>(off), p0, pd, baseDt, fadeFrames_};
-    switch (in.shape) {
-      case static_cast<std::uint32_t>(bf::Waveform::Sine):
-        L.Run(in, out, n, [](double ph, double, double) { return std::sin(kTwoPi * ph); });
-        break;
-      case static_cast<std::uint32_t>(bf::Waveform::Saw):
-        // Falls by 2 at the wrap.
-        L.Run(in, out, n, [](double ph, double dt, double) { return 2.0 * ph - 1.0 - 2.0 * StepResidual(ph, dt); });
-        break;
-      case static_cast<std::uint32_t>(bf::Waveform::Square):
-        L.Run(in, out, n, [](double ph, double dt, double) {
-          double y = ph < 0.5 ? 1.0 : -1.0;
-          y += 2.0 * StepResidual(ph, dt);            // rises by 2 at phase 0
-          y -= 2.0 * StepResidual(Wrap(ph - 0.5), dt);  // falls by 2 at phase 0.5
-          return y;
-        });
-        break;
-      case static_cast<std::uint32_t>(bf::Waveform::Pulse):
-        L.Run(in, out, n, [d0, dd](double ph, double dt, double a) {
-          double d = d0 + dd * a;
-          d = d < 0.001 ? 0.001 : (d > 0.999 ? 0.999 : d);
-          double y = ph < d ? 1.0 : -1.0;
-          y += 2.0 * StepResidual(ph, dt);            // rises by 2 at phase 0
-          y -= 2.0 * StepResidual(Wrap(ph - d), dt);  // falls by 2 at phase d
-          return y - (2.0 * d - 1.0);                 // DC removed
-        });
-        break;
-      case static_cast<std::uint32_t>(bf::Waveform::Triangle):
-        // -1 at phase 0 rising to +1 at 0.5: the slope changes by +-8 dt per sample.
-        L.Run(in, out, n, [](double ph, double dt, double) {
-          double y = ph < 0.5 ? 4.0 * ph - 1.0 : 3.0 - 4.0 * ph;
-          y += 8.0 * dt * RampResidual(ph, dt);
-          y -= 8.0 * dt * RampResidual(Wrap(ph - 0.5), dt);
-          return y;
-        });
-        break;
-      default:  // wavetable
-        L.Run(in, out, n, [&in, t0, td](double ph, double, double a) { return Wavetable(in, ph, t0 + td * a); });
-        break;
+    if (in.shape == kShapeWavetable) {
+      L.Run(in, out, n, [&in, t0, td](double ph, double, double a) { return Wavetable(in, ph, t0 + td * a); });
+    } else {
+      L.Run(in, out, n, [&](double ph, double dt, double a) { return Waveform(in.shape, ph, dt, d0 + dd * a); });
     }
     for (std::uint32_t c = 1; c < ch; ++c) std::memcpy(it.out[c] + off, out, sizeof(float) * n);
     it.playhead->frame += n;

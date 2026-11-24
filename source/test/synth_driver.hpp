@@ -160,7 +160,9 @@ class Driver {
     b.block.frames = bf;
     b.block.sampleRate = opt_.sampleRate;
     b.block.clock = clock_;
-    b.scratch = nullptr;
+    alignas(64) std::uint8_t arena[256]{};
+    src::Scratch scratch{arena, sizeof(arena), 0};
+    b.scratch = kind_->Kind() == snd::SourceKind::Patch ? &scratch : nullptr;
     const auto t0 = std::chrono::steady_clock::now();
     {
       snd::rt::RtScope rt;

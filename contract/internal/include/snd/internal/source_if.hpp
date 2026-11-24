@@ -163,6 +163,7 @@ struct PatchParams {
   const std::uint8_t* program;  // PTCH bytes, interpreted by the patch kind
   std::uint32_t programBytes;
   std::uint32_t reserved;
+  std::uint64_t gateFrames{};  // 0 holds the note; otherwise ADSR note-off at this output frame
 };
 struct CallbackParams {
   // 1.2 (D-94): the desc as the game gave it. When `callback` is NULL, `cpp_callback`

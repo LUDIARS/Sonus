@@ -16,3 +16,4 @@ snd_add_module(source
     src/input_kind.cpp
     src/runtime.cpp)
 target_sources(sonus_source PRIVATE src/granular_kind.cpp)
+target_sources(sonus_source PRIVATE src/patch_program.cpp src/patch_kind.cpp)
