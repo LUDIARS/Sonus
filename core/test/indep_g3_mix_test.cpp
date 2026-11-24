@@ -80,40 +80,14 @@ SND_TEST(IndepG3Snapshot, TwoWeightsReleaseIndependentlyToBusBase) {
   SND_CHECK_NEAR(h.LastMean(), base, 1e-5f);
 }
 
-// Replace one table in the test writer's output. The normal writer recomputes
-// layout and both checksums, including for scope masks omitted in old banks.
-std::vector<std::uint8_t> WithScopes(const FxBank& bank, std::uint32_t mask) {
-  const auto bytes = bank.Build("Scopes");
-  bf::FileHeader header{};
-  std::memcpy(&header, bytes.data(), sizeof(header));
-  bt::BankWriter writer;
-  for (std::uint32_t i = 0; i < header.chunkCount; ++i) {
-    bf::ChunkEntry entry{};
-    std::memcpy(&entry, bytes.data() + header.chunkTableOffset + sizeof(entry) * i, sizeof(entry));
-    if (entry.fourcc != bf::chunk::PARM) {
-      const auto* p = bytes.data() + entry.offset;
-      writer.AddBlob(entry.fourcc, {p, p + entry.bytes}, entry.flags);
-    }
-  }
-  bt::TableBuilder params(bf::chunk::PARM);
-  const auto row = params.AddRow();
-  params.U32(bf::col::PARM_id, row, HashId("Level"));
-  params.U32(bf::col::PARM_scopeMask, row, mask);
-  params.F32(bf::col::PARM_maxValue, row, 1);
-  params.F32(bf::col::PARM_defaultValue, row, 0);
-  writer.AddTable(params);
-  bt::BankHeaderInfo info;
-  info.bankId = header.bankId;
-  return writer.Finish(info);
-}
-
 SND_TEST(IndepG3Param, AllowedScopesWinInPlaybackEmitterGlobalOrder) {
   for (std::uint32_t mask = 0; mask < 8; ++mask) {
     Fx h(G2Config());
     FxBank b;
     b.Event("Signal", 400).curves = {0};
     b.b.curves.push_back({HashId("Level"), 0, 0, {{0, 0}, {1, -12}}});
-    const auto bank = h.Load("scope", WithScopes(b, mask));
+    b.b.params.push_back({HashId("Level"), 0, 0, 1, 0, 0, mask});
+    const auto bank = h.Load("scope", b.Build("Scopes"));
     SND_REQUIRE_EQ(h.sys->GetBankState(bank), SND_BANK_STATE_LOADED);
     const auto emitter = h.sys->CreateEmitter();
     const auto playback = h.sys->Play(HashId("Signal"), emitter, nullptr);
