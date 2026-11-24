@@ -480,7 +480,7 @@ struct DspPriv {
   bool hadSnapshotOffsets = false;
   float* duckDb = nullptr;           // [duckCap] current reduction (dB, <= 0)
   std::uint32_t* catPlaying = nullptr;  // [catCap] voices playing per category this block
-  float* catGainPrev = nullptr;
+  float* busGainDb = nullptr;
   float* pan = nullptr;  // [maxVirtual] 2D pan of the voice this block (clip random + curves), read by Render
 };
 

@@ -310,8 +310,7 @@ void EvaluateDspParams(Impl& im) noexcept {
   const schema::TableRows& br = t.Bus.rows;
   float* gt = SND_W(Bus_gainTarget);
   std::uint32_t* bypass = SND_W(Bus_effectBypass);
-  float* busDb = im.frameArena.AllocateArray<float>(im.cfg.busCap);
-  if (busDb == nullptr) return;
+  float* busDb = im.dp.busGainDb;
   for (std::uint32_t s = 0; s < im.cfg.busCap; ++s) busDb[s] = 0.0f;
   if (im.dp.hadSnapshotOffsets) ClearSnapshotOffsets(im);
   im.dp.hadSnapshotOffsets = false;
