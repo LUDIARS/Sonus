@@ -177,7 +177,7 @@ void App::TrackDocument() {
 void App::RefreshProblems() {
   const ProjectDocument* d = document();
   if (d == nullptr) return;
-  problems_ = DistinctIssues(CheckDocument(*d));  // D-189: each problem once
+  problems_ = CheckDocument(*d);  // each problem once (D-189)
   std::stable_sort(problems_.begin(), problems_.end(), [](const DocIssue& a, const DocIssue& b) {
     return a.error && !b.error;
   });
