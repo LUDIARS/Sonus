@@ -55,6 +55,12 @@ SND_TEST(ToolProfilerStreams, DetailViewsFillFromTheGame) {
   SND_REQUIRE(rig.Run(s, [&] { return s.connection().state() == LinkState::Online; }));
   ProfilerStreams p;
   p.SetViews(kViewCpu | kViewCpuDetail | kViewMemory | kViewStreams | kViewLod | kViewEventLog);
+  // The subscription first (the game streams the event log only once the mask is in), then the
+  // sounds: otherwise, under load, Blip can end before the log is subscribed.
+  SND_REQUIRE(rig.Run(s, [&] {
+    p.Poll(s.connection().client(), tooltest::Now());
+    return p.subscribedMask() == ProfilerMaskFor(p.views(), 1) && p.cpu().size() >= 1u;
+  }));
   rig.f.sys->Play(snd::HashId("Tone"), snd_emitter_handle{0}, nullptr);
   const snd::Id blip = snd::HashId("Blip");
   rig.f.sys->Play(blip, snd_emitter_handle{0}, nullptr);
