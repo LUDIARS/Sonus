@@ -274,6 +274,68 @@ inline std::vector<LiveCell> F32CellsOf(const snd::tool::DocBuild& b, const snd:
   return out;
 }
 
+// A music project: Tune (bus Amb) plays Calm (playlist LA: segment SA, DC kDc) or Fight (LB: SB,
+// DC 3 kDc); 3/4 at 90 BPM (a bar is 2 s); one rule "* -> *" at the next bar, no fades.
+inline std::map<std::string, std::string> MusicFiles() {
+  std::map<std::string, std::string> f = Files(false);
+  f["assets/ma.json"] = "{\"type\": \"asset\", \"guid\": \"" + G(230) + "\", \"name\": \"ma\", \"bank\": \"Main\", \"file\": \"audio/ma.wav\", "
+                        "\"convert\": {\"default\": {\"codec\": \"PCMF\"}}}";
+  f["assets/mb.json"] = "{\"type\": \"asset\", \"guid\": \"" + G(231) + "\", \"name\": \"mb\", \"bank\": \"Main\", \"file\": \"audio/mb.wav\", "
+                        "\"convert\": {\"default\": {\"codec\": \"PCMF\"}}}";
+  // 3/4 at 90 BPM: a bar is 2 s.
+  const char* tempo = "\"tempo\": [{\"tick\": 0, \"bpm\": 90, \"beatsPerBar\": 3, \"beatUnit\": 4}]";
+  f["segments/SA.json"] = "{\"type\": \"segment\", \"guid\": \"" + G(232) + "\", \"name\": \"SA\", \"bank\": \"Main\", \"asset\": \"ma\", "
+                          "\"bars\": 4, " + tempo + "}";
+  f["segments/SB.json"] = "{\"type\": \"segment\", \"guid\": \"" + G(233) + "\", \"name\": \"SB\", \"bank\": \"Main\", \"asset\": \"mb\", "
+                          "\"bars\": 4, " + tempo + "}";
+  f["playlists/LA.json"] = "{\"type\": \"playlist\", \"guid\": \"" + G(234) + "\", \"name\": \"LA\", \"bank\": \"Main\", "
+                           "\"entries\": [{\"segment\": \"SA\"}]}";
+  f["playlists/LB.json"] = "{\"type\": \"playlist\", \"guid\": \"" + G(235) + "\", \"name\": \"LB\", \"bank\": \"Main\", "
+                           "\"entries\": [{\"segment\": \"SB\"}]}";
+  f["events/Tune.json"] =
+      "{\"type\": \"event\", \"guid\": \"" + G(236) + "\", \"name\": \"Tune\", \"bank\": \"Main\", \"bus\": \"Amb\", \"music\": {"
+      "\"initialState\": \"Calm\", \"states\": [{\"name\": \"Calm\", \"playlist\": \"LA\"}, {\"name\": \"Fight\", \"playlist\": \"LB\"}],"
+      "\"transitions\": [{\"from\": \"*\", \"to\": \"*\", \"timing\": \"nextBar\"}]}}";
+  return f;
+}
+
+// The preview engine alone (Manual output) on the project (or the music project).
+struct Engine {
+  snd::tool::ProjectDocument doc;
+  snd::tool::DocBuild build;
+  std::unique_ptr<snd::tool::preview::PreviewEngine> e;
+  std::vector<float> out;
+  explicit Engine(bool music = false, const std::function<void(snd::tool::ProjectDocument&)>& edit = nullptr,
+                  snd::tool::preview::PreviewEngineDesc d = {}) {
+    if (music) {
+      doc.LoadFiles(MusicFiles());
+      doc.SetBinaryFile("audio/dc.wav", doctest::ToneWav(4800, 48000, 1, kDc));
+      doc.SetBinaryFile("audio/ma.wav", doctest::ToneWav(10 * 48000, 48000, 1, kDc));
+      doc.SetBinaryFile("audio/mb.wav", doctest::ToneWav(10 * 48000, 48000, 1, 3.0f * kDc));
+      doc.SetRandom(doctest::Counter{});
+    } else {
+      Load(doc);
+    }
+    if (edit) edit(doc);
+    build = snd::tool::BuildDocument(doc);
+    if (!build.ok) {
+      for (const auto& i : build.issues) std::printf("build: %s\n", i.text.c_str());
+      return;
+    }
+    std::string err;
+    e = snd::tool::preview::PreviewEngine::Create(d, &err);
+    if (e == nullptr || !e->LoadBuild(build, &err)) {
+      std::printf("engine: %s\n", err.c_str());
+      e.reset();
+    }
+  }
+  void Frames(std::uint32_t n) {
+    out.clear();
+    e->Render(n, &out);
+  }
+  float L() const { return out.empty() ? 0.0f : out[out.size() - 2]; }
+  float R() const { return out.empty() ? 0.0f : out[out.size() - 1]; }
+};
 // --- a hand-driven game ------------------------------------------------------------------------
 struct MiniFrame {
   ll::FrameHeader h{};

@@ -41,7 +41,7 @@ set_tests_properties(tool_replay_cli_bad_input PROPERTIES WILL_FAIL TRUE)
 # Independent tests of group P (tool/test/indep_s7_live_properties.md, written from the specs
 # before reading the code). The Defect_* tests are in their own executable, one CTest test each;
 # they fail on purpose (each documents a defect).
-foreach(_t indep_s7_live_sync_test)
+foreach(_t indep_s7_live_sync_test indep_s7_live_preview_test)
   _snd_tool_test(${_t} "${_tool_live_link}")
 endforeach()
 _snd_tool_test(indep_s7_live_defects_test "${_tool_live_link}")
@@ -49,7 +49,8 @@ set_tests_properties(tool_indep_s7_live_defects_test PROPERTIES DISABLED TRUE)  
 foreach(_d Defect_ReconnectKeepsCellsTheToolPutBackWhileOffline Defect_ResentBusyValueOvertakesANewerValue
         Defect_ReserveStaysTakenAfterDocumentUndoOfALiveEffect Defect_PhaseIsLiveAfterAFailedReload
         Defect_ReloadWriterFailureIsNotAFailedPhase Defect_BugReportRoundTripLosesNotesAndComparison
-        Defect_ConfigLineAcceptsNegativeAndOutOfRangeIntegers)
+        Defect_ConfigLineAcceptsNegativeAndOutOfRangeIntegers Defect_TransitionAuditionNearABarLineDisagreesWithThePreview
+        Defect_TransitionAuditionAtTimeZeroSkipsTheFromState)
   add_test(NAME tool_indep_s7_live_${_d} COMMAND tool_indep_s7_live_defects_test --filter ${_d})
 endforeach()
 
