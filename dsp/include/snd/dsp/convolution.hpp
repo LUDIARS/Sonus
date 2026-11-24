@@ -86,6 +86,8 @@ enum ConvolutionParam : std::uint32_t {
 };
 
 inline constexpr std::uint32_t kConvolutionMaxIrSlots = 1024;
+// Largest registry number (D-219): 24 bits, exact in a float parameter.
+inline constexpr std::uint32_t kConvolutionMaxIrNumber = (1u << 24) - 1u;
 inline constexpr std::uint32_t kConvolutionMaxIrChannels = 16;
 inline constexpr std::uint32_t kConvolutionMinPartition = 64;
 inline constexpr std::uint32_t kConvolutionMaxPartition = 4096;
