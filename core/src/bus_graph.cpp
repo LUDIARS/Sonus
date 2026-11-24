@@ -89,6 +89,12 @@ void MixBuses(Impl& im) noexcept {
   rc.sample_rate = im.cfg.sampleRate;
   rc.block_frames = frames;
   rc.transport_beats = -1.0;
+  // D-131: is any sidechain (DUCK kind 0) row registered? (skips the per-bus walk otherwise)
+  bool anySidechain = false;
+  for (std::uint32_t b = 0; b < im.cfg.maxBanks && !anySidechain; ++b) {
+    const BankAudio& ba = im.ap.banks[b];
+    anySidechain = ba.state == BankAudioState::Registered && ba.rec != nullptr && ba.rec->sidechainPrev != nullptr;
+  }
   for (std::uint32_t oi = 0; oi < nb; ++oi) {
     const SlotIndex s = order[oi];
     if (s == kNoSlot) continue;
@@ -112,13 +118,30 @@ void MixBuses(Impl& im) noexcept {
       snd_param_block blocks[kMaxBusEffects];
       std::uint32_t n = 0;
       bool tailDone = true;
+      // D-131: sidechain input of the standard effects that read one.
+      SidechainSource scSrc{};
+      dsp::EffectSidechain sc{scSrc.channels, 0u};
+      bool scLooked = false;
       for (std::uint32_t k = 0; k < effects[d].count && n < kMaxBusEffects; ++k) {
         const std::uint32_t x = effects[d].first + k;
         if (x >= rec->effectCount) break;
         EffectInstance& e = rec->effects[x];
         if (e.ok == 0u) continue;
-        blocks[n] = snd_param_block{e.params, e.params, e.paramCount, 0u, &rc};
-        slots[n] = dsp::EffectSlot{e.type, e.plugin, e.state, &blocks[n], nullptr, 0u, 0u};
+        // D-130: this block's values (start = last block's end), clamped, with the changed mask.
+        const std::uint32_t mask = StepEffectParams(im, e);
+        blocks[n] = snd_param_block{e.blockStart, e.blockEnd, e.paramCount, mask, &rc};
+        const dsp::EffectSidechain* side = nullptr;
+        if (e.plugin == nullptr && anySidechain) {
+          const dsp::EffectInfo* info = dsp::FindEffect(e.type);
+          if (info != nullptr && (info->flags & dsp::kEffectHasSidechain) != 0u) {
+            if (!scLooked) {
+              scLooked = true;
+              if (FindSidechain(im, *rec, s, oi, &scSrc)) sc.channelCount = scSrc.count;
+            }
+            if (sc.channelCount != 0u) side = &sc;
+          }
+        }
+        slots[n] = dsp::EffectSlot{e.type, e.plugin, e.state, &blocks[n], side, 0u, 0u};
         if (!dsp::EffectSlotIsTailDone(slots[n])) tailDone = false;
         ++n;
       }
@@ -153,6 +176,8 @@ void MixBuses(Impl& im) noexcept {
     BusPeak pk{};
     for (std::uint32_t c = 0; c < ch; ++c) pk.peak[c] = dsp::Peak(chans[c], frames);
     busPeak[d] = pk;
+    // D-131: keep this output for the sidechains that read it next block.
+    if (anySidechain) StoreSidechainSources(im, s, oi, buf, ch);
     AnalysisMixBus(im, s, d, chans, ch);  // stage 3 (group 4), D-147 / D-148: kBusMeter buses
     // Into the parent, or the output for root buses.
     const SlotIndex p = parent[d];

@@ -388,3 +388,33 @@ bank / buildtool:
 | 1.2（段階6 組み込み） | 2026-11-19 | D-100〜D-101: サブプロジェクトとしての取り込み（`Sonus::sonus`、ルートの `SND_BUILD_TESTS` の既定を `PROJECT_IS_TOP_LEVEL`、ビルド種別の既定はトップレベルだけ、`cmake/` をパスで読む）、`SND_BUILD_TOOL_CORE` と `Sonus::tool_core`（`tool/` を読む条件を `SND_BUILD_TOOL OR SND_BUILD_TOOL_CORE` に）、`Session` のホスト向けの関数、テスト `embed_subproject` と `tool_core_host_test`。契約ヘッダと版は変えない（凍結ファイルの変更はルートの `CMakeLists.txt` だけ、受け入れ側の決定） |
 | 1.2（段階6 ホスト API） | 2026-11-19 | D-102〜D-104: `snd_config` の末尾に `file_system_root` と `output_kind`（`SND_CONFIG_TOP_1_2_HOST`、`snd_output_kind`）、`snd_advance_output`、`snd_set_playback_volume` / `snd_set_playback_pitch`、`snd_play_user_buffer_ex` と C++ 版（`OutputKind`、`AdvanceOutput`、`SetPlaybackVolume` / `SetPlaybackPitch`、`UserBufferPlay`）。platform に `ManualOutputDevice`（`OutputBackend::Manual`）、io の OS 別の実装（`native_file*.cpp`、Windows の実装、パスの `:` の拒否）、core の予約パラメータ id と再生ごとの音量・ピッチ。版は 1.2 のまま（公開前、受け入れ側の決定）。内部の契約と D-91 は変えない |
 | 1.2（段階6 ホスト API、差し戻し） | 2026-11-19 | D-102〜D-104 の注記: 手動デバイスの待ちをリングの残量で、`struct_size` に 1.2 の最初の大きさ（`kConfigSize12`）、Win32 の `\\?\` の形、最終パスを大文字小文字を区別して比べる、POSIX は確かめる前に開かない（O_PATH / lstat）、予約 id（`snd/id.h` の `SND_ID_RESERVED_*`、規則表、`snd_set_param_*` の拒否、buildtool のエラー）、子の再生には及ばない、`snd_stats.fallback_commands`（`reserved0` を改名）、`OutputClock` の seqlock |
+
+## 段階 7-B（段階3 カバレッジ: core と dsp）
+
+セッション B（`int/s7-coverage`）の決定。番号は D-130〜D-169。契約の版は上げていない（統合のときに 1.3）。
+
+### 組② 標準 DSP とボイスエフェクト（D-130〜D-135）
+
+| # | 決定 | 理由 |
+| --- | --- | --- |
+| D-130 | **バスのエフェクトのパラメータを実行中に変える**: `snd_set_effect_param(sys, bus, effect_index, param_index, value, fade_seconds)`。新しいコマンド種別は足さず、`cmd::SetBusVolume.reserved` の下位 8 ビットを variant にする（1 = エフェクトのパラメータ、ビット 8〜15 = エフェクト番号、16〜23 = パラメータ番号、`volume` = 値）。値は「設定値のランプ + 寄与（スナップショットなどが足す分）」をパラメータの範囲で頭打ちにしたもの。フェードの秒 → フレームはバス音量と同じ切り捨て。ブロックの中は dsp が補間する（D-26）。バスを定義するバンクを外して登録し直すと、バンクの値に戻る。`[init]` のパラメータ（`kParamInitOnly`、MaxDelay など）は適用時に警告 `SND_ERR_INVALID_ARGUMENT` を出して捨てる。知らないバス・エフェクト・パラメータは警告 `SND_ERR_NOT_FOUND`。 | スナップショットとカーブ（組③）が同じ「寄与」の口を使う。新しいコマンド種別を足せないため variant にした。`[init]` は dsp が初期化のときしか読まないので、黙って受けると効かない設定になる。 |
+| D-131 | **コンプレッサーのサイドチェーンの元**: `DUCK` の kind 0（source = バス、target = バス）の行が、対象バスのチェーンにある `UseSidechain` のコンプレッサーのキーになる。見るのは対象バスを定義するバンクの行だけ。キーは元バスのフェーダーの後の信号。同じ対象に行が複数あれば最初の 1 本。プラグインのエフェクトにはサイドチェーンを渡さない。 | 列を足さずに既存の `DUCK` で表せる。フェーダーの後にしたのは、ミュートしたバスがキーにならないようにするため。 |
+| D-132 | **重いボイスエフェクト**: `snd_set_event_voice_effect(sys, event, slot, effect_kind, params, param_count)` と `snd_set_playback_effect_param(sys, playback, slot, param_index, value)`。ボイスは**枠を取るたび**（開始時と、仮想から戻ったとき）に、その Event の**その時点の設定（種別と値を一緒に）**を読む。鳴っているボイスは変わらない。段が外されていたら、警告なしでその段なしで戻る。再生ごとの値は、鳴っているボイスには次のブロックから（ブロック内は補間）、後から枠を取るボイスには最初のブロックから効く（ランプしない）。入れ子の Event のボイスは子の Event の設定を使う。再生ごとの値の `[init]` の判定は「その再生の Event に今設定されている種別」で行い、鳴っている枠へ値を入れるときは枠自身の種別で `[init]` を除く。処理の位置は、標準の LP / HP の後、パンの前。コマンドは `SetSwitch.reserved[0]` = 1（種別）と `SetParam.reserved[0]` = 1（値）。`snd_set_event_voice_effect` は全部入るか 1 つも入らないか（入らなければ `SND_ERR_COMMAND_BUFFER_FULL`）。 | 「開始時の種別に、戻ったときの新しい値」を入れると、別の種別の値が混ざる。種別と値を同じ時点で読めば混ざらない。列（`EVNT` / `TRAK` のエフェクトチェーン）が無いので、当面は公開関数で設定する。 |
+| D-133 | **枠が足りないとき**: ボイスエフェクトの枠（`snd_config.max_voice_effects`、既定 4）が空いていないボイス、または状態が `voice_effect_bytes` に収まらないボイスは、全段なし（ドライ）で鳴り、警告 `SND_ERR_LIMIT_REACHED`（詳細 `SND_END_DETAIL_VOICE_EFFECT_SLOTS` = 19）を出す。設定の表・再生ごとの値の表（`voice_effect_settings`）があふれた設定は、適用時に警告 `SND_ERR_LIMIT_REACHED` を出して捨てる。 | 原則 2（予算を超える要求は確保失敗にせず、理由付きで吸収する）。一部の段だけ掛かった音は設定の意図と違うので、全段なしにした。 |
+| D-134 | **ボイスエフェクトにテールは無い**: ボイスが終わればエフェクトの残響も終わる。残響を残したいものはバスのエフェクトで掛ける。 | 枠を次のボイスへすぐ返せる。ボイスの終わりの判定（終了通知）を変えずに済む。 |
+| D-135 | **フィルタの種類**: 単体の種別は LP と HP。バンドパス・ノッチ・シェルフ・ピーク・オールパスは ParamEq の型で表す（型 8 = オールパスは Gain を読まない）。 | 7 章の「各種フィルタ」は ParamEq の型で全部表せる。種別を増やすと登録表（D と共有）の衝突が増える。 |
+| （D-135 の付記） | Echo / Delay の `Delay` / `Time` が MaxDelay を超えたら、どのサンプルレートでも MaxDelay ちょうどと同じ遅延になる（従来はリングの長さで切っていて 1 フレーム長かった）。variant のコマンドは、アリーナがあふれたときの合体フォールバックには入れない（variant を持てないため）。variant の定数は `commands.hpp` の末尾。 | 独立テストで見つかった欠陥の直し。 |
+
+- **契約の追加（組②）**:
+  - `sonus.h` / `sonus.hpp`: `snd_set_effect_param`、`snd_set_event_voice_effect`、`snd_set_playback_effect_param`（C++: `SetEffectParam`、`SetEventVoiceEffect`、`SetPlaybackEffectParam`）。
+  - `config.h`: `snd_config` の末尾に `max_voice_effects`（4）、`voice_effect_chain`（2、0〜4）、`voice_effect_bytes`（160 KiB、0〜64 MiB）、`voice_effect_settings`（64、1〜65535）（`SND_CONFIG_TOP_S3_VOICE_FX`）。
+  - `types.h`: `SND_END_DETAIL_VOICE_EFFECT_SLOTS`（19）。
+  - `commands.hpp`（末尾）: `kBusVolumeVariantMask` / `kBusVolumeVariantEffectParam` / `kBusVolumeEffectIndexShift` / `kBusVolumeParamIndexShift` / `kBusVolumeIndexMask` / `kSwitchVariantVoiceEffect` / `kParamVariantVoiceEffect` / `BusEffectParamReserved()`。構造体の大きさと既存の欄の意味は変えていない。variant 0 は従来とビット単位で同じ。
+  - `schema.hpp`: 読み出し宣言 `R(Render, Voice_playbackSlot, Current)`。
+  - `api/compose/c_api.cpp`: 末尾に 3 関数の配線。
+
+- **変更履歴（統合のときに §7 へ移す）**: 1.2（段階3 カバレッジ、組②） | 2026-11-24 | D-130〜D-135: `snd_set_effect_param`（`cmd::SetBusVolume` の variant 1）、コンプレッサーのサイドチェーン（`DUCK` kind 0）、重いボイスエフェクト（`snd_set_event_voice_effect` / `snd_set_playback_effect_param`、`cmd::SetSwitch` / `cmd::SetParam` の variant 1、`snd_config` の末尾 4 項目、`SND_END_DETAIL_VOICE_EFFECT_SLOTS`、読み出し宣言 1 つ）、Echo / Delay の MaxDelay での頭打ち。版は上げていない。
+
+### 組④・組①・組③（未確定）
+
+組④（D-140〜D-149）の決定は受け入れ前なので、ここにはまだ書いていない。案は `spec/handoff/parallel/B-handoff.md` の 4 章にある。組①（D-150〜D-159）と組③（D-160〜D-169）は未着手。

@@ -92,13 +92,13 @@ constexpr EffectParamInfo kLimiterParams[] = {
     {"InputGainDb", "dB", 0.0f, 24.0f, 0.0f, 0},
 };
 constexpr EffectParamInfo kParamEqParams[] = {
-    {"Type1", "", 0.0f, 7.0f, 1.0f, kInt},   {"Freq1", "Hz", 20.0f, 20000.0f, 100.0f, 0},
+    {"Type1", "", 0.0f, 8.0f, 1.0f, kInt},   {"Freq1", "Hz", 20.0f, 20000.0f, 100.0f, 0},
     {"Q1", "", 0.1f, 20.0f, 0.707f, 0},      {"Gain1", "dB", -24.0f, 24.0f, 0.0f, 0},
-    {"Type2", "", 0.0f, 7.0f, 1.0f, kInt},   {"Freq2", "Hz", 20.0f, 20000.0f, 500.0f, 0},
+    {"Type2", "", 0.0f, 8.0f, 1.0f, kInt},   {"Freq2", "Hz", 20.0f, 20000.0f, 500.0f, 0},
     {"Q2", "", 0.1f, 20.0f, 0.707f, 0},      {"Gain2", "dB", -24.0f, 24.0f, 0.0f, 0},
-    {"Type3", "", 0.0f, 7.0f, 1.0f, kInt},   {"Freq3", "Hz", 20.0f, 20000.0f, 2000.0f, 0},
+    {"Type3", "", 0.0f, 8.0f, 1.0f, kInt},   {"Freq3", "Hz", 20.0f, 20000.0f, 2000.0f, 0},
     {"Q3", "", 0.1f, 20.0f, 0.707f, 0},      {"Gain3", "dB", -24.0f, 24.0f, 0.0f, 0},
-    {"Type4", "", 0.0f, 7.0f, 1.0f, kInt},   {"Freq4", "Hz", 20.0f, 20000.0f, 8000.0f, 0},
+    {"Type4", "", 0.0f, 8.0f, 1.0f, kInt},   {"Freq4", "Hz", 20.0f, 20000.0f, 8000.0f, 0},
     {"Q4", "", 0.1f, 20.0f, 0.707f, 0},      {"Gain4", "dB", -24.0f, 24.0f, 0.0f, 0},
 };
 constexpr EffectParamInfo kLowpassParams[] = {

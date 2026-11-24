@@ -54,7 +54,7 @@ SND_TEST(CoreVoice2, StealQuietestTakesTheLowestAudibility) {
   h.Steps(2);
   const snd_playback_handle c = Play(h, "C");
   h.Steps(4);
-  SND_CHECK(h.ends.Has(bq, SND_END_COMPLETED));  // its only voice was stolen
+  SND_CHECK(h.ends.Has(bq, SND_END_STOLEN, SND_END_DETAIL_LIMIT_GROUP));  // its only voice was stolen
   SND_CHECK_EQ(h.ends.CountOf(a), 0u);
   SND_CHECK_EQ(h.ends.CountOf(c), 0u);
   h.Clear();
@@ -73,7 +73,7 @@ SND_TEST(CoreVoice2, StealQuietestTieTakesTheOldest) {
   h.Steps(2);
   Play(h, "C");
   h.Steps(4);
-  SND_CHECK(h.ends.Has(a, SND_END_COMPLETED));
+  SND_CHECK(h.ends.Has(a, SND_END_STOLEN, SND_END_DETAIL_LIMIT_GROUP));
   SND_CHECK_EQ(h.ends.CountOf(bq), 0u);
 }
 
@@ -87,7 +87,7 @@ SND_TEST(CoreVoice2, StealQuietestSparesAVoiceOfTheSameBlock) {
   const snd_playback_handle bq = Play(h, "B");  // B and C in one block: C steals, B is new
   const snd_playback_handle c = Play(h, "C");
   h.Steps(4);
-  SND_CHECK(h.ends.Has(a, SND_END_COMPLETED));  // the only voice with an audibility
+  SND_CHECK(h.ends.Has(a, SND_END_STOLEN, SND_END_DETAIL_LIMIT_GROUP));  // the only voice with an audibility
   SND_CHECK_EQ(h.ends.CountOf(bq), 0u);
   SND_CHECK_EQ(h.ends.CountOf(c), 0u);
 }
@@ -104,7 +104,7 @@ SND_TEST(CoreVoice2, StealLowestPriority) {
   h.Steps(2);
   const snd_playback_handle c = Play(h, "C");  // 80 > 50: B goes
   h.Steps(4);
-  SND_CHECK(h.ends.Has(bq, SND_END_COMPLETED));
+  SND_CHECK(h.ends.Has(bq, SND_END_STOLEN, SND_END_DETAIL_LIMIT_GROUP));
   SND_CHECK_EQ(h.ends.CountOf(a), 0u);
   SND_CHECK_EQ(h.ends.CountOf(c), 0u);
   const snd_playback_handle d = Play(h, "D");  // 40 < 80, 100: refused
@@ -112,7 +112,7 @@ SND_TEST(CoreVoice2, StealLowestPriority) {
   SND_CHECK(h.ends.Has(d, SND_END_REJECTED, SND_END_DETAIL_LIMIT_GROUP));
   const snd_playback_handle c2 = Play(h, "C");  // 80 == 80: takes C (the lowest)
   h.Steps(4);
-  SND_CHECK(h.ends.Has(c, SND_END_COMPLETED));
+  SND_CHECK(h.ends.Has(c, SND_END_STOLEN, SND_END_DETAIL_LIMIT_GROUP));
   SND_CHECK_EQ(h.ends.CountOf(a), 0u);
   SND_CHECK_EQ(h.ends.CountOf(c2), 0u);
 }
@@ -154,8 +154,8 @@ SND_TEST(CoreVoice2, LimitHierarchyEventThenGroupThenGlobal) {
     h.Steps(2);
   }
   h.Steps(4);
-  SND_CHECK(h.ends.Has(o1, SND_END_COMPLETED));  // oldest of the group
-  SND_CHECK(h.ends.Has(r1, SND_END_COMPLETED));
+  SND_CHECK(h.ends.Has(o1, SND_END_STOLEN, SND_END_DETAIL_LIMIT_GROUP));  // oldest of the group
+  SND_CHECK(h.ends.Has(r1, SND_END_STOLEN, SND_END_DETAIL_LIMIT_GROUP));
   SND_CHECK_EQ(h.ends.CountOf(any3[0]), 0u);
   h.sys->Update();
   snd_stats st{};
