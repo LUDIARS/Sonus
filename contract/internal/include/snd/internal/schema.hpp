@@ -195,6 +195,7 @@ using F32 = float;
   C(Spatial, dopplerRatio, F32, Hot, Compute3D)                                \
   C(Spatial, coneCos, F32, Hot, Compute3D)                                     \
   C(Spatial, shapeSpread, F32, Hot, Compute3D) \
+  C(Spatial, coneAngle, F32, Hot, Compute3D) \
   C(Spatial, azimuth, F32, Hot, Compute3D) \
   C(Spatial, valid, U32, Hot, Compute3D)
 
@@ -363,6 +364,7 @@ using F32 = float;
   R(EvaluateDspParams, ParamPlayback_nextSlot, Current)                        \
   R(EvaluateDspParams, ParamPlayback_current, Current)                         \
   R(EvaluateDspParams, Listener_weight, Current) \
+  R(EvaluateDspParams, Spatial_coneAngle, Current) \
   R(EvaluateDspParams, Spatial_shapeSpread, Current) \
   R(EvaluateDspParams, Spatial_distance, Current)                              \
   R(EvaluateDspParams, Spatial_direction, Current)                             \

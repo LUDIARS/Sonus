@@ -374,6 +374,7 @@ enum VoiceStaticFlags : std::uint32_t {
 // EvaluateDspParams, SelectVoices, BuildRenderList and Render (proposed schema
 // columns: Voice.clipGainDb, Voice.pitchCents, Voice.pan, Voice.channels ...).
 struct VoiceStatic {
+  std::uint32_t emitterGeneration = 0;  // keep a live voice detached after its emitter is released
   std::uint32_t generation;  // Voice row generation
   std::uint32_t flags;       // VoiceStaticFlags
   std::uint32_t channels;    // source channels
@@ -499,7 +500,6 @@ struct SelectPriv {
 struct AuxRoute {
   SlotIndex bus;
   std::uint32_t segment, channels, generation;
-  float amount;
   PanMatrix pan;
 };
 struct PathHistory {

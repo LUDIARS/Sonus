@@ -110,7 +110,10 @@ void Compute3D(Impl& im) noexcept {
                              (dist < 1e-6f ? 1 : fade > 0 ? std::max(0.0f, 1 - dist / fade) : 0);
         if (amount > 0) InsertZone(im.dp.zones[l], ZoneSend{zoneBus, e, amount});
       }
-      SND_W(Spatial_coneCos)[s] = dist > 1e-6f ? -Dot(efwd, dir) : 1.0f;
+      const float coneCos = dist > 1e-6f ? -Dot(efwd, dir) : 1.0f;
+      SND_W(Spatial_coneCos)[s] = coneCos;
+      constexpr float kPi = 3.14159265358979f;
+      SND_W(Spatial_coneAngle)[s] = 2.0f * std::acos(std::clamp(coneCos, -1.0f, 1.0f)) * 180.0f / kPi;
       SND_W(Spatial_valid)[s] = 1u;
     }
   }
