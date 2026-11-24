@@ -142,3 +142,16 @@ SND_TEST(IndepG4Action, MusicalReservationAnchorsTrackTime) {
   SND_CHECK_EQ(r.FirstAbove(beat + r.Frames() + 32, r.Now(), 0.25f * kC), beat + 480);
   SND_CHECK_EQ(r.CountAbove(beat + 480, r.Now(), 0.25f * kC), 32u);
 }
+
+SND_TEST(IndepG4Meter, RefusesMeterCapacityBeyondPoolBudget) {
+  snd::core::CoreLimits limits{};
+  limits.spectrumFftSize = 32;
+  {
+    Rig normal(Config(), limits);
+    SND_REQUIRE_EQ(normal.created, SND_OK);
+  }
+  limits.maxMeteredBuses = 4096;
+  Rig excess(Config(), limits);
+  SND_CHECK_EQ(excess.created, SND_ERR_OUT_OF_BUDGET);
+  SND_CHECK(excess.sys == nullptr);
+}
