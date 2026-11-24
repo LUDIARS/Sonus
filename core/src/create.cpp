@@ -147,7 +147,8 @@ bool InitVoiceFx(Impl& im) noexcept {
   x.triedAssign = Arr<std::uint32_t>(im, g.realTotal, MemTag::Tables);
   if (x.slotCount != 0u && x.slotBytes != 0u) {
     if (im.allocationCount >= im.allocationCap) return false;
-    const std::size_t bytes = std::size_t{x.slotCount} * x.slotBytes;
+    std::size_t bytes = 0;
+    if (!base::CheckedMul(x.slotCount, x.slotBytes, &bytes)) return false;
     x.memory = static_cast<std::uint8_t*>(im.alloc->Allocate(bytes, 64, MemTag::DspPool));
     if (x.memory == nullptr) return false;
     im.allocations[im.allocationCount++] = Impl::Allocation{x.memory, MemTag::DspPool, bytes};
