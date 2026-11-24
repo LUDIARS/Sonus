@@ -24,8 +24,9 @@ std::vector<float> StopSignal(bool wet, Ending ending) {
   if (ending == Ending::Scheduled) {
     snd_when when{};
     when.kind = SND_WHEN_CLOCK_SAMPLE;
-    when.value = now + 358;
-    SND_CHECK_EQ(s.h.sys->SetScheduledStop(playback, &when, 0), SND_OK);
+    // The clock starts the release. Its 48-sample fade ends at frame 358.
+    when.value = now + 310;
+    SND_CHECK_EQ(s.h.sys->SetScheduledStop(playback, &when, 0.001f), SND_OK);
   }
   s.h.Steps(4);
   return s.h.all;
@@ -48,6 +49,6 @@ void CheckEnd(bool wet, Ending ending) {
 
 SND_TEST(IndepG1Stop, FiniteLoopCutsDirectFilterAtItsLastSample) { CheckEnd(false, Ending::LoopCount); }
 SND_TEST(IndepG1Stop, FiniteLoopCutsZoneSendFilterAtItsLastSample) { CheckEnd(true, Ending::LoopCount); }
-SND_TEST(IndepG1Stop, ScheduledStopCutsDirectFilterAtItsClock) { CheckEnd(false, Ending::Scheduled); }
-SND_TEST(IndepG1Stop, ScheduledStopCutsZoneSendFilterAtItsClock) { CheckEnd(true, Ending::Scheduled); }
+SND_TEST(IndepG1Stop, ScheduledStopCutsDirectFilterAtEndOfFade) { CheckEnd(false, Ending::Scheduled); }
+SND_TEST(IndepG1Stop, ScheduledStopCutsZoneSendFilterAtEndOfFade) { CheckEnd(true, Ending::Scheduled); }
 }  // namespace
