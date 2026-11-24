@@ -309,6 +309,39 @@ D-184「モデルは要求が適用されるブロックの頭から、ランタ
   ハッシュで照合する。1.1 のゲームではバンクの一覧で比べ直すので影響は小さい。1.0 では Accepted のあとに差分を送る）。
 - 再接続のとき、構造の変更（StructEdit）がゲームに残っているかは分からない（予備容量はリロードの成功でだけ 0 に戻す）。
 
+## 差し戻し 2 回目（D-182〜D-184 への追記）
+
+独立テストの再確認（`C-notes/live-indep.md` の「再確認」）: 新しい欠陥 5 件、仕様の穴 G10・G11。
+
+| 項目 | 変えた点 | コミット |
+| --- | --- | --- |
+| 1 `Defect_ValueEditBuiltWithAStructuralEditIsLost`（D-183） | 構造の変更の計画（`DeriveStructEdits`）が、残るバスの音量・残るエフェクトのパラメータ・残るセンドのレベルの変化を値として持ち、StructEdit の後に SetValue で送る。ほかの列（channels、flags、lodPriority、エフェクトの flags・パラメータ数、センドの preFader）の変化があれば StructEdit にせず表の経路（→ リロード）。StructEdit が断られてリロードになれば、値はリロードで入る | 04dc1e2 |
+| 2 `Defect_ReconnectSendsALiveStructuralEditAgain`（D-182/D-183） | 再接続の照合で、ライブの構造の変更を持つバンクは差分を作らずにリロード（書き出しが無い・1.0 なら未対応の一覧）。リロードの成功でそのバンクの構造の変更を一覧から消す（予備容量 0。待っている要求の番号は付け替え） | 04dc1e2 |
+| 3 `Defect_PreviewLoadBuildAfterAHotReloadFails`（D-184） | `PreviewEngine::LoadBuild` は、自分のハンドルのほかに `PutRebuiltBank` で書いたファイル（新しい順）を `LoadBankAsync` で引いて、読み込まれていれば外し、ファイルも消す。ビルドのほかのファイル（ストリーム）を出力のパスに置く | f93dad5 |
+| 4 `Defect_TransitionPreviewUsesTheTargetsLeadInsteadOfTheBridges`（D-184） | `MusicEditor::Preview` と `MinimumLookahead` は、ブリッジのある規則ではブリッジの素材のプライム（頭から）で判断する（music `FirstMaterialPrime` と同じ） | a45b218 |
+| 5 `Defect_RememberedAnswerGoesToAnotherGameWhenTheHelloArrivesAfterPoll`（D-182） | `Connection::Poll` が「決定待ち」→ HelloReply → 統計（世代 = disconnects）の順に 1 回で写し、`awaitingSync()` は写した値、`generation()` を足した。`DecideSync` は Poll が見た接続（世代が同じで決定待ち）にだけ答える。LiveSync の接続の判定はこの世代を使う | 6ec1711、04dc1e2 |
+| 6 G10 | 1.1 のゲームでは、覚えた答えが無くてもバンクの一覧が来るまで Checking（質問を出さない） | 04dc1e2 |
+| 7 G11 | `IPreviewEngine::StreamPrimeMs()`（source の StreamKind::PrimeFrames と同じ rate / 10。コーデックの pre-roll は含めない）と `MusicSettingsOf(engine)`。テストでストリームの素材の切り替えがモデルと一致（1.95 s → 4.0 s、1.5 s → 2.0 s、ブリッジあり 1.99 s → 2.0 s） | f93dad5、36a3f19 |
+| 8 `tool_profiler_streams_test` | 購読（`subscribedMask` が付き、BlockTiming が届く）を待ってから Play（期待値は不変） | ff66450 |
+| 9 自分のテスト | 上の 4 つの弱い箇所（構造の変更＋値、再接続とライブの構造の変更、リロードの後の LoadBuild を 3 回、ストリームとブリッジ） | 36a3f19 |
+
+`Defect_*`: `tool_indep_s7_live_Defect_*` 15 本すべて通過。`IndepS7LiveRecheck.NoQuestionBeforeTheBankListAndOneZeroByHash` は単独で 5 回、
+TSan / Release の 20 回でも通過（下）。決定と食い違って落ちる独立テスト: なし。
+
+画面（組 U）に影響する変更（名前・引数の変更なし、足したもの・意味の変化）:
+- `Connection::awaitingSync()` は最後の Poll で写した値（Poll の前は前の値）。`Connection::generation()` を追加。`DecideSync` は
+  Poll の後に接続が変わっていれば false。
+- 1.1 のゲームでは、初めての不一致でも一覧が来るまで `phase()` は Checking（`pending()` は一覧の後）。
+- `IPreviewEngine::StreamPrimeMs()`（純粋仮想を追加。ほかの実装があれば足す必要がある）、`MusicSettingsOf`。
+- `structEdits()` はリロードが成功したバンクの行が消える（前は undone の印）。
+- `MusicEditor::Preview` / `MinimumLookahead` はブリッジのある規則でブリッジのプライムを使う（値が変わる）。
+
+画面への要望（追加）: 音楽エディタの試聴の予告は `MusicSettingsOf(engine)` の値で計算し、`streamPrimeMs` を表示に使う。
+
+### 差し戻し 2 回目の構成と結果
+
+（下に追記）
+
 ## 未検証の箇所
 
 - 実デバイスでのプレビュー（`PreviewOutput::Device`）と `OutputPlayer`（コンテナにデバイスが無い。無音の出力は並行性のテストで回した。

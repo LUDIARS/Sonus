@@ -283,6 +283,12 @@ s.Connect(desc);                                        // Hello のハッシュ
 - リロードの失敗・書き出しの失敗は `LivePhase::Failed`（`failedBanks()` に理由）で、次の成功まで Live に戻らない。
 - 遷移の試聴の要求は時刻以降で最初のブロックの頭（少なくとも 1 ブロック後）。`MusicEditor::Preview` も同じブロック
   （`applySeconds`）とランタイムの先読み（素材のプライムだけ）で計算する。
+- 差し戻し 2 回目: 構造の変更と同じビルドの値（バスの音量・エフェクトのパラメータ・センドのレベル）は StructEdit の後に SetValue で
+  送る。再接続ではライブの構造の変更を送り直さず、そのバンクをリロードする（成功で予備容量と一覧は 0）。1.1 のゲームでは
+  初めての不一致でもバンクの一覧が来るまで Checking。`Connection` は Poll ごとに「決定待ち」・HelloReply・接続の世代
+  （`generation()`）を一貫して写し、`DecideSync` はその接続にだけ答える。プレビューエンジンの `LoadBuild` はホットリロードで
+  入ったバンクも外してから読み、ストリームのファイルを置く。`StreamPrimeMs()` と `MusicSettingsOf(engine)` で、試聴の計算に
+  エンジンのストリームのプライムを使う。`MusicEditor` はブリッジのある規則ではブリッジの素材のプライムで遅れを判断する。
 - 再生は記録の長さ（`maxBlocks`）と番号合わせの空回し（`maxAlignBlocks`）に上限（既定は実時間 1 時間）。不具合報告は全項目が
   往復する（`notes.txt`・`description.txt`・`comparison.txt`）。Config のテキストは符号・範囲・型を確かめる。
 
