@@ -44,7 +44,7 @@ struct Capture {
   bool invalid{};
 };
 
-SND_TEST(IndepG1Wire, Defect_ShapeZoneAndClearRecordThePublishedWireFormat) {
+SND_TEST(IndepG1Wire, ShapeZoneAndClearRecordThePublishedWireFormat) {
   auto cfg = Config();
   Capture capture;
   snd::mock::DeterministicJobSystem jobs;
@@ -107,7 +107,7 @@ SND_TEST(IndepG1Wire, Defect_ShapeZoneAndClearRecordThePublishedWireFormat) {
   SND_CHECK_EQ(clear.sw.value, SND_ID_NONE);
 }
 
-SND_TEST(IndepG1Wire, Defect_ReplayedShapeUsesTheDocumentedHalfExtentAxes) {
+SND_TEST(IndepG1Wire, ReplayedShapeUsesTheDocumentedHalfExtentAxes) {
   auto wave = [](bool replay) {
     g2::RawFx rig(Config());
     g2::FxBank bank;

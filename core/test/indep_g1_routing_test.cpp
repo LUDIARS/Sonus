@@ -108,7 +108,7 @@ SND_TEST(IndepG1Routing, EachListenerContributesOnlyWhenInsideTheZone) {
   SND_CHECK_NEAR(gain(SND_LISTENER_WEIGHTED, 1, 3, false) / full, 0.25, 0.002);
 }
 
-SND_TEST(IndepG1Routing, Defect_OnlyListenersInsideZoneDetermineSendPan) {
+SND_TEST(IndepG1Routing, OnlyListenersInsideZoneDetermineSendPan) {
   enum class Seats { LeftOnly, BothInside, LeftInside };
   auto stereo = [](Seats seats, snd_listener_mode mode) {
     auto cfg = Config();
@@ -194,7 +194,7 @@ SND_TEST(IndepG1Routing, RemovingZoneRampsWithinTheBlock) {
   SND_CHECK_EQ(s.Level(), 0.0);
 }
 
-SND_TEST(IndepG1Routing, Defect_PartialZoneCommandNeverChangesItsDestination) {
+SND_TEST(IndepG1Routing, PartialZoneCommandNeverChangesItsDestination) {
   auto cfg = Config();
   cfg.commands.arena_bytes = 4096;
   cfg.commands.reserve_bytes = 256;
@@ -280,7 +280,7 @@ SND_TEST(IndepG1Routing, ObstructionFiltersOnlyDirectWhileOcclusionFiltersBoth) 
   }
 }
 
-SND_TEST(IndepG1Routing, Defect_DistanceAndOcclusionChooseTheLowerCutoff) {
+SND_TEST(IndepG1Routing, DistanceAndOcclusionChooseTheLowerCutoff) {
   // The lower, pre-existing 300 Hz cutoff already dominates. Additional
   // obstruction or occlusion changes the gain, but not the relative spectrum.
   auto ratio = [](bool wet, const char* parameter) {
