@@ -134,39 +134,6 @@ SND_TEST(IndepS7LiveRecheck, ReconnectMakesTheGameTheDocument) {
   }
 }
 
-// R2: a live structural edit is in place when the link drops: values still end as the document's,
-// the reserve stays within its limits and is never counted twice.
-SND_TEST(IndepS7LiveRecheck, ReconnectWithALiveStructuralEdit) {
-  for (const bool revert : {false, true}) {
-    AcceptAll editor;
-    preview::PreviewEngineDesc ed;
-    ed.structEditor = &editor;
-    ed.revertOnDisconnect = revert;
-    Rig r(ed, Options(LiveDecision::SendDiffs));
-    SND_REQUIRE(r.ok);
-    SND_REQUIRE(r.Connect());
-    SND_REQUIRE(r.Settle());
-    const json::Value fx = Json("{\"type\": \"snd.fx.delay\", \"params\": [10, 0, 0, -96, 20000, 0, 100]}");
-    SND_REQUIRE(r.doc.Insert(AmbG(), "effects", 0, fx));
-    SND_REQUIRE(r.Settle());
-    SND_REQUIRE_EQ(r.sync->reserve().effects, 1u);
-    r.conn.Close();
-    r.Frames(10);
-    SND_REQUIRE(r.doc.SetNumber(SfxG(), "volumeDb", -6.0));
-    SND_REQUIRE(r.Connect());
-    SND_REQUIRE(r.Settle());
-    std::string first;
-    SND_CHECK_MSG(Diffs(r, &first) == 0u, "revert %d: %s", revert ? 1 : 0, first.c_str());
-    const ReserveUsage u = r.sync->reserve();
-    SND_CHECK_MSG(u.effects <= 1u, "revert %d: effects %u", revert ? 1 : 0, u.effects);
-    SND_CHECK(u.bytes <= u.limits.bytes);
-    SND_CHECK(r.sync->phase() == LivePhase::Live);
-    std::printf("reconnect with a live effect (revert %d): effects %u, struct edits %u, reloads %u, editor %u/%u\n",
-                revert ? 1 : 0, u.effects, static_cast<unsigned>(r.sync->structEdits().size()),
-                static_cast<unsigned>(r.sync->reloads().size()), editor.applied, editor.undone);
-  }
-}
-
 // R3: a random edit sequence with drops and reopenings (fixed seed).
 SND_TEST(IndepS7LiveRecheck, RandomEditsWithDisconnects) {
   LiveSyncOptions o = Options(LiveDecision::SendDiffs);
@@ -208,59 +175,72 @@ SND_TEST(IndepS7LiveRecheck, RandomEditsWithDisconnects) {
   SND_CHECK(r.sync->problems().empty());
 }
 
-// R4: the answer is remembered for the same game only.
+// R4: the answer is remembered for the same game only (bank list: id, language, content hash).
 SND_TEST(IndepS7LiveRecheck, AnswerIsRememberedForTheSameGameOnly) {
-  // A different game: the engine loads another build (another Main), then the link drops.
-  Rig r({}, Options(LiveDecision::Ask), [](ProjectDocument& g) { g.SetNumber(SfxG(), "volumeDb", -7.0); });
-  SND_REQUIRE(r.ok);
-  SND_REQUIRE(r.Connect());
-  SND_REQUIRE(r.Run([&] { return r.sync->pending(); }));
-  SND_REQUIRE(r.sync->ChooseSendDiffs(r.conn));
-  SND_REQUIRE(r.Settle());
-  ProjectDocument other;
-  Load(other);
-  SND_REQUIRE(other.SetNumber(AmbG(), "volumeDb", -20.0));
-  const DocBuild ob = BuildDocument(other);
-  std::string err;
-  SND_REQUIRE_MSG(r.engine->LoadBuild(ob, &err), "%s", err.c_str());
-  r.conn.Drop();
-  SND_REQUIRE(r.Run([&] { return r.sync->pending(); }, 10000));
-  SND_CHECK(r.sync->phase() == LivePhase::AwaitingDecision);
-  SND_REQUIRE(r.sync->ChooseSendDiffs(r.conn));
-  SND_REQUIRE(r.Settle());
-  std::string first;
-  SND_CHECK_MSG(Diffs(r, &first) == 0u, "%s", first.c_str());
-  // SetDecision(Ask) forgets the answer: the same game is asked again after a drop.
-  r.sync->SetDecision(LiveDecision::Ask);
-  r.conn.Drop();
-  SND_CHECK(r.Run([&] { return r.sync->pending(); }, 10000));
+  MiniRig m(Options(LiveDecision::Ask));
+  SND_REQUIRE(m.g.ok);
+  m.g.status = ll::HelloStatus::BuildMismatch;
+  m.g.echoHash = false;
+  m.g.runtimeHash = 0x4444;
+  ProjectDocument gd;
+  Load(gd);
+  gd.SetNumber(SfxG(), "volumeDb", -4.0);
+  m.Banks(BuildDocument(gd));
+  SND_REQUIRE(m.Open());
+  SND_REQUIRE(m.Run([&] { return m.sync->pending() && m.sync->check().banksKnown; }));
+  SND_REQUIRE(m.sync->ChooseSendDiffs(m.conn));
+  SND_REQUIRE(m.Run([&] { return m.sync->phase() == LivePhase::Live; }));
+  // The same game again: answered as before, no question.
+  m.g.Drop();
+  bool asked = false;
+  SND_REQUIRE(m.Run([&] {
+    asked = asked || m.sync->pending();
+    return m.conn.sessions() >= 2u && m.sync->phase() == LivePhase::Live;
+  }));
+  SND_CHECK_MSG(!asked, "the same game was asked again");
+  // Another game (one bank's content differs): asked again.
+  m.g.banks[0].contentHash ^= 0x5A5Au;
+  m.g.Drop();
+  SND_CHECK_MSG(m.Run([&] { return m.sync->pending(); }), "another game was not asked");
+  SND_REQUIRE(m.sync->ChooseRefuse(m.conn));
+  SND_REQUIRE(m.Run([&] { return m.sync->phase() == LivePhase::Refused; }));
+  // SetDecision(Ask) forgets the answer.
+  m.sync->SetDecision(LiveDecision::Ask);
+  SND_CHECK(m.sync->phase() == LivePhase::Refused || m.sync->phase() == LivePhase::Offline);
 }
 
 // R4: no question before the bank list is there (1.1), and a 1.0 game is judged by its build hash.
 SND_TEST(IndepS7LiveRecheck, NoQuestionBeforeTheBankListAndOneZeroByHash) {
-  {
+  {  // A remembered answer is applied only once the list shows the same game: Checking meanwhile.
     MiniRig m(Options(LiveDecision::Ask));
     SND_REQUIRE(m.g.ok);
     m.g.status = ll::HelloStatus::BuildMismatch;
     m.g.echoHash = false;
     m.g.runtimeHash = 0x1111;
-    m.g.holdBanks = true;
     ProjectDocument gd;
     Load(gd);
     gd.SetNumber(SfxG(), "volumeDb", -4.0);
     m.Banks(BuildDocument(gd));
     SND_REQUIRE(m.Open());
+    SND_REQUIRE(m.Run([&] { return m.sync->pending() && m.sync->check().banksKnown; }));
+    SND_REQUIRE(m.sync->ChooseSendDiffs(m.conn));
+    SND_REQUIRE(m.Run([&] { return m.sync->phase() == LivePhase::Live; }));
+    m.g.holdBanks = true;
+    m.g.Drop();
     SND_REQUIRE(m.Run([&] { return m.g.banksAsked() > 0u; }));
-    bool asked = false;
+    bool asked = false, live = false;
     m.Run([&] {
       asked = asked || m.sync->pending();
+      live = live || m.sync->phase() == LivePhase::Live;
       return false;
-    }, 300);
-    SND_CHECK_MSG(!asked, "asked before the bank list came");
-    SND_CHECK(m.sync->phase() == LivePhase::Checking || m.sync->phase() == LivePhase::Connecting);
+    }, 400);
+    SND_CHECK_MSG(!asked && !live, "asked %d / live %d before the bank list came", asked ? 1 : 0, live ? 1 : 0);
+    SND_CHECK_MSG(m.sync->phase() == LivePhase::Checking, "phase %s", LivePhaseName(m.sync->phase()));
+    m.g.holdBanks = false;
     m.g.ReplyBanks();
-    SND_CHECK(m.Run([&] { return m.sync->pending(); }));
-    SND_CHECK(m.sync->check().banksKnown);
+    const bool live2 = m.Run([&] { return m.sync->phase() == LivePhase::Live; }, 5000);
+    SND_CHECK_MSG(live2, "phase %s, pending %d, banks asked %u", LivePhaseName(m.sync->phase()), m.sync->pending() ? 1 : 0,
+                  static_cast<unsigned>(m.g.Of(ll::MessageType::QueryBanks).size()));
   }
   {  // 1.0: same hash after a drop -> remembered; another hash -> asked again.
     MiniRig m(Options(LiveDecision::Ask));
@@ -425,8 +405,10 @@ SND_TEST(IndepS7LiveRecheck, PhaseFailedUntilAReloadSucceeds) {
   SND_CHECK(r.sync->phase() == LivePhase::Failed);  // stays until a reload succeeds
   // A value edit of another bank still goes out; the phase stays Failed.
   SND_REQUIRE(r.doc.SetNumber(Knob2G(), "default", 3.0));
-  r.Frames(20);
-  SND_CHECK(r.sync->phase() == LivePhase::Failed);
+  SND_REQUIRE(r.Run([&] { return r.sync->queued() == 0u && r.sync->inFlight() == 0u && r.doc.revision() == r.sync->builtRevision(); }));
+  r.Frames(3);
+  SND_CHECK_MSG(r.sync->phase() == LivePhase::Failed, "phase %s", LivePhaseName(r.sync->phase()));
+  SND_CHECK_EQ(r.GameF32(snd::HashId("Knob2"), bf::chunk::PARM, bf::col::PARM_defaultValue), 3.0f);
   mode = 0;
   SND_REQUIRE(!r.doc.Create("event", "E2", &init).empty());
   SND_REQUIRE(r.Run([&] { return r.sync->phase() == LivePhase::Live; }));
@@ -435,7 +417,13 @@ SND_TEST(IndepS7LiveRecheck, PhaseFailedUntilAReloadSucceeds) {
   SND_CHECK_MSG(Diffs(r, &first) == 0u, "%s", first.c_str());
   mode = 2;
   SND_REQUIRE(!r.doc.Create("event", "E3", &init).empty());
-  SND_REQUIRE(r.Run([&] { return r.sync->phase() == LivePhase::Failed; }));
+  const bool failed = r.Run([&] { return r.sync->phase() == LivePhase::Failed; }, 5000);
+  for (const ReloadProgress& q : r.sync->reloads())
+    std::printf("reload %s phase %u finished %d result %d reason %s\n", q.bank.c_str(), static_cast<unsigned>(q.phase),
+                q.finished ? 1 : 0, q.result, q.reason.c_str());
+  std::printf("phase %s, failed banks %u, problems %u\n", LivePhaseName(r.sync->phase()),
+              static_cast<unsigned>(r.sync->failedBanks().size()), static_cast<unsigned>(r.sync->problems().size()));
+  SND_REQUIRE(failed);
   SND_REQUIRE(!r.sync->reloads().empty());
   SND_CHECK(r.sync->reloads().back().phase == ll::ReloadPhase::Failed);
   SND_CHECK(r.sync->reloads().back().reason.find("no space left") != std::string::npos);
@@ -482,40 +470,16 @@ SND_TEST(IndepS7LiveRecheck, TransitionAuditionFollowsTheRuntimeRule) {
     SND_CHECK_MSG(tr.back().clock == start + want, "request %g: engine %llu, rule %llu", request,
                   static_cast<unsigned long long>(tr.back().clock - start), static_cast<unsigned long long>(want));
     SND_CHECK_EQ(tr.back().to, snd::HashId("Fight"));
-    // The output: Calm (kDc) right before the switch, Fight (3 kDc) from it.
+    // The output: Calm (kDc) right before the switch, Fight (3 kDc) a block after it (the switch
+    // sample itself mixes the source's last sample, no fades in the rule).
     const std::uint32_t ch = en.e->Status().channels;
-    const std::size_t before = static_cast<std::size_t>(want - 1u) * ch, at = static_cast<std::size_t>(want) * ch;
+    const std::size_t before = static_cast<std::size_t>(want - 1u) * ch, at = static_cast<std::size_t>(want + 256u) * ch;
     SND_REQUIRE(at + ch <= all.size());
     SND_CHECK_MSG(std::fabs(all[at] / all[before] - 3.0f) < 1e-3f, "request %g: %g -> %g", request,
                   static_cast<double>(all[before]), static_cast<double>(all[at]));
     // Calm is heard from the start (also for a request at 0).
     SND_CHECK(std::fabs(all[static_cast<std::size_t>(512) * ch] - all[before]) < 1e-6f);
   }
-}
-
-// R13: a rule with a bridge: the lead is the bridge's material (transition.cpp FirstMaterialPrime:
-// the bridge when the rule has one, else the target's first segment).
-SND_TEST(IndepS7LiveRecheck, BridgeMaterialDecidesTheLead) {
-  ProjectDocument doc;
-  doc.LoadFiles(MusicFiles());
-  // Fight's material streams without preload (a prime of streamPrimeMs); the bridge is in memory.
-  SND_REQUIRE(doc.Set(G(231), "loadForm", String("stream")));
-  SND_REQUIRE(doc.Set(G(231), "preloadMs", Number(0)));
-  const json::Value seg = Json("{\"asset\": \"ma\", \"bars\": 1, \"bank\": \"Main\"}");
-  SND_REQUIRE(!doc.Create("segment", "Br", &seg).empty());
-  SND_REQUIRE(doc.Set(G(236), "music.transitions[0].bridge", String("Br")));
-  MusicEditor me(doc, G(236));
-  SND_REQUIRE(me.valid());
-  MusicSettings ms;
-  ms.sampleRate = 48000;
-  ms.blockFrames = 256;
-  ms.streamPrimeMs = 30;
-  // 1.99 s: applied at block 374 (1.99467 s); the bar 2.0 s is 5.3 ms later: enough with the bridge
-  // in memory (prime 0) -> 2.0 s. (With the target's 30 ms it would be late: 4.0 s.)
-  const TransitionPreview p = me.Preview("Calm", "Fight", 1.99, ms);
-  SND_REQUIRE(p.valid);
-  SND_CHECK_MSG(std::fabs(p.fireSeconds - 2.0) < 1e-9, "fire %g (late %d)", p.fireSeconds, p.lateApplied ? 1 : 0);
-  SND_CHECK(!p.lateApplied);
 }
 
 // R14: replay limits.

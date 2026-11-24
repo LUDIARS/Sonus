@@ -280,3 +280,109 @@ SND_TEST(IndepS7LiveDefects, Defect_TransitionAuditionAtTimeZeroSkipsTheFromStat
   SND_CHECK_MSG(std::fabs(late / early - 3.0f) < 1e-3f, "level at 0.5 s %g, at the end %g", static_cast<double>(early),
                 static_cast<double>(late));
 }
+
+// ===== re-check after D-182..D-185 (new defects) =====
+
+// D-183 (route order, the game ends as the document's build): an effect added (StructEdit) and a
+// value edit of another cell of the same bank in the same build. The StructEdit goes, the value is
+// never sent (it was inside the BUSS chunk the structural plan took); the phase says Live.
+SND_TEST(IndepS7LiveDefects, Defect_ValueEditBuiltWithAStructuralEditIsLost) {
+  AcceptAll editor;
+  preview::PreviewEngineDesc ed;
+  ed.structEditor = &editor;
+  Rig r(ed);
+  SND_REQUIRE(r.ok);
+  SND_REQUIRE(r.Connect());
+  SND_REQUIRE(r.Settle());
+  const json::Value fx = Json("{\"type\": \"snd.fx.delay\", \"params\": [10, 0, 0, -96, 20000, 0, 100]}");
+  SND_REQUIRE(r.doc.Insert(AmbG(), "effects", 0, fx));
+  SND_REQUIRE(r.doc.SetNumber(SfxG(), "volumeDb", -6.0));  // before the next Tick: one build
+  SND_REQUIRE(r.Settle());
+  SND_REQUIRE_EQ(editor.applied, 1u);
+  SND_CHECK_EQ(r.GameF32(snd::HashId("Sfx"), bf::chunk::BUSS, bf::col::BUSS_volumeDb), -6.0f);
+}
+
+// D-182 / D-183 (reconnect: recount the reserve; the tool's data is the truth): an effect added
+// live, the link drops and comes back. LiveSync sends the AddEffect again (the game's editor gets a
+// second Add without an Undo between when the game keeps its edits) and counts the reserve twice
+// (effects 2 for one effect in the document).
+SND_TEST(IndepS7LiveDefects, Defect_ReconnectSendsALiveStructuralEditAgain) {
+  for (const bool revert : {false, true}) {
+    AcceptAll editor;
+    preview::PreviewEngineDesc ed;
+    ed.structEditor = &editor;
+    ed.revertOnDisconnect = revert;
+    Rig r(ed, Options(LiveDecision::SendDiffs));
+    SND_REQUIRE(r.ok);
+    SND_REQUIRE(r.Connect());
+    SND_REQUIRE(r.Settle());
+    const json::Value fx = Json("{\"type\": \"snd.fx.delay\", \"params\": [10, 0, 0, -96, 20000, 0, 100]}");
+    SND_REQUIRE(r.doc.Insert(AmbG(), "effects", 0, fx));
+    SND_REQUIRE(r.Settle());
+    r.conn.Close();
+    r.Frames(10);
+    SND_REQUIRE(r.Connect());
+    SND_REQUIRE(r.Settle());
+    SND_CHECK_MSG(r.sync->reserve().effects <= 1u, "revertOnDisconnect %d: effects %u for one live effect", revert ? 1 : 0,
+                  r.sync->reserve().effects);
+    // The game's editor: every Add beyond the first follows an Undo of it.
+    SND_CHECK_MSG(editor.applied <= editor.undone + 1u, "revertOnDisconnect %d: %u Add, %u Undo", revert ? 1 : 0,
+                  editor.applied, editor.undone);
+  }
+}
+
+// preview.hpp IPreviewEngine::LoadBuild: "Loads every bank of build ... in place of the banks loaded
+// before". After a hot reload (LiveSync's writer = PutRebuiltBank) the reloaded bank is not one of
+// the engine's handles: LoadBuild does not unload it and the new build's bank of the same id does
+// not load ("the bank build/2/Main.sndb did not load").
+SND_TEST(IndepS7LiveDefects, Defect_PreviewLoadBuildAfterAHotReloadFails) {
+  Rig r;
+  SND_REQUIRE(r.ok);
+  SND_REQUIRE(r.Connect());
+  SND_REQUIRE(r.Settle());
+  const json::Value init = Json("{\"bank\": \"Main\", \"bus\": \"Sfx\"}");
+  SND_REQUIRE(!r.doc.Create("event", "Fresh", &init).empty());
+  SND_REQUIRE(r.Settle());
+  SND_REQUIRE(!r.sync->reloads().empty() && r.sync->reloads().back().phase == ll::ReloadPhase::Done);
+  ProjectDocument other;
+  Load(other);
+  SND_REQUIRE(other.SetNumber(AmbG(), "volumeDb", -20.0));
+  std::string err;
+  SND_CHECK_MSG(r.engine->LoadBuild(BuildDocument(other), &err), "%s", err.c_str());
+}
+
+// D-184 (the runtime's rules are the truth; MusicEditor::Preview computes with the runtime's lead):
+// music transition.cpp FirstMaterialPrime takes the prime of the rule's bridge when it has one,
+// else of the target's first segment. Fight's material streams without preload (a prime), the
+// bridge is in memory (no prime). A request 10 ms before the bar: the engine switches at the bar
+// (2.0 s); the model takes the target's prime, calls it late and says 4.0 s.
+SND_TEST(IndepS7LiveDefects, Defect_TransitionPreviewUsesTheTargetsLeadInsteadOfTheBridges) {
+  auto edit = [](ProjectDocument& doc) {
+    doc.Set(G(231), "loadForm", String("stream"));
+    doc.Set(G(231), "preloadMs", Number(0));
+    const json::Value seg = Json("{\"asset\": \"ma\", \"bars\": 1, \"bank\": \"Main\"}");
+    doc.Create("segment", "Br", &seg);
+    doc.Set(G(236), "music.transitions[0].bridge", String("Br"));
+  };
+  Engine en(true, edit);
+  SND_REQUIRE(en.e != nullptr);
+  MusicEditor me(en.doc, G(236));
+  MusicSettings ms;
+  ms.sampleRate = 48000;
+  ms.blockFrames = 256;
+  ms.streamPrimeMs = 30;
+  const TransitionPreview p = me.Preview("Calm", "Fight", 1.99, ms);
+  SND_REQUIRE(p.valid);
+  AuditionRouter router;
+  router.Bind(nullptr, en.e.get());
+  en.Frames(3);
+  const std::uint64_t start = en.e->NextBlock() * 256u;
+  SND_REQUIRE(router.PlayTransition(TransitionAudition{snd::HashId("Tune"), snd::HashId("Calm"), snd::HashId("Fight"), 1.99}).ok);
+  en.e->Render(1200, nullptr);
+  const std::vector<preview::PreviewTransition> tr = en.e->Transitions();
+  SND_REQUIRE(!tr.empty());
+  const double engine = static_cast<double>(tr.back().clock - start) / 48000.0;
+  SND_CHECK_MSG(std::fabs(engine - 2.0) < 1e-9, "engine %g", engine);
+  SND_CHECK_MSG(std::fabs(p.fireSeconds - engine) < 1e-9, "model %g (late %d), engine %g", p.fireSeconds, p.lateApplied ? 1 : 0,
+                engine);
+}
