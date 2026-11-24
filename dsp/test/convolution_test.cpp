@@ -512,9 +512,11 @@ SND_TEST(Convolution, Cost) {
     Conv fx(2, ir.slot, cs.block, static_cast<float>(cs.b), cs.zl, 2000.0f);
     SND_REQUIRE(fx.ok);
     std::vector<float> l = NoiseVec(cs.block, 83), r = NoiseVec(cs.block, 84);
+    std::vector<float> yl(cs.block), yr(cs.block);
     float* p[2] = {l.data(), r.data()};
+    float* out[2] = {yl.data(), yr.data()};
     // Warm up until the delay line is full (cost is then constant per partition).
-    for (std::uint32_t k = 0; k < frames / cs.block + 4u; ++k) EffectProcess(fx.st(), p, p, 2, cs.block, nullptr, nullptr);
+    for (std::uint32_t k = 0; k < frames / cs.block + 4u; ++k) EffectProcess(fx.st(), p, out, 2, cs.block, nullptr, nullptr);
 #ifdef NDEBUG
     const int blocks = 400;
 #else
@@ -523,16 +525,15 @@ SND_TEST(Convolution, Cost) {
     double worst = 0.0;
     const auto t0 = std::chrono::steady_clock::now();
     for (int k = 0; k < blocks; ++k) {
-      for (std::uint32_t i = 0; i < cs.block; ++i) l[i] = r[i] = 0.1f;
       const auto a = std::chrono::steady_clock::now();
-      EffectProcess(fx.st(), p, p, 2, cs.block, nullptr, nullptr);
+      EffectProcess(fx.st(), p, out, 2, cs.block, nullptr, nullptr);
       worst = std::max(worst, std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - a).count());
     }
     const double us = std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count() / blocks;
     snd::test::Note("convolution 2 s stereo IR, block %u, B %u, %s: %.1f us per block (worst %.1f), budget %.0f us, state %u bytes",
                     cs.block, cs.b, cs.zl != 0.0f ? "zero latency" : "latency B", us, worst, 1e6 * cs.block / kRate,
                     EffectStateBytes(fx.desc, kRate));
-    // D-218: the blocks where the IR switches (cross-fade: one extra FDL pass and the old head).
+    // D-218: include the cost of priming both predictions on a full delay line.
     Ir ir2(taps, cs.b);
     SND_REQUIRE(ir2.slot != 0u);
     double sw = 0.0, swWorst = 0.0;
@@ -541,11 +542,11 @@ SND_TEST(Convolution, Cost) {
       fx.params[kConvIrSlot] = static_cast<float>((k & 1) == 0 ? ir2.slot : ir.slot);
       snd::ParamBlock pb{fx.params, fx.params, kConvParamCount, 1u, nullptr};
       const auto a = std::chrono::steady_clock::now();
-      EffectProcess(fx.st(), p, p, 2, cs.block, &pb, nullptr);
+      EffectProcess(fx.st(), p, out, 2, cs.block, &pb, nullptr);
       const double t = std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - a).count();
       sw += t;
       swWorst = std::max(swWorst, t);
-      for (int q = 0; q < 3; ++q) EffectProcess(fx.st(), p, p, 2, cs.block, &pb, nullptr);
+      for (int q = 0; q < 3; ++q) EffectProcess(fx.st(), p, out, 2, cs.block, &pb, nullptr);
     }
     snd::test::Note("  IR switch blocks: %.1f us on average (worst %.1f)", sw / switches, swWorst);
   }
