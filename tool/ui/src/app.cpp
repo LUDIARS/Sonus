@@ -280,9 +280,11 @@ void App::OpenPicker(Picker picker) {
 
 void App::Pick(const std::string& value) {
   if (!picker_) return;
+  // Copy the value first: it may be an item of the list that closes below (D-187).
+  const std::string chosen = value;
   PickFn fn = std::move(picker_->pick);
   picker_.reset();
-  if (fn) fn(value);
+  if (fn) fn(chosen);
   Edited();
 }
 
