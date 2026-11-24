@@ -64,9 +64,11 @@ SND_TEST(IndepPatch, InvalidByteSlicesAreRejectedByValidatorAndStart) {
                         {PatchOp::Output, 2}});
   Driver d(snd::SourceKind::Patch, {});
   Driver::Voice v;
-  SND_REQUIRE(!valid.empty());
-  auto rejected = [&](const std::vector<std::uint8_t>& blob) {
-    auto p = Patch(blob);
+  std::array<std::uint8_t, 12 + 4 * 20> fixture{};
+  SND_REQUIRE(valid.size() == fixture.size());
+  std::copy(valid.begin(), valid.end(), fixture.begin());
+  auto rejected = [&](const auto& blob) {
+    src::PatchParams p{blob.data(), static_cast<unsigned>(blob.size()), 0};
     return !src::ValidatePatchProgram(blob.data(), blob.size()) && !d.Start(v, &p, 1) &&
            v.endDetail == SND_END_DETAIL_NONE;
   };
@@ -90,7 +92,7 @@ SND_TEST(IndepPatch, InvalidByteSlicesAreRejectedByValidatorAndStart) {
                                                                          {55, 1},
                                                                          {16 + 3, 0x7f},
                                                                          {16 + 4, 1}}) {
-    auto copy = valid;
+    auto copy = fixture;
     copy[offset] = static_cast<std::uint8_t>(value);
     SND_CHECK_MSG(rejected(copy), "bad field at %u", offset);
   }
@@ -98,7 +100,7 @@ SND_TEST(IndepPatch, InvalidByteSlicesAreRejectedByValidatorAndStart) {
   std::uint32_t state = 175;
   for (unsigned i = 0; i < 4096; ++i) {
     state = state * 1664525u + 1013904223u;
-    auto blob = valid;
+    auto blob = fixture;
     switch (i % 4) {
       case 0:
         blob[53] = static_cast<std::uint8_t>(2 + (state % 254));
