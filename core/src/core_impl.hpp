@@ -533,6 +533,7 @@ struct ItemInput {
   VoiceRenderStatus status;
   std::uint32_t sends;
   std::uint32_t removedCount;
+  bool spatialFilter;
   struct Removed { std::uint32_t previous, segment; } removed[kMaxAuxSends];
   AuxRoute aux[kMaxAuxSends];
   float directGain, directLp, sendLp;

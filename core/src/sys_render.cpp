@@ -201,7 +201,7 @@ void PostProcessItem(Impl& im, RenderSet& set, const source::RenderItem& it, Ite
         std::memset(buffers[c] + in.frameEnd, 0, sizeof(float) * (frames - in.frameEnd));
     }
   };
-  if (in.filterActive && !vfx) cut(voiceOut);
+  if (in.filterActive && !vfx && (in.spatialFilter || in.sends || in.removedCount)) cut(voiceOut);
   PathHistory& history = im.rd.paths[r];
   const bool fresh = (in.flags & kItemInitPan) != 0u;
   if (fresh) {
@@ -606,6 +606,7 @@ void Render(Impl& im) noexcept {
     const VoiceSpatialMix& mix = im.dp.mix[v];
     PanMatrix seatMatrices[SND_MAX_LISTENERS];
     SpatialMatrix(im, vs, mix, im.dp.pan[v], in.outChannels, in.pan, seatMatrices);
+    in.spatialFilter = mix.obstruction > 0 || mix.occlusion > 0;
     in.directGain = mix.obstruction > 0 ? DbToGain(-18 * mix.obstruction) : 1;
     in.directLp = mix.obstruction > 0 ? dsp::kVoiceLowpassOffHz * std::pow(0.04f, mix.obstruction) : dsp::kVoiceLowpassOffHz;
     in.sendLp = mix.occlusion > 0 ? dsp::kVoiceLowpassOffHz * std::pow(0.05f, mix.occlusion) : dsp::kVoiceLowpassOffHz;
