@@ -62,3 +62,7 @@ GCC 14 Debug の新規作成で空間16件すべて成功。経路と生記録17
 | PartialZoneCommandNeverChangesItsDestination | 残り1命令で宛先と量の一括設定を拒否する部分は成功。B-1の解除も -6 で拒否された。解除はSetSwitch 1命令で成功し送りが0となるはずだが、0.0707107のまま。 |
 | ShapeZoneAndClearRecordThePublishedWireFormat | 形、ゾーン登録、解除の記録が5件（期待4件）。半寸法X2.5、Y1.25を与えたSetParamのvalueは1.25、paramは0x40200000、期待はvalue 2.5、param 0x3fa00000。 |
 | ReplayedShapeUsesTheDocumentedHalfExtentAxes | B-1記載のvalue X、param Y bitsで線音源を再生した波形が、同じ半寸法を指定した公開操作の波形と異なった。 |
+
+### ①×④の停止境界の独立実測
+
+試作 fc230171e7aa9a866e8047a3795a3d59c467f4eb を新規 GCC 14 Debug で configure / build し、indep_g1_stop_test は4件すべて成功した。179フレームの有限2周と、310フレームに始まる48フレームの解放フェードの両方で、直達・ゾーン送りを別々に測った。両チャンネルとも357フレームに音が残り、358〜1023は厳密な0。試作の結果は正式なマージ先で行う受け入れと別に記録する。
