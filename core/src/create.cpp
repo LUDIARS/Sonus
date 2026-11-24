@@ -477,7 +477,8 @@ snd_result CreateImpl(Impl& im) noexcept {
   // Render.
   RenderPriv& rd = im.rd;
   rd.paths = Arr<PathHistory>(im, g.realTotal, MemTag::Tables);
-  if (!rd.paths) return SND_ERR_OUT_OF_BUDGET;
+  rd.sendInput = Arr<float>(im, std::size_t{g.realTotal} * g.maxVoiceChannels * g.blockFrames, MemTag::Tables);
+  if (!rd.paths || !rd.sendInput) return SND_ERR_OUT_OF_BUDGET;
   rd.resamplerPool = Arr<std::uint8_t>(im, im.cfg.resamplerSlotBytes * g.realTotal, MemTag::Tables);
   rd.lastAssign = Arr<std::uint32_t>(im, g.realTotal, MemTag::Tables);
   rd.stateChannels = Arr<std::uint32_t>(im, g.realTotal, MemTag::Tables);
