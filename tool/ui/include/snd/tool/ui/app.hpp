@@ -118,6 +118,9 @@ class App final : public ControlSink, public Actions {
   // Rebuilds the session's project from the document now (MixerModel::Bind).
   void RebindProject();
   void Message(const std::string& text) { session_.Message(text); }
+  // The file the recording's Save / Load use, and the connection the Connect button opens.
+  void SetRecordingPath(const std::string& path) { desc_.recordingPath = path; }
+  ConnectionDesc& connectionDesc() { return desc_.connection; }
   // What Delete (and Backspace outside a text entry) does on the current screen: set by the
   // screen's declaration (the selected point, node, clip ...), cleared at each declaration.
   void SetDeleteAction(std::function<void()> fn) { deleteAction_ = std::move(fn); }
