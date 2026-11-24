@@ -285,7 +285,29 @@ D-184「モデルは要求が適用されるブロックの頭から、ランタ
 
 ### 差し戻しの後の構成と結果
 
-（下の「回した構成と結果」の後に追記）
+すべて -j2、ビルドは `$S/live/b-*`（終わったら消した）。「食い違う 2 本」= 上の `tool_indep_s7_compute_test` と `tool_music_editor_test`。
+
+| 構成 | コミット | テスト | 結果 |
+| --- | --- | --- | --- |
+| 8: TOOL_CORE、gcc Debug | dd35c5a | 全部（289） | 失敗は食い違う 2 本だけ（`platform_device_play_test` は既存の Skipped）。`tool_indep_s7_live_Defect_*` 10 本は全部通過 |
+| 8 + ASan/UBSan | c47d53c | `tool\|livelink`（104） | 失敗は食い違う 2 本だけ。サニタイザの報告なし |
+| 8 + TSan | c47d53c | `tool`（71）、`tool_live_concurrency_test`・`tool_live_mixer_test`・`tool_live_sync_test`・`tool_indep_s7_live_threads_test`・`tool_indep_s7_live_sync_test` を -j1 で 20 回 | 失敗は食い違う 2 本だけ。20 回: 全通過 |
+| 8 + Release | c47d53c | `tool`（71）、同じ 5 本＋`tool_live_preview_test`・`tool_replay_test` を -j1 で 20 回 | 失敗は食い違う 2 本だけ。20 回: 全通過 |
+| 8 + clang | c47d53c | `tool`（71） | 失敗は食い違う 2 本だけ |
+| 9: Tela 入り | c47d53c | `tool`（85） | 失敗は食い違う 2 本だけ（今ある画面と画面のテストは通過） |
+| 6: テストなし Release | c47d53c | ビルドのみ | 通過、警告 0 |
+| MinGW 構文検査 | c47d53c | 変えた .cpp 10 本 | 通過（`live_preview_test.cpp` の `%zu` を直した） |
+
+回していない: 構成 1・7（差し戻しはツールの中だけ）。
+
+### 差し戻しの後の未検証
+
+- 1.0 のゲームの不一致を自分のテストでは試していない（独立テスト `OneZeroGameMismatchAsksWithoutABankList` は通過）。
+- 送り直しの時間切れ（`giveUpMs`）で問題になる経路と、同じセルの新しい値で古い送り直しを捨てる経路は、自分のテストでは
+  作っていない（独立テストの欠陥 2 で確認）。
+- Hello のハッシュの作り直しは、クライアントが「接続中」の間だけ（ハンドシェイクの最中に文書が変わると、その接続は前の
+  ハッシュで照合する。1.1 のゲームではバンクの一覧で比べ直すので影響は小さい。1.0 では Accepted のあとに差分を送る）。
+- 再接続のとき、構造の変更（StructEdit）がゲームに残っているかは分からない（予備容量はリロードの成功でだけ 0 に戻す）。
 
 ## 未検証の箇所
 
