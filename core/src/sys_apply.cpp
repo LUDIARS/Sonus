@@ -204,6 +204,10 @@ void SetParamValue(Impl& im, ParamScope scope, HandleRef target, Id id, ParamKin
     }
     return;
   }
+  const std::uint32_t scopeIndex = static_cast<std::uint32_t>(scope);
+  const auto definition = im.paramDefMap.Find(id);
+  if (scopeIndex > 2u || (definition != IdMap::kNotFound &&
+      (im.paramDefs[definition].scopeMask & (1u << scopeIndex)) == 0u)) return;
   const float rate = kind == ParamKind::Switch ? 0.0f : RampRateOf(im, id);
   if (kind == ParamKind::Continuous) value = ClampParam(im, id, value);
   switch (scope) {
@@ -687,10 +691,15 @@ void ApplyOne(Impl& im, const cmd::CommandHeader& h, const std::uint8_t* p) noex
     }
     case CT::ApplySnapshot: {
       const auto c = Load<cmd::ApplySnapshot>(p);
+      if (c.reserved > 1u) break;
       const std::uint32_t slot = im.snapMap.Find(c.snapshot);
       const std::uint32_t d = slot == IdMap::kNotFound ? kNoSlot : base::rows::DenseOf(t.Snapshot.rows, slot);
       if (d == kNoSlot) {
         PostWarning(im, SND_ERR_NOT_FOUND, 0u, c.snapshot);
+        break;
+      }
+      if (c.reserved == 1u) {
+        im.snapDefs[slot].actionFadeFrames = FadeFrames(c.timeSeconds, im.cfg.sampleRate);
         break;
       }
       TimedRamp& r = SND_W(Snapshot_request)[d].weight;
@@ -714,6 +723,8 @@ void ApplyOne(Impl& im, const cmd::CommandHeader& h, const std::uint8_t* p) noex
       CategoryRequest& r = SND_W(Category_request)[d];
       if (static_cast<CT>(h.type) == CT::SetCategoryVolume) {
         const auto c = Load<cmd::SetCategoryVolume>(p);
+        if (c.reserved == 1u) im.catDefs[slot].solo = c.volume != 0.0f;
+        if (c.reserved != 0u) break;
         r.volume = TimedRamp{RampValue(r.volume, im.clock), SaneVolume(c.volume), im.clock,
                              FadeFrames(c.fadeSeconds, im.cfg.sampleRate), 0u};
       } else if (static_cast<CT>(h.type) == CT::PauseCategory) {
@@ -996,7 +1007,11 @@ void ApplyDeferred(Impl& im) noexcept {
       case DeferredKind::ApplySnapshot: {
         const std::uint32_t slot = im.snapMap.Find(df.id);
         const std::uint32_t d = slot == IdMap::kNotFound ? kNoSlot : base::rows::DenseOf(t.Snapshot.rows, slot);
-        if (d != kNoSlot) SND_W(Snapshot_request)[d].weight = TimedRamp{df.value, df.value, im.clock, 0u, 0u};
+        if (d != kNoSlot) {
+          TimedRamp& weight = SND_W(Snapshot_request)[d].weight;
+          weight = TimedRamp{RampValue(weight, im.clock), SaneWeight(df.value), im.clock,
+                             im.snapDefs[slot].actionFadeFrames, 0u};
+        }
         break;
       }
     }

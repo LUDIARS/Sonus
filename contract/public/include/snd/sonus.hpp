@@ -645,6 +645,13 @@ inline Result SetPlaybackEffectParam(System* sys, PlaybackHandle p, std::uint32_
   return detail::R(snd_set_playback_effect_param(sys, p.ToC(), slot, paramIndex, value));
 }
 
+inline Result SetCategorySolo(System* sys, Id category, bool solo) noexcept {
+  return detail::R(snd_set_category_solo(sys, category, solo));
+}
+inline Result SetSnapshotActionTransition(System* sys, Id snapshot, float seconds) noexcept {
+  return detail::R(snd_set_snapshot_action_transition(sys, snapshot, seconds));
+}
+
 }  // namespace snd
 
 #endif  // SND_SONUS_HPP
