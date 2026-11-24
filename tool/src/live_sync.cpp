@@ -315,6 +315,9 @@ void LiveSync::Escalate(const std::string& bank, const std::string& reason, std:
     const ParsedBank* v = b->view();
     op.languageId = v != nullptr ? v->languageId() : 0u;
   }
+  // The document is the truth: a bank the game does not hold (never loaded, or detached by a failed
+  // reload) is loaded.
+  op.loadIfAbsent = true;
   if (!options_.writer || peerMinor_ < 1u || b == nullptr) {
     const std::string why = b == nullptr ? "the bank is not in the document's build"
                             : peerMinor_ < 1u ? "the game speaks protocol 1.0 (no hot reload)"
@@ -1250,7 +1253,11 @@ void LiveSync::Tick(Connection& c, const ConnectionEvents& ev, std::uint64_t now
     c.SetProjectBuildHash(current_.buildHash);
   }
   ll::Client* cl = c.client();
-  if (ev.sessionLost || cl == nullptr) {
+  // A new client (Open) or a new connection of the client: what the old one showed is gone.
+  const std::uint64_t link = (std::uint64_t{c.opens()} << 32) | (cl != nullptr ? cl->Stats().disconnects : 0u);
+  const bool newLink = link != seenLink_;
+  seenLink_ = link;
+  if (ev.sessionLost || cl == nullptr || newLink) {
     sessionLive_ = false;
     banksAsked_ = false;
     for (const Op& o : inflight_) Mark(o, LiveState::Offline, 0, "the connection dropped");

@@ -373,6 +373,7 @@ class LiveSync {
   std::string rememberedGame_;
   bool rememberPending_ = false;
   bool waitingForList_ = false;
+  std::uint64_t seenLink_ = ~0ull;
   std::string GameSignature() const;
   void ResendSentState();
   void ReleaseHeld();

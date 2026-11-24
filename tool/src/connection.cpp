@@ -44,6 +44,7 @@ int Connection::Open(const ConnectionDesc& desc) {
   }
   if (desc.profilerMask != 0u) c->SetProfilerMask(desc.profilerMask, desc.meterHz, false);
   client_ = c;
+  ++opens_;
   state_ = LinkState::Connecting;
   mismatch_ = false;
   sessions_ = 0;

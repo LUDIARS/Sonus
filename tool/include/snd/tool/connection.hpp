@@ -80,6 +80,8 @@ class Connection {
   // Drops the current connection; the client reconnects (autoReconnect).
   void Drop();
   bool IsOpen() const { return client_ != nullptr; }
+  // Group P: incremented by every Open (a new client: models drop what they knew of the old one).
+  std::uint32_t opens() const { return opens_; }
 
   ConnectionEvents Poll();
   LinkState state() const { return state_; }
@@ -105,6 +107,7 @@ class Connection {
   LinkState state_ = LinkState::Offline;
   bool mismatch_ = false;
   std::uint32_t sessions_ = 0;
+  std::uint32_t opens_ = 0;
   std::uint32_t seenConnects_ = 0;
   std::uint32_t seenDisconnects_ = 0;
   std::uint32_t roundTripUs_ = 0;
