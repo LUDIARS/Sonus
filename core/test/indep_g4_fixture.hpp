@@ -234,7 +234,8 @@ struct MarkerTable {
 class Rig {
  public:
   explicit Rig(const snd_config& cfg = Config(), snd::core::CoreLimits limits = {}, snd::IAllocator* allocator = nullptr,
-               const MarkerTable* markerTable = nullptr)
+               const MarkerTable* markerTable = nullptr, snd::core::LiveTap tap = {},
+               snd::music::IMusicSystem* music = nullptr)
       : cfg_(cfg), markers_(markerTable) {
     kinds_.kinds[static_cast<int>(snd::SourceKind::Oscillator)] = &osc;
     kinds_.kinds[static_cast<int>(snd::SourceKind::Sample)] = &sample;
@@ -242,6 +243,8 @@ class Rig {
     d.config = &cfg_;
     d.allocator = allocator != nullptr ? allocator : &snd::base::DefaultAllocator();
     d.sources = &kinds_;
+    d.liveTap = tap;
+    d.music = music;
     d.jobs = &jobs;
     d.bankFileSystem = &fs;
     d.rtWorkerRealtimePriority = false;
