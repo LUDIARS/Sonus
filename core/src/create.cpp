@@ -453,13 +453,13 @@ snd_result CreateImpl(Impl& im) noexcept {
   // EvaluateDspParams, SelectVoices.
   im.dp.duckDb = Arr<float>(im, g.duckCap, MemTag::Tables);
   im.dp.catPlaying = Arr<std::uint32_t>(im, g.catCap, MemTag::Tables);
-  im.dp.catGainPrev = Arr<float>(im, g.catCap, MemTag::Tables);
+  im.dp.busGainDb = Arr<float>(im, g.busCap, MemTag::Tables);
   im.dp.pan = Arr<float>(im, g.maxVirtual, MemTag::Tables);
   im.dp.spatialParams = Arr<SpatialCurveParams>(im, g.maxVirtual, MemTag::Tables);
   if (im.dp.pan == nullptr || im.dp.spatialParams == nullptr) return SND_ERR_OUT_OF_BUDGET;
   im.sel.voiceGen = Arr<std::uint32_t>(im, g.realTotal, MemTag::Tables);
   im.sel.fadeRemaining = Arr<std::int32_t>(im, g.realTotal, MemTag::Tables);
-  if (im.dp.duckDb == nullptr || im.dp.catPlaying == nullptr || im.dp.catGainPrev == nullptr ||
+  if (im.dp.duckDb == nullptr || im.dp.catPlaying == nullptr || im.dp.busGainDb == nullptr ||
       im.sel.voiceGen == nullptr || im.sel.fadeRemaining == nullptr ||
       !im.sel.realFree.Init(a, g.realTotal, MemTag::Tables)) {
     return SND_ERR_OUT_OF_BUDGET;
