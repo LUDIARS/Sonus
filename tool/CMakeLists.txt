@@ -70,6 +70,7 @@ add_library(sonus_tool_ui STATIC
   ui/src/buses_view.cpp
   ui/src/params_view.cpp
   ui/src/spatial_view.cpp
+  ui/src/music_view.cpp
   ui/src/stub_views.cpp
   ui/src/app.cpp
   ui/src/raster_compositor.cpp
