@@ -252,6 +252,9 @@ class System {
   snd_result SetSwitchEmitter(snd_emitter_handle emitter, Id group, Id value) noexcept;
   snd_result SetSwitchPlayback(snd_playback_handle playback, Id group, Id value) noexcept;
   snd_result SetBusVolume(Id bus, float volume, float fadeSeconds) noexcept;
+  snd_result SetCategorySolo(Id category, bool solo) noexcept;
+  snd_result SetSnapshotActionTransition(Id snapshot, float seconds) noexcept;
+  void SetFocusLost(bool lost) noexcept;
   snd_result ApplySnapshot(Id snapshot, float weight, float timeSeconds) noexcept;
   snd_result SetCategoryVolume(Id category, float volume, float fadeSeconds) noexcept;
   snd_result PauseCategory(Id category, bool paused) noexcept;

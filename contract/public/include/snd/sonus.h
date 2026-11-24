@@ -419,6 +419,11 @@ SND_API snd_result SND_CALL snd_set_event_voice_effect(snd_system* sys, snd_id e
 SND_API snd_result SND_CALL snd_set_playback_effect_param(snd_system* sys, snd_playback_handle playback,
                                                           uint32_t slot, uint32_t param_index, float value);
 
+/* Solo enables the union of the selected category subtrees. */
+SND_API snd_result SND_CALL snd_set_category_solo(snd_system* sys, snd_id category, int32_t solo);
+/* Transition length for subsequent ApplySnapshot event actions, in seconds. */
+SND_API snd_result SND_CALL snd_set_snapshot_action_transition(snd_system* sys, snd_id snapshot, float seconds);
+
 SND_EXTERN_C_END
 
 #endif /* SND_SONUS_H */

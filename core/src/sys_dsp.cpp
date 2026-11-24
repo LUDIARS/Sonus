@@ -10,6 +10,7 @@
 // Hz) or, without a volume curve, inverse distance 1 / max(d, 1) cut to 0
 // beyond EVNT.maxDistance (if set); the cone (EVNT.coneInnerDeg / OuterDeg /
 // OuterDb). Occlusion, Doppler and rooms are stage 3.
+#include <algorithm>
 #include <bit>
 #include <cmath>
 
@@ -41,6 +42,54 @@ std::uint32_t NearestSpatial(const Impl& im, SlotIndex emitter) noexcept {
   return best;
 }
 
+// Snapshot rows name objects in the snapshot's own bank. The bus with that ID
+// may be defined by a different bank, whose local EFFX/SEND indices can differ.
+void ApplySnapshotOffset(Impl& im, const BankRecord& rec, std::uint32_t kind, std::uint32_t row,
+                         std::uint32_t param, float offset) noexcept {
+  const auto& v = *rec.view;
+  const bool fx = kind == 1u;
+  if ((!fx && kind != 2u) || row >= v.Rows(fx ? bf::chunk::EFFX : bf::chunk::SEND)) return;
+  for (std::uint32_t b = 0; b < rec.busCount; ++b) {
+    const auto first = fx ? v.Column<bk::col::BUSS_effectFirst>()[b] : v.Column<bk::col::BUSS_sendFirst>()[b];
+    const auto count = fx ? v.Column<bk::col::BUSS_effectCount>()[b] : v.Column<bk::col::BUSS_sendCount>()[b];
+    if (row < first || row - first >= count || rec.busSlot[b] == kNoSlot) continue;
+    const auto& def = im.busDefs[rec.busSlot[b]];
+    const auto* owner = RegisteredBank(im, def.defBank);
+    if (owner == nullptr) continue;
+    if (fx) {
+      auto* e = BusEffectInstance(im, rec.busSlot[b], row - first);
+      if (e && e->type == v.Column<bk::col::EFFX_effectType>()[row] && param < e->paramCount &&
+          !EffectParamIsInitOnly(e->plugin, e->type, param)) e->ctl[param].contrib += offset;
+    } else {
+      const auto& ov = *owner->view;
+      const auto of = ov.Column<bk::col::BUSS_sendFirst>()[def.defRow];
+      const auto oc = ov.Column<bk::col::BUSS_sendCount>()[def.defRow];
+      if (of == bf::kNone || row - first >= oc) continue;
+      const auto dest = of + (row - first);
+      const auto fromBus = v.Column<bk::col::SEND_targetBus>()[row];
+      const auto toBus = ov.Column<bk::col::SEND_targetBus>()[dest];
+      if (fromBus < rec.busCount && toBus < owner->busCount && rec.busSlot[fromBus] == owner->busSlot[toBus] &&
+          v.Column<bk::col::SEND_preFader>()[row] == ov.Column<bk::col::SEND_preFader>()[dest]) {
+        owner->sendContrib[dest] += offset;
+      }
+    }
+    return;
+  }
+}
+
+void ClearSnapshotOffsets(Impl& im) noexcept {
+  for (std::uint32_t b = 0; b < im.cfg.maxBanks; ++b) {
+    const auto* bank = RegisteredBank(im, static_cast<std::uint16_t>(b));
+    if (!bank) continue;
+    std::fill_n(bank->sendContrib, bank->view->Rows(bf::chunk::SEND), 0.0f);
+    for (std::uint32_t x = 0; x < bank->effectCount; ++x) {
+      auto& effect = bank->effects[x];
+      if (effect.ctl == nullptr) continue;
+      for (std::uint32_t p = 0; p < effect.paramCount; ++p) effect.ctl[p].contrib = 0.0f;
+    }
+  }
+}
+
 }  // namespace
 
 void EvaluateDspParams(Impl& im) noexcept {
@@ -51,19 +100,27 @@ void EvaluateDspParams(Impl& im) noexcept {
 
   // --- categories: own volume x mute x parents x "all" (D-30) ---
   const schema::TableRows& cr = t.Category.rows;
+  bool anySolo = false;
+  for (std::uint32_t d = 0; d < cr.count; ++d) {
+    anySolo |= im.catDefs[base::rows::SlotAt(cr, d)].solo;
+  }
+  const bool focusMute = im.config.focus_mode == SND_FOCUS_PER_CATEGORY && im.focusLost.load(std::memory_order_relaxed);
   float* catGain = SND_W(Category_gain);
   for (std::uint32_t d = 0; d < cr.count; ++d) {
     SlotIndex s = base::rows::SlotAt(cr, d);
     float g = 1.0f;
+    bool audible = !anySolo;
     for (std::uint32_t guard = 0; guard < im.cfg.catCap && s != kNoSlot; ++guard) {
       const std::uint32_t cd = base::rows::DenseOf(cr, s);
       if (cd == kNoSlot) break;
       const CategoryRequest& rq = SND_R(Category_request)[cd];
       g *= rq.muted != 0u ? 0.0f : RampValue(rq.volume, endClock) * DbToGain(im.catDefs[s].baseVolumeDb);
+      audible |= im.catDefs[s].solo;
+      if (focusMute && (im.catDefs[s].flags & bf::kCategoryMuteOnFocusLoss)) g = 0.0f;
       if (s == im.globalCategory) break;
       s = im.catDefs[s].parentSlot == kNoSlot ? im.globalCategory : im.catDefs[s].parentSlot;
     }
-    catGain[d] = g;
+    catGain[d] = audible ? g : 0.0f;
   }
   for (std::uint32_t s = 0; s < im.cfg.catCap; ++s) im.dp.catPlaying[s] = 0;
 
@@ -104,6 +161,8 @@ void EvaluateDspParams(Impl& im) noexcept {
       const std::uint32_t cf = view->Column<bk::col::EVNT_curveFirst>()[row];
       const std::uint32_t cc = cf == bf::kNone ? 0u : view->Column<bk::col::EVNT_curveCount>()[row];
       const SlotIndex emitter = pd != kNoSlot ? SND_R(Voice_emitterSlot)[d] : kNoSlot;
+      float panProduct = 1.0f;
+      bool multiplyPan = false;
       for (std::uint32_t k = 0; k < cc; ++k) {
         const std::uint32_t cv = cf + k;
         const Id input = view->Column<bk::col::CURV_input>()[cv];
@@ -119,10 +178,18 @@ void EvaluateDspParams(Impl& im) noexcept {
           case bf::CurveTarget::Pitch: cents += y; break;
           case bf::CurveTarget::Lowpass: lowpass = y < lowpass ? y : lowpass; break;
           case bf::CurveTarget::Highpass: highpass = y > highpass ? y : highpass; break;
-          case bf::CurveTarget::Pan: pan += y; break;
+          case bf::CurveTarget::Pan:
+            if (view->Column<bk::col::CURV_compose>()[cv] == static_cast<std::uint32_t>(bf::CurveCompose::Multiply)) {
+              panProduct *= y;
+              multiplyPan = true;
+            } else {
+              pan += y;  // Legacy banks: preserve each addition to the clip pan, including rounding.
+            }
+            break;
           default: break;  // send / effect / spread / blend: stage 3 (Render reads spread & blend curves)
         }
       }
+      if (multiplyPan) pan += panProduct;
       // Layer crossfade (4.2): weight by the track's layer parameter.
       if (view->Column<bk::col::EVNT_sequenceKind>()[row] == static_cast<std::uint32_t>(bf::SequenceKind::LayerCrossfade) &&
           vs.trackRow < view->Rows(bf::chunk::TRAK) && vclip[d].clipIndex < view->Rows(bf::chunk::CLIP)) {
@@ -215,18 +282,19 @@ void EvaluateDspParams(Impl& im) noexcept {
   for (std::uint32_t i = 0; i < im.cfg.duckCap; ++i) {
     const DuckRule& r = im.duckRules[i];
     if (r.refCount == 0u) continue;
-    bool active = false;
+    float target = 0.0f;
     if (r.kind == 1u) {
-      active = r.sourceSlot < im.cfg.catCap && im.dp.catPlaying[r.sourceSlot] != 0u;
+      if (r.sourceSlot < im.cfg.catCap && im.dp.catPlaying[r.sourceSlot] != 0u) target = -std::fabs(r.amountDb);
     } else if (r.sourceSlot != kNoSlot) {
       const std::uint32_t bd = base::rows::DenseOf(t.Bus.rows, r.sourceSlot);
-      if (bd != kNoSlot) {
+      if (bd != kNoSlot && im.rd.busGen[r.sourceSlot] == t.Bus.rows.generation[r.sourceSlot]) {
         float pk = 0.0f;
         for (std::uint32_t c = 0; c < kMaxChannels; ++c) pk = peaks[bd].peak[c] > pk ? peaks[bd].peak[c] : pk;
-        active = pk > DbToGain(r.thresholdDb);
+        if (pk > 0.0f && pk > DbToGain(r.thresholdDb)) {
+          target = -std::fmin(std::fabs(r.amountDb), 20.0f * std::log10(pk) - r.thresholdDb);
+        }
       }
     }
-    const float target = active ? -std::fabs(r.amountDb) : 0.0f;
     float& cur = im.dp.duckDb[i];
     const float tau = target < cur ? r.attackMs : r.releaseMs;
     const float k = tau > 0.0f ? 1.0f - std::exp(-blockMs / tau) : 1.0f;
@@ -240,6 +308,8 @@ void EvaluateDspParams(Impl& im) noexcept {
   float* busDb = im.frameArena.AllocateArray<float>(im.cfg.busCap);
   if (busDb == nullptr) return;
   for (std::uint32_t s = 0; s < im.cfg.busCap; ++s) busDb[s] = 0.0f;
+  if (im.dp.hadSnapshotOffsets) ClearSnapshotOffsets(im);
+  im.dp.hadSnapshotOffsets = false;
   const schema::TableRows& sr = t.Snapshot.rows;
   float* sw = SND_W(Snapshot_weight);
   for (std::uint32_t d = 0; d < sr.count; ++d) {
@@ -255,10 +325,14 @@ void EvaluateDspParams(Impl& im) noexcept {
     const std::uint32_t vc = v.Column<bk::col::SNAP_valueCount>()[def.defRow];
     for (std::uint32_t k = 0; k < vc; ++k) {
       const std::uint32_t row = vf + k;
-      if (v.Column<bk::col::SNPV_targetKind>()[row] != 0u) continue;  // effect params / send levels: stage 3
-      const std::uint32_t busRow = v.Column<bk::col::SNPV_targetRow>()[row];
-      if (busRow < rec->busCount && rec->busSlot[busRow] != kNoSlot) {
-        busDb[rec->busSlot[busRow]] += w * v.Column<bk::col::SNPV_value>()[row];
+      const auto kind = v.Column<bk::col::SNPV_targetKind>()[row];
+      const auto target = v.Column<bk::col::SNPV_targetRow>()[row];
+      const float offset = w * v.Column<bk::col::SNPV_value>()[row];
+      if (kind == 0u) {
+        if (target < rec->busCount && rec->busSlot[target] != kNoSlot) busDb[rec->busSlot[target]] += offset;
+      } else {
+        ApplySnapshotOffset(im, *rec, kind, target, v.Column<bk::col::SNPV_paramIndex>()[row], offset);
+        im.dp.hadSnapshotOffsets = true;
       }
     }
   }

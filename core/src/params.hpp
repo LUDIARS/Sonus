@@ -91,12 +91,14 @@ inline float ParamValueOf(const Impl& im, Id id, SlotIndex playback, SlotIndex e
     return std::bit_cast<float>(bits);
   }
   float v = 0;
-  if (FindPlaybackParam<kSys>(im, id, playback, &v) || FindEmitterParam<kSys>(im, id, emitter, &v) ||
-      FindGlobalParam<kSys>(im, id, &v)) {
+  const auto def = im.paramDefMap.Find(id);
+  const auto mask = def == IdMap::kNotFound ? 7u : im.paramDefs[def].scopeMask;
+  if (((mask & 4u) && FindPlaybackParam<kSys>(im, id, playback, &v)) ||
+      ((mask & 2u) && FindEmitterParam<kSys>(im, id, emitter, &v)) ||
+      ((mask & 1u) && FindGlobalParam<kSys>(im, id, &v))) {
     if (found != nullptr) *found = true;
     return v;
   }
-  const std::uint32_t def = im.paramDefMap.Find(id);
   if (def != IdMap::kNotFound) {
     if (found != nullptr) *found = true;
     const ParamDef& pd = im.paramDefs[def];

@@ -160,7 +160,7 @@ void MixBuses(Impl& im) noexcept {
         const SlotIndex ts = rec->busSlot[tb];
         if (ts == kNoSlot || !base::rows::IsLive(br, ts)) continue;
         if (go[base::rows::DenseOf(br, ts)] <= oi) continue;  // would close a cycle: ignored
-        Downmix(buf, ch, BusBuffer(im, ts), im.busDefs[ts].channels, frames, g * DbToGain(v.Column<bk::col::SEND_levelDb>()[row]));
+        Downmix(buf, ch, BusBuffer(im, ts), im.busDefs[ts].channels, frames, g * DbToGain(v.Column<bk::col::SEND_levelDb>()[row] + rec->sendContrib[row]));
       }
     };
     doSends(true, 1.0f);
