@@ -121,7 +121,7 @@ SND_TEST(IndepG4Action, MusicalReservationAnchorsTrackTime) {
   snd::music::MusicSystem music;
   Rig r(Config(), {}, nullptr, nullptr, {}, &music);
   B b;
-  b.Event("Parent", {B::SynthClip(b.Synth(0.0f))}).tracks[0].actions = {PulseAt(10.0f)};
+  b.Event("Parent", {B::SynthClip(b.Synth(0.0f))}).tracks[0].actions = {PulseAt(0.0f), PulseAt(10.0f)};
   b.Event("Pulse", {B::AssetClip(b.Asset("dc", Constant(32, 0.5f)))});
   r.Load("b", b.Build("B"));
   const auto start = r.Now();
@@ -134,6 +134,11 @@ SND_TEST(IndepG4Action, MusicalReservationAnchorsTrackTime) {
   next.transport = tr;
   SND_REQUIRE(r.sys->Play(HashId("Parent"), NoEm(), &next).value != 0u);
   r.Steps(100);
-  SND_CHECK_EQ(r.FirstAbove(start, r.Now(), 0.25f * kC), start + 24000 + 480);
-  SND_CHECK_EQ(r.CountAbove(start, r.Now(), 0.25f * kC), 32u);
+  const auto beat = start + 24000;
+  const auto first = r.FirstAbove(start, r.Now(), 0.25f * kC);
+  // A first-block action of a musical start may wait for the next render block.
+  SND_CHECK(first >= beat && first <= beat + r.Frames());
+  SND_CHECK_EQ(r.CountAbove(start, beat + 480, 0.25f * kC), 32u);
+  SND_CHECK_EQ(r.FirstAbove(beat + r.Frames() + 32, r.Now(), 0.25f * kC), beat + 480);
+  SND_CHECK_EQ(r.CountAbove(beat + 480, r.Now(), 0.25f * kC), 32u);
 }
