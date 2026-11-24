@@ -191,7 +191,11 @@ bool InitProducers(Impl& im) noexcept {
   const Cfg& g = im.cfg;
   im.producers = Arr<Producer>(im, g.maxThreads, MemTag::CommandArena);
   if (im.producers == nullptr) return false;
-  const std::size_t arenaSize = 64u + g.arenaBytes + g.reserveBytes;
+  // Keep the normal reserve budget intact. Only an overflow lifecycle command uses the extra header.
+  const std::size_t arenaSize = base::AlignUp(sizeof(cmd::ArenaHeader) + g.arenaBytes + g.reserveBytes +
+                                               sizeof(cmd::CommandHeader), alignof(cmd::ArenaHeader));
+  std::size_t producerBytes = 0;
+  if (!base::CheckedMul(arenaSize, g.arenasPerThread, &producerBytes)) return false;
   const std::uint32_t pbWords = base::notify::BitWords(g.maxPlaybacks);
   const std::uint32_t emWords = base::notify::BitWords(g.maxEmitters);
   const std::uint32_t trWords = base::notify::BitWords(g.maxTransports);
@@ -201,7 +205,7 @@ bool InitProducers(Impl& im) noexcept {
     Producer& pr = im.producers[p];
     pr.index = p;
     pr.arenas = Arr<ArenaView>(im, g.arenasPerThread, MemTag::CommandArena);
-    std::uint8_t* mem = Arr<std::uint8_t>(im, arenaSize * g.arenasPerThread, MemTag::CommandArena);
+    std::uint8_t* mem = Arr<std::uint8_t>(im, producerBytes, MemTag::CommandArena);
     if (pr.arenas == nullptr || mem == nullptr || !pr.cycle.Init(*im.alloc, g.arenasPerThread)) return false;
     for (std::uint32_t a = 0; a < g.arenasPerThread; ++a) {
       ArenaView& av = pr.arenas[a];

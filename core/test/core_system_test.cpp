@@ -296,3 +296,42 @@ SND_TEST(CoreBanks, LanguageSwitchKeepsPlayingVoicesAndResolvesTheNewLanguage) {
   SND_CHECK_EQ(h.sys->GetBankState(en), SND_BANK_STATE_UNLOADED);
   SND_CHECK_EQ(h.ends.CountOf(neu), 0u);
 }
+
+SND_TEST(CoreQueues, A005_OverflowControlKeepsProducerOrderWithZeroReserve) {
+  auto cfg = SmallConfig();
+  cfg.commands.arena_bytes = 256;
+  cfg.commands.reserve_bytes = 0;
+  CountingAllocator alloc;
+  Harness h(cfg, {}, nullptr, 0, &alloc);
+  SND_REQUIRE_EQ(h.created, SND_OK);
+  h.Steps(4);
+  const auto allocations = alloc.allocations.load();
+  // Every packet is 8 bytes. Exactly 32 fit without touching any fallback table.
+  auto fill = [&] {
+    for (int i = 0; i < 32; ++i) SND_REQUIRE_EQ(h.sys->Suspend(), SND_OK);
+  };
+  for (int pass = 0; pass < 2; ++pass) {
+    std::thread worker([&] {
+      SND_REQUIRE_EQ(h.sys->RegisterThread(), SND_OK);
+      fill();
+      SND_CHECK_EQ(h.sys->Resume(), SND_OK);
+      if (pass == 1) SND_CHECK_EQ(h.sys->Suspend(), SND_OK);
+      SND_CHECK_EQ(h.sys->Flush(), SND_OK);
+      SND_CHECK_EQ(h.sys->UnregisterThread(), SND_OK);
+    });
+    worker.join();  // worker publishes first, but producer zero is applied first
+    fill();
+    SND_REQUIRE_EQ(h.sys->Resume(), SND_OK);
+    if (pass == 0) SND_REQUIRE_EQ(h.sys->Suspend(), SND_OK);
+    h.Steps(3);
+    h.sys->Update();
+    snd_stats a{}, b{};
+    SND_REQUIRE_EQ(h.sys->GetStats(&a), SND_OK);
+    h.Steps(3);
+    h.sys->Update();
+    SND_REQUIRE_EQ(h.sys->GetStats(&b), SND_OK);
+    if (pass == 0) SND_CHECK(b.clock_sample > a.clock_sample);
+    else SND_CHECK_EQ(b.clock_sample, a.clock_sample);
+  }
+  SND_CHECK_EQ(alloc.allocations.load(), allocations);
+}

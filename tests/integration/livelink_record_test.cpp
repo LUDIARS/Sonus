@@ -18,7 +18,7 @@ struct Recorded {
   std::uint32_t blockSamples = 0;
 };
 
-void RecordSession(Recorded& rec) {
+void RecordSession(Recorded& rec, bool floodLifecycle = false) {
   Fixture f;
   rec.blockSamples = f.sys->BlockFrames() * f.sys->OutputChannels();
   f.Load(DevBank());
@@ -32,6 +32,18 @@ void RecordSession(Recorded& rec) {
   SND_REQUIRE(f.StepUntil([&] { return c->TakeAck(seq, &r); }));
   SND_REQUIRE_EQ(r, SND_OK);
   SND_REQUIRE(f.StepUntil([&] { return f.rt->Recording(); }));
+  if (floodLifecycle) {
+    // The early suspend is an ordinary packet. Omitting the overflow resume from the
+    // capture would leave the replay suspended even though the recorded run plays.
+    SND_REQUIRE_EQ(f.sys->Suspend(), SND_OK);
+    const auto cfg = Config();
+    const auto params = (cfg.commands.arena_bytes + cfg.commands.reserve_bytes) / snd::cmd::kWireSize<snd::cmd::SetParam>;
+    for (std::uint32_t i = 0; i <= params; ++i) {
+      SND_REQUIRE_EQ(f.sys->SetParamGlobal(HashId("Knob"), 0.5f), SND_OK);
+    }
+    SND_REQUIRE_EQ(f.sys->Resume(), SND_OK);
+    f.Step();
+  }
   // Game commands from the owner, edits from the tool, over many blocks.
   const snd_playback_handle tone = f.sys->Play(HashId("Tone"), snd_emitter_handle{0}, nullptr);
   f.Steps(5);
@@ -151,6 +163,32 @@ SND_TEST(LivelinkRecord, ReplayIsBitIdenticalTwiceAndMatchesTheRecordedRun) {
   bool sawEdit = false;
   for (std::size_t i = 0; i + 1 < n; i += rec.blockSamples) sawEdit = sawEdit || (r1[i] > 0.0f && r1[i] < 0.3f);
   SND_CHECK(sawEdit);
+}
+
+SND_TEST(LivelinkRecord, A005_OverflowResumeSurvivesCaptureAndReplay) {
+  Recorded rec;
+  RecordSession(rec, true);
+  SND_REQUIRE(!rec.bytes.empty());
+  ll::RecordReader rr(rec.bytes.data(), rec.bytes.size());
+  ll::RecordItem it;
+  bool captured = false;
+  while (rr.Next(&it)) {
+    if (it.kind != ll::RecordKind::Arena || it.fallback == nullptr) continue;
+    snd::cmd::ForEachCommand(it.reserve, it.reserve + it.sections.reserveBytes,
+                             [&](const snd::cmd::CommandHeader& h, const std::uint8_t*) {
+      if (h.type == static_cast<std::uint16_t>(snd::cmd::CommandType::Resume)) captured = true;
+    });
+  }
+  SND_REQUIRE(rr.Error() == ll::RecordError::None && captured);
+  ll::ReplayInfo info{};
+  std::vector<float> replayed;
+  Replay(rec, &info, replayed);
+  SND_REQUIRE_EQ(info.invalidCommands, 0u);
+  SND_REQUIRE_EQ(info.skippedCommands, 0u);
+  const auto from = static_cast<std::size_t>(info.firstBlock) * rec.blockSamples;
+  const auto count = static_cast<std::size_t>(info.lastBlock - info.firstBlock + 1u) * rec.blockSamples;
+  SND_REQUIRE(count > 0u && replayed.size() >= count && rec.out.size() >= from + count);
+  SND_CHECK_EQ(std::memcmp(rec.out.data() + from, replayed.data(), count * sizeof(float)), 0);
 }
 
 SND_TEST(LivelinkRecord, ReplayRejectsMalformedRecordings) {

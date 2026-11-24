@@ -107,8 +107,12 @@ SND_API snd_result SND_CALL snd_unregister_thread(snd_system* sys);
  * The owner normally relies on snd_update(); non-owner threads call this once per frame. */
 SND_API snd_result SND_CALL snd_flush(snd_system* sys);
 
-/* Platform lifecycle (2.6). Suspend stops the device and the common clock; resume refills
- * render-ahead before restarting. Thread: registered. Recorded like other commands. */
+/* Platform lifecycle (2.6). At the applying block, suspend holds the common clock and
+ * renders silence. Resume releases that hold; the owner also services an OS-suspended
+ * device's restart. Thread: registered. Published like other commands.
+ * A full arena still accepts both calls. On overflow, lifecycle requests for the same
+ * arena may collapse to their final state at its render boundary. Application requires
+ * the recording thread to publish and the output path to render again. */
 SND_API snd_result SND_CALL snd_suspend(snd_system* sys);
 SND_API snd_result SND_CALL snd_resume(snd_system* sys);
 

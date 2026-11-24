@@ -120,6 +120,29 @@ Rec RecordRaw(Impl& im, Producer& pr, cmd::CommandType type, std::uint32_t size,
   return Rec::Rejected;
 }
 
+// Suspend and Resume have no per-command side effects: RenderBlock observes the final
+// state after every producer and fallback has been applied. A full arena therefore
+// needs one extra ordinary wire header to represent all its overflowing lifecycle calls.
+snd_result RecordLifecycle(Impl& im, Producer& pr, cmd::CommandType type) noexcept {
+  constexpr auto size = static_cast<std::uint32_t>(sizeof(cmd::CommandHeader));
+  static_assert(cmd::kWireSize<cmd::Suspend> == size && cmd::kWireSize<cmd::Resume> == size);
+  if (!pr.lifecycleTail && RecordRaw(im, pr, type, size, nullptr, 0, cmd::Delivery::MustDeliver) == Rec::Ok) {
+    return SND_OK;
+  }
+  ArenaView& av = pr.arenas[pr.cycle.Current()];
+  auto& h = *av.header;
+  if (!pr.lifecycleTail) {
+    // Either fallback has closed the reserve, or even its smallest packet did not fit.
+    // No later ordinary packet can append; the tail remains the last reserve header.
+    h.reserveBytes += size;
+    ++h.commandCount;
+    pr.lifecycleTail = true;
+  }
+  WriteCommand(av.reserve + h.reserveBytes - size, type, size, pr.seq++, nullptr, 0);
+  im.fallbackCommands.fetch_add(1u, std::memory_order_relaxed);
+  return SND_OK;
+}
+
 template <class P>
 Rec Record(Impl& im, Producer& pr, const P& payload, cmd::Delivery delivery = cmd::CommandTraits<P>::kDelivery) noexcept {
   using T = cmd::CommandTraits<P>;
@@ -209,6 +232,7 @@ bool PublishProducer(Impl& im, Producer& pr) noexcept {
   }
   cur.header->publishSeq = ++pr.publishSeq;
   if (!pr.cycle.Publish()) return false;  // every other arena is with the audio thread: keep appending
+  pr.lifecycleTail = false;  // ownership moved; failed publishes retain the pending control
   ArenaView& next = pr.arenas[pr.cycle.Current()];
   cmd::ArenaHeader& h = *next.header;
   const bool hadFallback = (h.flags & cmd::kArenaHasFallback) != 0u;
@@ -321,11 +345,11 @@ snd_result System::Flush() noexcept {
 
 snd_result System::Suspend() noexcept {
   SND_PRODUCER_OR(SND_ERR_THREAD_NOT_REGISTERED)
-  return ResultOf(Record(im, *pr, cmd::Suspend{}));
+  return RecordLifecycle(im, *pr, cmd::CommandType::Suspend);
 }
 snd_result System::Resume() noexcept {
   SND_PRODUCER_OR(SND_ERR_THREAD_NOT_REGISTERED)
-  return ResultOf(Record(im, *pr, cmd::Resume{}));
+  return RecordLifecycle(im, *pr, cmd::CommandType::Resume);
 }
 
 snd_bank_handle System::LoadBankAsync(const char* path) noexcept {
