@@ -44,16 +44,15 @@ constexpr std::uint32_t kIrVersion = 1;
 constexpr std::size_t kMaxStateBytes = std::size_t{1} << 30;
 constexpr std::uint32_t kResampleZeros = 16;  // zero crossings on each side
 
-// Registry (D-219): entry i holds the IR and the number it was registered under
-// (number & 1023 == i). Numbers come from a process-wide cursor, so successive
-// registrations get successive numbers and a reused entry gets an old number back
-// only after the 24-bit cursor wraps (16 777 215 registrations later).
+// Writers reserve a starting position and scan consecutive entries locally. Only
+// the writer that claimed ir can update lastTicket, before publishing number.
 struct Entry {
   std::atomic<std::uint32_t> number;
   std::atomic<const ConvolutionIr*> ir;
+  std::uint64_t lastTicket;
 };
 Entry g_entries[kConvolutionMaxIrSlots];
-std::atomic<std::uint32_t> g_cursor{0};
+std::atomic<std::uint64_t> g_cursor{1};
 
 bool IsPow2(std::uint32_t v) noexcept { return v != 0u && (v & (v - 1u)) == 0u; }
 
@@ -598,16 +597,25 @@ std::uint32_t ConvolutionIrSampleRate(const ConvolutionIr* ir) noexcept {
 
 std::uint32_t ConvolutionRegisterIr(const ConvolutionIr* ir) noexcept {
   if (!ValidIr(ir)) return 0;
-  // Up to one full turn over the entries: successive numbers visit every entry once.
-  for (std::uint32_t i = 0; i < kConvolutionMaxIrSlots; ++i) {
-    const std::uint32_t c = g_cursor.fetch_add(1u, std::memory_order_relaxed);
-    const std::uint32_t n = c % kConvolutionMaxIrNumber + 1u;  // 1 .. 2^24 - 1
-    Entry& e = g_entries[n & (kConvolutionMaxIrSlots - 1u)];
+  constexpr auto slots = kConvolutionMaxIrSlots;
+  const auto start = g_cursor.fetch_add(1u, std::memory_order_relaxed);
+  for (std::uint32_t i = 0; i < slots; ++i) {
+    auto ticket = start + i;
+    Entry& e = g_entries[ticket & (slots - 1u)];
     const ConvolutionIr* expected = nullptr;
-    if (e.ir.compare_exchange_strong(expected, ir, std::memory_order_acq_rel)) {
-      e.number.store(n, std::memory_order_release);
-      return n;
+    if (!e.ir.compare_exchange_strong(expected, ir, std::memory_order_acq_rel)) continue;
+    if (ticket <= e.lastTicket) ticket = e.lastTicket + slots;
+    if ((ticket & kConvolutionMaxIrNumber) == 0u) ticket += slots;  // number zero is reserved
+    e.lastTicket = ticket;
+    const auto number = static_cast<std::uint32_t>(ticket & kConvolutionMaxIrNumber);
+    e.number.store(number, std::memory_order_release);
+    // In isolation the next registration starts just after this entry. Concurrent
+    // registrars already own their starting positions and retain their full scans.
+    if (ticket != start) {
+      auto cursor = start + 1u;
+      g_cursor.compare_exchange_strong(cursor, ticket + 1u, std::memory_order_relaxed);
     }
+    return number;
   }
   return 0;
 }

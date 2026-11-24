@@ -180,11 +180,14 @@ std::uint32_t ConvolutionIrSampleRate(const ConvolutionIr* ir) noexcept;
 
 // --- Registry (process-wide, fixed capacity, lock-free; D-219) ---
 // Numbers: 1..kConvolutionMaxIrNumber (2^24 - 1, exact as a float parameter);
-// entry = number & 1023, generation = number >> 10. Every registration takes the
-// next number of a process-wide cursor (skipping numbers whose entry is in use),
-// so a number is never reused until the cursor wraps after 2^24 - 1
-// registrations; a stale number (unregistered, or an entry reused since) resolves
-// to "no IR". Successive registrations with free entries get successive numbers.
+// entry = number & 1023, generation = number >> 10. A registration probes each
+// entry at most once from a process-wide cursor. A busy or contended entry can
+// consume a candidate number without a successful registration. Generation zero
+// of entry zero is reserved. Each entry advances its ticket before reuse; its
+// 14-bit generation can wrap. Retire all saved copies of a number (including
+// effect parameters) when unregistering it; after a wrap an old number can name
+// a different IR. There is no minimum count of successful global registrations
+// before that happens.
 // Register: normal worker. Returns the number, 0 if all 1024 entries are in use
 // or `ir` is not a prepared IR.
 std::uint32_t ConvolutionRegisterIr(const ConvolutionIr* ir) noexcept;
