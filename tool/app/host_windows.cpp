@@ -7,8 +7,9 @@
 // The only Sonus file besides macOS's that is compiled with exceptions: Tela's
 // constructors and synchronize() throw, and everything is caught here.
 //
-// Shortcuts: Ctrl+Z undo, Ctrl+Y / Ctrl+Shift+Z redo, F2 mixer, F3 profiler,
-// Esc closes (Tela), F11 full screen (Tela).
+// Keys go to App::Key: Ctrl+Z / Ctrl+Y / Ctrl+Shift+Z, Ctrl+S, F2..F10 screens, Ctrl+PageUp /
+// PageDown, and the tool's text entry (WM_CHAR). Tela sees every message first (Esc closes the
+// window, F11 full screen), except Esc while a text entry or a candidate list is open.
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
@@ -72,26 +73,69 @@ void Observe(HWND window, UINT message, WPARAM wp, LPARAM lp) {
   app.Pointer(e, GetTickCount64(), false);
 }
 
+std::uint32_t KeyModifiers() {
+  std::uint32_t m = 0;
+  if ((GetKeyState(VK_CONTROL) & 0x8000) != 0) m |= ui::kModControl;
+  if ((GetKeyState(VK_SHIFT) & 0x8000) != 0) m |= ui::kModShift;
+  return m;
+}
+
+// WM_KEYDOWN: the key (App::Key: shortcuts, screens, the text entry's Enter / Escape / Backspace).
 void Key(WPARAM key) {
-  ui::App& app = *g_subclass.app;
-  const bool ctrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
-  const bool shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
-  if (ctrl && key == 'Z') {
-    if (shift) {
-      app.OnRedo();
-    } else {
-      app.OnUndo();
+  ui::KeyEvent k;
+  k.modifiers = KeyModifiers();
+  if ((key >= 'A' && key <= 'Z') || (key >= '0' && key <= '9')) {
+    k.key = static_cast<std::uint32_t>(key);
+  } else if (key >= VK_F1 && key <= VK_F12) {
+    k.key = ui::kKeyF1 + static_cast<std::uint32_t>(key - VK_F1);
+  } else {
+    switch (key) {
+      case VK_RETURN: k.key = ui::kKeyEnter; break;
+      case VK_ESCAPE: k.key = ui::kKeyEscape; break;
+      case VK_BACK: k.key = ui::kKeyBackspace; break;
+      case VK_DELETE: k.key = ui::kKeyDelete; break;
+      case VK_TAB: k.key = ui::kKeyTab; break;
+      case VK_LEFT: k.key = ui::kKeyLeft; break;
+      case VK_RIGHT: k.key = ui::kKeyRight; break;
+      case VK_UP: k.key = ui::kKeyUp; break;
+      case VK_DOWN: k.key = ui::kKeyDown; break;
+      case VK_HOME: k.key = ui::kKeyHome; break;
+      case VK_END: k.key = ui::kKeyEnd; break;
+      case VK_PRIOR: k.key = ui::kKeyPageUp; break;
+      case VK_NEXT: k.key = ui::kKeyPageDown; break;
+      default: return;
     }
-  } else if (ctrl && key == 'Y') {
-    app.OnRedo();
-  } else if (key == VK_F2) {
-    app.OnScreen(ui::Screen::Mixer);
-  } else if (key == VK_F3) {
-    app.OnScreen(ui::Screen::Profiler);
   }
+  g_subclass.app->Key(k);
+}
+
+// WM_CHAR: the typed character (UTF-16; a surrogate pair arrives as two messages).
+void Char(WPARAM ch) {
+  static std::uint32_t high = 0;
+  std::uint32_t c = static_cast<std::uint32_t>(ch);
+  if (c >= 0xD800u && c <= 0xDBFFu) {
+    high = c;
+    return;
+  }
+  if (c >= 0xDC00u && c <= 0xDFFFu) {
+    if (high == 0u) return;
+    c = 0x10000u + ((high - 0xD800u) << 10) + (c - 0xDC00u);
+  }
+  high = 0;
+  if (c < 0x20u || c == 0x7Fu) return;  // control characters come as keys
+  ui::KeyEvent k;
+  k.text = c;
+  k.modifiers = KeyModifiers() & ~ui::kModControl;  // AltGr reports Ctrl: a typed character is text
+  g_subclass.app->Key(k);
 }
 
 LRESULT CALLBACK Procedure(HWND window, UINT message, WPARAM wp, LPARAM lp) {
+  // Esc while typing or choosing cancels that (Tela would close the window): not passed to Tela.
+  if (message == WM_KEYDOWN && wp == VK_ESCAPE && g_subclass.app != nullptr &&
+      (g_subclass.app->text().active() || g_subclass.app->picker() != nullptr)) {
+    Key(wp);
+    return 0;
+  }
   // Tela first: it decides who owns a press before the router looks at it.
   const LRESULT r = CallWindowProcW(g_subclass.previous, window, message, wp, lp);
   if (g_subclass.app == nullptr) return r;
@@ -106,6 +150,9 @@ LRESULT CALLBACK Procedure(HWND window, UINT message, WPARAM wp, LPARAM lp) {
       return 0;
     case WM_KEYDOWN:
       Key(wp);
+      break;
+    case WM_CHAR:
+      Char(wp);
       break;
     default: break;
   }

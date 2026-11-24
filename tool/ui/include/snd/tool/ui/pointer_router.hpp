@@ -27,6 +27,8 @@
 #define SND_TOOL_UI_POINTER_ROUTER_HPP
 
 #include <cstdint>
+#include <functional>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -54,7 +56,33 @@ class ControlSink {
   }
 };
 
-enum class ControlKind : std::uint8_t { Fader = 0, Knob = 1 };
+enum class ControlKind : std::uint8_t { Fader = 0, Knob = 1, Custom = 2 };
+
+// A pointer motion of a Custom control (logical pixels).
+struct DragMotion {
+  float dx = 0.0f, dy = 0.0f;    // since the press
+  float ddx = 0.0f, ddy = 0.0f;  // since the previous motion
+  float x = 0.0f, y = 0.0f;      // the pointer, local to the hit element as it was placed at the press
+  std::uint32_t modifiers = 0;
+};
+
+// Gestures of the editors' drawn items (clips, curve points, listener and emitter, patch nodes,
+// number fields). The router keeps the handler of the press for the whole gesture (the
+// declaration may be replaced meanwhile), so a handler may keep state of its own. Every function
+// is optional.
+//   press:       the press was granted by Tela (local position). Selection goes here.
+//   drag:        each motion after the press (one call per move event, also without motion).
+//   release:     the end (also a Tela cancel or the element going away): `moved` = some motion
+//                was delivered; the local position of the last motion (or of the press).
+//   doubleClick: a second press within the double click limits (no press / release then).
+//   wheel:       notches over the element; `mergeKey` as the faders' (one undo step per series).
+struct DragHandler {
+  std::function<void(float x, float y, std::uint32_t modifiers)> press;
+  std::function<void(const DragMotion& motion)> drag;
+  std::function<void(bool moved, float x, float y)> release;
+  std::function<void(float x, float y)> doubleClick;
+  std::function<void(float notches, std::uint32_t modifiers, std::uint32_t mergeKey)> wheel;
+};
 
 struct ControlBinding {
   std::string hitId;  // the exclusive button element under the drawing
@@ -62,6 +90,7 @@ struct ControlBinding {
   Target target;
   float travel = 1.0f;  // pixels for the whole range (fader travel, kKnobDragPixels)
   KnobRange range;      // knobs
+  std::shared_ptr<DragHandler> handler;  // Custom
 };
 
 struct RouterParams {
@@ -84,12 +113,14 @@ class PointerRouter {
   const ControlBinding* active() const;
 
  private:
+  bool Local(const tela::Runtime& runtime, const std::string& id, float* x, float* y) const;
   std::int32_t Find(const std::string& hitId) const;
   std::int32_t Under(const tela::Runtime& runtime, float x, float y) const;
   bool Pressed(const tela::Runtime& runtime, std::int32_t control) const;
   float ToNorm(const ControlBinding& b, float value) const;
   float FromNorm(const ControlBinding& b, float norm) const;
-  void StartDrag(std::int32_t control, float y, bool fine);
+  void StartDrag(const tela::Runtime& runtime, std::int32_t control, float x, float y, bool fine,
+                 std::uint32_t modifiers);
   void EndDrag();
 
   ControlSink& sink_;
@@ -101,7 +132,12 @@ class PointerRouter {
   std::string dragId_, armedId_;
   float anchorY_ = 0.0f, anchorNorm_ = 0.0f, anchorValue_ = 0.0f, lastY_ = 0.0f;
   bool anchorFine_ = false;
-  float armedY_ = 0.0f;
+  float armedX_ = 0.0f, armedY_ = 0.0f;
+  std::uint32_t armedMods_ = 0;
+  // Custom gesture: its handler, the press position and the hit element's origin at the press.
+  std::shared_ptr<DragHandler> custom_;
+  float pressX_ = 0.0f, pressY_ = 0.0f, originX_ = 0.0f, originY_ = 0.0f, lastX_ = 0.0f;
+  bool moved_ = false;
   // last press, for double clicks
   std::string lastPressId_;
   std::uint64_t lastPressMs_ = 0;

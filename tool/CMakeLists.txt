@@ -62,12 +62,23 @@ add_library(sonus_tool_ui STATIC
   ui/src/status_view.cpp
   ui/src/mixer_view.cpp
   ui/src/profiler_view.cpp
+  ui/src/text_entry.cpp
+  ui/src/kit.cpp
+  ui/src/common_view.cpp
+  ui/src/stub_views.cpp
   ui/src/app.cpp
   ui/src/raster_compositor.cpp
   ui/src/image_file.cpp)
 target_include_directories(sonus_tool_ui PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/ui/include)
 snd_apply_options(sonus_tool_ui)
-target_link_libraries(sonus_tool_ui PUBLIC sonus_tool sonus_contract Tela::Core Tela::Raster PRIVATE sonus_livelink)
+target_link_libraries(sonus_tool_ui PUBLIC sonus_tool sonus_buildtool sonus_contract Tela::Core Tela::Raster
+                      PRIVATE sonus_livelink)
+
+# --- sonus_tool_ui_replay: the replay screen's ReplayService over Sonus::tool_preview (the preview
+# library composes the runtime; the UI library itself stays on the tool's core).
+add_library(sonus_tool_ui_replay STATIC ui/src/replay_service.cpp)
+snd_apply_options(sonus_tool_ui_replay)
+target_link_libraries(sonus_tool_ui_replay PUBLIC sonus_tool_ui PRIVATE sonus_tool_preview)
 
 # --- sonus-tool: the executable. Hosts: headless (every platform), Windows (Tela::Windows),
 # macOS (Tela::MacOS). The host files call Tela's throwing API and are the only Sonus
@@ -75,7 +86,7 @@ target_link_libraries(sonus_tool_ui PUBLIC sonus_tool sonus_contract Tela::Core 
 set(_tool_app_sources app/main.cpp app/options.cpp app/host_headless.cpp)
 add_executable(sonus-tool ${_tool_app_sources})
 snd_apply_options(sonus-tool)
-target_link_libraries(sonus-tool PRIVATE sonus_tool_ui sonus_tool sonus_platform)
+target_link_libraries(sonus-tool PRIVATE sonus_tool_ui sonus_tool_ui_replay sonus_tool_preview sonus_tool sonus_platform)
 if(WIN32)
   if(NOT TARGET Tela::Windows)
     message(FATAL_ERROR "sonus-tool on Windows needs Tela built with -DTELA_BUILD_WINDOWS=ON (Tela::Windows)")
