@@ -152,7 +152,23 @@ CTest の名前: `tool_indep_s7_live_{sync,preview,replay,threads,revert}_test`�
 
 ## 回した構成と結果
 
-（下に追記する）
+ビルドは `$S/live-indep/b-*`、-j2、1 構成ずつ（終わったら消した）。「欠陥 10 本」= 上の `tool_indep_s7_live_Defect_*`（失敗するのが正しい）。
+
+| 構成 | コミット | 実行したテスト | 結果 |
+| --- | --- | --- | --- |
+| 8: TOOL_CORE、gcc Debug | a4d256f | 全部（288 本、うち無効 4・スキップ 1） | 失敗 11: 欠陥 10 本と `platform_indep_audio_driver_test`（`underruns == 0` が 1、-j2 の全体実行の負荷。単独で 3 回通過。組 P の範囲外）。組 P の独立テストの通常の本はすべて通過 |
+| 8 + ASan/UBSan | 9bcce25 | `tool\|livelink`（104 本） | 失敗は欠陥 10 本だけ。サニタイザの報告 0 件（欠陥のテストの中を含む） |
+| 8 + TSan | 9bcce25 | `tool`（71 本） | 欠陥 10 本のほか 2 本: `tool_indep_s7_live_threads_test`（テストの不備: TSan で遅く、フレーム番号の手順が 2 秒の間に起きなかった → 201c2b4 で直した）、`tool_profiler_streams_test`（実装担当のテスト、60 秒待って満たされず。同時に走っていた欠陥のテスト（巨大なブロック番号、子プロセスが CPU を使い切る）と重なった。単独で 3 回通過、下）。ThreadSanitizer の報告 0 件 |
+| 8 + TSan、20 回（-j1） | 9bcce25 | `tool_indep_s7_live_{threads,replay,sync}_test` | sync・replay は 20 回通過。threads は上の不備で失敗 |
+| 8 + Release | 201c2b4 | `tool`（71 本） | 失敗は欠陥 10 本だけ |
+| 8 + Release、20 回（-j1） | 201c2b4 | 同上 | threads・sync は 20 回通過。replay が 20 回のうち 1 回失敗（テストの不備: 試聴の Ack を待たずに記録を止め、試聴が記録の外に落ちた → 96a17c0 で直した） |
+| 8 + clang | 201c2b4 | `tool`（71 本） | 失敗は欠陥 10 本だけ |
+| 8 + TSan、20 回（-j1、再確認） | 96a17c0 | `tool_indep_s7_live_{threads,replay,sync,revert}_test` 20 回、`tool_profiler_streams_test` 単独 3 回 | 全部通過、ThreadSanitizer の報告 0 件 |
+| 8 + Release、20 回（-j1、再確認） | 96a17c0 | 同上 | 全部通過 |
+
+MinGW（`x86_64-w64-mingw32-g++ -std=c++20 -fsyntax-only -Werror -Wall -Wextra -fno-exceptions -fno-rtti`）: `indep_s7_live_{sync,defects,preview,replay,threads,revert}_test.cpp`（とヘッダ）通過。`indep_s7_live_hang_test.cpp` は fork / sys/wait.h を使う POSIX 専用で対象外（CMake も `if(UNIX)`）。
+
+回していない構成: 1・6・7・9（組 P の独立テストは `SND_BUILD_TOOL_CORE` の下にだけあり、実装を変えていないため）。96a17c0 の最終形での全体実行（構成 8 の全部、ASan、clang）は回していない（96a17c0 までの変更はテストの待ち方だけ。直したテストは TSan / Release の 20 回で確認）。
 
 ## 未検証の箇所
 
