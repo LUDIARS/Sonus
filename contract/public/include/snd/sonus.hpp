@@ -283,6 +283,7 @@ struct Config {
   SND_CONFIG_TOP_1_1(SND_CONFIG_CPP_FIELD)  // contract 1.1 (maxVoiceChannels, maxPitchRatio)
   SND_CONFIG_TOP_1_2(SND_CONFIG_CPP_FIELD)  // contract 1.2 (maxBuses .. maxDuckRules, D-92)
   SND_CONFIG_TOP_1_2_HOST(SND_CONFIG_CPP_FIELD)  // contract 1.2 (fileSystemRoot, outputKind; D-102, D-103)
+  SND_CONFIG_TOP_S3_VOICE_FX(SND_CONFIG_CPP_FIELD)  // stage 3 (maxVoiceEffects .. voiceEffectSettings; D-132)
   MemoryConfig memory;
   CommandsConfig commands;
   JobsConfig jobs;
@@ -309,6 +310,7 @@ inline void ToC(const Config& in, snd_config* out) noexcept {
   SND_CONFIG_TOP_1_1(SND_TO_C_TOP)
   SND_CONFIG_TOP_1_2(SND_TO_C_TOP)
   SND_CONFIG_TOP_1_2_HOST(SND_TO_C_TOP)
+  SND_CONFIG_TOP_S3_VOICE_FX(SND_TO_C_TOP)
   SND_CONFIG_MEMORY(SND_TO_C_MEMORY)
   SND_CONFIG_COMMANDS(SND_TO_C_COMMANDS)
   SND_CONFIG_JOBS(SND_TO_C_JOBS)
@@ -625,6 +627,22 @@ inline Result GetMeter(const System* sys, Id bus, Meter* out) noexcept {
 }
 inline Result GetStats(const System* sys, Stats* out) noexcept {
   return detail::R(snd_get_stats(sys, out));
+}
+
+// ---------------------------------------------------------------------------
+// Effects at run time (stage 3: D-130, D-132)
+// ---------------------------------------------------------------------------
+inline Result SetEffectParam(System* sys, Id bus, std::uint32_t effectIndex, std::uint32_t paramIndex, float value,
+                             float fadeSeconds = 0.0f) noexcept {
+  return detail::R(snd_set_effect_param(sys, bus, effectIndex, paramIndex, value, fadeSeconds));
+}
+inline Result SetEventVoiceEffect(System* sys, Id event, std::uint32_t slot, Id effectKind,
+                                  const float* params = nullptr, std::uint32_t paramCount = 0) noexcept {
+  return detail::R(snd_set_event_voice_effect(sys, event, slot, effectKind, params, paramCount));
+}
+inline Result SetPlaybackEffectParam(System* sys, PlaybackHandle p, std::uint32_t slot, std::uint32_t paramIndex,
+                                     float value) noexcept {
+  return detail::R(snd_set_playback_effect_param(sys, p.ToC(), slot, paramIndex, value));
 }
 
 // Stage 3 (D-146, D-148).

@@ -362,6 +362,29 @@ class System {
   snd_result LiveWriteCell(const LiveCell& cell, std::uint32_t fourcc, std::uint32_t column, std::uint64_t bits,
                            std::uint64_t* previous, bool apply) noexcept;
 
+  // --- stage 3 (coverage, group 2): effects at run time ---------------------------------
+  // Recording (registered threads; semantics of snd/sonus.h snd_set_effect_param,
+  // snd_set_event_voice_effect, snd_set_playback_effect_param). D-130, D-132.
+  snd_result SetEffectParam(Id bus, std::uint32_t effectIndex, std::uint32_t paramIndex, float value,
+                            float fadeSeconds) noexcept;
+  snd_result SetEventVoiceEffect(Id event, std::uint32_t slot, Id effectKind, const float* params,
+                                 std::uint32_t paramCount) noexcept;
+  snd_result SetPlaybackEffectParam(snd_playback_handle playback, std::uint32_t slot, std::uint32_t paramIndex,
+                                    float value) noexcept;
+  // Voice-effect pool counters (D-133). Read on the audio thread or after it stopped (tests,
+  // tools); not part of snd_stats (the public struct is not extended).
+  struct VoiceFxStats {
+    std::uint64_t acquired = 0;     // real assignments that got a voice-effect slot
+    std::uint64_t dry = 0;          // real assignments that played dry (no slot, or too large)
+    std::uint64_t dryTooLarge = 0;  // of dry: the chain's state did not fit voice_effect_bytes
+    std::uint32_t slotsInUse = 0;
+    std::uint32_t slots = 0;
+  };
+  VoiceFxStats GetVoiceFxStats() const noexcept;
+  // Tests only (no audio thread inside RenderBlock): sets the load LOD level (2.4, 0..3).
+  // UpdateLod keeps moving it from the measured block times afterwards.
+  void SetLodLevelForTesting(std::uint32_t level) noexcept;
+
   struct Impl;
   Impl* impl() noexcept { return impl_; }
   const Impl* impl() const noexcept { return impl_; }
