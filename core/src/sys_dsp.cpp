@@ -253,10 +253,8 @@ void EvaluateDspParams(Impl& im) noexcept {
       lowpass = std::min(lowpass, spatial.filter);
       const auto ed = base::rows::DenseOf(t.Emitter.rows, em);
       const Occlusion occ = SND_R(Emitter_occlusion)[ed];
-      if (occ.occlusion > 0) {
-        gainDb -= 12 * occ.occlusion;
-        lowpass = std::min(lowpass, dsp::kVoiceLowpassOffHz * std::pow(0.05f, occ.occlusion));
-      }
+      if (occ.occlusion > 0) gainDb -= 12 * occ.occlusion;
+      mix.occlusion = occ.occlusion;
       mix.obstruction = occ.obstruction;
     }
     // Category gain and the "voices playing" count for rule ducking.
