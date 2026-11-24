@@ -130,7 +130,7 @@ void UnlinkVoice(Impl& im, SlotIndex playback, SlotIndex voice) noexcept {
 }
 
 // Destroys a voice row (not held: callers check). The source instance is released in the batch.
-void DestroyVoice(Ctx& c, SlotIndex voice, std::uint32_t detail = SND_END_DETAIL_NONE) noexcept {
+void DestroyVoice(Ctx& c, SlotIndex voice) noexcept {
   Impl& im = c.im;
   schema::Tables& t = c.t;
   const std::uint32_t d = base::rows::DenseOf(t.Voice.rows, voice);
@@ -148,9 +148,6 @@ void DestroyVoice(Ctx& c, SlotIndex voice, std::uint32_t detail = SND_END_DETAIL
   }
   if (group < im.cfg.groupCap && im.ev.groupLive[group] > 0u) --im.ev.groupLive[group];
   if (pb < im.cfg.maxPlaybacks) {
-    // A stolen voice already left the playback logically when it left its group.
-    // Rendering the end of its fade cannot replace the cause for a surviving voice.
-    if ((vs.flags & kVsGroupStolen) == 0u) Priv(im, pb).lastVoiceDetail = detail;
     UnlinkVoice(im, pb, voice);
     const std::uint32_t pd = base::rows::DenseOf(t.Playback.rows, pb);
     if (pd != kNoSlot && SND_W(Playback_logic)[pd].voiceCount > 0u) --SND_W(Playback_logic)[pd].voiceCount;
@@ -399,8 +396,6 @@ bool CreateVoice(Ctx& c, StartContext& sc, SourceKind kind, const void* params, 
       const std::uint32_t vd = base::rows::DenseOf(t.Voice.rows, victim);
       // The stolen voice leaves the group now (its fade still renders).
       if (vd != kNoSlot) {
-        im.ev.vs[victim].flags |= kVsGroupStolen;
-        Priv(im, SND_W(Voice_playbackSlot)[vd]).lastVoiceDetail = SND_END_DETAIL_LIMIT_GROUP;
         SND_W(Voice_limitGroup)[vd] = kNoSlot;
         if (im.ev.groupLive[sc.groupSlot] > 0u) --im.ev.groupLive[sc.groupSlot];
       }
@@ -1596,8 +1591,9 @@ void RunEventLogic(Impl& im) noexcept {
         }
       }
       if ((ended || released || dropped) && !VoiceHeld(c, d)) {
-        const auto detail = dropped && !ended && !released ? SND_END_DETAIL_VOICE_LIMIT : SND_END_DETAIL_NONE;
-        DestroyVoice(c, v, detail);  // the swapped-in row is now at d
+        const SlotIndex pb = SND_W(Voice_playbackSlot)[d];
+        if (dropped && !ended && !released && pb < im.cfg.maxPlaybacks) Priv(im, pb).flags |= kPbVoiceDropped;
+        DestroyVoice(c, v);  // the swapped-in row is now at d
         continue;
       }
       ++d;
@@ -1795,13 +1791,11 @@ void RunEventLogic(Impl& im) noexcept {
       // NO_STREAM_SLOT, ...) left the reason in endDetail: the playback is rejected.
       const bool stopping = (pp.flags & kPbStopping) != 0u;
       const bool refused = !stopping && pp.endDetail != SND_END_DETAIL_NONE && (pp.flags & kPbSourceStarted) == 0u;
-      std::uint32_t reason = pp.lastVoiceDetail == SND_END_DETAIL_NONE ? SND_END_COMPLETED : SND_END_STOLEN;
-      std::uint32_t detail = pp.lastVoiceDetail;
-      if (stopping || refused) {
-        reason = stopping ? pp.endReason : SND_END_REJECTED;
-        detail = pp.endDetail;
-      }
-      if (!EndPlayback(c, d, reason, detail)) {
+      // D-140: a voice dropped when it went virtual ("never" return): the playback was stolen.
+      const bool dropped = !stopping && !refused && (pp.flags & kPbVoiceDropped) != 0u;
+      if (!EndPlayback(c, d,
+                       stopping ? pp.endReason : (refused ? SND_END_REJECTED : (dropped ? SND_END_STOLEN : SND_END_COMPLETED)),
+                       stopping || refused ? pp.endDetail : (dropped ? SND_END_DETAIL_VOICE_LIMIT : SND_END_DETAIL_NONE))) {
         ++d;
       }
       continue;
