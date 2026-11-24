@@ -53,4 +53,6 @@
 | 親アクションの受理・拒否・再開 | `IndepG3Action.AcceptedInitialActionUsesTransitionDuration`, `IndepG3Action.RejectedInitialActionPreservesAlreadyRunningTransition`, `IndepG3Action.PausingBeforeFutureActionDelaysItsTransition`, `IndepG3Action.RetargetDuringScheduledParentsFirstFadeUsesItsCurrentWeight` |
 | 全組横断の出力・RT・CPU | `IndepCrossStage3.SerialReplayAndTwoWorkersMatchAudioNotificationsAndSpectrum`, `IndepCrossStage3.Real128VoicesRunWithinBudgetWithoutAllocationOrRtViolation` |
 
-単独ターゲットは `indep_g3_mix_test`、`indep_g3_control_test`。組①・④を含む先頭には `indep_b_cross_test` も登録される。性能試験はRTワーカー0と2のプロセスCPU時間をRenderBlockごとに測定し、ブロック時間に対する平均比を記録する。独立計画とソースを照合した時点では組③単独25ケース、全組横断2ケース。実行結果は別途記載する。
+単独ターゲットは `indep_g3_mix_test`、`indep_g3_control_test`。組①・④を含む先頭には `indep_b_cross_test` も登録される。性能試験はRTワーカー0と2のプロセスCPU時間をRenderBlockごとに測定し、ブロック時間に対する平均比を記録する。独立計画とソースを照合した時点では組③単独25ケース、全組横断5ケース。実行結果は別途記載する。
+
+D-162 の3ケース（IndepCrossCurves）は、距離曲線のあり・なし、パラメータ0・0.5・1について、2本のカーブの積と等価な距離曲線だけの参照シーンを比較する。Spread は左右、Blend3D は距離4での減衰、ReverbSend はドライ信号がマスターに届かないバスグラフの左右を観測する。
