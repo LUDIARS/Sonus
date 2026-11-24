@@ -16,11 +16,17 @@
 //    D-182: the Hello hash is the document's current build at every connection (a new client while
 //    connecting: Connection::SetProjectBuildHash). The answer is remembered for a reconnect to the
 //    same game only (its bank list: bank id, language, content hash; a 1.0 game: its build hash);
-//    another game is asked again (Checking until its bank list is in). SetDecision(Ask) forgets it.
+//    another game is asked again. A 1.1 game is never asked (nor answered from memory) before its
+//    bank list is in: the phase is Checking until then and the question carries the verdict per
+//    bank (G10). The connection's state, its HelloReply and its generation are read from one
+//    Connection::Poll (D-182): an answer goes only to the connection it was decided for.
+//    SetDecision(Ask) forgets it.
 //    Reconnect: no assumption on whether the game kept the overrides. Every cell and table the tool
 //    ever sent (Undone ones too) goes again with the current build's value, on top of the bank-list
 //    diff (the game's content hash against the builds the tool knows): after a reconnect the game's
-//    cells are the document's build.
+//    cells are the document's build. Live structural edits are not sent again (whether the game kept
+//    them is not known): a bank that had them is hot reloaded, and a successful reload empties
+//    structEdits() and reserve() for it.
 // 2. Edits: every change of the document (an edit, Undo, Redo: its revision) is built (throttled:
 //    at most one build per throttleMs while edits keep coming; the last state is always built and
 //    sent: FlushNow() forces it, e.g. at the end of a drag) and compared with what the game holds
@@ -29,7 +35,9 @@
 //      a table whose shape is unchanged                  -> ReplaceChunk (one in flight)
 //      buses / effects / sends added or removed          -> StructEdit (within Config.dev_reserve)
 //        (a bus added in today's bank format moves the master's row, so events' bus columns change
-//        too: in practice an added bus goes by hot reload, G3)
+//        too: in practice an added bus goes by hot reload, G3). Value changes of the same build in
+//        those tables (bus volumes, effect parameters, send levels of the objects that stay) go as
+//        SetValue right after the structural edits; anything else in them sends the bank by reload.
 //      anything else, or a refused ReplaceChunk / StructEdit (UNSUPPORTED, OUT_OF_BUDGET, LIMIT)
 //                                                        -> hot reload of the bank (step 3)
 //    What cannot go anywhere (no reload writer, a 1.0 game, a bank the game does not have, the
