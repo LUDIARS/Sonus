@@ -74,6 +74,19 @@ void Energy(const Sys& s, std::uint64_t from, std::uint64_t to, double* l, doubl
     *r += std::fabs(s.R(f));
   }
 }
+// Advances the output until snd_get_stats shows a new block_index (one rig period does not
+// always publish a new block by its last snd_update: the audio thread renders asynchronously).
+bool AdvanceToNewBlock(Sys& s) {
+  snd_stats a{};
+  snd_get_stats(s.sys, &a);
+  for (int i = 0; i < 50; ++i) {
+    s.Advance(1);
+    snd_stats b{};
+    snd_get_stats(s.sys, &b);
+    if (b.block_index != a.block_index) return true;
+  }
+  return false;
+}
 std::uint32_t CoreOverflow(const Sys& s) {
   snd_stats ss{};
   snd_get_stats(s.sys, &ss);
@@ -105,7 +118,7 @@ SND_TEST(IndepStall, DetectionBoundaryAndEnd) {
     }
     SND_CHECK_EQ(played.size(), 4u);
     if (played.size() == 4u) SND_CHECK_EQ(played.back(), 4);
-    f.s.Advance(1);  // the block_index moves: the next call plays again
+    SND_REQUIRE(AdvanceToNewBlock(f.s));  // the block_index moves: the next call plays again
   }
   const snd_physics_stats st = f.St();
   SND_CHECK_EQ(st.dropped_audio_stalled, 12u);
@@ -173,7 +186,7 @@ SND_TEST(IndepStall, StalledGroupsAccounting) {
   SND_CHECK_EQ(st.dropped_budget, 1u);
   SND_CHECK_EQ(st.groups, st.dropped_no_event + st.dropped_cooldown + st.dropped_budget + st.dropped_audio_stalled +
                               st.dropped_no_emitter + st.group_requests);
-  f.s.Advance(1);
+  SND_REQUIRE(AdvanceToNewBlock(f.s));
   SND_CHECK_EQ(f.Submit({Hit(1, 2.0f)}), SND_OK);  // no cooldown was recorded
   SND_CHECK_EQ(f.rec.Count(SND_PHYSICS_RECORD_PLAY), 1u);
   st = f.St();
@@ -225,7 +238,7 @@ SND_TEST(IndepStall, SlidesDuringAStall) {
   SND_CHECK_EQ(st.tracking_timeouts, 0u);        // slide 2 waits for the end of the stall
   SND_CHECK_EQ(st.tracking_updated + st.tracking_restarted, 2000u);
   // The stall ends (snd_update + output): slide 2 times out, slide 1 records its latest values.
-  f.s.Advance(1);
+  SND_REQUIRE(AdvanceToNewBlock(f.s));
   const float lastX = 2.0f;
   const float lastSpeed = 1.0f + 1999.0f * 0.001f;
   SND_CHECK_EQ(f.Submit({Slide(1, lastX, lastSpeed)}), SND_OK);
