@@ -84,7 +84,7 @@ void Script(unsigned workers, unsigned voices, unsigned blocks, std::vector<floa
   h.sys->Update();
   snd_stats stats{};
   SND_CHECK_EQ(h.sys->GetStats(&stats), SND_OK);
-
+  SND_CHECK_EQ(stats.real_voices, voices);
   SND_CHECK_EQ(alloc.allocations.load(), allocations);
   SND_CHECK_EQ(snd::test::rt::UnexpectedTotal(), 0u);
   if (!capture) {
