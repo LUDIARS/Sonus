@@ -22,7 +22,6 @@ namespace snd::core {
 
 namespace {
 constexpr schema::SystemId kSys = schema::SystemId::EvaluateDspParams;
-constexpr float kPi = 3.14159265358979f;
 
 float Unit(float x) noexcept { return std::clamp(x, 0.0f, 1.0f); }
 
@@ -58,7 +57,7 @@ SpatialTarget SpatialAt(const Impl& im, SlotIndex spatial, const bk::BankView* v
   const float inner = view->Column<bk::col::EVNT_coneInnerDeg>()[row];
   const float outer = view->Column<bk::col::EVNT_coneOuterDeg>()[row];
   if (outer > 0 && outer >= inner) {
-    const float angle = 2.0f * std::acos(std::clamp(SND_R(Spatial_coneCos)[spatial], -1.0f, 1.0f)) * 180.0f / kPi;
+    const float angle = SND_R(Spatial_coneAngle)[spatial];
     if (angle > inner) {
       const float f = angle >= outer ? 1.0f : (angle - inner) / std::max(outer - inner, 1e-6f);
       result.coneDb = view->Column<bk::col::EVNT_coneOuterDb>()[row] * f;
@@ -80,7 +79,7 @@ SpatialTarget SpatialAt(const Impl& im, SlotIndex spatial, const bk::BankView* v
 }
 
 struct SpatialGain {
-  float distanceDb = 0, coneDb = 0, linear = 1, filter = 1e9f, ratio = 1, distance = 0;
+  float distanceDb = 0, coneDb = 0, linear = 1, filter = 1e9f, ratio = 1, distance = 0, blend = 1;
 };
 
 SpatialGain ListenerMix(const Impl& im, SlotIndex em, const bk::BankView* view, std::uint32_t row,
@@ -127,6 +126,7 @@ SpatialGain ListenerMix(const Impl& im, SlotIndex em, const bk::BankView* view, 
       out.filter = target.filter;
       out.ratio = target.ratio;
       out.distance = SND_R(Spatial_distance)[item.spatial];
+      out.blend = target.blend;
     }
     if (mix.count == 1) {
       item.weight = 1;
@@ -205,7 +205,8 @@ void EvaluateDspParams(Impl& im) noexcept {
     const BankRecord* br = RegisteredBank(im, vclip[d].bankSlot);
     const bk::BankView* view = br != nullptr ? br->view : nullptr;
     const bool event = view && vs.eventRow < view->Rows(bf::chunk::EVNT);
-    const SlotIndex em = (vs.flags & kVs3D) != 0u ? vem[d] : kNoSlot;
+    const bool emitterLive = base::rows::IsCurrent(t.Emitter.rows, HandleRef{vem[d], vs.emitterGeneration});
+    const SlotIndex em = (vs.flags & kVs3D) != 0u && emitterLive ? vem[d] : kNoSlot;
     VoiceSpatialMix& mix = im.dp.mix[v];
     const SpatialGain spatial = ListenerMix(im, em, event ? view : nullptr, vs.eventRow, mix);
     const float distance = spatial.distance;
@@ -214,7 +215,7 @@ void EvaluateDspParams(Impl& im) noexcept {
       // Parameter curves (4.3): volume dB add, pitch cents add, lowpass min, highpass max, others multiply.
       const std::uint32_t cf = view->Column<bk::col::EVNT_curveFirst>()[row];
       const std::uint32_t cc = cf == bf::kNone ? 0u : view->Column<bk::col::EVNT_curveCount>()[row];
-      const SlotIndex emitter = pd != kNoSlot ? SND_R(Voice_emitterSlot)[d] : kNoSlot;
+      const SlotIndex emitter = pd != kNoSlot && emitterLive ? vem[d] : kNoSlot;
       for (std::uint32_t k = 0; k < cc; ++k) {
         const std::uint32_t cv = cf + k;
         const Id input = view->Column<bk::col::CURV_input>()[cv];
@@ -224,8 +225,27 @@ void EvaluateDspParams(Impl& im) noexcept {
         } else {
           x = ParamValueOf<kSys>(im, input, pb, emitter);
         }
-        const float y = EvaluateCurve(*view, cv, x);
-        switch (static_cast<bf::CurveTarget>(view->Column<bk::col::CURV_target>()[cv])) {
+        const auto destination = static_cast<bf::CurveTarget>(view->Column<bk::col::CURV_target>()[cv]);
+        float y = EvaluateCurve(*view, cv, x);
+        if (input == bf::kInputDistance && mix.count && spatial.blend < 1) {
+          // The same blend applies to distance-input CURV rows as to the
+          // dedicated EVNT curves. Other parameter inputs remain active in 2D.
+          const float b = spatial.blend;
+          if (b == 0) continue;
+          switch (destination) {
+            case bf::CurveTarget::Volume: y = 20 * std::log10((1 - b) + b * DbToGain(y)); break;
+            case bf::CurveTarget::Pitch:
+            case bf::CurveTarget::Pan: y *= b; break;
+            case bf::CurveTarget::Lowpass:
+              y = dsp::kVoiceLowpassOffHz * std::pow(std::max(y, 10.0f) / dsp::kVoiceLowpassOffHz, b);
+              break;
+            case bf::CurveTarget::Highpass:
+              y = dsp::kVoiceHighpassOffHz * std::pow(std::max(y, 10.0f) / dsp::kVoiceHighpassOffHz, b);
+              break;
+            default: break;
+          }
+        }
+        switch (destination) {
           case bf::CurveTarget::Volume: gainDb += y; break;
           case bf::CurveTarget::Pitch: cents += y; break;
           case bf::CurveTarget::Lowpass: lowpass = y < lowpass ? y : lowpass; break;

@@ -659,10 +659,10 @@ void ApplyOne(Impl& im, const cmd::CommandHeader& h, const std::uint8_t* p) noex
         const float z = std::bit_cast<float>(c.reserved2);
         if (!std::isfinite(z) || z < 0 || !std::isfinite(c.value) || c.value < 0) break;
         if (c.reserved[0] == cmd::kParamVariantShape) {
-          const float x = std::bit_cast<float>(c.param);
-          if (!std::isfinite(x) || x < 0 || c.reserved[1] > SND_EMITTER_SHAPE_BOX) break;
+          const float y = std::bit_cast<float>(c.param);
+          if (!std::isfinite(y) || y < 0 || c.reserved[1] > SND_EMITTER_SHAPE_BOX) break;
           SND_W(Emitter_shapeKind)[d] = c.reserved[1];
-          SND_W(Emitter_halfExtents)[d] = Vec3{x, c.value, z};
+          SND_W(Emitter_halfExtents)[d] = Vec3{c.value, y, z};
         } else if (c.value <= 1) {
           SND_W(Emitter_zoneAmount)[d] = c.value;
           SND_W(Emitter_zoneFade)[d] = z;

@@ -115,3 +115,53 @@ SND_TEST(CoreG1, Split128MovingSourcesWithFourZonesWithinBudget) {
   std::vector<float> unused;
   for (unsigned workers : {0u, 2u}) Script(workers, 128, 120, unused);
 }
+
+SND_TEST(CoreG1, SplitScreenZoneGainFollowsListenerContribution) {
+  auto cfg = SmallConfig();
+  cfg.listener_mode = SND_LISTENER_SPLIT;
+  cfg.max_listeners = 2;
+  Harness h(cfg);
+  SND_REQUIRE_EQ(h.created, SND_OK);
+  TestBank bank;
+  bank.buses.push_back(TBus{HashId("dry"), kNone, 2, bf::kBusOutput, 0, {}, {}});
+  bank.buses.push_back(TBus{HashId("master"), kNone, 2, bf::kBusMaster, 0, {}, {}});
+  bank.assets.push_back(TAsset{HashId("constant"), 1, 48000, Constant(4096, 0.1f), 0, 4096});
+  TEvent event = SimpleEvent("moving", 0);
+  event.flags = bf::kEvent3D;
+  event.tracks[0].clips[0].loopCount = 0;
+  event.curveSpread = 0;
+  bank.curves.push_back(TCurve{bf::kInputDistance, static_cast<unsigned>(bf::CurveTarget::Spread),
+                               static_cast<unsigned>(bf::CurveCompose::Min), {{0, 1}, {10, 1}}});
+  bank.events.push_back(event);
+  SND_REQUIRE_EQ(h.sys->GetBankState(h.Load("two seats", bank.Build(HashId("space")))), SND_BANK_STATE_LOADED);
+  const auto zone = h.sys->CreateEmitter();
+  const auto source = h.sys->CreateEmitter();
+  const snd_vec3 atZone{-1, 0, 0};
+  SND_REQUIRE_EQ(h.sys->SetTransform(zone, &atZone, nullptr, nullptr), SND_OK);
+  SND_REQUIRE_EQ(h.sys->SetReverbZone(zone, HashId("master"), 1, 0.1f), SND_OK);
+  snd_listener_desc inside{atZone, {0, 0, 1}, {0, 1, 0}, {}, 1, 1};
+  SND_REQUIRE_EQ(h.sys->SetListener(0, &inside), SND_OK);
+  SND_REQUIRE(h.sys->Play(kTone, source, nullptr).value != 0);
+  h.Steps(8);
+  const float reference = h.out[0] + h.out[1];
+  SND_REQUIRE(reference > 0.1f);
+  inside.position = {1, 0, 0};
+  SND_REQUIRE_EQ(h.sys->SetListener(1, &inside), SND_OK);
+  h.Steps(8);
+  SND_CHECK_NEAR((h.out[0] + h.out[1]) / reference, 0.5f, 0.002f);
+}
+
+SND_TEST(CoreG1, DopplerConfigRejectsInvalidUnits) {
+  auto cfg = SmallConfig();
+  for (float speed : {0.0f, -1.0f, 100001.0f}) {
+    cfg.speed_of_sound = speed;
+    Harness h(cfg);
+    SND_CHECK_EQ(h.created, SND_ERR_INVALID_ARGUMENT);
+  }
+  cfg.speed_of_sound = 343;
+  for (float factor : {-1.0f, 16.1f}) {
+    cfg.doppler_factor = factor;
+    Harness h(cfg);
+    SND_CHECK_EQ(h.created, SND_ERR_INVALID_ARGUMENT);
+  }
+}

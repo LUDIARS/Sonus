@@ -85,7 +85,7 @@ void PanFor(const Impl& im, const VoiceStatic& vs, float pan, std::uint32_t outC
 }
 
 void SpatialMatrix(const Impl& im, const VoiceStatic& vs, const VoiceSpatialMix& mix, float pan,
-                   std::uint32_t channels, PanMatrix& matrix) noexcept {
+                   std::uint32_t channels, PanMatrix& matrix, PanMatrix* seatMatrices) noexcept {
   const auto& t = im.tables;
   if (mix.count == 0) {
     PanFor(im, vs, pan, channels, nullptr, 0, 0, &matrix);
@@ -95,6 +95,7 @@ void SpatialMatrix(const Impl& im, const VoiceStatic& vs, const VoiceSpatialMix&
     const ListenerContribution& item = mix.listeners[i];
     PanMatrix part{};
     PanFor(im, vs, pan, channels, &SND_R(Spatial_azimuth)[item.spatial], item.spread, item.blend, &part);
+    seatMatrices[i] = part;
     if (mix.count == 1) { matrix = part; return; }
     for (unsigned c = 0; c < vs.channels; ++c)
       for (unsigned o = 0; o < channels; ++o) matrix.gain[c][o] += part.gain[c][o] * item.weight;
@@ -224,17 +225,17 @@ void PostProcessItem(Impl& im, RenderSet& set, const source::RenderItem& it, Ite
   for (unsigned j = 0; j < in.sends; ++j) {
     const auto& route = in.aux[j];
     PanMatrix old{}, next{};
-    if (fresh) ScaleMatrix(route.pan, in.gain0 * route.amount, &old);
+    if (fresh) ScaleMatrix(route.pan, in.gain0, &old);
     else {
       for (unsigned n = 0; n < history.sends; ++n) {
         const auto& previous = history.previous[n];
         if (previous.bus == route.bus && previous.generation == route.generation) {
-          ScaleMatrix(previous.pan, in.gain0 * previous.amount, &old);
+          ScaleMatrix(previous.pan, in.gain0, &old);
           break;
         }
       }
     }
-    ScaleMatrix(route.pan, in.gain1 * route.amount, &next);
+    ScaleMatrix(route.pan, in.gain1, &next);
     float* output[kMaxChannels];
     float* segment = SegBuffer(im, set, chunk, route.segment);
     for (unsigned c = 0; c < route.channels; ++c) output[c] = segment + std::size_t{c} * frames;
@@ -244,7 +245,7 @@ void PostProcessItem(Impl& im, RenderSet& set, const source::RenderItem& it, Ite
     const auto removed = in.removed[j];
     const auto& previous = history.previous[removed.previous];
     PanMatrix old{}, silent{};
-    ScaleMatrix(previous.pan, in.gain0 * previous.amount, &old);
+    ScaleMatrix(previous.pan, in.gain0, &old);
     float* output[kMaxChannels];
     float* segment = SegBuffer(im, set, chunk, removed.segment);
     for (unsigned c = 0; c < previous.channels; ++c) output[c] = segment + std::size_t{c} * frames;
@@ -603,37 +604,63 @@ void Render(Impl& im) noexcept {
     in.gain1 = gain.end;
     t.RealVoice.col.appliedGain[r] = gain.end;
     const VoiceSpatialMix& mix = im.dp.mix[v];
-    SpatialMatrix(im, vs, mix, im.dp.pan[v], in.outChannels, in.pan);
+    PanMatrix seatMatrices[SND_MAX_LISTENERS];
+    SpatialMatrix(im, vs, mix, im.dp.pan[v], in.outChannels, in.pan, seatMatrices);
     in.directGain = mix.obstruction > 0 ? DbToGain(-18 * mix.obstruction) : 1;
     in.directLp = mix.obstruction > 0 ? dsp::kVoiceLowpassOffHz * std::pow(0.04f, mix.obstruction) : dsp::kVoiceLowpassOffHz;
     in.sendLp = mix.occlusion > 0 ? dsp::kVoiceLowpassOffHz * std::pow(0.05f, mix.occlusion) : dsp::kVoiceLowpassOffHz;
     in.directLp = std::min(in.directLp, in.sendLp);
     if (mix.count) {
-      auto add = [&](SlotIndex target, float amount) {
+      float seatAmounts[kMaxAuxSends][SND_MAX_LISTENERS]{};
+      auto add = [&](SlotIndex target, unsigned seat, float amount) {
         if (target == kNoSlot || amount <= 0) return;
-        for (unsigned j = 0; j < in.sends; ++j) {
-          if (in.aux[j].bus != target) continue;
-          in.aux[j].amount = std::min(1.0f, in.aux[j].amount + amount);
-          return;
+        unsigned j = 0;
+        while (j < in.sends && in.aux[j].bus != target) ++j;
+        if (j == in.sends) {
+          auto& route = in.aux[in.sends++];
+          route.bus = target;
+          route.generation = t.Bus.rows.generation[target];
+          route.channels = im.busDefs[target].channels;
+          route.segment = Segment(ci, segs, target, route.channels);
         }
-        auto& route = in.aux[in.sends++];
-        route.bus = target;
-        route.amount = amount;
-        route.generation = t.Bus.rows.generation[target];
-        route.channels = im.busDefs[target].channels;
-        route.segment = Segment(ci, segs, target, route.channels);
-        if (route.channels == in.outChannels) route.pan = in.pan;
-        else SpatialMatrix(im, vs, mix, im.dp.pan[v], route.channels, route.pan);
+        seatAmounts[j][seat] = std::min(1.0f, seatAmounts[j][seat] + amount);
       };
       if (mix.curveSend > 0) {
         const auto* rec = RegisteredBank(im, SND_R(Voice_clipRef)[d].bankSlot);
-        add(CurveSendBus(im, rec, vs.eventRow), mix.curveSend);
+        const SlotIndex target = CurveSendBus(im, rec, vs.eventRow);
+        for (unsigned l = 0; l < mix.count; ++l) add(target, l, mix.listeners[l].curveSend);
       }
       ZoneSend zones[kMaxZones]{};
       ListenerZones(im, mix, zones);
       for (const ZoneSend& zone : zones) {
         if (zone.amount == 0) break;
-        add(im.busMap.Find(zone.bus), zone.amount);
+        const SlotIndex target = im.busMap.Find(zone.bus);
+        for (unsigned l = 0; l < mix.count; ++l) {
+          const unsigned seat = mix.listeners[l].spatial % im.cfg.maxListeners;
+          for (const auto& candidate : im.dp.zones[seat]) {
+            if (candidate.amount == 0) break;
+            if (candidate.emitter == zone.emitter) add(target, l, candidate.amount);
+          }
+        }
+      }
+      for (unsigned j = 0; j < in.sends; ++j) {
+        AuxRoute& route = in.aux[j];
+        // Only a seat hearing this send contributes its pan matrix. A zone at
+        // the left seat must stay on that side in the combined stereo output.
+        for (unsigned l = 0; l < mix.count; ++l) {
+          const float amount = mix.listeners[l].weight * seatAmounts[j][l];
+          if (amount <= 0) continue;
+          PanMatrix alternate;
+          const PanMatrix* matrix = &seatMatrices[l];
+          if (route.channels != in.outChannels) {
+            const auto& item = mix.listeners[l];
+            PanFor(im, vs, im.dp.pan[v], route.channels, &SND_R(Spatial_azimuth)[item.spatial],
+                   item.spread, item.blend, &alternate);
+            matrix = &alternate;
+          }
+          for (unsigned c = 0; c < in.channels; ++c)
+            for (unsigned o = 0; o < route.channels; ++o) route.pan.gain[c][o] += amount * matrix->gain[c][o];
+        }
       }
     }
     if ((in.flags & kItemInitPan) == 0u) {
@@ -648,6 +675,18 @@ void Render(Impl& im) noexcept {
     }
     // Filter.
     in.filter = SND_R(Voice_filterTarget)[d];
+    const float sharedLp = std::min(in.filter.lowpassHz, dsp::kVoiceLowpassOffHz);
+    if (in.directLp < sharedLp) {
+      // A stricter path needs a separate cutoff. Run exactly one lowpass per
+      // route after the voice effects; keep the common highpass before them.
+      in.sendLp = std::min(sharedLp, in.sendLp);
+      in.filter.lowpassHz = dsp::kVoiceLowpassOffHz;
+      if (in.flags & kItemInitPan) dsp::VoiceFilterInit(t.RealVoice.col.filterState[r], in.filter);
+    } else {
+      // The existing clip/parameter/distance cutoff already dominates both.
+      in.directLp = dsp::kVoiceLowpassOffHz;
+      in.sendLp = dsp::kVoiceLowpassOffHz;
+    }
     const bool targetOpen = in.filter.lowpassHz >= dsp::kVoiceLowpassOffHz && in.filter.highpassHz <= dsp::kVoiceHighpassOffHz;
     in.filterActive = (!targetOpen || !dsp::VoiceFilterIsOpen(t.RealVoice.col.filterState[r], im.cfg.sampleRate)) ? 1u : 0u;
     VfxPrepareItem(im, it, in);  // D-132: voice-effect slot and this block's parameters
