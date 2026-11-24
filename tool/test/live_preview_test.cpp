@@ -227,3 +227,71 @@ SND_TEST(LivePreview, TransitionAuditionMatchesThePreviewAtBarLinesAndTimeZero) 
     SND_CHECK_NEAR(last / first, 2.0, 1e-4);
   }
 }
+
+namespace {
+// The music project with SegB's material streamed without preload (`bridge`: a rule bridge "Br"
+// in memory). Returns the engine's switch and the model's forecast for `request`.
+struct StreamRun {
+  bool ok = false;
+  double engine = -1.0, model = -1.0;
+  bool late = false;
+  double primeMs = 0.0;
+};
+StreamRun RunStream(double request, bool bridge) {
+  StreamRun out;
+  Rig r(true);
+  if (!r.ok) return out;
+  r.doc.Set(livetest::G(21), "loadForm", String("stream"));
+  r.doc.Set(livetest::G(21), "preloadMs", Number(0));
+  if (bridge) {
+    json::Value seg;
+    json::ParseError pe{};
+    json::Parse("{\"asset\": \"ma\", \"bars\": 1, \"bank\": \"Main\"}", &seg, &pe);
+    r.doc.Create("segment", "Br", &seg);
+    r.doc.Set(livetest::G(26), "music.transitions[0].bridge", String("Br"));
+  }
+  std::string err;
+  const DocBuild b = BuildDocument(r.doc);
+  if (!b.ok || !r.engine->LoadBuild(b, &err)) return out;
+  MusicEditor me(r.doc, livetest::G(26));
+  const MusicSettings ms = MusicSettingsOf(*r.engine);  // the engine's own prime (G11)
+  out.primeMs = ms.streamPrimeMs;
+  const TransitionPreview p = me.Preview("Explore", "Battle", request, ms);
+  out.model = p.fireSeconds;
+  out.late = p.lateApplied;
+  AuditionRouter router;
+  router.Bind(nullptr, r.engine.get());
+  r.Frames(2);
+  const std::uint64_t start = r.engine->NextBlock() * ms.blockFrames;
+  if (!router.PlayTransition(TransitionAudition{snd::HashId("Song"), snd::HashId("Explore"), snd::HashId("Battle"), request}).ok) {
+    return out;
+  }
+  r.engine->Render(static_cast<std::uint32_t>((p.fireSeconds + 0.5) * ms.sampleRate / ms.blockFrames), nullptr);
+  const std::vector<PreviewTransition> tr = r.engine->Transitions();
+  if (tr.empty()) return out;
+  out.engine = static_cast<double>(tr.back().clock - start) / ms.sampleRate;
+  out.ok = true;
+  return out;
+}
+}  // namespace
+
+SND_TEST(LivePreview, StreamAndBridgePrimesAgreeWithTheModel) {
+  // G11: a stream without preload primes for the engine's StreamPrimeMs; the model computes with it.
+  const StreamRun late = RunStream(1.95, false);
+  SND_REQUIRE(late.ok);
+  SND_CHECK_NEAR(late.primeMs, 100.0, 1e-9);
+  SND_CHECK(late.late);  // 2.0 s is closer than the prime: the next bar
+  SND_CHECK_NEAR(late.engine, 4.0, 1e-9);
+  SND_CHECK_NEAR(late.model, late.engine, 1e-9);
+  const StreamRun early = RunStream(1.5, false);
+  SND_REQUIRE(early.ok);
+  SND_CHECK(!early.late);
+  SND_CHECK_NEAR(early.engine, 2.0, 1e-9);
+  SND_CHECK_NEAR(early.model, early.engine, 1e-9);
+  // D-184: with a bridge in memory the bridge's prime (0) decides: 1.99 s goes at 2.0 s.
+  const StreamRun br = RunStream(1.99, true);
+  SND_REQUIRE(br.ok);
+  SND_CHECK(!br.late);
+  SND_CHECK_NEAR(br.engine, 2.0, 1e-9);
+  SND_CHECK_NEAR(br.model, br.engine, 1e-9);
+}
