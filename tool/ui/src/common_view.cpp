@@ -8,8 +8,77 @@
 #include "snd/tool/ui/kit.hpp"
 #include "snd/tool/ui/layout_metrics.hpp"
 #include "snd/tool/ui/views.hpp"
+#include "editor_util.hpp"
 
 namespace snd::tool::ui {
+
+float ObjectList(Kit& kit, const ObjectListSpec& spec, float x, float y, float w, float h) {
+  App* app = &kit.app();
+  ProjectDocument& doc = *app->document();
+  std::vector<const DocObject*> all;
+  for (const DocObject* o : doc.OfKind(spec.kind)) {
+    if (!spec.filter || spec.filter(*o)) all.push_back(o);
+  }
+  if (spec.selected != nullptr) {
+    bool found = false;
+    for (const DocObject* o : all) found = found || o->guid == *spec.selected;
+    if (!found) *spec.selected = all.empty() ? std::string() : all.front()->guid;
+  }
+  kit.Title(spec.id + ".title", spec.title + " (" + std::to_string(all.size()) + ")", x, y, w);
+  std::string* sel = spec.selected;
+  if (spec.create) {
+    auto create = spec.create;
+    kit.Action(spec.id + ".new", "New", [create, sel, app] {
+      const std::string g = create();
+      if (g.empty()) {
+        app->Message("refused: new object");
+      } else if (sel != nullptr) {
+        *sel = g;
+      }
+    }, x, y + 24, 60);
+  }
+  if (sel != nullptr && !sel->empty()) {
+    auto remove = spec.remove;
+    ProjectDocument* d = &doc;
+    kit.Action(spec.id + ".remove", "Remove", [remove, sel, app, d] {
+      const std::string g = *sel;
+      const bool ok = remove ? remove(g) : d->Remove(g);
+      if (!ok) {
+        app->Message("refused: still referenced by " + std::to_string(d->ReferencesTo(g).size()) + " members");
+      }
+    }, x + 64, y + 24, 70);
+    const DocObject* o = doc.Find(*sel);
+    if (o != nullptr) {
+      const std::string g = o->guid;
+      kit.Action(spec.id + ".dup", "Copy", [d, g, sel, app] {
+        const DocObject* src = d->Find(g);
+        if (src == nullptr) return;
+        const std::string n = NewName(*d, src->kind().c_str(), src->name());
+        const std::string copy = d->Duplicate(g, n);
+        if (copy.empty()) app->Message("refused: copy");
+        else *sel = copy;
+      }, x + 138, y + 24, 60);
+      kit.NameField(spec.id + ".name", "Name", o->name(), [d, g](const std::string& n) { return d->Rename(g, n); }, x,
+                    y + 50, w, 50);
+    }
+  }
+  const float rowsTop = y + 100.0f;
+  const std::uint32_t per = static_cast<std::uint32_t>(std::max(1.0f, (h - (rowsTop - y)) / 24.0f));
+  const std::uint32_t first = kit.Pager(spec.id + ".pager", static_cast<std::uint32_t>(all.size()), per, spec.page, x,
+                                        y + 76, w);
+  for (std::uint32_t i = 0; i < per && first + i < all.size(); ++i) {
+    const DocObject* o = all[first + i];
+    const std::string g = o->guid;
+    const std::string label = spec.label ? spec.label(*o) : o->name();
+    const bool on = sel != nullptr && *sel == g;
+    Button(kit.doc(), spec.id + "." + ObjectKey(g), (on ? "> " : "  ") + Clip(label, 40),
+           [sel, g] {
+             if (sel != nullptr) *sel = g;
+           },
+           x, rowsTop + static_cast<float>(i) * 24.0f, w, 22, 0.55f);
+  }
+  return rowsTop + static_cast<float>(std::min<std::size_t>(per, all.size())) * 24.0f;
+}
 
 void DeclarePicker(tela::Document& doc, ViewContext& ctx, float width, float height) {
   App* app = ctx.app;

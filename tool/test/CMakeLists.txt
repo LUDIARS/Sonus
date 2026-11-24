@@ -73,6 +73,13 @@ foreach(_t ui_declaration_test ui_gesture_test ui_raster_test ui_concurrency_tes
   _snd_tool_test(${_t} "${_tool_test_link}")
 endforeach()
 
+# Group U: the stage 5 screens (declarations, gestures, CPU-rendered pixels, large projects). The
+# replay and preview screens use the real replay service and preview engine (Sonus::tool_preview).
+set(_tool_ui_screen_link sonus_tool_ui_replay sonus_tool_preview ${_tool_test_link})
+foreach(_t ui_event_screen_test)
+  _snd_tool_test(${_t} "${_tool_ui_screen_link}")
+endforeach()
+
 # The executable itself, headless, on the build tool's sample project (its WAV files are
 # not in the repository: the build reports errors, the tool still shows the project).
 add_test(NAME tool_app_headless
