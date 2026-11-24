@@ -99,9 +99,8 @@ void ComputeCfg(const snd_config& c, const CoreLimits& lim, Cfg& g) noexcept {
   g.voicesPerChunk = c.jobs.voices_per_chunk;
   g.maxChunks = (g.realTotal + g.voicesPerChunk - 1u) / g.voicesPerChunk;
   g.busCap = lim.maxBuses + c.dev_reserve.buses;
-  // Each voice may select a dry bus and a distance-send bus. Zones are shared
-  // per listener, so there can be at most four additional buses per listener.
-  g.segmentsPerChunk = std::min(g.busCap + 1u, g.voicesPerChunk * 2u + SND_MAX_LISTENERS * kMaxZones);
+  // Dry path plus current sends and any old sends being ramped out this block.
+  g.segmentsPerChunk = std::min(g.busCap + 1u, g.voicesPerChunk * (1u + 2u * kMaxAuxSends));
   g.catCap = lim.maxCategories + 1u;
   g.snapCap = lim.maxSnapshots;
   g.groupCap = lim.maxLimitGroups;
