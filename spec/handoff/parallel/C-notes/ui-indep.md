@@ -47,7 +47,7 @@
 | D7 | Patch | `PatchLimitAndCycleAreRefused`、`PatchNodeDrag…` | 通過 |
 | D8 | Profiler / Replay / Link（接続・サービスなし） | `LiveScreensWithoutAGameSayWhy` | 通過 |
 | D9 | Problems（行の数、エラーが先、Go） | `ProblemsRowsAreTheBuildsIssues` | 通過 |
-| D10 | 画面だけの選択と文書のずれ | `EventDeleteAfterUndo…`、`EventSelectedTrack…`、`SpecGap_ClipSelectionIsAnIndexAcrossUndo` | 通過。ただし仕様の穴 3 |
+| D10 | 画面だけの選択と文書のずれ | `EventDeleteAfterUndo…`、`EventSelectedTrack…`、`SpecGap_ClipSelectionIsAnIndexAcrossUndo` | 通過。ただし仕様の穴 1 |
 | E1〜E5 | ID の安定と一意 | `IdsAreStableOverFramesAndRoundTrips`、`EventNameField…`（名前の変更）、`EveryScreen…`（重複なし） | 通過 |
 | F1・F2・F9 | ドラッグの量と値、範囲、動かさない押下 | `EventClipDrag…`、`EventClipVerticalDrag…`、`PressWithoutMotionIsNoStep` | 通過（欠陥 3 を除く） |
 | F3〜F5 | 点・エミッタ・ノード | `ParamsCurvePoints…`、`SpatialValues…`、`PatchNodeDrag…` | 通過 |
