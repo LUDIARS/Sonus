@@ -71,15 +71,29 @@ SND_TEST(IndepS7Impl, StructEditBeyondTheLogIsRefusedAtAcceptance) {
   SND_CHECK_EQ(ed.Count(), 2u);
   SND_CHECK_EQ(f.rt->StructLogPlaces(), 2u);
   SND_CHECK_EQ(f.rt->Drops().structLog, 0u);
-  // a remove of a bank bus also needs a place (it stays in the log for the revert): refused too
+  // D-172 (2nd addition): a remove of a bank bus needs a place at application; the log is full:
+  // LIMIT_REACHED, the editor is not called
   SND_CHECK_EQ(t.Ack(t.c->StructEdit(ll::StructOp::RemoveBus, HashId("Sfx"), nullptr, 0)), SND_ERR_LIMIT_REACHED);
   SND_CHECK_EQ(ed.Count(), 2u);
-  // D-172: every edit takes a place at acceptance, a remove too: with the log full even the remove
-  // that would cancel B1 is refused (see "仕様の穴" in livelink-indep.md). A disconnect revert frees it.
-  SND_CHECK_EQ(t.Ack(t.c->StructEdit(ll::StructOp::RemoveBus, HashId("B1"), nullptr, 0)), SND_ERR_LIMIT_REACHED);
-  SND_CHECK_EQ(f.rt->ReserveUsage().buses, 2u);
-  t.Ack(t.c->StructEdit(ll::StructOp::AddBus, HashId("B9"), kMasterArgs, 2));  // nothing changes
   SND_CHECK_EQ(f.rt->StructLogPlaces(), 2u);
+  // D-172 (2nd addition): a remove that cancels a live add is accepted with the log full; the
+  // place and the reserve of B1 come back
+  SND_CHECK_EQ(t.Ack(t.c->StructEdit(ll::StructOp::RemoveBus, HashId("B1"), nullptr, 0)), SND_OK);
+  SND_CHECK_EQ(f.rt->ReserveUsage().buses, 1u);
+  SND_CHECK_EQ(f.rt->ReserveUsage().bytes, 80u);
+  SND_CHECK_EQ(f.rt->StructLogPlaces(), 1u);
+  // now B3 fits (the place freed)
+  SND_CHECK_EQ(t.Ack(t.c->StructEdit(ll::StructOp::AddBus, HashId("B3"), kMasterArgs, 2)), SND_OK);
+  SND_CHECK_EQ(f.rt->StructLogPlaces(), 2u);
+  // full again: the bank remove is refused, the cancelling remove of B2 is taken
+  SND_CHECK_EQ(t.Ack(t.c->StructEdit(ll::StructOp::RemoveBus, HashId("Sfx"), nullptr, 0)), SND_ERR_LIMIT_REACHED);
+  SND_CHECK_EQ(t.Ack(t.c->StructEdit(ll::StructOp::RemoveBus, HashId("B2"), nullptr, 0)), SND_OK);
+  SND_CHECK_EQ(f.rt->StructLogPlaces(), 1u);
+  // with a place free, the bank remove is applied and stays in the log
+  SND_CHECK_EQ(t.Ack(t.c->StructEdit(ll::StructOp::RemoveBus, HashId("Sfx"), nullptr, 0)), SND_OK);
+  SND_CHECK_EQ(f.rt->StructLogPlaces(), 2u);
+  SND_CHECK_EQ(f.rt->ReserveUsage().buses, 1u);
+  SND_CHECK_EQ(f.rt->Drops().structLog, 0u);
 }
 
 // D-172: the place comes back when the edits are undone (disconnect revert): then B3 fits.

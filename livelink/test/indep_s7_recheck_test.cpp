@@ -70,7 +70,7 @@ struct Model {
 }  // namespace
 
 SND_TEST(IndepS7Recheck, StructLogAndReserveFollowTheModel) {
-  for (std::uint32_t seed = 1; seed <= 4; ++seed) {
+  for (std::uint32_t seed = 1; seed <= 8; ++seed) {
     std::mt19937 rng(seed * 7919u);
     FakeEditor ed;
     ll::RuntimeDesc rd;
@@ -173,27 +173,51 @@ SND_TEST(IndepS7Recheck, StructLogAndReserveFollowTheModel) {
           bad("AddSend", r);
         }
         check("AddSend");
-      } else if (k < 80) {  // RemoveBus of a live bus (cancels it and what is on it)
+      } else if (k < 72) {  // RemoveBus of a live bus: cancels it and what is on it
         if (m.buses.empty()) continue;
         const std::size_t i = rng() % m.buses.size();
         const std::int32_t r = t.Ack(t.c->StructEdit(ll::StructOp::RemoveBus, m.buses[i].id, nullptr, 0));
-        // a remove needs a place at acceptance too (given back when it cancels a live add)
-        const bool place = m.Places() + 1u <= m.logLimit;
+        // D-172 (2nd addition): accepted even with the log full (no place needed)
         if (r == SND_OK) {
-          if (refuse || !place) bad("RemoveBus live", r);
+          if (refuse) bad("RemoveBus live", r);
           m.buses.erase(m.buses.begin() + static_cast<std::ptrdiff_t>(i));
-        } else if ((r == SND_ERR_LIMIT_REACHED && place) || (r == SND_ERR_NOT_FOUND && !refuse) ||
-                   (r != SND_ERR_LIMIT_REACHED && r != SND_ERR_NOT_FOUND)) {
+        } else if (r != SND_ERR_NOT_FOUND || !refuse) {
           bad("RemoveBus live", r);
         }
         check("RemoveBus live");
-      } else if (k < 85) {  // RemoveBus of the bank's bus: stays in the log
+      } else if (k < 80) {  // RemoveEffect: cancels the newest live effect of that bus, else removes a bank effect
+        LiveBus* b = nullptr;
+        if (!m.buses.empty() && (rng() & 1u)) b = &m.buses[rng() % m.buses.size()];
+        const std::uint32_t target = b != nullptr ? b->id : HashId("Sfx");
+        const std::uint64_t idx[1] = {rng() % 4u};
+        const std::int32_t r = t.Ack(t.c->StructEdit(ll::StructOp::RemoveEffect, target, idx, 1));
+        const bool cancels = b != nullptr ? b->effects != 0u : m.sfxEffects != 0u;
+        const bool place = cancels || m.Places() + 1u <= m.logLimit;
+        if (r == SND_OK) {
+          if (refuse || !place) bad("RemoveEffect", r);
+          if (cancels) {
+            if (b != nullptr) {
+              --b->effects;
+              b->bytes -= 80u;
+            } else {
+              --m.sfxEffects;
+              m.sfxBytes -= 80u;
+            }
+          } else {
+            ++m.bankRemoves;
+          }
+        } else if ((r == SND_ERR_LIMIT_REACHED && place) || (r == SND_ERR_NOT_FOUND && (!refuse || !place)) ||
+                   (r != SND_ERR_LIMIT_REACHED && r != SND_ERR_NOT_FOUND)) {
+          bad("RemoveEffect", r);
+        }
+        check("RemoveEffect");
+      } else if (k < 85) {  // RemoveBus of the bank's bus: takes a place at application (D-172)
         const std::int32_t r = t.Ack(t.c->StructEdit(ll::StructOp::RemoveBus, HashId("Sfx"), nullptr, 0));
         const bool place = m.Places() + 1u <= m.logLimit;
         if (r == SND_OK) {
           if (refuse || !place) bad("RemoveBus bank", r);
           ++m.bankRemoves;
-        } else if ((r == SND_ERR_LIMIT_REACHED && place) || (r == SND_ERR_NOT_FOUND && !refuse) ||
+        } else if ((r == SND_ERR_LIMIT_REACHED && place) || (r == SND_ERR_NOT_FOUND && (!refuse || !place)) ||
                    (r != SND_ERR_LIMIT_REACHED && r != SND_ERR_NOT_FOUND)) {
           bad("RemoveBus bank", r);
         }
@@ -572,10 +596,10 @@ SND_TEST(IndepS7Recheck, StateAfterReloadOfAnotherBanksFile) {
   SND_CHECK(f.StepUntil([&] { return HasErrorText(t.c, "another bank"); }));
 }
 
-// D-173 says the other bank read from the file is not kept. When the game itself has that other
-// bank loaded, a failed ReloadBank must not take the game's bank away: the request named
-// another bank, and the game's registration is not something the reload loaded.
-SND_TEST(IndepS7Recheck, Defect_FailedReloadUnloadsTheGamesOwnOtherBank) {
+// D-173 (2nd addition): a failed reload unloads only a registration it made itself. When the game
+// has the file's bank loaded, a failed ReloadBank keeps the game's bank. (Was
+// Defect_FailedReloadUnloadsTheGamesOwnOtherBank.)
+SND_TEST(IndepS7Recheck, FailedReloadKeepsTheGamesOwnOtherBank) {
   Fixture f;
   f.Load(IndepBank(), "a.sndb");
   BankOpts two;
@@ -606,6 +630,19 @@ SND_TEST(IndepS7Recheck, Defect_FailedReloadUnloadsTheGamesOwnOtherBank) {
   bool stillTwo = false;
   for (std::uint32_t i = 0; i < n2; ++i) stillTwo = stillTwo || b[i].bankId == HashId("Two");
   SND_CHECK(stillTwo);
+  SND_CHECK_EQ(n2, 1u);
+  // afterwards: edits reach the game's Two, Live loads again, a normal reload of Two works
+  SND_CHECK_EQ(t.Ack(t.c->SetValue(lltest::BusVolume("Sfx", -6.0f))), SND_OK);
+  ll::CellValue cv{};
+  SND_REQUIRE(WaitCell(t, t.c->ReadCell(SfxVolumeCell()), &cv));
+  SND_CHECK_EQ(cv.cells, 1u);
+  SND_CHECK_EQ(cv.current, F32Bits(-6.0f));
+  SND_CHECK_EQ(t.Ack(t.c->ReloadBank(kLive, 0, "a.sndb", true)), SND_OK);
+  SND_CHECK_EQ(t.Ack(t.c->ReloadBank(HashId("Two"), 0, "two.sndb")), SND_OK);
+  const std::uint32_t q3 = t.c->QueryBanks(true);
+  SND_REQUIRE_EQ(t.Ack(q3), SND_OK);
+  SND_CHECK_EQ(t.c->CopyBanks(b, 8), 2u);
+  SND_CHECK_EQ(f.server->Stats().reloadsFailed, 2u);
 }
 
 // --- M10: malformed edits while the revert log is full ---------------------------------------
