@@ -94,6 +94,7 @@ void DeclareHeader(tela::Document& doc, ViewContext& ctx, float width) {
   if (st == LinkState::Online) on = conn.mismatch() ? ctx.palette.pending : ctx.palette.solo;
   if (st == LinkState::Connecting || st == LinkState::Handshake) on = ctx.palette.pending;
   const float lx = width - 470.0f;
+  if (ctx.session.live() != nullptr && ctx.session.live()->phase() == LivePhase::Failed) on = ctx.palette.failed;  // a reload failed
   Canvas(doc, "link.light", DrawLight(12, 12, st != LinkState::Offline, on, ctx.palette, ctx.dpi), lx, 14, 12, 12);
   std::string text = std::string(LinkStateName(st)) + "  " + conn.Target();
   if (st == LinkState::Online) {

@@ -101,6 +101,21 @@ void Matching(Kit& kit, float w, float h) {
     kit.Label("ln.nolive", "no live reflection: start the tool with --project (the mixer values still go live)", 0, y, w, 20, 0.5f);
     return;
   }
+  // Banks whose hot reload failed (phase Failed, D-184): which and why, until a reload succeeds.
+  const auto& failed = live->failedBanks();
+  if (!failed.empty()) {
+    std::size_t row = 0;
+    for (const auto& [bank, why] : failed) {
+      if (row >= 4u) break;
+      kit.Label("ln.failed." + std::to_string(row++), "FAILED " + bank + ": " + why + " (detached in the game until a reload works)",
+                0, y, w, 20, 0.55f);
+      y += 20.0f;
+    }
+    if (failed.size() > 4u) {
+      kit.Label("ln.failed.more", "+" + std::to_string(failed.size() - 4u) + " failed banks", 0, y, w, 18, 0.5f);
+      y += 18.0f;
+    }
+  }
   const SyncCheck& chk = live->check();
   // D-189: without a connection there is no game to describe (no version, no 1.0 reasons).
   const bool connected = c.state() == LinkState::Online || c.state() == LinkState::Handshake;
