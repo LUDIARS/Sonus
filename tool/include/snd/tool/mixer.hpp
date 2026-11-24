@@ -72,6 +72,18 @@ struct OverrideItem {
   std::string key;       // stable id ("bus.<id>.vol", "fx.<bus>.<e>.<p>", "cat.<id>.vol", "par.<id>")
 };
 
+// A live value of the mixer named by its object instead of its position (D-188): what a rebind to a
+// new Project (the document's structure changed) carries over. `value` is the stored value of the
+// control (dB, 0 / 1, the parameter's value).
+struct LiveValue {
+  Control control = Control::BusFader;  // never ParamOverride without its ParamOverrideOn
+  Guid guid;                            // the bus / category / parameter
+  std::string name;                     // its name (for the question when it cannot be carried)
+  std::uint32_t effect = 0, param = 0;  // EffectParam
+  std::string effectType;               // EffectParam: the effect's type at `effect`
+  float value = 0.0f;
+};
+
 class MixerModel {
  public:
   struct BusStrip {
@@ -91,6 +103,16 @@ class MixerModel {
 
   // Starts from the project's values; clears the history.
   void Bind(const Project& project);
+  // D-188: every value that differs from the bank (faders, mute, solo, effect parameters, category
+  // faders and mutes, parameter overrides), by object.
+  std::vector<LiveValue> LiveValues() const;
+  // The values whose object (and, for an effect parameter, the effect type at that index and the
+  // parameter) is not in `project`: what a rebind would lose.
+  static std::vector<LiveValue> Unmatched(const Project& project, const std::vector<LiveValue>& values);
+  // Bind(project), then puts `values` back where their objects are (no history; normalized as Set
+  // does). Returns the number put back; the others go to `dropped` (may be null).
+  std::uint32_t Rebind(const Project& project, const std::vector<LiveValue>& values,
+                       std::vector<LiveValue>* dropped = nullptr);
   const Project* project() const { return project_; }
 
   // --- edits (undoable). false if the target does not exist, is not editable, or the
