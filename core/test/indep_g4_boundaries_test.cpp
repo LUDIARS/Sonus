@@ -54,7 +54,8 @@ SND_TEST(IndepG4Loop, PitchChangeCutsFiniteLoopAtMeasuredWrap) {
   SND_CHECK_EQ(first[1] - first[0], 600u);
   SND_CHECK(first[2] - first[1] < 600u);
   const auto cut = first[2];
-  snd::test::Note("infinite loop wraps at %zu, %zu, %zu output frames", first[0], first[1], cut);
+  snd::test::Note("infinite loop wraps at %llu, %llu, %llu output frames", static_cast<unsigned long long>(first[0]),
+                  static_cast<unsigned long long>(first[1]), static_cast<unsigned long long>(cut));
   SND_REQUIRE_EQ(reference.sound.size(), finite.sound.size());
   SND_CHECK(finite.sound[cut - 1] > 0.1f * kC);
   for (std::size_t f = cut; f < finite.sound.size(); ++f) SND_REQUIRE_EQ(finite.sound[f], 0.0f);
