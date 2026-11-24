@@ -19,6 +19,13 @@ void InputPort::Bind(float* data, std::uint32_t channels, std::uint32_t frames) 
   readPos_.store(0u, std::memory_order_relaxed);
 }
 
+void InputPort::Rebind(float* data, std::uint32_t frames) noexcept {
+  data_ = data;
+  frames_ = frames;
+  writePos_.store(0u, std::memory_order_relaxed);
+  readPos_.store(0u, std::memory_order_relaxed);
+}
+
 void InputPort::Configure(std::uint32_t sampleRate, std::uint32_t maxLatencyFrames) noexcept {
   sampleRate_.store(sampleRate, std::memory_order_relaxed);
   maxLatency_.store(maxLatencyFrames, std::memory_order_relaxed);
@@ -124,14 +131,32 @@ namespace detail {
 namespace {
 constexpr std::size_t Align64(std::size_t n) noexcept { return (n + 63u) & ~std::size_t{63u}; }
 std::uint32_t Cap(const SourceLimits& l) noexcept { return l.maxVoices == 0u ? 1u : l.maxVoices; }
+std::uint32_t NextPow2(std::uint32_t v) noexcept {
+  std::uint32_t p = 1;
+  while (p < v && p < 0x80000000u) p <<= 1u;
+  return p;
+}
 }  // namespace
 
 // ---------------------------------------------------------------------------
 // InputKind
 // ---------------------------------------------------------------------------
+// D-200: ports below 4 blocks get a ring of NextPow2(4 blocks) in the pool.
+std::uint32_t InputKind::MinPortFrames(const SourceLimits& limits) noexcept {
+  const std::uint32_t block = limits.blockFrames == 0u ? 256u : limits.blockFrames;
+  return NextPow2(4u * block);
+}
+
 std::size_t InputKind::PoolBytes(const SourceLimits& limits) const noexcept {
   const std::uint32_t n = Cap(limits);
-  return Align64(sizeof(InputInst) * n) + Align64(sizeof(std::uint32_t) * n) + sizeof(std::uint32_t) * (portCount_ + 1u);
+  std::size_t bytes = Align64(sizeof(InputInst) * n) + Align64(sizeof(std::uint32_t) * n) +
+                      Align64(sizeof(std::uint32_t) * (portCount_ + 1u)) +
+                      Align64(sizeof(PortHome) * (portCount_ + 1u));
+  const std::uint32_t minFrames = MinPortFrames(limits);
+  for (std::uint32_t p = 0; p < portCount_; ++p) {
+    if (ports_[p].Capacity() < minFrames) bytes += Align64(sizeof(float) * std::size_t{minFrames} * ports_[p].Channels());
+  }
+  return bytes;
 }
 
 bool InputKind::Init(void* pool, std::size_t bytes, const SourceLimits& limits, const SourceServices&) noexcept {
@@ -144,7 +169,22 @@ bool InputKind::Init(void* pool, std::size_t bytes, const SourceLimits& limits, 
   for (std::uint32_t p = 0; p < portCount_; ++p) ports_[p].SetBlockFrames(blockFrames_);
   inst_ = reinterpret_cast<InputInst*>(base);
   freeInst_ = reinterpret_cast<std::uint32_t*>(base + Align64(sizeof(InputInst) * n));
-  portOwner_ = reinterpret_cast<std::uint32_t*>(base + Align64(sizeof(InputInst) * n) + Align64(sizeof(std::uint32_t) * n));
+  std::size_t at = Align64(sizeof(InputInst) * n) + Align64(sizeof(std::uint32_t) * n);
+  portOwner_ = reinterpret_cast<std::uint32_t*>(base + at);
+  at += Align64(sizeof(std::uint32_t) * (portCount_ + 1u));
+  homes_ = reinterpret_cast<PortHome*>(base + at);
+  at += Align64(sizeof(PortHome) * (portCount_ + 1u));
+  // D-200: a port below 4 blocks moves (empty) into the pool until Shutdown.
+  const std::uint32_t minFrames = MinPortFrames(limits);
+  for (std::uint32_t p = 0; p < portCount_; ++p) {
+    homes_[p] = PortHome{ports_[p].Data(), ports_[p].Capacity()};
+    if (ports_[p].Capacity() >= minFrames) continue;
+    auto* ring = reinterpret_cast<float*>(base + at);
+    const std::size_t floats = std::size_t{minFrames} * ports_[p].Channels();
+    for (std::size_t k = 0; k < floats; ++k) ring[k] = 0.0f;
+    at += Align64(sizeof(float) * floats);
+    ports_[p].Rebind(ring, minFrames);
+  }
   for (std::uint32_t i = 0; i < n; ++i) {
     new (&inst_[i]) InputInst();
     freeInst_[i] = n - 1u - i;
@@ -156,6 +196,12 @@ bool InputKind::Init(void* pool, std::size_t bytes, const SourceLimits& limits, 
 }
 
 void InputKind::Shutdown() noexcept {
+  if (homes_ != nullptr) {
+    for (std::uint32_t p = 0; p < portCount_; ++p) {
+      if (ports_[p].Data() != homes_[p].data) ports_[p].Rebind(homes_[p].data, homes_[p].frames);
+    }
+  }
+  homes_ = nullptr;
   inst_ = nullptr;
   freeInst_ = nullptr;
   portOwner_ = nullptr;
