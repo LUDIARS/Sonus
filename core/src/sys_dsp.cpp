@@ -205,7 +205,8 @@ void EvaluateDspParams(Impl& im) noexcept {
     const BankRecord* br = RegisteredBank(im, vclip[d].bankSlot);
     const bk::BankView* view = br != nullptr ? br->view : nullptr;
     const bool event = view && vs.eventRow < view->Rows(bf::chunk::EVNT);
-    const SlotIndex em = (vs.flags & kVs3D) != 0u ? vem[d] : kNoSlot;
+    const bool emitterLive = base::rows::IsCurrent(t.Emitter.rows, HandleRef{vem[d], vs.emitterGeneration});
+    const SlotIndex em = (vs.flags & kVs3D) != 0u && emitterLive ? vem[d] : kNoSlot;
     VoiceSpatialMix& mix = im.dp.mix[v];
     const SpatialGain spatial = ListenerMix(im, em, event ? view : nullptr, vs.eventRow, mix);
     const float distance = spatial.distance;
@@ -214,7 +215,7 @@ void EvaluateDspParams(Impl& im) noexcept {
       // Parameter curves (4.3): volume dB add, pitch cents add, lowpass min, highpass max, others multiply.
       const std::uint32_t cf = view->Column<bk::col::EVNT_curveFirst>()[row];
       const std::uint32_t cc = cf == bf::kNone ? 0u : view->Column<bk::col::EVNT_curveCount>()[row];
-      const SlotIndex emitter = pd != kNoSlot ? SND_R(Voice_emitterSlot)[d] : kNoSlot;
+      const SlotIndex emitter = pd != kNoSlot && emitterLive ? vem[d] : kNoSlot;
       for (std::uint32_t k = 0; k < cc; ++k) {
         const std::uint32_t cv = cf + k;
         const Id input = view->Column<bk::col::CURV_input>()[cv];
