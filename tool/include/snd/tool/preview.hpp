@@ -32,6 +32,7 @@
 #include <vector>
 
 #include "snd/id.hpp"
+#include "snd/tool/music_editor.hpp"
 #include "snd/tool/spatial_preview.hpp"
 
 namespace snd::livelink {
@@ -101,7 +102,16 @@ class IPreviewEngine {
   virtual std::uint32_t Render(std::uint32_t blocks, std::vector<float>* out) = 0;
   virtual void Pump() = 0;  // Device / Silent: once per UI frame (owner)
   virtual PreviewStatus Status() const = 0;
+  // G11 (D-184): the prime time of a stream started where it has no preload, as this runtime does
+  // it (the source module's stream kind: about two IO rounds, rate / 10, plus the codec's pre-roll
+  // for the codecs that have one). MusicSettingsOf gives MusicEditor the engine's own values.
+  virtual double StreamPrimeMs() const = 0;
 };
+
+// The settings MusicEditor computes with (MinimumLookahead, Preview) for this engine: its rate,
+// block length and stream prime time, so that the transition audition and the editor's forecast
+// agree (D-184, G11). A screen can show streamPrimeMs.
+MusicSettings MusicSettingsOf(const IPreviewEngine& engine);
 
 // --- the audition router --------------------------------------------------------------------
 enum class AuditionTarget : std::uint8_t { Game = 0, Preview = 1 };

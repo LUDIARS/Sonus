@@ -8,8 +8,10 @@
 // engine's own API (IPreviewEngine, preview.hpp) plays auditions that need the runtime directly.
 //
 // Banks: LoadBuild puts the document's built banks into the engine's in-memory file system
-// ("build/<n>/<file>") and loads them (dependencies first; language banks are skipped and said
-// in the error text). Hot reloads (LiveSync's writer = PutRebuiltBank) write "live/<n>/<file>".
+// ("build/<n>/<file>", and the build's other files, stream files, at their output paths) and loads
+// them (dependencies first; language banks are skipped and said in the error text). Hot reloads
+// (LiveSync's writer = PutRebuiltBank) write "live/<n>/<file>". LoadBuild first unloads every bank
+// loaded before, those a hot reload put in place too (D-184), however often it is called.
 //
 // Output (PreviewOutput): Manual (the owner calls Render: deterministic, tests and WAV export),
 // Device (the platform's default device, real time; the owner calls Pump each frame), Silent
@@ -85,6 +87,7 @@ class PreviewEngine final : public IPreviewEngine {
   std::uint32_t Render(std::uint32_t blocks, std::vector<float>* out) override;
   void Pump() override;
   PreviewStatus Status() const override;
+  double StreamPrimeMs() const override;
 
   // --- more (owner) --------------------------------------------------------------------------
   // Device / Silent: the last `blocks` blocks rendered (any thread).
@@ -116,6 +119,7 @@ class PreviewEngine final : public IPreviewEngine {
   std::uint64_t buildHash_ = 0;
   std::vector<std::uint64_t> banks_;  // loaded bank handles
   std::uint32_t buildSerial_ = 0, reloadSerial_ = 0;
+  std::vector<std::string> rebuilt_;  // PutRebuiltBank paths (a hot reload may have loaded them)
   std::vector<Scheduled> scheduled_;
   std::vector<Playing> playing_;
   std::string error_;
