@@ -210,3 +210,22 @@
 
 回していない構成: 1〜7（ツールなし。組 U の独立テストは `tool/test` の Tela 入りの部分だけなので入らない）、9 の全体（全モジュール）は gcc Debug だけ
 （ほかの 9 の派生は tool のターゲットだけをビルドした）。
+
+## 再確認（決定 D-186〜D-189 の後）
+
+実装担当の差し戻しの修正（353bee2、00986ce、e4fa328、fab42a9 ほか、先頭 a364fdb、組 P の c/live の取り込み済み）の上で行った。
+組 U の前の `Defect_*` 5 件はすべて通過（直っている）。
+
+### 決定に合わせて更新したテスト（コメントに D-番号）
+
+| テスト | 決定 | 新しい期待 |
+| --- | --- | --- |
+| `IndepS7Ui.ChangingTheScreenEndsTheTextEntry` | D-186 | 入力中の F4・F2・Ctrl+PageDown・Ctrl+Tab は入力欄が受ける（画面も入力も変わらない、commit しない）。Esc で閉じてからは切り替わる。`OnScreen` とタブのボタンでは入力が終わる（commit しない） |
+| `IndepS7UiScreens.MaterialRowsLastMaterialAndSymmetricPairs` | D-189 | 材質の行は `ma.mat.<NameKey>`、組は `ma.pair.<NameKey a>.<NameKey b>`。並べ替え・前への挿入・前の削除で同じ材質の ID が変わらない、重複なし |
+| `IndepS7UiScreens.ProblemsRowsAreTheBuildsIssues` | D-189 訂正 | 行の数 = `DistinctIssues(CheckDocument)` の件数、`CheckDocument` は重複を含むまま（件数が多い）、フッタの「n err」も同じ数 |
+| `IndepS7UiDefects.SpecGap_ClipSelectionIsAnIndexAcrossUndo` | D-186 | Undo の後に選択が外れ（`clip == -1`）、Delete は何も消さない（クリップは 2 つのまま） |
+| `IndepS7UiDefects.SpecGap_StructuralEditDropsLiveOverridesSilently` | D-188 | バスを足しても上書きは対象で引き継がれる（件数が同じ、質問なし、値 -10 dB が残る） |
+| `IndepS7UiDefects.SpecGap_UndoKeyDuringATextEntryUndoesTheDocument` | D-186 | 入力中の Ctrl+Z / Ctrl+Y / Ctrl+Shift+Z で文書の取り消し・やり直しの数も値も変わらない |
+| `IndepS7Ui.AppEscapeCancelsTheEntryWithoutCommit`（末尾） | D-186 | 入力中の Ctrl+Z の後、入力は開いたまま、文書の手は 1 つのまま（前は「どちらか」の緩い検査だった） |
+
+名前（`SpecGap_*`）は CTest の登録と合わせるため変えていない。中身は決定を期待値にした。
