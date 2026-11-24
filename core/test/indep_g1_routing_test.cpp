@@ -108,6 +108,34 @@ SND_TEST(IndepG1Routing, EachListenerContributesOnlyWhenInsideTheZone) {
   SND_CHECK_NEAR(gain(SND_LISTENER_WEIGHTED, 1, 3, false) / full, 0.25, 0.002);
 }
 
+SND_TEST(IndepG1Routing, OnlyListenersInsideZoneDetermineSendPan) {
+  enum class Seats { LeftOnly, BothInside, LeftInside };
+  auto stereo = [](Seats seats, snd_listener_mode mode) {
+    auto cfg = Config();
+    cfg.listener_mode = mode;
+    Scene s(Signal(true), cfg);
+    auto left = Listener({-1, 0, 0});
+    auto right = Listener({1, 0, 0});
+    SND_CHECK_EQ(s.h.sys->SetListener(0, &left), SND_OK);
+    if (seats != Seats::LeftOnly) SND_CHECK_EQ(s.h.sys->SetListener(1, &right), SND_OK);
+    // The left seat hears a source to its right; the right seat hears it to its left.
+    Zone(s, seats == Seats::BothInside ? kOrigin : snd_vec3{-1, 0, 0}, 1, 0);
+    s.Position(kOrigin);
+    s.Start();
+    return std::pair{s.Level(0), s.Level(1)};
+  };
+  for (auto mode : {SND_LISTENER_SPLIT, SND_LISTENER_WEIGHTED}) {
+    const auto solo = stereo(Seats::LeftOnly, mode);
+    SND_REQUIRE(solo.second > 0.08 && solo.first < 0.001);
+    const auto all = stereo(Seats::BothInside, mode);
+    SND_CHECK_NEAR(all.first + all.second, solo.second, 0.001);
+    SND_CHECK_NEAR(all.first, all.second, 0.001);
+    const auto one = stereo(Seats::LeftInside, mode);
+    SND_CHECK_NEAR(one.first, 0, 0.001);
+    SND_CHECK_NEAR(one.second, 0.5 * solo.second, 0.001);
+  }
+}
+
 SND_TEST(IndepG1Routing, ClearingZoneAndReusingEmitterRemoveTheSend) {
   Scene s(Signal(true));
   auto z = Zone(s);
