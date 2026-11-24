@@ -33,3 +33,20 @@
 ### Cloud 復元の事前条件
 
 設計 §4.5、§7、公開ヘッダのリスナーと Emitter の契約を上記 01〜13 と再照合した。追加で、有限ループの終端とサンプル指定の予約停止について、音源を定数信号として直接とゾーン送りを個別に取り出す。各経路の LP が動作し、停止の直前に非ゼロであること、停止フレーム以後は左右の全サンプルが厳密にゼロであることを、それぞれ無加工の連続再生を対照として検査する。バスメーターの平滑化の影響を除くため、出力の区間電力またはサンプル値を使う。
+
+### Cloud で復元した独立テスト
+
+今回のテストを作った起点は 7aea75c。事前登録 1611484、初回テスト b9232dc、解除ランプ・容量境界 e0a725d、予約停止の時計 a9e777c、未知 variant 9f4d7e9、複数リスナーとカットオフ 246e64f。受け入れ実測と旧環境での試験結果は report-B に従う。
+
+| 事前登録 | 主要な独立ケース（core/test/indep_g1_*_test.cpp） |
+| --- | --- |
+| 01, 02 | DopplerDistinguishesEmitterAndListenerVelocity、NearSonicDopplerIsFiniteAndBounded、ZeroVelocityAndDisabledDopplerKeepReferenceBits |
+| 03, 04 | DistanceRolloffAndSilenceBeyondMaximum、DistanceVolumeCurveInterpolatesDecibels、OuterConeAttenuatesAccordingToDecibels、LowAndHighPassFollowDistanceInFrequencyDomain、SpreadMakesLateralEmitterCentered |
+| 05, 06 | BlendInterpolatesAttenuationLinearly、BlendCutoffAtMidpointMatchesGeometricMean、ListenerModesWithOneListenerAreBitIdentical、CollocatedListenersPreserveSingleListenerGain、WeightedListenersSwapChannelsAndSplitIsSymmetric、DominantListenerSelectsDopplerRatio |
+| 07, 08 | ObstructionFiltersOnlyDirectWhileOcclusionFiltersBoth、LineRectangleAndBoxUseNearestPoint、RotatingLineChangesItsNearestPoint |
+| 09, 10 | DistanceSendUsesFirstBusSendAndSaturatesWithZone、ListenerPositionControlsContinuousZoneFade、TwoDimensionalEventNeverFeedsTheZone、StrongestFourZonesKeepIndependentDestinations |
+| 11, 12 | RemovingZoneRampsWithinTheBlock、PartialZoneCommandNeverChangesItsDestination、PausedAndVirtualPlaybackLeaveNoZoneSignal、ClearingZoneAndReusingEmitterRemoveTheSend、InvalidZoneAndShapeDoNotOverwriteValidSettings、UnknownParameterVariantLeavesOrdinaryEmitterParameterUntouched |
+| 13 | SpatialChangesRepeatBitForBitAcrossWorkers（10声・5チャンク、LOD無効、遅れ0、直列2回とワーカー2、確保件数・RT違反） |
+| ①×④ | FiniteLoopCutsDirectFilterAtItsLastSample、FiniteLoopCutsZoneSendFilterAtItsLastSample、ScheduledStopCutsDirectFilterAtEndOfFade、ScheduledStopCutsZoneSendFilterAtEndOfFade |
+
+①×④の切断位置は独立に計算した。有限ループは179サンプル×2周。予約停止は310フレームで48サンプルの解放フェードに入り、同じ358フレームで無音になる。各経路の両チャンネルについて357の信号と以後の全サンプルを確認し、連続再生の同じ358フレームも対照に置いた。CPU性能は実装担当の128実声の測定と、受け入れ側の再測定を参照する。

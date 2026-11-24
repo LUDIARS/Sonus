@@ -221,6 +221,30 @@ SND_TEST(IndepG1Routing, ObstructionFiltersOnlyDirectWhileOcclusionFiltersBoth) 
   }
 }
 
+SND_TEST(IndepG1Routing, DistanceAndOcclusionChooseTheLowerCutoff) {
+  // The lower, pre-existing 300 Hz cutoff already dominates. Additional
+  // obstruction or occlusion changes the gain, but not the relative spectrum.
+  auto ratio = [](bool wet, const char* parameter) {
+    auto level = [&](float hz) {
+      auto b = Signal(wet, hz);
+      b.events[0].curveLowpass = Curve(b, bf::CurveTarget::Lowpass, 300, 300);
+      Scene s(b);
+      if (wet) Zone(s);
+      if (parameter) SND_CHECK_EQ(s.h.sys->SetParamEmitter(s.em, HashId(parameter), 1), SND_OK);
+      s.Start();
+      s.h.Steps(32);
+      return s.Level();
+    };
+    return level(1500) / level(187.5f);
+  };
+  for (bool wet : {false, true}) {
+    const auto baseline = ratio(wet, nullptr);
+    SND_REQUIRE(baseline > 1e-6 && baseline < 0.2);
+    SND_CHECK_NEAR(ratio(wet, "snd.occlusion") / baseline, 1, 0.03);
+    if (!wet) SND_CHECK_NEAR(ratio(false, "snd.obstruction") / baseline, 1, 0.03);
+  }
+}
+
 SND_TEST(IndepG1Routing, InvalidZoneAndShapeDoNotOverwriteValidSettings) {
   Scene s(Signal(true));
   auto zone = Zone(s);
