@@ -26,7 +26,7 @@ float ObjectList(Kit& kit, const ObjectListSpec& spec, float x, float y, float w
   }
   kit.Title(spec.id + ".title", spec.title + " (" + std::to_string(all.size()) + ")", x, y, w);
   std::string* sel = spec.selected;
-  if (spec.create) {
+  if (spec.create && spec.manage) {
     auto create = spec.create;
     kit.Action(spec.id + ".new", "New", [create, sel, app] {
       const std::string g = create();
@@ -37,7 +37,7 @@ float ObjectList(Kit& kit, const ObjectListSpec& spec, float x, float y, float w
       }
     }, x, y + 24, 60);
   }
-  if (sel != nullptr && !sel->empty()) {
+  if (spec.manage && sel != nullptr && !sel->empty()) {
     auto remove = spec.remove;
     ProjectDocument* d = &doc;
     kit.Action(spec.id + ".remove", "Remove", [remove, sel, app, d] {
@@ -62,10 +62,10 @@ float ObjectList(Kit& kit, const ObjectListSpec& spec, float x, float y, float w
                     y + 50, w, 50);
     }
   }
-  const float rowsTop = y + 100.0f;
+  const float rowsTop = y + (spec.manage ? 100.0f : 48.0f);
   const std::uint32_t per = static_cast<std::uint32_t>(std::max(1.0f, (h - (rowsTop - y)) / 24.0f));
   const std::uint32_t first = kit.Pager(spec.id + ".pager", static_cast<std::uint32_t>(all.size()), per, spec.page, x,
-                                        y + 76, w);
+                                        spec.manage ? y + 76 : y + 24, w);
   for (std::uint32_t i = 0; i < per && first + i < all.size(); ++i) {
     const DocObject* o = all[first + i];
     const std::string g = o->guid;
