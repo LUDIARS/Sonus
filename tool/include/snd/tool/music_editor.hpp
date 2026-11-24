@@ -24,7 +24,8 @@
 // row is unreachable (D-179e: sorting could then change which rule matches).
 //
 // Minimum lookahead (8.2), per reservation target: one block (blockFrames / sampleRate)
-// plus the target's prime time:
+// plus the prime time of the first material played (D-184: a rule's bridge when it has one, as the
+// runtime's FirstMaterialPrime; else the target's):
 //   - material in memory (loadForm pcm / compressed / decompressCache): 0;
 //   - a stream whose transition is "prepare" (8.3 事前プライム): 0;
 //   - a stream started at its head with a preload (preloadMs > 0): 0 (the preload chunk
@@ -41,7 +42,8 @@
 // segmentEnd: the segment's exit), the late rule when the firing comes sooner than the
 // minimum lookahead (nextGrid: the next timing point; startLate: the request + lookahead;
 // cancel: no transition), fades in seconds (out at the source tempo, in at the target's),
-// the late rule compares the firing with applySeconds + the target's prime time (the runtime has
+// the late rule compares the firing with applySeconds + the first material's prime time (the
+// rule's bridge when it has one, else the target) (the runtime has
 // no extra block there; lookaheadMs stays the 8.2 display value, one block + prime),
 // the bridge and where the target segment starts (head, same bar: the source bar modulo
 // the target's bars, beat kept when the signatures match (D-74); marker; lastPosition is
