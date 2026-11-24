@@ -291,3 +291,48 @@ SND_TEST(IndepG3Param, RampRateFollowsElapsedTimeRegardlessOfVoiceCount) {
   }
 }
 } // namespace
+
+namespace {
+using namespace g2;
+using snd::HashId;
+
+SND_TEST(IndepG3Snapshot, RetargetedWeightContinuesFromCurrentLevel) {
+  Fx h(G2Config());
+  FxBank b;
+  b.Event("Signal", 400);
+  b.b.snapshots = {{HashId("Weight"), {{0, 0, 0, -18}}}};
+  h.Load("weight", b.Build("WeightBank"));
+  h.sys->Play(HashId("Signal"), NoEmitter(), nullptr);
+  h.Steps(8);
+  const float base = h.LastMean();
+  h.sys->ApplySnapshot(HashId("Weight"), 1, 0.128f);
+  h.Steps(12);
+  const auto mid = h.Total();
+  const float last = h.At(mid - 1);
+  SND_CHECK_NEAR(Db(last / base), -9, 0.9);
+  h.sys->ApplySnapshot(HashId("Weight"), 0, 0.064f);
+  h.Steps(16);
+  SND_CHECK_NEAR(h.At(mid), last, 0.001);
+  SND_CHECK_NEAR(Db(h.At(mid + 6 * h.Frames()) / base), -4.5, 0.9);
+  SND_CHECK_NEAR(h.LastMean(), base, 1e-4);
+}
+
+SND_TEST(IndepG3Category, IndependentOutputIsAbsentFromMasterButPublishesItsOwnPeak) {
+  Fx h(G2Config());
+  FxBank b;
+  KeyBus(b);
+  b.b.buses[0].flags |= bf::kBusMeter;
+  b.Event("SoloOutput", 700, 0);
+  b.Event("MainOutput", 80, 1);
+  h.Load("out", b.Build("Out"));
+  h.sys->Play(HashId("SoloOutput"), NoEmitter(), nullptr);
+  h.Steps(10);
+  snd_meter meter{};
+  SND_REQUIRE_EQ(h.sys->GetMeter(HashId("Key"), &meter), SND_OK);
+  SND_CHECK(meter.peak[0] > 0.4f);
+  SND_CHECK_NEAR(h.LastMean(), 0, 1e-7);
+  h.sys->Play(HashId("MainOutput"), NoEmitter(), nullptr);
+  h.Steps(8);
+  SND_CHECK_NEAR(h.LastMean(), 0.08f * kCenter, 1e-4);
+}
+} // namespace
