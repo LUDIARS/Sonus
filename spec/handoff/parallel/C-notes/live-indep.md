@@ -177,3 +177,70 @@ MinGW（`x86_64-w64-mingw32-g++ -std=c++20 -fsyntax-only -Werror -Wall -Wextra -
 - 実デバイスのプレビュー出力と OutputPlayer（コンテナにデバイスが無い）。TCP の本物のゲーム。
 - 言語バンク、依存のあるバンクのホットリロード。予備容量を超える（OUT_OF_BUDGET）StructEdit。
 - Windows / macOS での実行（新しいファイルは MinGW の構文検査だけ。`indep_s7_live_hang_test.cpp` は fork を使うので POSIX だけで、MinGW の構文検査の対象外。CMake も `if(UNIX)`）。
+
+## 再確認（差し戻しの決定 D-182〜D-185 の後、先頭 d1fc165 から）
+
+性質は `indep_s7_live_properties.md` の R1〜R18（8372eba で、テストより先に追記）。テストは新しい `indep_s7_live_recheck_test.cpp`（14 本）と、
+`indep_s7_live_defects_test.cpp` の新しい `Defect_*` 4 本。
+
+### 更新したテスト（決定と食い違っていたもの）
+
+| テスト | 変えた点（期待はランタイム music `transition.cpp` の規則から自分で導いた） | コミット |
+| --- | --- | --- |
+| `tool_indep_s7_compute_test` `IndepS7Calc.F16_TransitionPreview`（組 M の独立テスト、旧 695〜720 行） | D-184: 要求は「時刻以降で最初のブロックの頭（最低 1 ブロック）」で取り、そこから規則の時刻（その点がブロックの頭ちょうどなら含む）、遅れの規則は「ブロックの頭 + 最初の素材のプライム」より前のときだけ（先読みの 1 ブロックは足さない）。0.498 s → 適用 94 ブロック目 0.50133 s → 次の拍 1.0 s・遅れなし。遅れの規則の検査はブリッジを外し Seg/B（プリロードなしのストリーム、30 ms）で 0.47 s → 適用 0.474667 s、拍 0.5 s は 0.504667 s より前 → nextGrid 1.0 s／startLate 0.474667 + 0.030 s／cancel。0.4 s は遅れなし 0.5 s。小節線ちょうど 2.0 s → 2.0 s（前は 4.0 s）、2.001 s → 4.0 s、0 s → 適用 1 ブロック目・2.0 s | 8372eba |
+| `tool_music_editor_test` `MusicEditor.MinimumLookaheadAndTransitionPreview` の 306・307 行（例外として許可） | 10 ms ブロックで 1.495 s → 適用 150 ブロック目 = 1.5 s、その拍 1.5 s を含む、ブリッジはプリロード付き（プライム 0）→ 遅れなし・1.5 s | 8372eba |
+| 自分の `Record_*` 3 本 → 決定を期待値に | `AddedBusGoesByReloadEvenWithAnEditor`（G3: リロード、Done、contentHash 一致）、`MismatchAnswerIsRememberedForTheSameGame`（G2: 同じゲームは聞かない）、`ValueEditOfALiveAddedEffectGoesByReload`（G7: 問題なし、リロードで contentHash 一致） | d29a0d5 |
+| sonus-replay の終了コード | 報告からの再生そのものの失敗（バンクが読めない）= 2 を追加（`tool_indep_s7_live_cli_replayfail`） | d29a0d5 |
+
+前の `Defect_*` 10 本は全部通過（直っている）。
+
+### 再確認の結果（`IndepS7LiveRecheck.*`、通過）
+
+| # | テスト | 内容 |
+| --- | --- | --- |
+| R1 | `ReconnectMakesTheGameTheDocument` | revertOnDisconnect あり・なし、切断中の編集・Undo・Redo、Close / Open と Drop（自動再接続）の両方でゲームの全 live セル = 文書のビルド |
+| R3 | `RandomEditsWithDisconnects` | 固定シード 200 手（値 4 種、Undo、Redo、Close / Open、Drop）の後、全 live セル = 文書、問題なし |
+| R4 | `AnswerIsRememberedForTheSameGameOnly` | 同じバンクの一覧なら聞かない、1 つの contentHash が違えば聞き直す |
+| R4 | `NoQuestionBeforeTheBankListAndOneZeroByHash` | 覚えた答えがあるとき、一覧が来るまで Checking（質問も Live もなし）、来たら同じゲームとして Live。1.0 のゲームは同じハッシュなら聞かない、違うハッシュなら聞き直す |
+| R5 | `BusyResendsGiveUpByTime` | 常に COMMAND_BUFFER_FULL: 送り直しのあと giveUpMs（400 ms）を過ぎて問題に（0.35 s より後）、その後は送らない。新しい値は届き最後の SetValue が新しい値 |
+| R6 | `ThrottleWithoutFlush` | throttleMs 200、Flush なしで最後の値が届く |
+| R7 | `ReserveFollowsUndoRedoAndReload` | エフェクトの追加 1 → 文書の Undo 0 → Redo 1 → リロードの成功で 0 → その後の Undo でも負にならず、全セル = 文書 |
+| R8 | `MixerReleaseSendsTheDocumentValue` | ミキサーが離すと Resync なしで文書の値が届き、項目は Live |
+| R11 | `PhaseFailedUntilAReloadSucceeds` | ゲームで失敗 → Failed と failedBanks（理由つき）、ほかのバンクの値の編集は届くが Failed のまま、成功で Live・failedBanks 空、書き出しの失敗 → Failed、reloads() の phase Failed と「no space left」 |
+| R12 | `TransitionAuditionFollowsTheRuntimeRule` | 3/4・90 BPM、要求 0 / 2.0 / 1.999 / 2.001 / 0.96（ブロックの境目ちょうど）/ 1.9973 / 3.995 / 4.0 s: 自分で計算した規則（a = max(1, ⌈t / ブロック⌉)、a の頭以降で最初の小節線）= `MusicEditor::Preview` の applySeconds と fireSeconds = エンジンの切り替えのサンプル、切り替えの前は Calm、1 ブロック後は 3 倍（時刻 0 でも Calm から鳴る） |
+| R14 | `ReplayLimitsAtTheirEdges` | maxBlocks 40: 40 ブロックは再生、41 は失敗（理由つき）。maxAlignBlocks 100: 最初のブロック 100 は番号を保つ、101 は保たずに再生。1e15 の番号は既定の上限で有限時間（失敗、または番号を保たずに再生） |
+| R15 | `BugReportEveryFieldRoundTrips` | 題・notes・summary・比較の文（改行・CRLF・`=`・`#`・非 ASCII・絵文字・空・5000 文字）、Config、版、記録、バンク（id 0xFFFFFFFF、内容）、結果の 4 つ、期待が往復で同じ |
+| R16 | `ConfigLineRangesForEveryMember` | config.h の X マクロで全メンバ（60 余り）: 整数は最大値・0 を受け、-1・最大 + 1・2^64 以上・小数・前後の空白・`+1`・空・`0x` を断り、断っても Config は変わらない。浮動小数は 1.5 を受け、`x`・空・±1e40・`1.5x` を断る |
+| R18 | `DocumentChangesDuringTheHandshake` | HelloReply を遅らせ、その間に文書を編集（1.1 と 1.0 のゲーム、Hello のハッシュに Accepted）: 質問なし、編集は SetValue で届き、ReplaceChunk / ReloadBank は送らない |
+| R17 | `tool_indep_s7_live_cli_*`（7 本） | 0 一致、1 期待との不一致、2 壊れた報告・無い報告・再生の失敗・引数不足・無い記録 |
+
+依頼の 3（実装担当の未検証）: ハンドシェイクの最中に文書が変わっても照合は正しく、1.0 / 1.1 とも Accepted の後に送るのはその後の編集（SetValue）だけで、
+質問の要る差分を黙って送ることは無かった（R18、欠陥なし）。
+
+### 新しい欠陥（`tool_indep_s7_live_<名前>`、失敗のまま）
+
+| テスト | 再現・期待と実際 | 根拠 | 重さ |
+| --- | --- | --- | --- |
+| `Defect_ValueEditBuiltWithAStructuralEditIsLost` | 編集器あり。Amb にエフェクトを足し、次の Tick の前に Sfx の音量を -6 dB に（1 回のビルドに両方）。StructEdit は送られるが音量は送られず、ゲームの Sfx は -1 のまま、phase は Live。音量のセルが構造の計画に回った BUSS の表の中にあり、値として送られない（Settle を挟めば届く） | D-183（経路の順の後もゲーム = 文書のビルド）、live_sync.hpp の Live の定義 | 高（ドラッグ中などに黙って値が落ちる） |
+| `Defect_ReconnectSendsALiveStructuralEditAgain` | 編集器あり、エフェクトをライブで足す → 切断 → 再接続。再接続で AddEffect をもう一度送る: revertOnDisconnect なしでは編集器が Undo なしに 2 回目の Add を受け（ゲームに 2 個）、あり・なしとも reserve() の effects が 2 | D-182（ゲームの状態を前提にしない）・D-183（再接続のあと数え直す） | 中（C-01 の後は実際に構造が二重になる） |
+| `Defect_PreviewLoadBuildAfterAHotReloadFails` | プレビューエンジンにつないでイベントを足す（ホットリロード成功）→ `LoadBuild(別のビルド)` が「the bank build/2/Main.sndb did not load」で失敗。リロードで入れ替わったバンクはエンジンが持つハンドルに無く、外されずに残る。差分を送る（不一致・知らないビルド → リロード）の後も同じ | preview.hpp `LoadBuild`「in place of the banks loaded before」 | 中（ライブの編集の後にプレビューを作り直せない） |
+| `Defect_TransitionPreviewUsesTheTargetsLeadInsteadOfTheBridges` | 規則にメモリ上のブリッジ、行き先の素材はプリロードなしのストリーム。要求 1.99 s: エンジン（ランタイム）は 2.0 s で切り替える（`FirstMaterialPrime` はブリッジのプライム = 0）が、`MusicEditor::Preview` は行き先のプライム 30 ms で遅れと判断し 4.0 s | D-184（モデルはランタイムと同じ先読み）、music `transition.cpp` | 中（遷移の予告が 1 小節ずれる。組 M のモデル） |
+
+### 残る仕様の穴
+
+- G10（新）: 覚えた答えが無い初めての不一致では、バンクの一覧が来る前に質問が出る（check() の判定は後から埋まる）。header どおりだが、
+  判定の無い質問になる。推奨: 1.1 のゲームでは初めての質問も一覧が来るまで Checking（一覧が来ない 1.0 はすぐ聞く）。
+- G11（新）: プレビューエンジンのストリームの実際のプライムは `MusicSettings::streamPrimeMs` と別（プリロードなしのストリームで、
+  要求 1.96 s をモデルは 2.0 s、エンジンは 4.0 s）。D-179f のとおり設定値で受けるが、プレビューでの試聴とモデルの予告を合わせる口
+  （エンジンが使うプライムを読む、または設定する）が無い。
+- 再接続でゲームに構造の変更が残っているかは分からない（欠陥 `ReconnectSendsALiveStructuralEditAgain` の直し方: 再接続ではライブの
+  構造の変更を送り直さず、そのバンクをリロードする、が保守的）。
+- G9 は変更なし（決定どおり）。G1〜G8 は決定どおりに直っている（上の通過したテスト）。
+
+### 実装担当のテストの弱い箇所（再確認）
+
+- `tool_profiler_streams_test` の `DetailViewsFillFromTheGame` が全体実行（-j2）で 60 秒待って落ちた（今回の構成 8 と前回の TSan で 1 回ずつ、
+  単独では 5 回通過）。マスクを購読する前に `Play(Blip)` しており、負荷が高いと Blip の終わり（イベントログ）が購読の前に過ぎて
+  二度と届かない（テストの順序の不備、実装の欠陥ではない見込み）。購読（subscribedMask が付く）を待ってから Play するのがよい。
+- 構造の変更と値の編集を 1 回のビルドに入れるテストが無い（欠陥 `ValueEditBuiltWithAStructuralEditIsLost`）。再接続のテストに
+  ライブの構造の変更が無い。プレビューエンジンの LoadBuild をリロードの後に呼ぶテストが無い。ブリッジのある規則の先読みのテストが無い。
