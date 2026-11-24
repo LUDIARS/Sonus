@@ -173,27 +173,26 @@ SND_TEST(IndepS7UiDefects, WriteBackAfterStaleMixerKeepsNewerDocumentValues) {
   SND_CHECK_EQ(NumberAt(r.doc.Find(G(3))->doc, "volumeDb", 0.0), -10.0);
 }
 
-// Spec gap (recorded, not decided): a structural edit of the document (a new bus) rebinds the
-// mixer at once and the live overrides are gone without a message (decision g). Prints what
-// happens; checks only that the tool does not crash and the mixer follows the document.
+// D-188 (was a spec gap): a structural edit of the document (a new bus) rebinds the mixer and
+// carries the live values over by object: the override stays, no question (everything has a place).
 SND_TEST(IndepS7UiDefects, SpecGap_StructuralEditDropsLiveOverridesSilently) {
   Rig r;
   r.Show(ui::Screen::Mixer);
   SND_REQUIRE(r.s.mixer().Set(Target{Control::BusFader, 0, 0, 0}, -10.0f));
   r.Frame();
   const std::size_t before = r.s.mixer().Overrides().size();
-  const std::size_t messages = r.s.messages().size();
   SND_REQUIRE(!MixerEditor(r.doc).AddBus("New", G(2)).empty());
   r.Frame();
-  std::printf("SpecGap: overrides %u -> %u, messages %u -> %u\n", static_cast<unsigned>(before),
-              static_cast<unsigned>(r.s.mixer().Overrides().size()), static_cast<unsigned>(messages),
-              static_cast<unsigned>(r.s.messages().size()));
   SND_CHECK_EQ(r.s.mixer().buses().size(), std::size_t{4});
+  SND_CHECK_EQ(r.s.mixer().Overrides().size(), before);
+  SND_CHECK(!r.app->rebindPending());
+  bool kept = false;
+  for (const LiveValue& v : r.s.mixer().LiveValues()) kept = kept || (v.control == Control::BusFader && v.value == -10.0f);
+  SND_CHECK(kept);
 }
 
-// Spec gap (recorded): the clip selection is an index. After an undo puts back a clip before the
-// selected one, the selection (and Delete) points at the clip that came back. Prints which clip
-// Delete removed.
+// D-186 (was a spec gap): the clip selection follows the object; after an undo outside the screen
+// the position selection is cleared and Delete removes nothing.
 SND_TEST(IndepS7UiDefects, SpecGap_ClipSelectionIsAnIndexAcrossUndo) {
   Rig r;
   r.app->Navigate(G(8));
@@ -203,15 +202,14 @@ SND_TEST(IndepS7UiDefects, SpecGap_ClipSelectionIsAnIndexAcrossUndo) {
   SND_REQUIRE(ed.RemoveClip(0, 0));             // clips: B
   r.Frame();
   SND_REQUIRE(r.ClickId("ev.t0.c0"));           // select B
-  r.Key('Z', ui::kModControl);                  // clips: A, B (selection index 0 = A)
+  r.Key('Z', ui::kModControl);                  // clips: A, B
   r.Key(ui::kKeyDelete);
-  std::printf("SpecGap: after selecting B, undo, Delete: clips left %u, first starts at %g\n", ed.ClipCount(0),
-              ed.ClipCount(0) > 0 ? ed.ClipNumberOf(0, 0, ClipNumber::StartMs) : -1.0);
-  SND_CHECK_EQ(ed.ClipCount(0), 1u);
+  SND_CHECK_EQ(ed.ClipCount(0), 2u);
+  SND_CHECK_EQ(r.app->view().event.clip, -1);
 }
 
-// Spec gap (recorded): Ctrl+Z while a text entry is open passes to the document (text_entry.cpp:
-// shortcuts pass) and undoes a document step under the open entry.
+// D-186 (was a spec gap): Ctrl+Z while a text entry is open is the entry's: the document is not
+// undone, the entry stays as it is.
 SND_TEST(IndepS7UiDefects, SpecGap_UndoKeyDuringATextEntryUndoesTheDocument) {
   Rig r;
   r.app->Navigate(G(8));
@@ -221,7 +219,9 @@ SND_TEST(IndepS7UiDefects, SpecGap_UndoKeyDuringATextEntryUndoesTheDocument) {
   SND_REQUIRE(r.ClickId("ev.list.name"));
   SND_REQUIRE(r.app->text().active());
   r.Key('Z', ui::kModControl);
-  std::printf("SpecGap: Ctrl+Z in an entry: entry %s, document undo steps %u (1 before)\n",
-              r.app->text().active() ? "open" : "closed", static_cast<unsigned>(r.doc.UndoCount()));
-  SND_CHECK(true);
+  r.Key('Y', ui::kModControl);
+  r.Key('Z', ui::kModControl | ui::kModShift);
+  SND_CHECK_EQ(r.doc.UndoCount(), std::size_t{1});
+  SND_CHECK_EQ(r.doc.RedoCount(), std::size_t{0});
+  SND_CHECK_EQ(NumberAt(r.doc.Find(G(3))->doc, "volumeDb", 0.0), -7.0);
 }

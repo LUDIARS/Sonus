@@ -604,30 +604,48 @@ SND_TEST(IndepS7UiScreens, MusicPreviewShowsTheModelsNumbers) {
 // Material (D6)
 // ============================================================================================
 
-// D6: one row per material, the last material cannot be removed from the screen, a pair set on
-// (a, b) shows on (b, a).
+// D6 / D-189: one row per material with an id made from its name (ui::NameKey), the same id after
+// the materials are moved, one is inserted before it or another is removed; the last material
+// cannot be removed from the screen; a pair set on (a, b) shows on (b, a).
 SND_TEST(IndepS7UiScreens, MaterialRowsLastMaterialAndSymmetricPairs) {
   std::map<std::string, std::string> f = Rich();
   Rig r(f);
   r.app->Navigate(G(25));
   r.Frame();
   MaterialEditor me(r.doc, G(25));
-  SND_CHECK_EQ(r.Prefixed("ma.mat.", "").size() >= me.Materials().size(), true);
-  for (std::size_t i = 0; i < me.Materials().size(); ++i) {
-    SND_CHECK_MSG(r.El("ma.mat." + std::to_string(i)) != nullptr, "row %u", static_cast<unsigned>(i));
-  }
-  // Symmetric pairs: the table shows (0, 1) and (1, 0) the same.
-  const tela::PlacedElement* a = r.El("ma.pair.0.1");
-  const tela::PlacedElement* b = r.El("ma.pair.1.0");
+  auto row = [&](const std::string& m) { return "ma.mat." + ui::NameKey(m); };
+  auto rowShows = [&](const std::string& m) {
+    const tela::PlacedElement* e = r.El(row(m));
+    return e != nullptr && e->element.label.find(m) != std::string::npos;
+  };
+  for (const std::string& m : me.Materials()) SND_CHECK_MSG(rowShows(m), "row of %s", m.c_str());
+  // Symmetric pairs: the table shows (mat0, mat1) and (mat1, mat0) the same.
+  const std::string k0 = ui::NameKey("mat0"), k1 = ui::NameKey("mat1");
+  const tela::PlacedElement* a = r.El("ma.pair." + k0 + "." + k1);
+  const tela::PlacedElement* b = r.El("ma.pair." + k1 + "." + k0);
   SND_REQUIRE(a != nullptr && b != nullptr);
   SND_CHECK(a->element.label == b->element.label);
+  // The id of mat2 stays over a move, an insertion before it and a removal before it.
+  SND_REQUIRE(me.MoveMaterial(2, 0));
+  r.Frame();
+  SND_CHECK(rowShows("mat2"));
+  SND_REQUIRE(me.AddMaterial("inserted", 0));
+  r.Frame();
+  SND_CHECK(rowShows("mat2"));
+  SND_CHECK(rowShows("inserted"));
+  SND_REQUIRE(me.RemoveMaterial("mat0"));
+  r.Frame();
+  SND_CHECK(rowShows("mat2"));
+  SND_CHECK(r.El(row("mat0")) == nullptr);
+  SND_CHECK(FirstDuplicate(r.rt()).empty());
   // Remove until one is left; the last one stays.
   for (int i = 0; i < 10; ++i) {
-    r.ClickId("ma.mat.0");
+    const std::vector<std::string> ms = me.Materials();
+    r.ClickId(row(ms.front()));
     r.ClickId("ma.mat.remove");
   }
   SND_CHECK_EQ(me.Materials().size(), std::size_t{1});
-  SND_CHECK(r.El("ma.mat.0") != nullptr);
+  SND_CHECK(rowShows(me.Materials().front()));
 }
 
 // ============================================================================================
@@ -711,7 +729,11 @@ SND_TEST(IndepS7UiScreens, ProblemsRowsAreTheBuildsIssues) {
   Rig r(f);
   r.app->RefreshProblems();
   r.Show(ui::Screen::Problems);
-  const std::vector<DocIssue> issues = CheckDocument(r.doc);
+  // D-189 (corrected): CheckDocument keeps the build tool's problems word for word (here the same
+  // error twice); the screen lists DistinctIssues of them, each once.
+  const std::vector<DocIssue> all = CheckDocument(r.doc);
+  const std::vector<DocIssue> issues = DistinctIssues(all);
+  SND_CHECK(all.size() > issues.size());
   std::size_t errors = 0;
   for (const DocIssue& i : issues) errors += i.error ? 1u : 0u;
   SND_REQUIRE(errors > 0);
@@ -724,6 +746,10 @@ SND_TEST(IndepS7UiScreens, ProblemsRowsAreTheBuildsIssues) {
   }
   SND_CHECK_EQ(rows, issues.size());
   SND_CHECK_EQ(errorRows, errors);
+  // The footer counts the same.
+  char foot[64];
+  std::snprintf(foot, sizeof foot, "%u err", static_cast<unsigned>(errors));
+  SND_CHECK_MSG(r.AnyLabelContains(foot), "footer without '%s'", foot);
   // Errors first.
   for (std::size_t i = 0; i < errors; ++i) {
     const tela::PlacedElement* e = r.El("prob." + std::to_string(i));

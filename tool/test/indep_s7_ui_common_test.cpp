@@ -102,17 +102,37 @@ SND_TEST(IndepS7Ui, FunctionKeysAndCtrlPageWalkTheTabs) {
 
 // A4: changing the screen ends a text entry (without committing it).
 SND_TEST(IndepS7Ui, ChangingTheScreenEndsTheTextEntry) {
+  // D-186: while an entry is open it takes every key: the screen keys (F4, Ctrl+PageDown, Ctrl+Tab)
+  // do nothing (the screen stays, the entry stays open, nothing is committed). After Esc closes the
+  // entry they switch. A screen change by other means (the tab button, OnScreen) ends the entry
+  // without committing it.
   Rig r;
   r.Show(ui::Screen::Event);
   int commits = 0;
   r.app->BeginText("indep.field", "abc", [&](const std::string&) { ++commits; return true; }, false);
   SND_CHECK(r.app->text().active());
-  r.Key(F(4));  // Buses
+  for (ui::KeyEvent k : {ui::KeyEvent{F(4), 0, 0}, ui::KeyEvent{ui::kKeyPageDown, 0, ui::kModControl},
+                         ui::KeyEvent{ui::kKeyTab, 0, ui::kModControl}, ui::KeyEvent{F(2), 0, 0}}) {
+    r.Key(k.key, k.modifiers);
+    SND_CHECK(r.app->view().screen == ui::Screen::Event);
+    SND_CHECK(r.app->text().active());
+  }
+  SND_CHECK(r.app->text().text() == "abc");
+  SND_CHECK_EQ(commits, 0);
+  r.Key(ui::kKeyEscape);
   SND_CHECK(!r.app->text().active());
+  r.Key(F(4));
+  SND_CHECK(r.app->view().screen == ui::Screen::Buses);
   SND_CHECK_EQ(commits, 0);
   r.app->BeginText("indep.field", "abc", [&](const std::string&) { ++commits; return true; }, false);
   r.app->OnScreen(ui::Screen::Params);
   r.Frame();
+  SND_CHECK(!r.app->text().active());
+  SND_CHECK_EQ(commits, 0);
+  // The tab button too.
+  r.app->BeginText("indep.field", "abc", [&](const std::string&) { ++commits; return true; }, false);
+  r.ClickId("tab.event");
+  SND_CHECK(r.app->view().screen == ui::Screen::Event);
   SND_CHECK(!r.app->text().active());
   SND_CHECK_EQ(commits, 0);
 }
@@ -348,5 +368,7 @@ SND_TEST(IndepS7Ui, AppEscapeCancelsTheEntryWithoutCommit) {
   SND_REQUIRE(r.doc.SetNumber(G(3), "volumeDb", -7.0));
   r.app->BeginText("indep.f", "", [&](const std::string&) { return true; }, false);
   r.Key('Z', ui::kModControl);
-  SND_CHECK(r.app->text().active() || r.doc.UndoCount() == 1);
+  // D-186: the entry takes the key; the document keeps its step.
+  SND_CHECK(r.app->text().active());
+  SND_CHECK_EQ(r.doc.UndoCount(), std::size_t{1});
 }
