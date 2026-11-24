@@ -229,3 +229,58 @@
 | `IndepS7Ui.AppEscapeCancelsTheEntryWithoutCommit`（末尾） | D-186 | 入力中の Ctrl+Z の後、入力は開いたまま、文書の手は 1 つのまま（前は「どちらか」の緩い検査だった） |
 
 名前（`SpecGap_*`）は CTest の登録と合わせるため変えていない。中身は決定を期待値にした。
+
+### 再確認の結果（性質 L、`tool/test/indep_s7_ui_recheck_test.cpp`、1 件ずつ `tool_indep_s7_ui_recheck_<名前>`）
+
+| 性質 | テスト | 結果 |
+| --- | --- | --- |
+| L1 入力中の全部のキー（4 つの修飾 × 26 キー） | `EveryKeyWhileTypingIsTheEntrys` | 通過（文書・選択・画面が変わらず、入力は開いたまま、`Key` は true） |
+| L2 Esc（入力、一覧、何も無い全 12 画面、パッチの接続待ち） | `EscClosesTheEntryAndTheListAndIsAlwaysTheTools` | 通過（何も無い時も `Key` が true = ウィンドウに渡さない） |
+| L2 ドラッグ中の Esc | `EscDuringAClipDragLeavesTheHistoryAsBefore`、`EscDuringNumberAndFaderDrags` | 値は戻り、取り消しの手は増えない（通過）。ただし欠陥 N1・N2 |
+| L3 全部の数値の欄（82 個 × 9 種類の読めない入力） | `TypedNumbersOnEveryFieldGoToTheModelUnchanged` | 通過（どれも拒否、文書は変わらず入力は開いたまま） |
+| L3 整数の欄・3D の欄 | `Defect_TypedNumberIsCutToAnIntegerBeforeTheModel`、`Defect_HugeTypedPositionsOnThe3DScreenShowInfAndNan` | **欠陥 N3・N6** |
+| L4 ホイールと ± の連打 | `WheelAndButtonSeriesCountEveryStepAndStopAtTheEnd` | 通過（1・3・7 ノッチ、4 回の +、0..8 の端で止まり、端のホイールで手が増えない） |
+| L5 縦のドラッグ（押す位置 3 × 移動量 8） | `VerticalClipDragFollowsTheMotionOnly` | 通過 |
+| L6 欄の幅（窓 4 × DPI 4 × 14 の選択、1048 欄） | `NumberFieldsHaveRoomEverywhere` | 通過（幅 ≥ 48、重なりなし、1280×800 以上は窓の中）。小さい窓は **欠陥 N4** |
+| L7 名前から作る ID | `NameMadeIdsAreUniqueWithAwkwardNames` | 通過 |
+| L8 結び直しの質問 | `RebindCarriesWhatItCanAndAsksForTheRest`、`RebindQuestionGoesWhenTheUnplacedOverrideIsReverted`、`RebindWriteBackWritesWhatHasAPlace` | 通過（引き継ぎ、保留と質問、質問中の編集、Undo で消える、捨てる、戻す、書き戻す）。エフェクトの種類が変わった場合は **欠陥 N5** |
+| L9 コーン | `ConeIsShownAlikeOnBothScreens` | 通過 |
+| L10 Link | `LinkNotConnectedShowsNoPeerVersion`、`LinkFailedBanksAreListed` | 通過（行の数 = `failedBanks()`、理由、「failed」、Failed の間も全画面で重複なし） |
+| L11 Problems | `ProblemsOnceOnScreenAndFooterCheckDocumentAsTheBuild` | 通過 |
+| 前の欠陥 1〜5 | `tool_indep_s7_ui_Defect_*` | 5 件とも通過（直っている） |
+
+### 新しい欠陥（失敗のまま）
+
+- **N1 `Defect_EscOnADragThatChangedNothingUndoesTheEditBefore`（高）**: 何も変えなかったドラッグ（左端で止まったクリップ、範囲の端の数値の欄、
+  行って戻ったドラッグ）の途中で Esc を押すと、**その前の無関係な手が取り消される**。`kit.cpp` の `DocumentDrag` と数値の欄の
+  `cancel` が「`EndGroup` してから `Undo`」で取り消すが、変化の無いグループは手を残さないので、`Undo` が 1 つ前の手を消す。
+  再現: Event で Priority を 9 にする（1 手）→ 開始 0 のクリップを押して左へ 60 px（開始は 0 のまま）→ Esc → Priority が 128 に戻る。
+  D-186「進行中の操作があればそれを取り消す」に反し、利用者の編集が黙って消える。
+- **N2 `Defect_EscOnADragLeavesItAsARedoStep`（中）**: Esc で取り消したドラッグがやり直しの手として残り（Ctrl+Y でドラッグが戻る）、
+  ドラッグの前にあったやり直しの手は消える。同じ原因（取り消しを `Undo` で行う）。直し方の例: 文書に「開いたグループを捨てる」
+  操作が無いので、ドラッグの前の値を覚えて戻してからグループを閉じる（手は残らない）、またはモデルに `CancelGroup` を足す。
+- **N3 `Defect_TypedNumberIsCutToAnIntegerBeforeTheModel`（中）**: 整数の欄（Channels、LOD prio.、Bars、Entry、Loops、ほか
+  `static_cast<std::uint32_t>(v)` の 18 か所: buses_view・event_view・music_view・link_view・profiler_view）は、打った値をモデルに渡す前に
+  整数へ型変換する。2.5 は 2 として書かれ、-1・1e300・2^32 は整数の範囲の外（未定義動作。ここでは 0 などになってモデルが受け付ける
+  か、今の値と同じとして入力が閉じる）。Link の Port に 70000 を打つと 4464 になる。D-187「切り詰めずにそのままモデルに渡す」に反する。
+  期待: 整数でない・範囲の外の値は拒否（入力は開いたまま）。
+- **N4 `Defect_NumberFieldsOutsideTheWindowAtSmallWindows`（低〜中）**: 窓 320×240（App が受け付ける最小の論理の大きさ）で 49 個、
+  640×400 で 9 個の数値の欄が窓の外に宣言される（Event の項目、エフェクト、スナップショット、Params、Segment、Playlist、遷移の試聴、
+  Material）。見えず押せない。D-187「入りきらない行は折り返す・段を分ける・ページを送る」。1280×800 以上では窓の中。
+- **N5 `Defect_RebindWriteBackPutsAnOverrideIntoAnotherEffect`（中）**: Sfx の lowpass のパラメータにライブの上書き（500 Hz）がある
+  ときに、文書でそのエフェクトを消して別の種類（chorus）を同じ位置に足すと、質問が出る（正しい）。そこで「Write back」を押すと、
+  lowpass の値が chorus のパラメータ 0 に書かれる（0.5 → 1、chorus の範囲に切り詰められて）。`ResolveRebind(true)` が古い
+  プロジェクトに結ばれたままのミキサーで `WriteBackMixer` を呼び、エフェクトを位置で書くため。期待: 引き継げない値（質問に出た値）は
+  書き戻さない、または種類が合うときだけ書く。エフェクトを消しただけの場合は、新しいエフェクトは作られない（確認、通過）。
+- **N6 `Defect_HugeTypedPositionsOnThe3DScreenShowInfAndNan`（低）**: 3D 画面の位置の欄は有限の数なら何でも受け付け、
+  `SpatialPreview` は float で計算するので、1e30・1e300 で「distance inf m」「azimuth -nan deg」「cone nan deg」が出る。Tela の
+  上限は超えない（図は落ちない）。期待: float に入らない値は拒否するか、表示が有限。
+
+### 残る仕様の穴
+
+- ホイールの手のまとまり: 同じ欄のホイールは、ほかのコントロールへ移るまで（時間が空いても）1 手にまとまる（ルータのキーが変わらない）。
+  段階2 のフェーダーと同じ。「続けて回した分」の「続けて」を時間で切るかは決まっていない。推奨: 今のまま（フェーダーと揃える）。
+- 位置で持つ選択を外すのは Undo / Redo と画面の切り替えのとき（`ClearPositionSelections`）。ほかの経路での文書の変更（Write back、
+  ライブ、ほかのホスト）では外さない。今の画面の操作では起きないが、決定の「画面の外で文書が変わったら」とは範囲が違う。
+- パッチのノードが重なると、下のノードの端子は押せない（生成した配置で osc1 の出力の端子が osc27 の本体の下）。重なりを避ける
+  決まりは無い。
