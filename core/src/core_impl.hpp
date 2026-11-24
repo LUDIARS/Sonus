@@ -500,7 +500,6 @@ struct SelectPriv {
 struct AuxRoute {
   SlotIndex bus;
   std::uint32_t segment, channels, generation;
-  float amount;
   PanMatrix pan;
 };
 struct PathHistory {
