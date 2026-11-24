@@ -50,6 +50,8 @@ bool PrepareBankRecord(Impl& im, const cmd::BankRegister& reg) noexcept {
   off = Up64(off + sizeof(source::NoiseParams) * nS);
   const std::size_t oMaps = off;
   off = Up64(off + sizeof(std::uint32_t) * (2u * nB + nC + nSn + nG + nD));
+  const std::size_t oSend = off;
+  off = Up64(off + sizeof(float) * v.Rows(bf::chunk::SEND));
   const std::size_t oEvents = off;
   off = Up64(off + sizeof(EventState) * nE);
   const std::size_t oFx = off;
@@ -157,6 +159,7 @@ bool PrepareBankRecord(Impl& im, const cmd::BankRegister& reg) noexcept {
   }
   // Mapping arrays (filled by ApplyCommands).
   std::uint32_t* maps = reinterpret_cast<std::uint32_t*>(mem + oMaps);
+  r.sendContrib = reinterpret_cast<float*>(mem + oSend);
   r.busCount = nB;
   r.busSlot = maps;
   r.busChannels = maps + nB;
