@@ -458,7 +458,23 @@ struct LogicPriv {  // EvaluateLogicParams: generation seen per row slot (new ro
   std::uint32_t* playbackGen = nullptr;
 };
 
+// Products are independent of the listener. Distance curves are evaluated per
+// listener before the product is applied; a missing distance curve supplies 1
+// only when a Parameter curve actually drives that target.
+struct SpatialCurveProduct {
+  float value = 1.0f;
+  bool active = false;
+  void Add(float factor) noexcept { active = true; value *= factor; }
+  float Apply(float distanceValue, bool hasDistanceCurve) const noexcept {
+    return active ? (hasDistanceCurve ? distanceValue : 1.0f) * value : distanceValue;
+  }
+};
+struct SpatialCurveParams {
+  SpatialCurveProduct spread, blend, send;
+};
+
 struct DspPriv {
+  SpatialCurveParams* spatialParams = nullptr;  // [maxVirtual]
   bool hadSnapshotOffsets = false;
   float* duckDb = nullptr;           // [duckCap] current reduction (dB, <= 0)
   std::uint32_t* catPlaying = nullptr;  // [catCap] voices playing per category this block
