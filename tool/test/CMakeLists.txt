@@ -76,7 +76,7 @@ endforeach()
 # Group U: the stage 5 screens (declarations, gestures, CPU-rendered pixels, large projects). The
 # replay and preview screens use the real replay service and preview engine (Sonus::tool_preview).
 set(_tool_ui_screen_link sonus_tool_ui_replay sonus_tool_preview ${_tool_test_link})
-foreach(_t ui_event_screen_test ui_buses_screen_test ui_params_screen_test ui_spatial_screen_test ui_music_screen_test ui_material_screen_test)
+foreach(_t ui_event_screen_test ui_buses_screen_test ui_params_screen_test ui_spatial_screen_test ui_music_screen_test ui_material_screen_test ui_patch_screen_test)
   _snd_tool_test(${_t} "${_tool_ui_screen_link}")
 endforeach()
 
