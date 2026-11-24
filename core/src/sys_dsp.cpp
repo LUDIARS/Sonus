@@ -91,18 +91,22 @@ SpatialGain ListenerMix(const Impl& im, SlotIndex em, const bk::BankView* view, 
   if (em >= im.cfg.maxEmitters) return out;
   SlotIndex nearest = kNoSlot;
   float nearestD = 0;
+  bool hasWeight = false;
   for (unsigned l = 0; l < im.cfg.maxListeners; ++l) {
     const SlotIndex s = em * im.cfg.maxListeners + l;
     if (!base::rows::IsLive(t.Spatial.rows, s) || !SND_R(Spatial_valid)[s]) continue;
     const float d = SND_R(Spatial_distance)[s];
     if (nearest == kNoSlot || d < nearestD) { nearest = s; nearestD = d; }
     const float weight = im.cfg.listenerMode == SND_LISTENER_WEIGHTED ? SND_R(Listener_weight)[l] : 1;
-    if (weight > 0) mix.listeners[mix.count++] = ListenerContribution{s, weight, 0, 1};
+    mix.listeners[mix.count++] = ListenerContribution{s, std::max(0.0f, weight), 0, 1};
+    hasWeight |= weight > 0;
   }
   if (nearest == kNoSlot) return out;
-  if (im.cfg.listenerMode == SND_LISTENER_NEAREST || mix.count == 0) {
+  if (im.cfg.listenerMode == SND_LISTENER_NEAREST) {
     mix.count = 1;
     mix.listeners[0] = ListenerContribution{nearest, 1, 0, 1};
+  } else if (!hasWeight) {
+    for (unsigned i = 0; i < mix.count; ++i) mix.listeners[i].weight = 1;
   }
   double sumWeight = 0, sumGain = 0, best = -1;
   double contribution[SND_MAX_LISTENERS]{};
