@@ -73,3 +73,5 @@ set_tests_properties(indep_g2_impl_test PROPERTIES TIMEOUT 600)
 # Re-check 1 of group 2 (implementation 192bace).
 snd_add_test(indep_g2_recheck_test SOURCES indep_g2_recheck_test.cpp LINK ${_core_test_link})
 set_tests_properties(indep_g2_recheck_test PROPERTIES TIMEOUT 600)
+
+snd_add_test(indep_g3_mix_test SOURCES indep_g3_mix_test.cpp LINK ${_core_test_link})
