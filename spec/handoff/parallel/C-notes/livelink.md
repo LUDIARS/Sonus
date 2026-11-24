@@ -195,7 +195,15 @@ gcc Debug の全件を d51b8df で回したとき `api_indep_runtime_test`（Ind
 | --- | --- | --- |
 | 1+8 gcc Debug + TOOL_CORE | 全件（228） | 失敗は上の 2 件だけ。indep_s7 のほか（unit 15、live 31、record 8、fuzz 7、stress 2、recheck の残り 9、impl の残り 8）と既存の全テストは通過 |
 | MinGW 構文検査 | runtime.cpp、server.cpp、livelink_v11_live_test.cpp、struct_edit.hpp、runtime.hpp | 通過 |
-RESULTS_REST
+| 3 ASan/UBSan | `livelink\|api_`（56） | 上の 2 件だけ失敗 |
+| 4 TSan | `livelink`（33）、並行性 4 本（v11_stress、v11_live、indep_s7_stress、integration_livelink_stress）を -j1 で 20 回 | 上の 2 件だけ失敗。20 回: 全通過 |
+| 5 Release | `livelink\|api_`（56）、同じ 4 本を 20 回 | 上の 2 件だけ失敗。20 回: 全通過 |
+| clang Debug | `livelink\|tool`（38） | 上の 2 件だけ失敗 |
+| 6 テストなし Release | — | ビルド成功 |
+| 7 Opus なし | `livelink`（33） | 上の 2 件だけ失敗 |
+| 9 ツール入り（Tela） | `livelink\|tool`（57） | 上の 2 件だけ失敗。tool/test は全通過 |
+
+警告はどの構成も 0。recheck の繰り返し（ConcurrentStartsNeverOverlap など）を `--filter` で 20 回ずつ回すことはしていない（ctest の 20 回の対象は上の 4 本）。
 
 ## 未検証の箇所
 
