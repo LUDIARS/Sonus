@@ -29,11 +29,13 @@ SND_TEST(ToolUiSpatial, DragTheEmitterAndTheFacings) {
   }
   SND_CHECK(t.Label("sp.play") == "(Play)");  // no audition router: disabled with the reason
   SND_CHECK(t.Label("sp.why").find("no audition router") != std::string::npos);
-  SND_CHECK(t.Label("sp.v.0").find("distance 5.000 m") != std::string::npos);
+  // The emitter starts at half the maxDistance (50 m) to the front right: (15, 20), 25 m away.
+  SND_CHECK(t.Label("sp.v.0").find("distance 25.000 m") != std::string::npos);
+  SND_CHECK_NEAR(sp->emitter().position.x, 15.0f, 1e-5f);
   const float mpp = sp->metersPerPixel();
   t.Drag("sp.emitter", 40.0f, 0.0f, 4);
-  SND_CHECK_NEAR(sp->emitter().position.x, 40.0f * mpp, 1e-4f);
-  SND_CHECK_NEAR(sp->emitter().position.z, 5.0f, 1e-4f);
+  SND_CHECK_NEAR(sp->emitter().position.x, 15.0f + 40.0f * mpp, 1e-3f);
+  SND_CHECK_NEAR(sp->emitter().position.z, 20.0f, 1e-4f);
   const SpatialResult r = sp->Compute(2, 1, 0.0f);
   char b[64];
   std::snprintf(b, sizeof b, "distance %.3f m", r.distance);

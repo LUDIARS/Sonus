@@ -2,6 +2,7 @@
 // tracks and clips, 100 transition rules, a patch at the node limit, 64 materials, many buses), at
 // DPI 0.25, 1, 2 and 4 (D-67a): fewer than kMaxElements elements, unique ids, every drawing within
 // 256 shapes and 4096 points, the composition paints. Paging keeps the lists in range.
+#include <cstdlib>
 #include <set>
 
 #include "snd/buildtool/patch.hpp"
@@ -97,7 +98,11 @@ SND_TEST(ToolUiLimits, EveryScreenOfALargeProjectAtEveryDpi) {
     int w, h;
     bool compose;
   };
-  const Case cases[] = {{0.25f, 640, 400, true}, {1.0f, 1280, 800, true}, {2.0f, 2560, 1600, false}, {4.0f, 1600, 1200, true}};
+  const Case cases[] = {{0.25f, 640, 400, true},  {1.0f, 1280, 800, true}, {2.0f, 2560, 1600, false},
+                        {4.0f, 1600, 1200, true}, {1.0f, 320, 240, true},  {4.0f, 1280, 960, true}};
+  // SND_UI_LIMITS_SCREEN=<name>: one screen only (CTest runs each screen in its own process, so that a
+  // Tela exception names the screen).
+  const char* only = std::getenv("SND_UI_LIMITS_SCREEN");
   for (const Case& c : cases) {
     Editor t(ui::Screen::Mixer, c.w, c.h, c.dpi, BigFiles(), ui::Workspace{}, &FillPatch);
     // Selections that show the large objects.
@@ -109,6 +114,7 @@ SND_TEST(ToolUiLimits, EveryScreenOfALargeProjectAtEveryDpi) {
     t.app.view().spatial.event = doctest::G(8);
     t.app.view().buses.bus = doctest::G(2200);
     for (ui::Screen s : ui::kTabOrder) {
+      if (only != nullptr && *only != '\0' && std::string(only) != ui::ScreenName(s)) continue;
       for (std::uint32_t tab = 0; tab < 6u; ++tab) {
         t.app.view().screen = s;
         t.app.view().buses.tab = tab % 4u;

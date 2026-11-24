@@ -35,7 +35,7 @@ SND_TEST(ToolUiMaterial, MaterialsSinglesPairsAndResolution) {
   SND_REQUIRE(t.app.view().material.table == kPhys);
   MaterialEditor me(t.doc, kPhys);
   SND_CHECK(t.app.view().material.material == "metal");
-  SND_CHECK(t.Label("ma.mat.0").find("0: metal") != std::string::npos);
+  SND_CHECK(t.Label("ma.mat." + ui::NameKey("metal") + "").find("0: metal") != std::string::npos);
   SND_CHECK(t.Label("ma.p.single0").find("SE/M0") == 0u);
   // A new material at the end keeps the numbers; moving it up renumbers.
   SND_REQUIRE(t.Click("ma.mat.add"));
@@ -45,16 +45,16 @@ SND_TEST(ToolUiMaterial, MaterialsSinglesPairsAndResolution) {
   SND_CHECK_EQ(me.IndexOf("material1"), 1);
   SND_CHECK(t.Label("ma.renumbered").find("1->2") != std::string::npos);
   // Singles and footsteps of wood.
-  SND_REQUIRE(t.Click("ma.mat.2"));
+  SND_REQUIRE(t.Click("ma.mat." + ui::NameKey("wood") + ""));
   SND_CHECK(t.app.view().material.material == "wood");
   SND_REQUIRE(t.Pick("ma.p.single1", "SE/M1"));
   SND_CHECK_EQ(me.Single("wood", ContactKind::Slide), doctest::G(201));
   SND_REQUIRE(t.Pick("ma.p.foot", "SE/M3"));
   SND_CHECK_EQ(me.Footstep("wood"), doctest::G(203));
   // The pair cell metal x wood (row 0, column 2), shown on both sides.
-  SND_REQUIRE(t.Pick("ma.pair.0.2", "SE/M2"));
+  SND_REQUIRE(t.Pick("ma.pair." + ui::NameKey("metal") + "." + ui::NameKey("wood") + "", "SE/M2"));
   SND_CHECK_EQ(me.Pair("metal", "wood"), doctest::G(202));
-  SND_CHECK(t.Label("ma.pair.2.0").find("SE/M2") == 0u);
+  SND_CHECK(t.Label("ma.pair." + ui::NameKey("wood") + "." + ui::NameKey("metal") + "").find("SE/M2") == 0u);
   // Resolution of metal x wood: the pair.
   SND_REQUIRE(t.Pick("ma.res.b", "2: wood"));
   SND_CHECK(t.Label("ma.res.text").find("pair: SE/M2") != std::string::npos);
@@ -82,8 +82,8 @@ SND_TEST(ToolUiMaterial, StrengthCurvesAndTestInput) {
 
 SND_TEST(ToolUiMaterial, ManyMaterialsScrollThePairWindow) {
   Editor t(ui::Screen::Material, 1280, 800, 1.0f, Files(20));
-  SND_CHECK(t.Has("ma.pair.7.7"));
-  SND_CHECK(!t.Has("ma.pair.8.0"));
+  SND_CHECK(t.Has("ma.pair." + ui::NameKey("m7") + "." + ui::NameKey("m7") + ""));  // the window: materials 0..7
+  SND_CHECK(!t.Has("ma.pair." + ui::NameKey("m8") + "." + ui::NameKey("metal") + ""));
   SND_CHECK(t.Label("ma.pair.row.0").find("0 metal") == 0u);
   SND_REQUIRE(t.Click("ma.pair.down"));
   SND_CHECK(t.Label("ma.pair.row.0").find("1 wood") == 0u);

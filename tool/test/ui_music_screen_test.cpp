@@ -28,9 +28,14 @@ SND_TEST(ToolUiMusic, SegmentTimeLineMarkersAndTempo) {
   t.app.view().music.segment = kSegA;
   t.Frame();
   for (const char* id : {"mu.seg.asset", "mu.seg.bars", "mu.seg.entry", "mu.seg.exit", "mu.seg.preload", "mu.seg.tap",
-                         "mu.seg.grid.apply", "mu.seg.line", "mu.seg.mk.0", "mu.seg.mk.1", "mu.tp.0.bpm", "mu.mk.0.name",
-                         "mu.mk.1.kind"}) {
+                         "mu.seg.grid.apply", "mu.seg.line", "mu.tp.0.bpm"}) {
     SND_CHECK_MSG(t.Has(id), "missing %s", id);
+  }
+  for (const char* m : {"Drop", "Out"}) {
+    for (const char* part : {"mu.seg.mk.", "mu.mk."}) {
+      const std::string id = part + ui::NameKey(m) + (std::string(part) == "mu.mk." ? ".name" : "");
+      SND_CHECK_MSG(t.Has(id), "missing %s", id.c_str());
+    }
   }
   SegmentEditor se(t.doc, kSegA);
   // 4 bars at 120 BPM 4/4: 8 s over the line's width / 1.05.
@@ -38,10 +43,10 @@ SND_TEST(ToolUiMusic, SegmentTimeLineMarkersAndTempo) {
   SND_REQUIRE(line != nullptr);
   const double pps = line->bounds.width / (8.0 * 1.05);
   const std::size_t undo0 = t.doc.UndoCount();
-  t.Drag("mu.seg.mk.0", 20.0f, 0.0f, 4);
+  t.Drag("mu.seg.mk." + ui::NameKey("Drop"), 20.0f, 0.0f, 4);
   SND_CHECK_NEAR(static_cast<double>(se.Markers()[0].frame), 30000.0 + 20.0 / pps * 48000.0, 1.0);
   SND_CHECK_EQ(t.doc.UndoCount(), undo0 + 1u);
-  SND_CHECK_EQ(t.app.view().music.marker, 0);
+  SND_CHECK_EQ(t.app.view().music.marker, std::string("Drop"));  // selected by name
   // Tempo: + adds a point one bar later; the bpm field.
   SND_REQUIRE(t.Click("mu.tp.add"));
   SND_REQUIRE_EQ(se.Tempo().size(), 2u);
@@ -50,7 +55,7 @@ SND_TEST(ToolUiMusic, SegmentTimeLineMarkersAndTempo) {
   SND_CHECK_NEAR(se.Tempo()[1].bpm, 121.0, 1e-9);
   SND_REQUIRE(t.Click("mu.tp.1.remove"));
   // Markers: rename by typing, new marker, stems.
-  SND_REQUIRE(t.Click("mu.mk.1.name"));
+  SND_REQUIRE(t.Click("mu.mk." + ui::NameKey("Out") + ".name"));
   t.ClearEntry();
   t.Type("End");
   SND_CHECK_EQ(se.Markers()[1].name, std::string("End"));
@@ -83,10 +88,12 @@ SND_TEST(ToolUiMusic, RuleTableUnreachableAutoSortAndPreview) {
   MusicEditorRig t(2);
   SND_REQUIRE(t.app.view().music.event == kMusic);  // the only event with "music"
   MusicEditor me(t.doc, kMusic);
-  for (const char* id : {"mu.state.0.name", "mu.state.1.pl", "mu.state.0.initial", "mu.rule.0.from", "mu.rule.2.late",
-                         "mu.rule.1.unreachable", "mu.rule.2.unreachable", "mu.rule.warn", "mu.pv.text", "mu.pv.line",
-                         "mu.la.title", "mu.pv.play", "mu.pv.why"}) {
-    SND_CHECK_MSG(t.Has(id), "missing %s", id);
+  for (const std::string& id : {"mu.state." + ui::NameKey("Explore") + ".name", "mu.state." + ui::NameKey("Battle") + ".pl",
+                                "mu.state." + ui::NameKey("Explore") + ".initial", std::string("mu.rule.0.from"), std::string("mu.rule.2.late"),
+                         std::string("mu.rule.1.unreachable"), std::string("mu.rule.2.unreachable"), std::string("mu.rule.warn"),
+                                std::string("mu.pv.text"), std::string("mu.pv.line"), std::string("mu.la.title"),
+                                std::string("mu.pv.play"), std::string("mu.pv.why")}) {
+    SND_CHECK_MSG(t.Has(id), "missing %s", id.c_str());
   }
   SND_CHECK(!t.Has("mu.rule.0.unreachable"));
   // Auto sort is refused while rows are unreachable.
@@ -116,7 +123,7 @@ SND_TEST(ToolUiMusic, RuleTableUnreachableAutoSortAndPreview) {
   SND_REQUIRE(t.Click("mu.rule.3.remove"));
   SND_CHECK_EQ(me.Rules().size(), 3u);
   // States: rename follows into the rules.
-  SND_REQUIRE(t.Click("mu.state.1.name"));
+  SND_REQUIRE(t.Click("mu.state." + ui::NameKey("Battle") + ".name"));
   t.ClearEntry();
   t.Type("Fight");
   SND_CHECK(me.Rules()[0].to == "Fight");
@@ -126,11 +133,13 @@ SND_TEST(ToolUiMusic, RuleTableUnreachableAutoSortAndPreview) {
 
 SND_TEST(ToolUiMusic, Stingers) {
   MusicEditorRig t(3);
-  SND_CHECK(t.Has("mu.sg.0.name") && t.Has("mu.sg.0.stack"));
-  SND_REQUIRE(t.Click("mu.sg.0.stack"));
+  const std::string hit = "mu.sg." + ui::NameKey("Hit");
+  SND_CHECK(t.Has(hit + ".name") && t.Has(hit + ".stack"));
+  SND_REQUIRE(t.Click(hit + ".stack"));
   SND_CHECK_EQ(StringAt(t.doc.Find(kMusic)->doc, "music.stingers[0].overlap"), std::string("stack"));
   SND_REQUIRE(t.Pick("mu.sg.add", "Shot"));
-  SND_CHECK(t.Has("mu.sg.1.name"));
-  SND_REQUIRE(t.Click("mu.sg.1.remove"));
-  SND_CHECK(!t.Has("mu.sg.1.name"));
+  const std::string second = "mu.sg." + ui::NameKey("Stinger 2");
+  SND_CHECK(t.Has(second + ".name"));
+  SND_REQUIRE(t.Click(second + ".remove"));
+  SND_CHECK(!t.Has(second + ".name"));
 }
