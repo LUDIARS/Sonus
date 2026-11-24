@@ -340,7 +340,27 @@ TSan / Release の 20 回でも通過（下）。決定と食い違って落ち�
 
 ### 差し戻し 2 回目の構成と結果
 
-（下に追記）
+-j2、ビルドは `$S/live/b-*`（終わったら消した）。20 回の繰り返しは `tool_live_concurrency_test`・`tool_live_mixer_test`・`tool_live_sync_test`・
+`tool_indep_s7_live_threads_test`・`tool_indep_s7_live_sync_test`・`tool_indep_s7_live_recheck_test` の 6 本を -j1 で。
+
+| 構成 | コミット | テスト | 結果 |
+| --- | --- | --- | --- |
+| 8: TOOL_CORE、gcc Debug | d666382 | 全部（296） | 全部通過（`platform_device_play_test` は既存の Skipped） |
+| 8 + ASan/UBSan | d666382 | `tool\|livelink`（111） | 全部通過、サニタイザの報告なし |
+| 8 + TSan | d666382 | `tool`（78）と 6 本を 20 回 | 全部通過 |
+| 8 + Release | d666382 | `tool`（78）と 6 本を 20 回 | 全部通過 |
+| 8 + clang | d666382 | `tool`（78） | 全部通過 |
+| 9: Tela 入り | d666382 | `tool`（92） | 全部通過（今ある画面と画面のテストを含む） |
+| MinGW 構文検査 | d666382 | 変えた .cpp 8 本 | 通過 |
+
+回していない: 1・6・7。
+
+### 差し戻し 2 回目の未検証
+
+- `DecideSync` の世代の照合は、照合と送信の間（Client の外）に新しい接続ができる、ごく短い隙間が残る（Client に世代つきの答えの口が無い。livelink への要望）。
+- `LoadBuild` が書き出したファイルを引くとき、読み込まれていないファイルは一度読み込んでから外す（余分な読み込み）。言語バンク・依存のあるバンクのリロードの後は試していない。
+- `StreamPrimeMs` はコーデックの pre-roll を含めない（PCM / ADPCM は 0。Opus では短くなる）。
+- 構造の変更の後の値で、エフェクトのパラメータとセンドのレベルの SetValue は自分のテストでは通していない（バスの音量だけ）。
 
 ## 未検証の箇所
 
