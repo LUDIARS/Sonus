@@ -146,7 +146,7 @@ SND_TEST(CoreVoice, LimitGroupNeverRejectsAndOldestSteals) {
     h.Step();
   }
   h.Steps(4);
-  SND_CHECK(h.ends.Has(q[0], SND_END_COMPLETED));  // its only voice was stolen (short fade)
+  SND_CHECK(h.ends.Has(q[0], SND_END_STOLEN, SND_END_DETAIL_LIMIT_GROUP));
   SND_CHECK_EQ(h.ends.CountOf(q[1]), 0u);
   SND_CHECK_EQ(h.ends.CountOf(q[2]), 0u);
 }
