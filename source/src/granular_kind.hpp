@@ -10,6 +10,11 @@ inline constexpr unsigned kGrainSlots = 8;
 struct Grain {
   std::uint64_t birth = 0;
   std::uint32_t length = 0;
+  double inverseLength = 0;
+  // Adjacent cosine samples for the periodic Hann; re-anchor on an absolute
+  // 32-sample grid so rendering and virtual returns follow the same recurrence.
+  double twiceCosStep = 0, hannCos = 0, hannNextCos = 0;
+  unsigned hannAge = UINT32_MAX;
   double origin = 0;
   double stride = 1;
 };

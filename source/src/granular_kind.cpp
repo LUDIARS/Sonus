@@ -27,6 +27,9 @@ void Spawn(GranularVoice& v, std::uint64_t serial, std::uint64_t birth, double l
   grain.length = static_cast<std::uint32_t>(
       std::max(1.0, std::round(ms * v.asset.codec.sample_rate / 1000.0)));
   grain.birth = birth;
+  grain.inverseLength = 1.0 / grain.length;
+  grain.hannAge = UINT32_MAX;
+  if (p.window == GrainWindow::Hann) grain.twiceCosStep = 2 * std::cos(kTau * grain.inverseLength);
   const double position =
       p.position + positionOffset + p.positionJitter * NoiseKind::White(v.key, serial * 2);
   grain.origin = double(v.begin) + std::clamp(position, 0.0, 1.0) * double(v.end - v.begin - 1);
@@ -86,49 +89,186 @@ void Seek(GranularVoice& v, std::uint64_t frame) noexcept {
   Skip(v, frame);
 }
 
-float Sample(const GranularVoice& v, std::uint32_t frame, std::uint32_t channel) noexcept {
-  const auto& codec = v.asset.codec;
-  const std::size_t index =
-      std::size_t{frame} * codec.channels + std::min(channel, codec.channels - 1);
-  if (codec.codec == SND_CODEC_PCM_S16) {
-    const auto* p = v.asset.data + 2 * index;
-    return static_cast<std::int16_t>(p[0] | (p[1] << 8)) / 32768.f;
+constexpr unsigned kTile = 32;
+
+void WindowWeights(Grain& g, GrainWindow window, unsigned first, unsigned count,
+                   double* out) noexcept {
+  if (window == GrainWindow::Rectangle) {
+    std::fill_n(out, count, 1.0);
+    return;
   }
-  float value;
-  std::memcpy(&value, v.asset.data + 4 * index, 4);
-  return std::isfinite(value) ? std::clamp(value, -1.f, 1.f) : 0.f;
+  if (window == GrainWindow::Triangle) {
+    for (unsigned f = 0; f < count; ++f)
+      out[f] = 1.0 - std::abs(2 * ((first + f) * g.inverseLength) - 1);
+    return;
+  }
+  // c(n+2) = 2*cos(step)*c(n+1) - c(n). Re-anchor every 32 samples to
+  // bound roundoff. Seeking into a group replays at most 31 rotations from
+  // that exact anchor, independently of the voice's history or block cuts.
+  const double step = kTau * g.inverseLength;
+  for (unsigned f = 0; f < count;) {
+    const unsigned age = first + f;
+    const unsigned at = age % kTile;
+    if (at == 0 || g.hannAge != age) {
+      const auto anchor = age - at;
+      g.hannCos = std::cos(anchor * step);
+      g.hannNextCos = std::cos((anchor + 1) * step);
+      for (unsigned k = 0; k < at; ++k) {
+        const double next = g.twiceCosStep * g.hannNextCos - g.hannCos;
+        g.hannCos = g.hannNextCos;
+        g.hannNextCos = next;
+      }
+    }
+    const auto end = f + std::min(kTile - at, count - f);
+    for (; f < end; ++f) {
+      out[f] = 0.5 - 0.5 * g.hannCos;
+      const double next = g.twiceCosStep * g.hannNextCos - g.hannCos;
+      g.hannCos = g.hannNextCos;
+      g.hannNextCos = next;
+    }
+    g.hannAge = first + f;
+  }
 }
 
-double Window(GrainWindow window, double t) noexcept {
-  if (window == GrainWindow::Triangle) return 1.0 - std::abs(2 * t - 1);
-  if (window == GrainWindow::Rectangle) return 1;
-  return 0.5 - 0.5 * std::cos(kTau * t);
+// PCM32 stores IEEE binary32. The common in-range path includes signed zero
+// and subnormals. Finite outliers clip to full scale and NaN/Inf become zero.
+template <bool FloatPcm>
+double Decode(const std::uint8_t* sample) noexcept {
+  if constexpr (FloatPcm) {
+    std::uint32_t bits;
+    std::memcpy(&bits, sample, sizeof(bits));
+    const auto magnitude = bits & 0x7fffffffu;
+    if (magnitude <= 0x3f800000u) return std::bit_cast<float>(bits);
+    if (magnitude >= 0x7f800000u) return 0;
+    return (bits >> 31) ? -1.0 : 1.0;
+  } else {
+    return static_cast<std::int16_t>(sample[0] | (sample[1] << 8)) / 32768.0;
+  }
 }
 
-void RenderFrame(const GranularVoice& v, const RenderItem& item, std::uint32_t f) noexcept {
-  double sum[kMaxChannels]{};
-  double weights = 0;
-  const auto channels = std::min(item.channels, kMaxChannels);
-  for (const auto& g : v.grains) {
-    const auto age = v.frame - g.birth;
-    if (age >= g.length) continue;
-    const double w = Window(v.params.window, double(age) / g.length);
-    weights += w;
-    double x = g.origin + double(age) * g.stride;
-    if (x >= double(v.end)) {
+struct Tile {
+  double weights[kTile];
+  double sums[kMaxChannels][kTile];
+};
+
+// Mix contiguous frames of one grain into this voice's tile. The two reads
+// share their frame addresses, interpolation fraction, and window across all
+// channels. Only distinct source channels are decoded. Extra output channels
+// are copied after the complete mix.
+template <bool FloatPcm, bool Stereo>
+inline void Interpolate(const std::uint8_t* left, const std::uint8_t* right, double fraction,
+                        double weight, unsigned channels, Tile& tile, unsigned f) noexcept {
+  constexpr unsigned bytes = FloatPcm ? 4 : 2;
+  for (unsigned c = 0; c < (Stereo ? 2u : channels); ++c) {
+    const double l = Decode<FloatPcm>(left + c * bytes);
+    const double r = Decode<FloatPcm>(right + c * bytes);
+    tile.sums[c][f] += weight * (l + fraction * (r - l));
+  }
+}
+
+template <bool FloatPcm, bool Stereo>
+void MixGrain(const GranularVoice& v, Grain& g, unsigned count, unsigned channels,
+              Tile& tile) noexcept {
+  const auto firstAge = v.frame - g.birth;
+  if (firstAge >= g.length) return;
+  const auto first = static_cast<unsigned>(firstAge);
+  count = std::min(count, g.length - first);
+  double window[kTile];
+  WindowWeights(g, v.params.window, first, count, window);
+  for (unsigned f = 0; f < count; ++f) tile.weights[f] += window[f];
+  const unsigned stride = (Stereo ? 2u : v.asset.codec.channels) * (FloatPcm ? 4 : 2);
+  // A forward-moving grain whose final interpolation pair fits needs no
+  // per-sample wrap, range test, or second address calculation.
+  if (g.origin + (first + count - 1) * g.stride < double(v.end - 1)) {
+    for (unsigned f = 0; f < count; ++f) {
+      const double pos = g.origin + (first + f) * g.stride;
+      const auto a = static_cast<std::uint32_t>(pos);
+      const auto* left = v.asset.data + std::size_t{a} * stride;
+      Interpolate<FloatPcm, Stereo>(left, left + stride, pos - a, window[f], channels, tile, f);
+    }
+    return;
+  }
+  for (unsigned f = 0; f < count; ++f) {
+    double pos = g.origin + (first + f) * g.stride;
+    if (pos >= double(v.end)) {
       if (!v.loop) continue;
-      x = double(v.begin) + std::fmod(x - double(v.begin), double(v.end - v.begin));
+      pos = double(v.begin) + std::fmod(pos - double(v.begin), double(v.end - v.begin));
     }
-    const auto a = static_cast<std::uint32_t>(x);
+    const auto a = static_cast<std::uint32_t>(pos);
     const auto b = a + 1 < v.end ? a + 1 : static_cast<std::uint32_t>(v.loop ? v.begin : a);
-    const double fraction = x - a;
-    for (unsigned c = 0; c < channels; ++c) {
-      const double left = Sample(v, a, c);
-      sum[c] += w * (left + fraction * (Sample(v, b, c) - left));
+    Interpolate<FloatPcm, Stereo>(v.asset.data + std::size_t{a} * stride,
+                                  v.asset.data + std::size_t{b} * stride, pos - a, window[f],
+                                  channels, tile, f);
+  }
+}
+
+template <bool FloatPcm, bool Stereo>
+void RenderTile(GranularVoice& v, const RenderItem& item, unsigned offset,
+                unsigned count) noexcept {
+  Tile tile;
+  const unsigned outChannels = std::min(item.channels, kMaxChannels);
+  const unsigned channels = Stereo ? 2u : std::min(outChannels, v.asset.codec.channels);
+  std::fill_n(tile.weights, count, 0.0);
+  for (unsigned c = 0; c < channels; ++c) std::fill_n(tile.sums[c], count, 0.0);
+  // Slot order is the per-frame summation order, independent of block boundaries.
+  for (auto& g : v.grains) MixGrain<FloatPcm, Stereo>(v, g, count, channels, tile);
+  for (unsigned c = 0; c < channels; ++c) {
+    for (unsigned f = 0; f < count; ++f) {
+      item.out[c][offset + f] =
+          static_cast<float>(tile.sums[c][f] / std::max(1.0, tile.weights[f]));
     }
   }
-  for (unsigned c = 0; c < channels; ++c)
-    item.out[c][f] = static_cast<float>(sum[c] / std::max(1.0, weights));
+  for (unsigned c = channels; c < outChannels; ++c)
+    std::copy_n(item.out[channels - 1] + offset, count, item.out[c] + offset);
+}
+
+void RenderVoice(GranularVoice& v, const RenderItem& item) noexcept {
+  const unsigned n = item.framesRequested;
+  const bool constant = item.grainDensityOffset.start == item.grainDensityOffset.end;
+  const auto fixed = Increment(v, Modulation(item.grainDensityOffset, 0));
+  const bool stereo = item.channels == 2 && v.asset.codec.channels == 2;
+  const bool floating = v.asset.codec.codec == SND_CODEC_PCM_F32;
+  for (unsigned f = 0; f < n;) {
+    const double t = double(f) / n;
+    const auto inc = constant ? fixed : Increment(v, Modulation(item.grainDensityOffset, t));
+    const auto phase = v.phase + inc;
+    v.phase = static_cast<std::uint32_t>(phase);
+    if (phase >= kCycle) {
+      Spawn(v, v.serial++, v.frame, Modulation(item.grainLengthMsOffset, t),
+            Modulation(item.grainPositionOffset, t),
+            Modulation(item.grainPitchJitterCentsOffset, t));
+    }
+    unsigned count = std::min(kTile, n - f);
+    // Accumulate until the next birth so every grain remains fixed throughout the tile.
+    if (constant) {
+      if (inc)
+        count =
+            static_cast<unsigned>(std::min<std::uint64_t>(count, 1 + (UINT32_MAX - v.phase) / inc));
+      v.phase += static_cast<std::uint32_t>((count - 1) * inc);
+    } else {
+      unsigned step = 1;
+      for (; step < count; ++step) {
+        const auto next =
+            v.phase + Increment(v, Modulation(item.grainDensityOffset, double(f + step) / n));
+        if (next >= kCycle) break;
+        v.phase = static_cast<std::uint32_t>(next);
+      }
+      count = step;
+    }
+    if (floating) {
+      if (stereo)
+        RenderTile<true, true>(v, item, f, count);
+      else
+        RenderTile<true, false>(v, item, f, count);
+    } else {
+      if (stereo)
+        RenderTile<false, true>(v, item, f, count);
+      else
+        RenderTile<false, false>(v, item, f, count);
+    }
+    v.frame += count;
+    f += count;
+  }
 }
 }  // namespace
 
@@ -191,25 +331,10 @@ void GranularKind::RenderBatch(const source::RenderBatch& batch,
       st.ended = 1;
       continue;
     }
-    const auto n = item.framesRequested;
-    const bool constant = item.grainDensityOffset.start == item.grainDensityOffset.end;
-    const auto fixed = Increment(*v, Modulation(item.grainDensityOffset, 0));
-    for (unsigned f = 0; f < n; ++f) {
-      const double t = double(f) / n;
-      const auto inc = constant ? fixed : Increment(*v, Modulation(item.grainDensityOffset, t));
-      const auto phase = v->phase + inc;
-      v->phase = static_cast<std::uint32_t>(phase);
-      if (phase >= kCycle) {
-        Spawn(*v, v->serial++, v->frame, Modulation(item.grainLengthMsOffset, t),
-              Modulation(item.grainPositionOffset, t),
-              Modulation(item.grainPitchJitterCentsOffset, t));
-      }
-      RenderFrame(*v, item, f);
-      ++v->frame;
-    }
+    RenderVoice(*v, item);
     item.playhead->frame = v->frame;
     item.playhead->fraction = v->fraction.back();
-    st.framesRendered = n;
+    st.framesRendered = item.framesRequested;
   }
 }
 

@@ -67,3 +67,34 @@ SND_TEST(SourceGranular, SubQ32VirtualPitchCarriesAcrossDifferentRatios) {
   SND_CHECK_EQ(v.ph.frame, std::uint64_t{UINT32_MAX} * 32);
   SND_CHECK_EQ(v.ph.fraction, 1u);
 }
+
+SND_TEST(SourceGranular, LongHannWindowAcrossTileAndBlockBoundaries) {
+  constexpr unsigned length = 1920;
+  std::vector<float> dc(length, 1.f);
+  src::SourceAsset asset{};
+  asset.codec.codec = SND_CODEC_PCM_F32;
+  asset.codec.channels = 1;
+  asset.codec.sample_rate = 48000;
+  asset.codec.total_frames = dc.size();
+  asset.data = reinterpret_cast<const std::uint8_t*>(dc.data());
+  asset.dataBytes = dc.size() * sizeof(float);
+  src::GranularParams p{&asset, 1, 40, 0, 0};
+  Driver d(snd::SourceKind::Granular, {});
+  Driver::Voice a, b;
+  SND_REQUIRE(d.Start(a, &p, 1));
+  SND_REQUIRE(d.Start(b, &p, 1));
+  d.Render(a, length, {}, 31);
+  d.Render(b, length, {}, 137);
+  SND_CHECK(a.out[0] == b.out[0]);
+  Driver::Voice resumed;
+  SND_REQUIRE(d.Start(resumed, &p, 1));
+  d.Render(resumed, 79);
+  d.Advance(resumed, 584);
+  d.Render(resumed, 93, {}, 17);
+  SND_CHECK(std::equal(resumed.out[0].begin() + 79, resumed.out[0].end(), a.out[0].begin() + 663));
+  for (unsigned i = 0; i < length; ++i) {
+    const double expected = (1.0 - std::cos(6.2831853071795864769 * i / length)) * 0.5;
+    // Float output has at most half an ULP (2^-25 on [0.5,1)), plus double roundoff.
+    SND_CHECK_NEAR(a.out[0][i], expected, 0x1p-25 + 1e-13);
+  }
+}
