@@ -79,7 +79,7 @@ SpatialTarget SpatialAt(const Impl& im, SlotIndex spatial, const bk::BankView* v
 }
 
 struct SpatialGain {
-  float distanceDb = 0, coneDb = 0, linear = 1, filter = 1e9f, ratio = 1, distance = 0;
+  float distanceDb = 0, coneDb = 0, linear = 1, filter = 1e9f, ratio = 1, distance = 0, blend = 1;
 };
 
 SpatialGain ListenerMix(const Impl& im, SlotIndex em, const bk::BankView* view, std::uint32_t row,
@@ -126,6 +126,7 @@ SpatialGain ListenerMix(const Impl& im, SlotIndex em, const bk::BankView* view, 
       out.filter = target.filter;
       out.ratio = target.ratio;
       out.distance = SND_R(Spatial_distance)[item.spatial];
+      out.blend = target.blend;
     }
     if (mix.count == 1) {
       item.weight = 1;
@@ -224,8 +225,27 @@ void EvaluateDspParams(Impl& im) noexcept {
         } else {
           x = ParamValueOf<kSys>(im, input, pb, emitter);
         }
-        const float y = EvaluateCurve(*view, cv, x);
-        switch (static_cast<bf::CurveTarget>(view->Column<bk::col::CURV_target>()[cv])) {
+        const auto destination = static_cast<bf::CurveTarget>(view->Column<bk::col::CURV_target>()[cv]);
+        float y = EvaluateCurve(*view, cv, x);
+        if (input == bf::kInputDistance && mix.count && spatial.blend < 1) {
+          // The same blend applies to distance-input CURV rows as to the
+          // dedicated EVNT curves. Other parameter inputs remain active in 2D.
+          const float b = spatial.blend;
+          if (b == 0) continue;
+          switch (destination) {
+            case bf::CurveTarget::Volume: y = 20 * std::log10((1 - b) + b * DbToGain(y)); break;
+            case bf::CurveTarget::Pitch:
+            case bf::CurveTarget::Pan: y *= b; break;
+            case bf::CurveTarget::Lowpass:
+              y = dsp::kVoiceLowpassOffHz * std::pow(std::max(y, 10.0f) / dsp::kVoiceLowpassOffHz, b);
+              break;
+            case bf::CurveTarget::Highpass:
+              y = dsp::kVoiceHighpassOffHz * std::pow(std::max(y, 10.0f) / dsp::kVoiceHighpassOffHz, b);
+              break;
+            default: break;
+          }
+        }
+        switch (destination) {
           case bf::CurveTarget::Volume: gainDb += y; break;
           case bf::CurveTarget::Pitch: cents += y; break;
           case bf::CurveTarget::Lowpass: lowpass = y < lowpass ? y : lowpass; break;
