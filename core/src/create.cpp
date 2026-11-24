@@ -64,6 +64,11 @@ snd_result Validate(const snd_config& c) noexcept {
     return SND_ERR_INVALID_ARGUMENT;
   }
   if (c.listener_mode > SND_LISTENER_SPLIT) return SND_ERR_INVALID_ARGUMENT;
+  // Stage 3 (D-132): voice effects.
+  if (c.voice_effect_chain > kMaxVoiceEffectChain || c.voice_effect_bytes > (64u << 20) ||
+      c.voice_effect_settings == 0u || c.voice_effect_settings > 0xFFFFu) {
+    return SND_ERR_INVALID_ARGUMENT;
+  }
   return SND_OK;
 }
 
@@ -119,6 +124,45 @@ void ComputeCfg(const snd_config& c, const CoreLimits& lim, Cfg& g) noexcept {
       base::AlignUp(dsp::ResamplerStateBytes(dsp::ResamplerQuality::Sinc, c.max_voice_channels, c.max_pitch_ratio),
                     kBufferAlignment);
 }
+
+}  // namespace
+
+// Stage 3 (D-132): the voice-effect pool and its tables (create time only).
+bool InitVoiceFx(Impl& im) noexcept {
+  const Cfg& g = im.cfg;
+  const snd_config& c = im.config;
+  VoiceFxPriv& x = im.vfx;
+  x.chain = c.voice_effect_chain;
+  x.slotCount = c.max_voice_effects < g.realTotal ? c.max_voice_effects : g.realTotal;
+  x.slotBytes = (c.voice_effect_bytes + 63u) & ~63u;
+  x.settings = c.voice_effect_settings;
+  if (x.chain == 0u) {
+    x.slotCount = 0u;
+    return true;  // disabled: nothing configured, nothing allocated
+  }
+  x.events = Arr<VfxEventEntry>(im, x.settings, MemTag::Tables);
+  x.playbacks = Arr<VfxPlaybackEntry>(im, x.settings, MemTag::Tables);
+  x.slots = Arr<VfxSlot>(im, x.slotCount, MemTag::Tables);
+  x.ofReal = Arr<std::uint32_t>(im, g.realTotal, MemTag::Tables);
+  x.triedAssign = Arr<std::uint32_t>(im, g.realTotal, MemTag::Tables);
+  if (x.slotCount != 0u && x.slotBytes != 0u) {
+    if (im.allocationCount >= im.allocationCap) return false;
+    const std::size_t bytes = std::size_t{x.slotCount} * x.slotBytes;
+    x.memory = static_cast<std::uint8_t*>(im.alloc->Allocate(bytes, 64, MemTag::DspPool));
+    if (x.memory == nullptr) return false;
+    im.allocations[im.allocationCount++] = Impl::Allocation{x.memory, MemTag::DspPool, bytes};
+  } else {
+    x.slotCount = 0u;
+  }
+  if (x.events == nullptr || x.playbacks == nullptr || x.slots == nullptr || x.ofReal == nullptr ||
+      x.triedAssign == nullptr) {
+    return false;
+  }
+  for (std::uint32_t r = 0; r < g.realTotal; ++r) x.triedAssign[r] = 0xFFFFFFFFu;
+  return true;
+}
+
+namespace {
 
 // DSP hooks for the bank manager (D-54).
 bool DspCompute(void* user, const snd_effect_desc* descs, std::uint32_t count, std::uint32_t sampleRate,
@@ -471,6 +515,7 @@ snd_result CreateImpl(Impl& im) noexcept {
     return SND_ERR_OUT_OF_BUDGET;
   }
   for (std::uint32_t r = 0; r < g.realTotal; ++r) rd.lastAssign[r] = 0xFFFFFFFFu;
+  if (!InitVoiceFx(im)) return SND_ERR_OUT_OF_BUDGET;
   dsp::LoudnessMeterInit(*rd.loudness, g.outChannels, g.sampleRate);
   // Stage 3 (group 4): D-143 layer weights, D-145 action children, D-146 fade-ins, analysis.
   im.dp.layerGain = Arr<float>(im, g.maxVirtual, MemTag::Tables);

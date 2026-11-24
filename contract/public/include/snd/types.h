@@ -134,6 +134,10 @@ typedef uint32_t snd_end_detail; /* refinement of snd_end_reason, 0 = none */
 #define SND_END_DETAIL_SYSTEM_DESTROYED   16u
 #define SND_END_DETAIL_WRONG_EVENT_KIND   17u  /* e.g. music API on a non-music playback */
 #define SND_END_DETAIL_RESERVATION_FULL   18u
+/* Stage 3 (coverage, D-133): warning detail only (SND_ERR_LIMIT_REACHED, object = playback):
+ * a voice plays without its heavy voice effects (no free voice-effect slot, or the chain's
+ * state does not fit snd_config voice_effect_bytes). */
+#define SND_END_DETAIL_VOICE_EFFECT_SLOTS 19u
 
 typedef uint32_t snd_bank_state;
 #define SND_BANK_STATE_UNLOADED  0u
