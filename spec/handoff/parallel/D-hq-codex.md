@@ -85,6 +85,8 @@ D-200 で落ちる独立テスト（`source/test/indep_*`）は、独立テス�
 - `IndepOsc.ExtremeFrequenciesAndRatiosStayFinite` と `ZeroFrequencyIsSilentAndKeepsThePhase`: レート比 0 で、すぐ 0 になることを期待している。
 - `IndepInput.ThreadedWriterExactAccounting`: 容量 256（= 1 ブロック）のポートを前提にしている。
 
+書きかけの実装で実際に落ちたのは 7 件で、この見込みより多い。一覧は 9 章。
+
 ### H2: Granular（`SourceKind::Granular`、`GranularParams`）
 
 - **素材**: Sample の波形（`GranularParams::asset`）。常駐 PCM を直接読む。圧縮やストリームの資産を拒否するか PCM キャッシュを使うかを決める。バンクの解放と素材の寿命は、Sample の種別（`sample_kind.*`、`pcm_cache.*`）と同じ扱いにする。
@@ -298,4 +300,21 @@ D-200 で落ちる独立テスト（`source/test/indep_*`）は、独立テス�
 
 ## 9. この文書を入れた時点の確認結果
 
-- D-200 の書きかけ（de01480）: gcc Debug でのビルドと source のテストを確認中。結果が出たらここに書く。
+D-200 の書きかけ（de01480）を、クラウドの受け入れ側が gcc Debug で確かめた結果（2026-11-24）。
+
+- 全体のビルドは通る（警告ゼロ、`-Werror`）。
+- `ctest -R 'source|indep_(osc|noise|input|src1)'` は 24 本のうち 22 本が通り、独立テストの 2 本（`indep_osc_test`、`indep_input_test`）が落ちる。実装者のテスト（`source_*`）はすべて通る。
+- 落ちるテストケースは 7 件で、4 章 H1 に書いた見込みの 3 件より多い。
+
+| 実行ファイル | テストケース | 落ちる行 | 見立て |
+| --- | --- | --- | --- |
+| `indep_osc_test` | `ExtremeFrequenciesAndRatiosStayFinite` | 303、306 | フェードの分。すぐ 0 を期待しているが、値が 5 ms かけて下がる（0.4979、0.4958、…） |
+| `indep_osc_test` | `ZeroFrequencyIsSilentAndKeepsThePhase` | 657、676、680 | 同上の見込み |
+| `indep_osc_test` | `NonFiniteRenderInputsAreSafe` | （未確認） | 有限でない pitch を 0 として扱うので、同じくフェードが入る見込み。**未確認** |
+| `indep_input_test` | `ThreadedWriterExactAccounting` | 461 | 容量 256 のポートを前提にしている。容量の切り上げで変わる見込み |
+| `indep_input_test` | `BitExactAcrossManyWraps` | 64 | **未確認**。容量の切り上げで折り返しの位置が変わるためと見ているが、確かめていない |
+| `indep_input_test` | `ReaderLatencyBound` | 215 | **未確認**。同上 |
+| `indep_input_test` | `NonFiniteSamplesAreWrittenAsZero` | 717 | **未確認**。同上 |
+
+- 「見立て」は、落ちた行と値を見ただけの推定で、テストと実装を突き合わせてはいない。**決定の変更のせいか、書きかけの実装の欠陥かは、独立テストの担当が 1 件ずつ確かめる**（`D-codex-brief.md` 2 章の 4）。特に、`BitExactAcrossManyWraps` と `NonFiniteSamplesAreWrittenAsZero` は入力ポートの基本の性質を見ているので、欠陥の可能性を先に疑う。
+- 回したのは gcc Debug だけ。ほかの構成、繰り返し、MinGW は回していない。
