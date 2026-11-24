@@ -251,8 +251,8 @@
 
 ### 新しい欠陥（失敗のまま）
 
-- **N1 `Defect_EscOnADragThatChangedNothingUndoesTheEditBefore`（高）**: 何も変えなかったドラッグ（左端で止まったクリップ、範囲の端の数値の欄、
-  行って戻ったドラッグ）の途中で Esc を押すと、**その前の無関係な手が取り消される**。`kit.cpp` の `DocumentDrag` と数値の欄の
+- **N1 `Defect_EscOnADragThatChangedNothingUndoesTheEditBefore`（高）**: 何も変えなかったドラッグ（テストは左端で止まったクリップ。範囲の端の数値の欄、
+  行って戻ったドラッグも同じコードの経路だがテストしていない）の途中で Esc を押すと、**その前の無関係な手が取り消される**。`kit.cpp` の `DocumentDrag` と数値の欄の
   `cancel` が「`EndGroup` してから `Undo`」で取り消すが、変化の無いグループは手を残さないので、`Undo` が 1 つ前の手を消す。
   再現: Event で Priority を 9 にする（1 手）→ 開始 0 のクリップを押して左へ 60 px（開始は 0 のまま）→ Esc → Priority が 128 に戻る。
   D-186「進行中の操作があればそれを取り消す」に反し、利用者の編集が黙って消える。
