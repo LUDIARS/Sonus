@@ -254,7 +254,7 @@ livelink だけなので、ソースの種別・音楽・IO を組み立てる�
 | `connection`（追記） | `deferSyncDecision`、`awaitingSync` / `DecideSync`、`peerMinor` |
 | `preview/preview_engine` | ツールの中のランタイム（メモリ上のファイルシステム、IO とストリーム、ソースの種別、音楽、core、プロセス内の転送路のライブリンク）。出力は手動（テスト・WAV）、デバイス、無音（実時間） |
 | `preview/replay_host` | 記録の再生（2 回再生して比較、期待と照合、不具合報告から再生、WAV、デバイスで聞く `OutputPlayer`） |
-| `preview/cli/sonus_replay` | `sonus-replay`: UI なしで記録と不具合報告を再生する（終了コード 0 一致、1 不一致、2 入力の誤り） |
+| `preview/cli/sonus_replay` | `sonus-replay`: UI なしで記録と不具合報告を再生する（終了コード 0 一致、1 比較の不一致、2 入力が読めない・再生そのものの失敗（報告からの再生も）、`--help`） |
 
 使い方（ホストの UI スレッド）:
 
@@ -272,6 +272,19 @@ s.Connect(desc);                                        // Hello のハッシュ
 プレビューエンジン（`tool_preview`）: `PreviewEngine::Create(desc)` → `LoadBuild(BuildDocument(doc))` →
 `desc.connector = engine->connector()` で接続する。ホットリロードの書き出しは `engine->PutRebuiltBank`。
 試聴は `AuditionRouter`（`Bind(&connection, engine)`、`SetTarget(Game / Preview)`）。
+
+差し戻しの決定（D-182〜D-185）で決まった振る舞い:
+
+- 接続のたびに Hello のハッシュは今の文書のビルド。不一致の答えは同じゲーム（バンクの一覧）のときだけ覚える。再接続では、
+  これまでに送った全セル・差し替えた表を今のビルドの値で送り直す（ゲームが上書きを残していても文書になる）。
+- 送り直しは同じセルの新しい値を追い越さず、諦めるのは時間（`giveUpMs`）。ミキサーが離したセルは文書の値を自動で送る。
+  文書の Undo の Remove で予備容量を返し、ホットリロードの成功でそのバンクのライブの分は 0。ライブで足したオブジェクトの値は
+  ホットリロード。バスの追加は今のバンク形式ではマスターの行番号を動かすので、実際にはホットリロードになる。
+- リロードの失敗・書き出しの失敗は `LivePhase::Failed`（`failedBanks()` に理由）で、次の成功まで Live に戻らない。
+- 遷移の試聴の要求は時刻以降で最初のブロックの頭（少なくとも 1 ブロック後）。`MusicEditor::Preview` も同じブロック
+  （`applySeconds`）とランタイムの先読み（素材のプライムだけ）で計算する。
+- 再生は記録の長さ（`maxBlocks`）と番号合わせの空回し（`maxAlignBlocks`）に上限（既定は実時間 1 時間）。不具合報告は全項目が
+  往復する（`notes.txt`・`description.txt`・`comparison.txt`）。Config のテキストは符号・範囲・型を確かめる。
 
 スレッド: モデル（LiveSync、ProfilerStreams、AuditionRouter、Session）は UI のスレッドだけ。プレビューエンジンの関数も
 作ったスレッドだけ（`connector()` と `RecentOutput()` はどこからでも）。手動の出力では作ったスレッドが `Render` で描き、
