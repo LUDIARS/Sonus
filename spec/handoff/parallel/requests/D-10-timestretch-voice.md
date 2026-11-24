@@ -1,6 +1,6 @@
 # 依頼 D-10: タイムストレッチをボイスにつなぐ（core = セッション B、api、bank / buildtool = C）
 
-依頼元: セッション D（dsp 組）。決定: CONTRACTS.md「段階 7-D」の D-209、D-210。
+依頼元: セッション D（dsp 組）。決定: CONTRACTS.md「段階 7-D」の D-209、D-210、D-217（差し戻しで探索幅 ±12 ms、数値を更新）。
 部品（`dsp/include/snd/dsp/time_stretch.hpp`、`dsp/src/time_stretch.cpp`）とその単体テストは D のブランチで完成している。
 この依頼は、Sample と Stream（と UserBuffer / Input の source-rate 種別）のボイスで「ピッチを変えずに再生速度を変える」ための配線。
 
@@ -36,14 +36,14 @@ dsp::ResamplerProcess(rs, rsIn, nR, outAt, frames - in.frameOffset, in.ratio0, i
 - 速度 1 のボイスは今までどおり（タイムストレッチを通さない）。**速度が初めて 1 以外になったブロックで**
   `TimeStretchInit` してから通し始めればよい: 初期化直後の速度 1 は入力とビット一致で遅れもない（D-210）ので、
   途中から差し込んでも継ぎ目は出ない（ソースの読み位置からそのまま流し込む）。
-  一度通し始めたら、ボイスが終わるまで通し続ける（1 に戻しても外さない。外すと最大 ±8 ms の跳びが出る）。
+  一度通し始めたら、ボイスが終わるまで通し続ける（1 に戻しても外さない。外すと最大 ±12 ms の跳びが出る）。
 - シーク（`Seek`）、仮想化からの復帰（D-15 のフェード）、ループのないソースの途中からの再開では `TimeStretchReset` してから
   新しい位置のフレームを流す。Sample のループはソースが連続したフレームとして渡すので、タイムストレッチは何もしなくてよい。
 
 ## 2. 状態のプール（D-43 / D-44 と同じ考え方）
 
 - 状態の大きさは `dsp::TimeStretchStateBytes(channels, sourceRate, maxSpeed)`（64 の倍数）。
-  ステレオ・48 kHz・最大速度 4 で 47 KB、8ch・96 kHz・4 では約 300 KB になるので、**全ての実ボイスに持たせない**。
+  ステレオ・48 kHz・最大速度 4 で 41 KB（41152 バイト）、最大速度 2 で 29632 バイト、8ch・96 kHz・4 では 310528 バイト、8ch・384 kHz・4 では 1.2 MB になるので、**全ての実ボイスに持たせない**。
 - 推奨: 速度を使うボイスだけが借りる固定個数のプール。
   - 枠の大きさ = `TimeStretchStateBytes(Config.maxStretchChannels, Config.maxStretchRate, Config.maxPlaybackSpeed)`、
     個数 = `Config.maxStretchVoices`、`MemTag::Tables`、64 バイト境界。初期化のときに確保する（以後は確保しない）。
@@ -55,7 +55,7 @@ dsp::ResamplerProcess(rs, rsIn, nR, outAt, frames - in.frameOffset, in.ratio0, i
 - スレッド別アリーナの見積もりに 1 ボイスあたり
   `channels × (padT + TimeStretchMaxInputFrames(ts, nRmax))` floats を足す。
   `nRmax` はブロック長と `maxPitchRatio` から決まるリサンプラの入力の最大（例: 256 フレーム、比 4、速度 2 で `nT` は約 2900、
-  `padT` は 48 kHz・速度 4 で 4384）。
+  `padT` は 48 kHz・最大速度 4 で 4768、2 で 3328）。
 
 ## 3. Config の候補（`snd_config` の末尾、`struct_size` で守る。版は統合で 1.3）
 
@@ -93,7 +93,7 @@ SND_API snd_result SND_CALL snd_set_playback_speed(snd_system* sys, snd_playback
 
 ## 6. 再生位置、終わり、通知
 
-- ソースの読み位置は「タイムストレッチが消費したフレーム」まで先に進んでいる（先読み S + 2H = 48 kHz で 1824 フレーム = 38 ms）。
+- ソースの読み位置は「タイムストレッチが消費したフレーム」まで先に進んでいる（先読み S + 2H = 48 kHz で 2016 フレーム = 42 ms）。
   ゲームに見せる再生位置（とマーカーの通知）は、次の出力フレームのソース上の位置
   `TimeStretchConsumedFrames(ts) + TimeStretchPendingOffset(ts)`（タイムストレッチの出力の座標で、さらにリサンプラの
   `ResamplerPendingOffset` × 速度 だけ手前）を、ボイスの開始位置に足したものにする。
@@ -107,3 +107,13 @@ SND_API snd_result SND_CALL snd_set_playback_speed(snd_system* sys, snd_playback
 - `snd_set_playback_speed(0.5)` の Sample ボイスで、鳴っている時間が 2 倍、主な周波数が変わらない（DFT）。
 - 途中で 1 → 1.5 → 1 と変えたときに継ぎ目に大きな段差が出ない、ストリームのボイスで IO の先読みが足りる。
 - 枠が足りないときに速度 1 で鳴り、統計が増える。初期化の後の確保がゼロ（`SND_RT_SCOPE`）。
+
+## 8. 差し戻し（D-217）で変わったこと
+
+- 探索幅の既定 ±12 ms（48 kHz で 576）。先読み 2016、pad 4768（最大速度 4）。プールの枠の大きさは上の 2 の数値。
+- 1 回の呼び出しの上限 `dsp::kTimeStretchMaxCallFrames` = 2^20（ブロック長はこれより十分小さいので core は気にしなくてよい）。
+- ランプの端点は dsp が補間の前に切り詰める（core が ±Inf を渡しても速度 1 にはならない）。
+- 過渡（クリック、打撃）は崩れる（速度 0.5 で 2 重、2 で約 3 分の 1 が消える）。効果音の速度を大きく変える用途には向かない。
+  想定は BGM と声の ±20〜30 % 程度。API の説明にも書くこと。
+- 処理時間（Release、ステレオ 1 ボイス 256 フレームあたり）: 速度 1: 3.7 µs、0.8: 6.5 µs、1.3: 8.9 µs、2.5: 20.0 µs。
+  `max_stretch_voices` = 16 で全部が速度 2.5 なら 1 ブロック約 0.3 ms（予算 5.3 ms の 6 %）。
