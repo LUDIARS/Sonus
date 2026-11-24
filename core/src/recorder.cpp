@@ -904,8 +904,8 @@ snd_result System::SetEmitterShape(snd_emitter_handle emitter, snd_emitter_shape
   c.target = h;
   c.reserved[0] = cmd::kParamVariantShape;
   c.reserved[1] = static_cast<std::uint8_t>(kind);
-  c.param = std::bit_cast<Id>(e.x);
-  c.value = e.y;
+  c.param = std::bit_cast<Id>(e.y);
+  c.value = e.x;
   c.reserved2 = std::bit_cast<std::uint32_t>(e.z);
   return ResultOf(RecordVariant(im, *pr, c));
 }
@@ -916,7 +916,9 @@ snd_result System::SetReverbZone(snd_emitter_handle emitter, Id bus, float amoun
   if (!im.emitterSlots.IsCurrent(h)) return SND_ERR_INVALID_HANDLE;
   if (!std::isfinite(amount) || amount < 0 || amount > 1 || !std::isfinite(fadeDistance) || fadeDistance < 0)
     return SND_ERR_INVALID_ARGUMENT;
-  if (!ArenaFits(im, *pr, cmd::CommandTraits<cmd::SetSwitch>::kSize + cmd::CommandTraits<cmd::SetParam>::kSize)) {
+  const unsigned bytes = cmd::CommandTraits<cmd::SetSwitch>::kSize +
+                         (bus == SND_ID_NONE ? 0u : cmd::CommandTraits<cmd::SetParam>::kSize);
+  if (!ArenaFits(im, *pr, bytes)) {
     im.reserveOverflows.fetch_add(1u, std::memory_order_relaxed);
     return SND_ERR_COMMAND_BUFFER_FULL;
   }
@@ -926,6 +928,7 @@ snd_result System::SetReverbZone(snd_emitter_handle emitter, Id bus, float amoun
   sw.reserved[0] = cmd::kSwitchVariantZone;
   sw.value = bus;
   if (RecordVariant(im, *pr, sw) != Rec::Ok) return SND_ERR_COMMAND_BUFFER_FULL;
+  if (bus == SND_ID_NONE) return SND_OK;
   cmd::SetParam c{};
   c.scope = sw.scope;
   c.target = h;
