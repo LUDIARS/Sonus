@@ -193,7 +193,7 @@ std::uint32_t RoundUp16(std::uint32_t v) { return (v + 15u) & ~15u; }
 // including the clamping of every argument; invalid rates / channels.
 SND_TEST(IndepTimeStretch, ShapeFormulas) {
   const std::uint32_t rates[] = {1u, 1000u, 8000u, 11025u, 22050u, 44100u, 48000u, 96000u, 192000u, 384000u};
-  // NaN maxSpeed is checked in indep_defects_dsp_test.cpp (D-210: NaN is 1).
+  // NaN maxSpeed maps to 1 (D-217).
   const float speeds[] = {1.0f, 1.5f, 2.5f, 4.0f, 0.5f, 7.0f};
   const float wins[] = {30.0f, 5.0f, 1.0f, 200.0f, 500.0f, 47.3f, std::nanf("")};
   const float searches[] = {8.0f, 0.0f, -3.0f, 50.0f, 80.0f, 2.7f, std::nanf("")};
@@ -204,7 +204,7 @@ SND_TEST(IndepTimeStretch, ShapeFormulas) {
           TimeStretchShape s{};
           SND_REQUIRE(TimeStretchGetShape(r, ms, &s, w, sr));
           const double wc = std::isnan(w) ? 30.0 : std::clamp(static_cast<double>(w), 5.0, 200.0);
-          const double sc = std::isnan(sr) ? 8.0 : std::clamp(static_cast<double>(sr), 0.0, 50.0);
+          const double sc = std::isnan(sr) ? 12.0 : std::clamp(static_cast<double>(sr), 0.0, 50.0);
           // D-210: maxSpeed NaN is 1.
           const double mc = std::isnan(ms) ? 1.0 : std::clamp(static_cast<double>(ms), 1.0, 4.0);
           std::uint32_t H = static_cast<std::uint32_t>(std::lround(r * wc / 2000.0));
@@ -228,9 +228,9 @@ SND_TEST(IndepTimeStretch, ShapeFormulas) {
   TimeStretchShape s{};
   SND_CHECK(TimeStretchGetShape(48000, 4.0f, &s));
   SND_CHECK_EQ(s.hopFrames, 720u);
-  SND_CHECK_EQ(s.searchFrames, 384u);
+  SND_CHECK_EQ(s.searchFrames, 576u);
   SND_CHECK_EQ(s.decimation, 8u);
-  SND_CHECK_EQ(s.lookaheadFrames, 1824u);
+  SND_CHECK_EQ(s.lookaheadFrames, 2016u);
   SND_CHECK(!TimeStretchGetShape(0, 1.0f, &s));
   SND_CHECK(!TimeStretchGetShape(384001, 1.0f, &s));
   SND_CHECK(!TimeStretchGetShape(48000, 1.0f, nullptr));
@@ -247,10 +247,11 @@ SND_TEST(IndepTimeStretch, ShapeFormulas) {
   bool untouched = true;
   for (unsigned char c : m) untouched = untouched && c == 0x5A;
   SND_CHECK_MSG(untouched, "a failed Init wrote to the state");
-  // D-209: stereo, 48 kHz, max speed 4: about 47 KB.
+  // D-217 specifies these two state sizes.
   snd::test::Note("state bytes: stereo 48k x4 %zu, 8ch 96k x4 %zu, 8ch 384k x4 %zu", b,
                   TimeStretchStateBytes(8, 96000), TimeStretchStateBytes(8, 384000));
-  SND_CHECK(b > 40000u && b < 56000u);
+  SND_CHECK_EQ(b, 41152u);
+  SND_CHECK_EQ(TimeStretchStateBytes(8, 96000), 310528u);
 }
 
 // T2 / T15: state, input and output guards over a long run with every kind of
@@ -363,7 +364,7 @@ SND_TEST(IndepTimeStretch, LongRunConsumptionNoDrift) {
   const Signal zero(1, std::vector<float>());  // reads as zeros
   for (float speed : {0.25f, 0.5f, 0.7f, 1.0f, 1.1f, 2.0f, 3.3f, 4.0f}) {
     Ts ts(1);
-    const double H = 720.0, LA = 1824.0;
+    const double H = 720.0, LA = 2016.0;
     double dev2 = 0.0, dev20 = 0.0;
     std::uint64_t total = 0;
     Signal out(1);
@@ -429,19 +430,22 @@ SND_TEST(IndepTimeStretch, BackToSpeedOneIsAConstantOffset) {
   for (float speed : {0.3f, 0.77f, 1.5f, 2.9f}) {
     Ts ts(2);
     Signal out(2);
-    double integral = 0.0;
     for (int i = 0; i < 150; ++i) {
       ts.Call(src, &out, 256, speed, speed);
-      integral += speed * 256.0;
     }
     for (int i = 0; i < 6; ++i) {  // > 2 hops at speed 1
       ts.Call(src, &out, 256, 1.0f, 1.0f);
-      integral += 256.0;
     }
     const double P = static_cast<double>(TimeStretchConsumedFrames(ts.st())) + TimeStretchPendingOffset(ts.st());
     const std::int64_t p = static_cast<std::int64_t>(P);
     SND_CHECK_EQ(static_cast<double>(p), P);
-    SND_CHECK_MSG(std::fabs(P - integral) <= 384.0 + 1.0, "speed %g: offset %g", speed, P - integral);
+    // The first hop starts at zero. Hop boundaries through frame 38400
+    // use the initial speed, then use 1. The selected position is within S
+    // of the integer nominal position, including the current partial hop.
+    constexpr int initialHops = (150 * 256 - 1) / 720;
+    const double nominal = std::floor(initialHops * 720.0 * speed) +
+                           static_cast<double>(out[0].size()) - initialHops * 720.0;
+    SND_CHECK_MSG(std::fabs(P - nominal) <= 576.0, "speed %g: offset %g", speed, P - nominal);
     Signal tail(2);
     const std::size_t from = out[0].size();
     for (int i = 0; i < 100; ++i) ts.Call(src, &out, 256, 1.0f, 1.0f);
@@ -508,7 +512,7 @@ SND_TEST(IndepTimeStretch, BlockSplitting) {
 // speed(i_k) = s0 + (s1 - s0) i_k / n, tau += round(speed H 2^32), the
 // requirement is floor(tau) + S + 2H.
 SND_TEST(IndepTimeStretch, RampFollowsOwnSimulation) {
-  const std::uint32_t H = 720, S = 384;
+  const std::uint32_t H = 720, S = 576;
   struct Seg {
     std::uint32_t n;
     float s0, s1;
@@ -554,7 +558,7 @@ SND_TEST(IndepTimeStretch, RampFollowsOwnSimulation) {
 // envelope (per 10 ms) and the worst residual against a fitted sinusoid are
 // reported; the envelope must stay within -3 dB .. +0.5 dB for 200 Hz and up.
 SND_TEST(IndepTimeStretch, SinusoidPitchAndAmplitude) {
-  for (double hz : {50.0, 100.0, 220.0, 440.0, 1000.0, 3150.0, 10000.0}) {
+  for (double hz : {50.0, 55.0, 73.0, 100.0, 220.0, 440.0, 1000.0, 3150.0, 10000.0}) {
     const Signal src = ToneSig(1, 48000 * 9, {hz});
     for (float speed : {0.25f, 0.5f, 0.8f, 1.5f, 2.0f, 4.0f}) {
       Ts ts(1);
@@ -566,6 +570,12 @@ SND_TEST(IndepTimeStretch, SinusoidPitchAndAmplitude) {
       const double res = WorstResidual(o[0], 9600, 96000, hz, 960);
       snd::test::Note("%6.0f Hz x%.2f: envelope %+.2f .. %+.2f dB, worst residual %.3f", hz, speed,
                       dsptest::Db(mn / 0.5), dsptest::Db(mx / 0.5), res);
+      if (hz <= 220.0 && speed <= 2.0f) {
+        // Phase mismatch of at most one sample on this tone bounds the
+        // difference between it and a convex mix with its shifted copy.
+        const double phaseStep = 2.0 * std::sin(kPi * hz / kRate);
+        SND_CHECK_MSG(res <= phaseStep, "%g Hz x%g: residual %g", hz, speed, res);
+      }
       if (hz >= 200.0) {
         SND_CHECK_MSG(dsptest::Db(mn / 0.5) > -3.0 && dsptest::Db(mx / 0.5) < 0.5,
                       "%g Hz at speed %g: envelope %g .. %g dB", hz, speed, dsptest::Db(mn / 0.5),
@@ -625,7 +635,7 @@ SND_TEST(IndepTimeStretch, Transients) {
                     missing, weak, doubled, clicks - 1u, worstShift);
     if (speed == 1.0f) SND_CHECK(missing == 0u && weak == 0u && doubled == 0u && worstShift == 0u);
     if (speed < 1.0f) SND_CHECK(missing == 0u);
-    SND_CHECK(worstShift <= 2u * (384u + 720u));
+    SND_CHECK(worstShift <= 2u * (576u + 720u));
   }
 }
 
@@ -767,7 +777,7 @@ SND_TEST(IndepTimeStretch, PlayheadTracksTheSpeedIntegral) {
     worst = std::max(worst, std::fabs(P - integral));
   }
   snd::test::Note("playhead vs speed integral: worst %.1f frames", worst);
-  SND_CHECK(worst <= 384.0 + 4.0 * 720.0 + 2.0);
+  SND_CHECK(worst <= 576.0 + 4.0 * 720.0 + 2.0);
 }
 
 // Cost (report): one stereo voice, 48 kHz, 256-frame blocks, mean and worst per block.
@@ -818,6 +828,76 @@ SND_TEST(IndepTimeStretch, BitExactChecksumAcrossConfigurations) {
     }
   }
   snd::test::Note("time stretch checksum %016llx", static_cast<unsigned long long>(h));
-  constexpr std::uint64_t kExpected = 0xf7d42a3b48c9c009ull;
+  constexpr std::uint64_t kExpected = 0xaf9b99d4a10e48eeull;
   SND_CHECK_EQ(h, kExpected);
+}
+
+SND_TEST(IndepTimeStretch, NanMaxSpeedIsOne) {
+  TimeStretchShape nanShape{}, oneShape{};
+  SND_REQUIRE(TimeStretchGetShape(kRate, std::nanf(""), &nanShape));
+  SND_REQUIRE(TimeStretchGetShape(kRate, 1.0f, &oneShape));
+  SND_CHECK_EQ(nanShape.padFrames, oneShape.padFrames);
+  Ts nan(2, kRate, std::nanf("")), one(2, kRate, 1.0f);
+  SND_REQUIRE(nan.ok && one.ok);
+  SND_CHECK_EQ(nan.bytes, one.bytes);
+  const Signal src = NoiseSig(2, 64000, 3);
+  SND_CHECK(nan.Run(src, 24000, 256, 2.0f) == one.Run(src, 24000, 256, 2.0f));
+}
+
+SND_TEST(IndepTimeStretch, PerChannelCorrelation) {
+  const Signal mono = ToneSig(1, 200000, {220.0});
+  for (float speed : {0.7f, 1.5f}) {
+    Ts reference(1);
+    const auto want = reference.Run(mono, 96000, 256, speed);
+    for (unsigned channels : {2u, 8u}) {
+      for (bool antiPhase : {false, true}) {
+        Signal src(channels, mono[0]);
+        for (unsigned c = 0; c < channels; ++c) {
+          const float gain = c == 0u ? 1.0f : antiPhase ? (c % 2u ? -1.0f : 1.0f) : 0.0f;
+          for (float& x : src[c]) x *= gain;
+        }
+        Ts ts(channels);
+        const auto actual = ts.Run(src, 96000, 256, speed);
+        SND_CHECK(actual[0] == want[0]);
+      }
+    }
+  }
+  // At speed 4, the second hop's natural continuation falls below the
+  // search window. Every candidate ties on silence, so select the first.
+  Ts silent(8);
+  const Signal zero(8);
+  const auto out = silent.Run(zero, 721, 721, 4.0f);
+  for (const auto& c : out) SND_CHECK(c == std::vector<float>(721, 0.0f));
+  SND_CHECK_EQ(static_cast<double>(silent.pos) + TimeStretchPendingOffset(silent.st()), 4 * 720 - 576 + 1);
+}
+
+SND_TEST(IndepTimeStretch, ClampEndpointsBeforeInterpolation) {
+  const Signal src = NoiseSig(1, 48000, 81);
+  struct Endpoints { float a, b, finiteA, finiteB; };
+  for (auto ramp : {Endpoints{INFINITY, -INFINITY, 2.0f, 0.25f},
+                    Endpoints{-INFINITY, std::nanf(""), 0.25f, 1.0f},
+                    Endpoints{std::nanf(""), INFINITY, 1.0f, 2.0f}}) {
+    Ts raw(1, kRate, 2.0f), finite(1, kRate, 2.0f);
+    Signal x(1), y(1);
+    SND_CHECK_EQ(raw.Call(src, &x, 9000, ramp.a, ramp.b),
+                 finite.Call(src, &y, 9000, ramp.finiteA, ramp.finiteB));
+    SND_CHECK(x == y);
+  }
+}
+
+SND_TEST(IndepTimeStretch, CallLimitSilencesOnlyTheExcess) {
+  constexpr std::uint32_t limit = 1u << 20;
+  Ts clipped(1), reference(1);
+  SND_REQUIRE(clipped.ok && reference.ok);
+  SND_CHECK_EQ(TimeStretchInputFrames(clipped.st(), UINT32_MAX, 1, 1),
+               TimeStretchInputFrames(reference.st(), limit, 1, 1));
+  const Signal src(1, std::vector<float>(limit + 6000u, 0.25f));
+  Signal x(1), y(1);
+  int bad = 0;
+  SND_CHECK_EQ(clipped.Call(src, &x, limit + 7, 1, 1, &bad), reference.Call(src, &y, limit, 1, 1, &bad));
+  SND_CHECK_EQ(bad, 0);
+  SND_CHECK(std::all_of(y[0].begin(), y[0].end(), [](float v){ return v == 0.25f; }));
+  y[0].resize(limit + 7, 0.0f);
+  SND_CHECK(x == y);
+  SND_CHECK(clipped.Run(src, 256, 256, 1) == reference.Run(src, 256, 256, 1));
 }
