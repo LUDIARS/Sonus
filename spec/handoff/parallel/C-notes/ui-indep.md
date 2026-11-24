@@ -22,7 +22,7 @@
 | `indep_s7_ui_limits_test.cpp` | G・E（全 12 画面 × {文書なし、空、基本、大きい（7 つの選択）} × DPI 0.25〜4 × 320×200〜3840×2160 を子プロセスで: 落ちない、要素 ≤ 4096、ID の重複なし、図形 ≤ 256・点 ≤ 4096、位置が有限、compose。範囲外の DPI と大きさ。フレームと画面の往復で ID が同じ）。ヘッドレスの CTest 用に大きなプロジェクトと空のプロジェクトを書く |
 | `indep_s7_ui_raster_test.cpp` | H（クリップの箱の画素、maxDistance の円の半径、カーブの点。DPI 1 と 2） |
 | `indep_s7_ui_threads_test.cpp` | J（実時間のプレビューエンジン（Silent）とライブリンクの中で、UI スレッドが全画面をポインタとキーで操作） |
-| `indep_s7_ui_defects_test.cpp` | 欠陥 4 件（`Defect_*`、失敗のまま）、書き戻しの確認 1 件、仕様の穴の記録 3 件（`SpecGap_*`、通る。今の振る舞いを出力する） |
+| `indep_s7_ui_defects_test.cpp` | 欠陥 5 件（`Defect_*`、失敗のまま）、書き戻しの確認 1 件、仕様の穴の記録 3 件（`SpecGap_*`、通る。今の振る舞いを出力する） |
 | `CMakeLists.txt`（末尾に追記） | 上のテストの登録、`tool_indep_s7_ui_screen_{large,empty}_<画面>`（24 本、`sonus-tool --headless --screen` が画像を書くこと）、知らない画面名 5 本（WILL_FAIL）、欠陥のテストを 1 件ずつ |
 
 ## 性質の一覧と結果
@@ -57,7 +57,7 @@
 | H1〜H3 | 画素（DPI 1・2） | `IndepS7UiRaster.*` | 通過 |
 | I1・I2 | ヘッドレスの全画面（大きい・空）、知らない画面名 | `tool_indep_s7_ui_screen_*`、`tool_indep_s7_ui_bad_screen_*`、`tool_indep_s7_ui_screen_missing_name` | 下の構成の表 |
 | J1 | UI スレッドと接続・エンジンのスレッド | `IndepS7UiThreads.ScreensDrivenWhileEngineAndLinkRun` | 下の構成の表 |
-| K | 実装を読んだ後の追加 | `indep_s7_ui_defects_test.cpp` | 欠陥 4、記録 3、確認 1（通過） |
+| K | 実装を読んだ後の追加 | `indep_s7_ui_defects_test.cpp` | 欠陥 5（うち 1 件は ASan の構成で見つけた Pick）、記録 3、確認 1（通過） |
 
 ## 欠陥の一覧（`tool_indep_s7_ui_defects_test`、CTest では `tool_indep_s7_ui_<名前>`）
 
@@ -89,6 +89,14 @@
    - 実際: `pc.par.def.value` 2 px、`pc.par.min/max/ramp.value` 16 px、`ma.t.impulse.value` 10 px。`kit.cpp` は欄の幅を 40 px 以上に
      するが値には欄 − 44 px しか残さない（負にもなりうる。Tela は負の幅で例外を投げなかった）。値の文字が出ず、2 px の当たり判定は
      実質押せない。
+
+5. **`Defect_PickWithAnItemOfTheOpenListReadsFreedMemory`**（中、ASan で発見）
+   - 再現: 候補の一覧を開き（`OpenPicker`、または画面の `PickField` を押す）、`app.Pick(app.picker()->items[i].value)` を呼ぶ。
+   - 期待: pick の関数がその項目の値を受け取る（app.hpp の `Pick(const std::string&)` と `picker()` の組み合わせで素直な呼び方）。
+   - 実際: `App::Pick` が `picker_.reset()`（項目を解放）してから `fn(value)` を呼ぶので、`value` は解放した領域を指す。ASan では
+     heap-use-after-free（パッチ画面の「+ Node」の pick から `PatchEditor::AddNode` → `FindNodeKind` で読んだ）、ASan なしでは
+     受け取った値が壊れる。画面の一覧のボタンは値を写して捕まえるのでクリックでは起きないが、ホスト（Ergo のプラグイン）やテストが
+     呼ぶと起きる。直し方の例: `Pick` の中で `value` を先に写す。
 
 （確認して欠陥でなかったもの: `WriteBackAfterStaleMixerKeepsNewerDocumentValues` — ライブの上書きがある間に文書で別のバスの値を
 変えてから書き戻しても、上書きの無いバスの新しい値は消えない。通過。）
@@ -179,12 +187,13 @@
 
 ## 回した構成と結果
 
-ビルドは `$S/ui-indep/b-*`、-j2、構成は 1 つずつ（終わったら消した）。「tool」は `ctest -R tool`。組 U の独立テストは CTest で 45 件
-（実行ファイル 7 本（欠陥の実行ファイルは DISABLED で、欠陥 4・確認 1・記録 3 を 1 件ずつ）、ヘッドレスの全画面 24 本、プロジェクトを
-書く 1 本、知らない画面名 6 本）。
+ビルドは `$S/ui-indep/b-*`、-j2、構成は 1 つずつ（終わったら消した）。「tool」は `ctest -R tool`。組 U の独立テストは CTest で 46 件
+（実行ファイル 7 本（欠陥の実行ファイルは DISABLED で、欠陥 5・確認 1・記録 3 を 1 件ずつ）、ヘッドレスの全画面 24 本、プロジェクトを
+書く 1 本、知らない画面名 5 本）。
 
 | 構成 | コミット | 実行したテスト | 結果 |
 | --- | --- | --- | --- |
+| 9 ＋ ASan / UBSan | 2e0a455（Pick の欠陥のテストと画面のテストの直しは 05a7e87 で、その 2 本を再実行） | tool のテストの実行ファイルと sonus-tool / sonus-replay だけをビルドし `ctest -R tool`（135 件。`-R tool` に当たる buildtool のテスト 9 件はビルドしていないので Not Run） | 組 U の独立テストで ASan が heap-use-after-free を報告（`App::Pick`、欠陥 5）。テストの側は値を写して渡すようにし、欠陥は `Defect_Pick…` に分けた。それ以外の tool のテストは全部通過（実装担当のテストも）、UBSan の報告なし。失敗は `Defect_*` だけ |
 | 9: Tela 入り、gcc Debug | 3c601eb（テストの中身は 2e0a455 と同じ。その後は書式の変更だけ） | 全部（350、Skipped 1・Disabled 3 を除く） | 346 通過、失敗 4 = 組 U の `Defect_*` 4 件だけ（意図どおり）。警告 0。以前の実装担当の回で失敗していた livelink の独立テスト 2 本は通過 |
 
 ## 未検証の箇所
