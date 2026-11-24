@@ -44,6 +44,10 @@ Built BuildSynths(const std::string& tag) {
   proj.Add("events/Wt.json", "event", "Wt",
            "\"bank\": \"Main\", \"bus\": \"Master\", \"tracks\": [{\"clips\": [{\"synth\": {\"kind\": \"wavetable\", "
            "\"asset\": \"wt\", \"frequencyHz\": 300}}]}]");
+  if (tag == "granular") {
+    proj.Add("events/Grains.json", "event", "Grains",
+             R"("bank":"Main","bus":"Master","tracks":[{"clips":[{"synth":{"kind":"granular","asset":"wt"}}]}])");
+  }
   bt::BuildOptions o = proj.Options();
   o.encoders = &bt::CodecEncoders();
   bt::Diagnostics diag;
@@ -184,4 +188,19 @@ SND_TEST(SourceSynthE2E, InputPlaybackPlaysThePort) {
   r.Steps(2);
   SND_CHECK(r.EndOf(h) != nullptr);
   SND_CHECK_EQ(r.runtime.Stats().inputInstances, 0u);
+}
+
+// Until D-07 is integrated the SYNP path starts Granular with null params.
+SND_TEST(SourceSynthE2E, GranularWithoutCoreDescriptorEndsSilently) {
+  const Built b = BuildSynths("granular");
+  SND_REQUIRE_MSG(b.ok, "%s", b.diag.c_str());
+  Rig r;
+  SND_REQUIRE(r.Ok());
+  r.Load(b);
+  const auto h = r.Play("Grains");
+  SND_REQUIRE(h.value != 0u);
+  r.Steps(16);
+  SND_REQUIRE(r.EndOf(h) != nullptr);
+  SND_CHECK_EQ(r.runtime.Stats().granularInstances, 0u);
+  for (std::size_t i = 0; i < r.Frames(); ++i) SND_CHECK_EQ(r.At(i, 0), 0.f);
 }

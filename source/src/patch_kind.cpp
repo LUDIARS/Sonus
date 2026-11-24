@@ -35,7 +35,8 @@ float ModValue(const PatchVoice& v, unsigned i, unsigned rate, std::uint64_t t) 
     const auto release = Duration(n.arg[3], rate);
     const auto elapsed = t - v.gate;
     if (elapsed >= release) return 0;
-    return static_cast<float>(KeyboardLevel(n, rate, v.gate) * (1 - double(elapsed) / double(release)));
+    return static_cast<float>(KeyboardLevel(n, rate, v.gate) *
+                              (1 - double(elapsed) / double(release)));
   }
   // Q32 cycles at sample t, modulo 2^32 whole cycles. Unsigned products wrap exactly.
   const auto cycles = t * static_cast<std::uint64_t>(std::round(double(n.arg[0]) * kScale / rate));
@@ -49,7 +50,8 @@ void Advance(PatchVoice& v, std::uint64_t frames, double pitch, bool seek) noexc
   for (unsigned i = 0; i < v.count; ++i) {
     auto& s = v.state[i];
     if (v.nodes[i].op == PatchOp::Oscillator)
-      s.phase = (seek ? s.initialPhase : s.phase) + static_cast<std::uint32_t>((end-start) * Increment(s, pitch));
+      s.phase = (seek ? s.initialPhase : s.phase) +
+                static_cast<std::uint32_t>((end - start) * Increment(s, pitch));
     s.filter = 0;  // no unbounded filter-history replay on a virtual return
   }
   v.frame = end;
@@ -63,22 +65,33 @@ float Evaluate(PatchVoice& v, float* values, double pitch, unsigned rate) noexce
     auto& s = v.state[i];
     float value = 0;
     switch (n.op) {
-      case PatchOp::Constant: value = n.arg[0]; break;
+      case PatchOp::Constant:
+        value = n.arg[0];
+        break;
       case PatchOp::Oscillator: {
         const auto increment = Increment(s, pitch);
         if (increment != 0)
-          value = static_cast<float>(Waveform(n.waveform, s.phase / kScale, increment / kScale, n.arg[1]));
+          value = static_cast<float>(
+              Waveform(n.waveform, s.phase / kScale, increment / kScale, n.arg[1]));
         s.phase += increment;
         break;
       }
-      case PatchOp::WhiteNoise: value = NoiseKind::White(s.key, v.frame); break;
-      case PatchOp::Add: value = values[n.a] + values[n.b]; break;
-      case PatchOp::Multiply: value = values[n.a] * values[n.b]; break;
+      case PatchOp::WhiteNoise:
+        value = NoiseKind::White(s.key, v.frame);
+        break;
+      case PatchOp::Add:
+        value = values[n.a] + values[n.b];
+        break;
+      case PatchOp::Multiply:
+        value = values[n.a] * values[n.b];
+        break;
       case PatchOp::Lowpass:
         s.filter += s.coefficient * (values[n.a] - s.filter);
         value = static_cast<float>(s.filter);
         break;
-      case PatchOp::Adsr: case PatchOp::RandomHold: case PatchOp::Lfo: {
+      case PatchOp::Adsr:
+      case PatchOp::RandomHold:
+      case PatchOp::Lfo: {
         if (sub == 0 || v.refresh) {
           const auto knot = v.frame - sub;
           s.modStart = ModValue(v, i, rate, knot);
@@ -87,8 +100,12 @@ float Evaluate(PatchVoice& v, float* values, double pitch, unsigned rate) noexce
         value = s.modStart + (s.modEnd - s.modStart) * (static_cast<float>(sub) / kModStep);
         break;
       }
-      case PatchOp::Clip: value = std::clamp(values[n.a], -n.arg[0], n.arg[0]); break;
-      case PatchOp::Output: value = std::clamp(values[n.a], -1.f, 1.f); break;
+      case PatchOp::Clip:
+        value = std::clamp(values[n.a], -n.arg[0], n.arg[0]);
+        break;
+      case PatchOp::Output:
+        value = std::clamp(values[n.a], -1.f, 1.f);
+        break;
     }
     values[i] = std::clamp(value, -16.f, 16.f);
   }
@@ -109,8 +126,10 @@ bool PatchKind::Prepare(PatchVoice& v, const SourceStartRequest& rq, SourceStart
     s.key = NoiseKind::ChannelKey(NoiseKind::VoiceKey(0, rq.seed), i);
     if (n.op == PatchOp::Oscillator) {
       s.baseDt = double(n.arg[0]) / rate_;
-      if (n.waveform == static_cast<unsigned>(bank_format::Waveform::Saw)) s.initialPhase = 0x80000000u;
-      if (n.waveform == static_cast<unsigned>(bank_format::Waveform::Triangle)) s.initialPhase = 0x40000000u;
+      if (n.waveform == static_cast<unsigned>(bank_format::Waveform::Saw))
+        s.initialPhase = 0x80000000u;
+      if (n.waveform == static_cast<unsigned>(bank_format::Waveform::Triangle))
+        s.initialPhase = 0x40000000u;
     } else if (n.op == PatchOp::Lowpass) {
       s.coefficient = -std::expm1(-kTau * std::min(double(n.arg[0]) / rate_, 0.5));
     } else if (n.op == PatchOp::Adsr && v.gate) {
@@ -129,12 +148,16 @@ void PatchKind::Control(const SourceControlOp* ops, std::uint32_t count) noexcep
     if (v && ops[i].op == ControlOp::Seek) Advance(*v, ops[i].frame, 1, true);
   }
 }
-void PatchKind::AdvanceVirtual(const AdvanceItem* items, std::uint32_t count, VoiceRenderStatus* status) noexcept {
+void PatchKind::AdvanceVirtual(const AdvanceItem* items, std::uint32_t count,
+                               VoiceRenderStatus* status) noexcept {
   for (unsigned i = 0; i < count; ++i) {
     const auto& a = items[i];
     status[i] = {};
     auto* v = Get(a.sourceSlot);
-    if (!v) { status[i].ended = 1; continue; }
+    if (!v) {
+      status[i].ended = 1;
+      continue;
+    }
     if (a.outputFrames) Advance(*v, a.outputFrames, std::isfinite(a.pitch) ? a.pitch : 0, false);
     a.playhead->frame = v->frame;
     status[i].ended = v->finiteDuration && v->frame == v->end;
@@ -146,15 +169,22 @@ void PatchKind::RenderBatch(const source::RenderBatch& batch, VoiceRenderStatus*
     auto& st = status[k];
     st = {};
     auto* v = Get(it.sourceSlot);
-    if (!v) { st.ended = 1; continue; }
-    const auto frames = v->finiteDuration
-        ? static_cast<unsigned>(std::min<std::uint64_t>(it.framesRequested, v->end - v->frame)) : it.framesRequested;
+    if (!v) {
+      st.ended = 1;
+      continue;
+    }
+    const auto frames =
+        v->finiteDuration
+            ? static_cast<unsigned>(std::min<std::uint64_t>(it.framesRequested, v->end - v->frame))
+            : it.framesRequested;
     if (frames != 0) {
       auto* scratch = batch.scratch;
       const auto mark = scratch ? scratch->used : 0;
       const auto bytes = sizeof(float) * v->count;
-      auto* values = scratch && scratch->base && mark <= scratch->bytes && mark <= SIZE_MAX - bytes - alignof(float)
-          ? static_cast<float*>(scratch->Take(bytes, alignof(float))) : nullptr;
+      auto* values = scratch && scratch->base && mark <= scratch->bytes &&
+                             mark <= SIZE_MAX - bytes - alignof(float)
+                         ? static_cast<float*>(scratch->Take(bytes, alignof(float)))
+                         : nullptr;
       if (values) {
         for (unsigned f = 0; f < frames; ++f) {
           const auto at = it.frameOffset + f;

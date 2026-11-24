@@ -24,7 +24,8 @@ class ResidentSynth : public ISourceKind {
     measure.Take<SlotIndex>(limits.maxVoices);
     return measure.used;
   }
-  bool Init(void* pool, std::size_t bytes, const SourceLimits& limits, const SourceServices&) noexcept final {
+  bool Init(void* pool, std::size_t bytes, const SourceLimits& limits,
+            const SourceServices&) noexcept final {
     if (!pool || bytes < PoolBytes(limits)) return false;
     Carver carve{static_cast<std::uint8_t*>(pool), 0, bytes};
     voices_ = carve.Take<Voice>(limits.maxVoices);
@@ -38,7 +39,8 @@ class ResidentSynth : public ISourceKind {
     slots_ = {};
     live_.store(0, std::memory_order_relaxed);
   }
-  void Start(const SourceStartRequest* requests, std::uint32_t count, SourceStartResult* results) noexcept final {
+  void Start(const SourceStartRequest* requests, std::uint32_t count,
+             SourceStartResult* results) noexcept final {
     for (std::uint32_t i = 0; i < count; ++i) {
       results[i] = {kInvalidSlot, SND_END_DETAIL_NONE, 0, 0};
       if (!voices_ || !requests[i].params) continue;
@@ -67,15 +69,19 @@ class ResidentSynth : public ISourceKind {
       }
     }
   }
-  void QueryReady(const SlotIndex* ids, std::uint32_t count, std::uint8_t* ready) const noexcept final {
-    for (std::uint32_t i = 0; i < count; ++i) ready[i] = ids[i] < slots_.cap && voices_[ids[i]].live;
+  void QueryReady(const SlotIndex* ids, std::uint32_t count,
+                  std::uint8_t* ready) const noexcept final {
+    for (std::uint32_t i = 0; i < count; ++i)
+      ready[i] = ids[i] < slots_.cap && voices_[ids[i]].live;
   }
   void ScheduleBackground(const BlockInfo&) noexcept final {}
   std::uint32_t PrimeFrames(const SourceAsset&, std::uint64_t) const noexcept final { return 0; }
   std::uint32_t LiveInstances() const noexcept { return live_.load(std::memory_order_relaxed); }
 
  protected:
-  Voice* Get(SlotIndex i) noexcept { return i < slots_.cap && voices_[i].live ? &voices_[i] : nullptr; }
+  Voice* Get(SlotIndex i) noexcept {
+    return i < slots_.cap && voices_[i].live ? &voices_[i] : nullptr;
+  }
   std::uint32_t rate_ = 48000;
 
  private:

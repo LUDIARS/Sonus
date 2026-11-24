@@ -37,8 +37,10 @@ inline double RampResidual(double t, double dt) noexcept {
 inline double Waveform(std::uint32_t shape, double ph, double dt, double duty) noexcept {
   using W = bank_format::Waveform;
   switch (static_cast<W>(shape)) {
-    case W::Sine: return std::sin(6.283185307179586476925 * ph);
-    case W::Saw: return 2.0 * ph - 1.0 - 2.0 * StepResidual(ph, dt);
+    case W::Sine:
+      return std::sin(6.283185307179586476925 * ph);
+    case W::Saw:
+      return 2.0 * ph - 1.0 - 2.0 * StepResidual(ph, dt);
     case W::Triangle: {
       const double other = ph < 0.5 ? ph + 0.5 : ph - 0.5;
       double y = ph < 0.5 ? 4.0 * ph - 1.0 : 3.0 - 4.0 * ph;

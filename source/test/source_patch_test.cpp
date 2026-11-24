@@ -20,7 +20,7 @@ SND_TEST(SourcePatch, SineTimesConstantAndProgramValidation) {
   SND_REQUIRE(d.Ok());
   Driver::Voice v;
   SND_REQUIRE(d.Start(v, &p, 2));
-  program[12+20*2+1] = 2;  // self-edge, start already owns a validated copy
+  program[12 + 20 * 2 + 1] = 2;  // self-edge, start already owns a validated copy
   SND_CHECK(!src::ValidatePatchProgram(program, bytes));
   d.Render(v, 512, {}, 37);
   for (unsigned i = 0; i < 512; ++i) {

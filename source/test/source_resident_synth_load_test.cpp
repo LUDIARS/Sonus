@@ -41,12 +41,12 @@ void Measure(snd::SourceKind kind, const void* params, const char* name) {
   for (unsigned i = 0; i < 4; ++i) driver.Block(batch);
   const double before = driver.renderUs;
   for (unsigned i = 0; i < 24; ++i) driver.Block(batch);
-  const double mean = (driver.renderUs-before)/24;
+  const double mean = (driver.renderUs - before) / 24;
   for (auto& v : voices) driver.Advance(v, 48000);
   const double start = driver.renderUs;
   driver.Block(batch);
-  std::printf("%s 128 stereo voices, 256 frames: mean %.1f us, simultaneous return %.1f us\n",
-              name, mean, driver.renderUs-start);
+  std::printf("%s 128 stereo voices, 256 frames: mean %.1f us, simultaneous return %.1f us\n", name,
+              mean, driver.renderUs - start);
   SND_CHECK_EQ(counter.allocations, initial);
   SND_CHECK_EQ(snd::test::rt::UnexpectedTotal(), 0u);
 }
@@ -54,12 +54,12 @@ void Measure(snd::SourceKind kind, const void* params, const char* name) {
 
 SND_TEST(SourceResidentSynth, BoundedLoadAndReturn) {
   std::array<float, 8192> pcm{};
-  for (unsigned i = 0; i < pcm.size(); ++i) pcm[i] = static_cast<float>(std::sin(i/16.0));
+  for (unsigned i = 0; i < pcm.size(); ++i) pcm[i] = static_cast<float>(std::sin(i / 16.0));
   src::SourceAsset asset{};
   asset.codec.codec = SND_CODEC_PCM_F32;
   asset.codec.channels = 2;
   asset.codec.sample_rate = 48000;
-  asset.codec.total_frames = pcm.size()/2;
+  asset.codec.total_frames = pcm.size() / 2;
   asset.data = reinterpret_cast<const std::uint8_t*>(pcm.data());
   asset.dataBytes = sizeof(pcm);
   src::GranularParams g{&asset, 20, 40, 0.3f, 100};
@@ -99,7 +99,8 @@ SND_TEST(SourceResidentSynth, HeldVoiceRendersWhileOtherSlotsAreReused) {
   src::GranularParams granular{&a, 48000, 0, 0, 0};
   granular.window = src::GrainWindow::Rectangle;
   for (auto kind : {snd::SourceKind::Granular, snd::SourceKind::Patch}) {
-    const void* params = kind == snd::SourceKind::Granular ? static_cast<const void*>(&granular) : &patch;
+    const void* params =
+        kind == snd::SourceKind::Granular ? static_cast<const void*>(&granular) : &patch;
     Driver d(kind, {});
     Driver::Voice held;
     SND_REQUIRE(d.Start(held, params, 1));
@@ -112,7 +113,10 @@ SND_TEST(SourceResidentSynth, HeldVoiceRendersWhileOtherSlotsAreReused) {
     bool ok = true;
     for (unsigned i = 0; i < 500; ++i) {
       Driver::Voice other;
-      if (!d.Start(other, params, 1)) { ok = false; break; }
+      if (!d.Start(other, params, 1)) {
+        ok = false;
+        break;
+      }
       d.Control(other, src::ControlOp::Seek, i);
       d.Kind().ScheduleBackground({});
       d.Release(other);
