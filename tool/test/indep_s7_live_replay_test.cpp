@@ -382,7 +382,7 @@ SND_TEST(IndepS7LiveReplay, BrokenFilesAreRefused) {
   std::string err;
   SND_REQUIRE(DecodeRecording(file.data(), file.size(), &out, &err));
   for (std::size_t cut = 0; cut < file.size(); cut += (cut < 256u ? 1u : 61u)) {
-    SND_CHECK_MSG(!DecodeRecording(file.data(), cut, &out, &err), "cut %zu", cut);
+    SND_CHECK_MSG(!DecodeRecording(file.data(), cut, &out, &err), "cut %u", static_cast<unsigned>(cut));
   }
   // recordBytes (offset 48) lies: larger, smaller, huge.
   for (const std::uint64_t lie : {std::uint64_t{file.size()} * 2u, std::uint64_t{8}, ~std::uint64_t{0}, ~std::uint64_t{0} - 63u}) {

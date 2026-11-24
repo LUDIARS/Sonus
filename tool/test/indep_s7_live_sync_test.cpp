@@ -310,8 +310,8 @@ SND_TEST(IndepS7Live, Record_AddedBusGoesByReloadEvenWithAnEditor) {
   const json::Value bus = Json("{\"bank\": \"Main\", \"parent\": \"Master\"}");
   SND_REQUIRE(!r.doc.Create("bus", "Zed", &bus).empty());
   SND_REQUIRE(r.Settle());
-  std::printf("record: AddBus: struct edits %zu, editor applied %u, reloads %zu\n", r.sync->structEdits().size(),
-              editor.applied, r.sync->reloads().size());
+  std::printf("record: AddBus: struct edits %u, editor applied %u, reloads %u\n",
+              static_cast<unsigned>(r.sync->structEdits().size()), editor.applied, static_cast<unsigned>(r.sync->reloads().size()));
   SND_CHECK(r.sync->problems().empty());
   // The new bus is in the game either way.
   bool zed = false;
@@ -386,8 +386,8 @@ SND_TEST(IndepS7Live, NonFiniteAndUnbuildableValues) {
   r.Frames(10);
   r.Run([&] { return r.sync->phase() == LivePhase::Live || !r.sync->problems().empty(); }, 5000);
   const float g = r.GameF32(snd::HashId("Sfx"), bf::chunk::BUSS, bf::col::BUSS_volumeDb);
-  SND_CHECK_MSG(g == 1.0e6f || !r.sync->problems().empty(), "game %g, %zu problems", static_cast<double>(g),
-                r.sync->problems().size());
+  SND_CHECK_MSG(g == 1.0e6f || !r.sync->problems().empty(), "game %g, %u problems", static_cast<double>(g),
+                static_cast<unsigned>(r.sync->problems().size()));
   SND_REQUIRE(r.doc.SetNumber(SfxG(), "volumeDb", -5.0));
   SND_REQUIRE(r.Settle());
   SND_CHECK_EQ(r.GameF32(snd::HashId("Sfx"), bf::chunk::BUSS, bf::col::BUSS_volumeDb), -5.0f);
@@ -636,8 +636,9 @@ SND_TEST(IndepS7Live, Record_ValueEditOfALiveAddedEffect) {
   r.Settle();
   r.Frames(10);
   const LiveItem* it = r.sync->Find(AmbG(), "effects[#].params[#]");
-  std::printf("record: param edit of a live-added effect: %zu problems, %zu reloads, item %s\n", r.sync->problems().size(),
-              r.sync->reloads().size(), it != nullptr ? LiveStateName(it->state) : "(none)");
+  std::printf("record: param edit of a live-added effect: %u problems, %u reloads, item %s\n",
+              static_cast<unsigned>(r.sync->problems().size()), static_cast<unsigned>(r.sync->reloads().size()),
+              it != nullptr ? LiveStateName(it->state) : "(none)");
   for (const LiveProblem& p : r.sync->problems()) std::printf("  problem: %s (%s)\n", p.message.c_str(), p.member.c_str());
   // Whatever the route, the user is not told "live" while the game has no such cell.
   SND_CHECK(!r.sync->problems().empty() || !r.sync->reloads().empty());
