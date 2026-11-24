@@ -30,7 +30,7 @@ struct LiveUi {
   bool ok = false;
 
   // `edit` changes the document after the game was started (a build mismatch).
-  explicit LiveUi(bool mismatch) {
+  explicit LiveUi(bool mismatch, bool failingWriter = false) {
     livetest::LoadLive(doc);
     gameBuild = BuildDocument(doc);
     std::string err;
@@ -45,7 +45,11 @@ struct LiveUi {
     s.UseProject(p);
     LiveSyncOptions o = livetest::MakeOptions(LiveDecision::Ask);
     preview::PreviewEngine* e = engine.get();
-    o.writer = [e](const BankImage& b, std::string* path, std::string*) {
+    o.writer = [e, failingWriter](const BankImage& b, std::string* path, std::string* error) {
+      if (failingWriter) {
+        *error = "test: no room for the rebuilt bank";
+        return false;
+      }
       *path = e->PutRebuiltBank(b.file, b.bytes);
       return true;
     };
@@ -226,4 +230,24 @@ SND_TEST(ToolUiLive, RecordReplayTwiceWavAndBugReport) {
   bool expectation = false;
   for (const std::string& l : t.app->view().replay.result) expectation = expectation || l == "expectation: met";
   SND_CHECK(expectation);
+}
+
+// A hot reload that fails (the rebuilt bank cannot be written): the live phase is Failed and the
+// Link screen names the bank and the reason; the header's light is red.
+SND_TEST(ToolUiLive, FailedReloadIsShownOnTheLinkScreen) {
+  LiveUi t(false, true);
+  SND_REQUIRE(t.ok);
+  t.app->view().screen = ui::Screen::Link;
+  SND_REQUIRE(t.Until([&] { return t.s.live()->phase() == LivePhase::Live; }));
+  // A new event in the bank: not a value edit (the bank is rebuilt and hot reloaded).
+  json::Value init = json::MakeObject();
+  json::Add(init, "bank", String("Main"));
+  json::Add(init, "bus", String("Sfx"));
+  SND_REQUIRE(!t.doc.Create("event", "E1", &init).empty());
+  t.app->Edited();
+  SND_REQUIRE(t.Until([&] { return t.s.live()->phase() == LivePhase::Failed; }));
+  t.Frame();
+  SND_REQUIRE(t.El("ln.failed.0") != nullptr);
+  SND_CHECK(t.Label("ln.failed.0").find("no room for the rebuilt bank") != std::string::npos);
+  SND_CHECK(t.Label("link.state").find("failed") != std::string::npos);
 }

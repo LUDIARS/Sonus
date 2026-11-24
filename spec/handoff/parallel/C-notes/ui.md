@@ -82,8 +82,13 @@ Tela に渡さない）、`host_macos.mm`（キーコードと文字を `App::Ke
 | D-189 | 穴 7 | 3D の既定のエミッタは maxDistance の半分（無ければ 5 m）だけ右前（(0.6d, 0.8d)）。取っ手を先、本体を後に宣言（本体が上） | 00986ce |
 | D-189 | 穴 8 | カーブの図は x にも 4 % の余白（`PlotAxes::Fit` の xMargin、`kCurveXMargin`）。点のドラッグで動かない軸は元の値のまま | 00986ce |
 | D-189 | 穴 10 | Link は未接続なら「not connected」（版・機能の理由を出さない） | 00986ce |
-| D-189 | 穴 11 | 同じファイル・行・列・種類・文言の問題を 1 回にする関数 `DistinctIssues` を `doc_build` に足し、Problems の一覧（`App::problems`）はそれを通す。**`CheckDocument` 自体は変えなかった**: 決定は「`CheckDocument` の側で」だったが、既存の `Document.IssuesMatchTheBuildToolWordForWord`（`tool_document_test`、組 M）が `CheckDocument` と buildtool の診断の件数の一致を確かめていて（今は 8 件 = 重複を含む）、`CheckDocument` で除くとそれが落ちる（一度そう直して確かめた）。既存のアサーションは変えないので、`CheckDocument` で除くならそのテストの直しが要る（受け入れ側の判断） | e4fa328 → 下の追いのコミット |
+| D-189（訂正） | 穴 11 | 同じファイル・行・列・種類・文言の問題を 1 回にする `DistinctIssues` を `doc_build` に足し、表示の側（`App::problems()` = Problems 画面とフッタの件数）がそれを通す。`CheckDocument` は buildtool の診断と一語一語・件数まで同じまま（ecd6d46 で一度 `CheckDocument` で除いたが、受け入れ側の訂正で 2fbb846 で戻した） | 146f728, 2fbb846 |
 | テスト | 弱い箇所 | `ui_editor_fix_test`（上の全部）、`model_fix_test`（核）、上限を画面ごとの別プロセスで 320×240 まで（`tool_ui_editor_limits_<画面>`） | fbc68cb ほか |
+
+組 P の差し戻しの取り込み（`git merge --no-ff c/live`、衝突なし）: Link 画面に `LiveSync::failedBanks()`（バンクと理由、`ln.failed.<行>`）、
+ヘッダの接続のランプは `LivePhase::Failed` で赤。テスト `ToolUiLive.FailedReloadIsShownOnTheLinkScreen`（書き出せないホットリロード）。
+`ChooseSendDiffs` / `ChooseRefuse` と `TransitionPreview` の変更は、画面がモデルの値を出すだけなので直しは要らなかった（音楽の画面のテストは
+`MusicEditor::Preview` の値と比べている）。
 
 モデルに足した・直したもの（U-fix.md で許された `mixer`・`event_editor`・`doc_build` だけ）:
 - `mixer.hpp/.cpp`: `struct LiveValue`、`MixerModel::LiveValues()`、`static Unmatched(project, values)`、`Rebind(project, values, dropped)`。
@@ -93,6 +98,8 @@ Tela に渡さない）、`host_macos.mm`（キーコードと文字を `App::Ke
 決定と食い違って落ちる独立テスト（`indep_s7_*` は変えていない）:
 - `IndepS7Ui.ChangingTheScreenEndsTheTextEntry`（`tool_indep_s7_ui_common_test`）: 入力中の F4 で画面が変わり入力が終わることを期待。D-186 で入力中の画面の切り替えのキーは入力欄が受ける（何もしない）。`OnScreen` での切り替え（ボタン）では今も入力が終わる。
 - `IndepS7UiScreens.MaterialRowsLastMaterialAndSymmetricPairs`（`tool_indep_s7_ui_screens_test`）: `ma.mat.<番号>` の ID を期待。D-189 で材質の ID は名前から。
+- `IndepS7UiScreens.ProblemsRowsAreTheBuildsIssues`（`tool_indep_s7_ui_screens_test`）: Problems の行の数 = `CheckDocument` の件数を期待。
+  訂正後の D-189 で画面は重複を 1 行にする（`CheckDocument` は重複を含むまま）ので、重複のある文書で行が 1 つ少ない。
 - `IndepS7UiDefects.SpecGap_ClipSelectionIsAnIndexAcrossUndo`（`tool_indep_s7_ui_SpecGap_ClipSelectionIsAnIndexAcrossUndo`）: 今の振る舞い（Undo の後の Delete で 1 つ消える）を記録する。D-186 で選択は外れ、Delete は何も消さない（クリップは 2 つのまま）。
 
 ## 決定の案（受け入れ側が D-番号を振る。番号は振っていない）
