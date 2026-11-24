@@ -878,6 +878,14 @@ TransitionPreview MusicEditor::Preview(const std::string& from, const std::strin
   const TempoMap dmap = dst.valid() ? dst.Map() : TempoMap();
   const double srcRate = src.valid() && src.SampleRate() > 0 ? src.SampleRate() : 48000.0;
   p.requestSeconds = requestSeconds;
+  // D-184: the runtime takes the request at the start of a block (blocks counted from the music's
+  // start). A request is never applied earlier than asked: the first block start at or after the
+  // request, and at least one block after the start (the music starts in the From state).
+  const double applyRate = s.sampleRate == 0u ? 48000.0 : static_cast<double>(s.sampleRate);
+  const double applyFrames = s.blockFrames == 0u ? 256.0 : static_cast<double>(s.blockFrames);
+  double blocks = std::ceil(requestSeconds * applyRate / applyFrames - 1e-9);
+  if (!(blocks >= 1.0)) blocks = 1.0;
+  p.applySeconds = blocks * applyFrames / applyRate;
   p.requestTick = map.TickAtSeconds(requestSeconds);
   // Lookahead of this target.
   LookaheadEntry le;
@@ -886,8 +894,8 @@ TransitionPreview MusicEditor::Preview(const std::string& from, const std::strin
           r.prepare, dseg != nullptr && BoolAt(dseg->doc, "entryPreload", false), s, &le);
   const double blockMs = 1000.0 * s.blockFrames / (s.sampleRate == 0u ? 48000.0 : s.sampleRate);
   p.lookaheadMs = blockMs + le.primeMs;
-  // Timing.
-  const double now = p.requestTick;
+  // Timing (from where the runtime takes the request).
+  const double now = map.TickAtSeconds(p.applySeconds);
   const double exitTick = src.valid() ? src.ExitTick() : map.TickAtBar(1);
   auto nextMarker = [&](double x, double* out) {
     double best = -1;
@@ -918,12 +926,16 @@ TransitionPreview MusicEditor::Preview(const std::string& from, const std::strin
     return map.NextBar(x);
   };
   double fire = timing(now);
-  const double lookSeconds = p.lookaheadMs / 1000.0;
-  if (map.SecondsAtTick(fire) - requestSeconds < lookSeconds - 1e-12) {
+  // The runtime's lead check (music transition.cpp HandleSetState): the target material must be
+  // primed by the fire time, counted from the block the request is applied in (no extra block:
+  // lookaheadMs above is the display value, one block + prime, of 8.2).
+  const double lookSeconds = le.primeMs / 1000.0;
+  const double halfSample = 0.5 / applyRate;
+  if (map.SecondsAtTick(fire) < p.applySeconds + lookSeconds - halfSample) {
     p.lateApplied = true;
     switch (r.late) {
       case LateRule::NextGrid: {
-        const double reach = map.TickAtSeconds(requestSeconds + lookSeconds);
+        const double reach = map.TickAtSeconds(p.applySeconds + lookSeconds);
         double x = fire;
         for (int guard = 0; guard < 10000 && x < reach - kEps; ++guard) {
           const double nx = r.timing == Timing::Immediate ? reach : timing(x + 0.5);
@@ -936,7 +948,7 @@ TransitionPreview MusicEditor::Preview(const std::string& from, const std::strin
         fire = x;
         break;
       }
-      case LateRule::StartLate: fire = map.TickAtSeconds(requestSeconds + lookSeconds); break;
+      case LateRule::StartLate: fire = map.TickAtSeconds(p.applySeconds + lookSeconds); break;
       case LateRule::Cancel: p.cancelled = true; break;
     }
   }

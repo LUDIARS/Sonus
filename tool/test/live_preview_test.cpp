@@ -189,3 +189,41 @@ SND_TEST(LivePreview, AuditionsToAConnectedGame) {
   SND_CHECK(!why.empty());
   SND_CHECK(!router.PlayEvent(q).ok);
 }
+
+SND_TEST(LivePreview, TransitionAuditionMatchesThePreviewAtBarLinesAndTimeZero) {
+  // D-184: requests on a bar line, just before, just after, and at 0 s. The engine applies the
+  // request at the first block start at or after it (never earlier, at least one block after the
+  // start); MusicEditor::Preview computes with the same block and the runtime's lead.
+  for (const double request : {0.0, 2.0, 1.999, 2.001, 4.0 - 256.0 / 48000.0}) {
+    Rig r(true);
+    SND_REQUIRE(r.ok);
+    MusicEditor me(r.doc, livetest::G(26));
+    MusicSettings ms;
+    ms.sampleRate = r.engine->Status().sampleRate;
+    ms.blockFrames = r.engine->Status().blockFrames;
+    const TransitionPreview p = me.Preview("Explore", "Battle", request, ms);
+    SND_REQUIRE(p.valid);
+    SND_CHECK(p.applySeconds >= request - 1e-12);
+    SND_CHECK(p.applySeconds > 0.0);
+    AuditionRouter router;
+    router.Bind(nullptr, r.engine.get());
+    r.Frames(2);
+    const std::uint64_t startClock = r.engine->NextBlock() * ms.blockFrames;
+    SND_REQUIRE(router.PlayTransition(TransitionAudition{snd::HashId("Song"), snd::HashId("Explore"),
+                                                         snd::HashId("Battle"), request})
+                    .ok);
+    std::vector<float> all;
+    r.engine->Render(static_cast<std::uint32_t>((p.fireSeconds + 0.5) * ms.sampleRate / ms.blockFrames), &all);
+    const std::vector<PreviewTransition> tr = r.engine->Transitions();
+    SND_REQUIRE_MSG(tr.size() == 1u, "request %.4f: %zu transitions", request, tr.size());
+    const std::uint64_t want = startClock + static_cast<std::uint64_t>(std::llround(p.fireSeconds * ms.sampleRate));
+    SND_CHECK_MSG(tr[0].clock == want, "request %.4f: switch at %.5f s, preview %.5f s", request,
+                  static_cast<double>(tr[0].clock - startClock) / ms.sampleRate, p.fireSeconds);
+    // The From state is heard first (level kDc), then To (2 kDc).
+    const std::uint32_t ch = r.engine->Status().channels;
+    const float first = all[std::size_t{ms.blockFrames} * ch];  // the second block
+    const float last = all[all.size() - ch];
+    SND_CHECK(first > 0.01f);
+    SND_CHECK_NEAR(last / first, 2.0, 1e-4);
+  }
+}
