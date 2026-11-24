@@ -170,7 +170,7 @@ struct RuntimeStats {
   std::uint32_t oscillatorInstances = 0;
   std::uint32_t noiseInstances = 0;
   std::uint32_t inputInstances = 0;
-  std::uint64_t inputUnderruns = 0;      // blocks a playing Input voice found too few frames
+  std::uint64_t inputUnderruns = 0;      // beginnings of shortages after a fully supplied block
 };
 
 class Runtime {

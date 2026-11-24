@@ -105,3 +105,4 @@ snd_add_test(indep_src1_api_test SOURCES indep_src1_api_test.cpp
        sonus_codec sonus_mocks)
 target_include_directories(indep_src1_api_test PRIVATE ${PROJECT_SOURCE_DIR}/api/test ${PROJECT_SOURCE_DIR}/api/compose)
 set_tests_properties(indep_src1_api_test PROPERTIES TIMEOUT 900)
+snd_add_test(source_input_floor_test SOURCES source_input_floor_test.cpp LINK sonus_source sonus_base sonus_mocks)
