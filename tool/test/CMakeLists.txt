@@ -163,3 +163,38 @@ add_test(NAME tool_indep_app_dpi_max
 add_test(NAME tool_indep_app_dpi_above COMMAND sonus-tool --headless --no-connect --dpi 4.01)
 add_test(NAME tool_indep_app_dpi_below COMMAND sonus-tool --headless --no-connect --dpi 0.24)
 set_tests_properties(tool_indep_app_dpi_above tool_indep_app_dpi_below PROPERTIES WILL_FAIL TRUE)
+
+# Independent tests of group U (tool/test/indep_s7_ui_properties.md, written from the specs and
+# the public headers before reading the screens' code). The Defect_* tests are in their own
+# executable, one CTest test each; they fail on purpose (each documents a defect).
+foreach(_t indep_s7_ui_common_test indep_s7_ui_limits_test indep_s7_ui_screens_test)
+  _snd_tool_test(${_t} "${_tool_ui_screen_link}")
+endforeach()
+# I1 / I2: every screen headless on an empty and a large generated project (the limits test writes
+# them first: FIXTURES), and an unknown screen name.
+add_test(NAME tool_indep_s7_ui_write_projects COMMAND tool_indep_s7_ui_limits_test --filter WriteLargeProjectForHeadless)
+set_tests_properties(tool_indep_s7_ui_write_projects PROPERTIES FIXTURES_SETUP tool_indep_s7_ui_projects
+                     ENVIRONMENT "SND_INDEP_LARGE_DIR=${CMAKE_CURRENT_BINARY_DIR}/indep-ui-large")
+foreach(_screen mixer buses event params spatial music material patch profiler replay link problems)
+  foreach(_proj large empty)
+    if(_proj STREQUAL "large")
+      set(_dir ${CMAKE_CURRENT_BINARY_DIR}/indep-ui-large)
+    else()
+      set(_dir ${CMAKE_CURRENT_BINARY_DIR}/indep-ui-large-empty)
+    endif()
+    add_test(NAME tool_indep_s7_ui_screen_${_proj}_${_screen}
+             COMMAND ${CMAKE_COMMAND} -E env
+                     sh -c "rm -f \"$2\" && \"$0\" --headless --no-connect --frames 2 --frame-ms 1 --text-placeholders --screen $1 --project \"$3\" --build-dir \"$4\" --snapshot \"$2\" && test -s \"$2\""
+                     $<TARGET_FILE:sonus-tool> ${_screen} ${CMAKE_CURRENT_BINARY_DIR}/indep-ui-${_proj}-${_screen}.ppm
+                     ${_dir} ${CMAKE_CURRENT_BINARY_DIR}/indep-ui-${_proj}-${_screen}-build)
+    set_tests_properties(tool_indep_s7_ui_screen_${_proj}_${_screen} PROPERTIES FIXTURES_REQUIRED tool_indep_s7_ui_projects)
+  endforeach()
+endforeach()
+foreach(_bad "" "Mixer" "mixer2" "--snapshot")
+  string(MAKE_C_IDENTIFIER "x${_bad}" _n)
+  add_test(NAME tool_indep_s7_ui_bad_screen_${_n} COMMAND sonus-tool --headless --no-connect --frames 1 --screen "${_bad}")
+  set_tests_properties(tool_indep_s7_ui_bad_screen_${_n} PROPERTIES WILL_FAIL TRUE)
+endforeach()
+add_test(NAME tool_indep_s7_ui_screen_missing_name COMMAND sonus-tool --headless --no-connect --frames 1 --screen)
+set_tests_properties(tool_indep_s7_ui_screen_missing_name PROPERTIES WILL_FAIL TRUE)
+set_tests_properties(tool_indep_s7_ui_limits_test PROPERTIES TIMEOUT 3600)
