@@ -735,7 +735,6 @@ void StartClip(Ctx& c, StartContext& sc, const BankRecord& r, std::uint32_t clip
   }
 }
 
-// Starts a playback (state None/Pending -> Playing / Priming). false: ended.
 // D-145: an action-only event stays live through the block that applies its last
 // action. Pause inserts whole blocks, so the start offset used for rounding is stable.
 std::uint64_t ActionOnlyEnd(const Impl& im, const bk::BankView& v, std::uint32_t row, ClockSample start) noexcept {
@@ -760,6 +759,7 @@ std::uint64_t ActionOnlyEnd(const Impl& im, const bk::BankView& v, std::uint32_t
   return end;
 }
 
+// Starts a playback (state None/Pending -> Playing / Priming). false: ended.
 bool StartPlayback(Ctx& c, std::uint32_t d, ClockSample startClock) noexcept {
   Impl& im = c.im;
   schema::Tables& t = c.t;
@@ -970,43 +970,46 @@ bool Defer(Impl& im, const Deferred& df, HandleRef parent = HandleRef{}) noexcep
 }
 
 // --- Action tracks (4.2, D-145) ---------------------------------------------------------
-// The time of an action is the parent's track time (Priv.trackTime: frames played, not
-// advancing while the parent pauses or stops). RunEventLogic takes the actions of the
-// next block ahead (the playback rows of their children are created by ApplyCommands):
-//  - Play: the child is created at the next block's ApplyCommands with a CLOCK_SAMPLE
-//    start at the action's clock (sample accurate);
-//  - StopEvent: at its block, the target playbacks stop from the action's clock (a timed
-//    stop, like snd_stop with a clock);
-//  - SetParam (the parent's own playback scope, ACTN has no scope column) and
-//    ApplySnapshot (at once, ACTN has no time column): block values, so they apply from the
-//    first block that starts at or after the action's clock, never before.
-// The taken actions wait in EventPriv.pending until their block; if the parent pauses,
-// stops or does not start before then, they are dropped (a pause rolls the parent back so
-// they come again after the resume) and the children are cancelled (kPbCancelled).
+// Actions are queued one block ahead. ApplyDueActions holds their
+// clocks during pauses and creates only the children that fall in the current block.
+}  // namespace
 
-// 0 = the parent's actions may happen, 1 = paused (they come again later), 2 = stopped / gone.
-std::uint32_t ParentState(Ctx& c, HandleRef parent, ClockSample at) noexcept {
-  Impl& im = c.im;
-  schema::Tables& t = c.t;
+ActionParentState ActionParentStatus(Impl& im, HandleRef parent, ClockSample at) noexcept {
+  schema::Tables& t = im.tables;
   const std::uint32_t d = base::rows::DenseOf(t.Playback.rows, parent);
-  if (d == kNoSlot) return 2u;
+  if (d == kNoSlot) return ActionParentState::Stopped;
   const PlaybackPriv& pp = Priv(im, parent.slot);
-  if ((pp.flags & (kPbStopping | kPbEndPending | kPbCancelled)) != 0u) return 2u;
-  if (pp.stopClock != 0u && pp.stopClock <= at) return 2u;
+  const bool stopped = (pp.flags & kPbStopping) != 0u &&
+                       ((pp.flags & kPbTimedStop) == 0u || pp.stopClock == 0u || pp.stopClock <= at);
+  if (stopped || (pp.flags & (kPbEndPending | kPbCancelled)) != 0u ||
+      (pp.stopClock != 0u && pp.stopClock <= at) ||
+      ((pp.flags & kPbActionStop) != 0u && pp.actionStopClock <= at)) return ActionParentState::Stopped;
   const PlaybackRequest& req = SND_R(Playback_request)[d];
   const bool fresh = req.seq != SND_W(Playback_logic)[d].handledRequestSeq;
-  if (fresh && (req.flags & (kRequestStop | kRequestDiscard)) != 0u) return 2u;
-  if ((pp.flags & (kPbPausedUser | kPbPausedCategory | kPbPausedState)) != 0u) return 1u;
-  if (fresh && (req.flags & kRequestPause) != 0u) return 1u;
+  if (fresh && (req.flags & (kRequestStop | kRequestDiscard)) != 0u) return ActionParentState::Stopped;
+  for (std::uint32_t i = 0; i < im.fire.count; ++i) {
+    const auto& f = im.fire.entries[i];
+    if (f.target.Value() == parent.Value() && f.fireClock <= at && f.lateRuleApplied != kFireTransportGone &&
+        (f.action == ReservationAction::Stop ||
+         (f.action == ReservationAction::ScheduledStop && req.stopReservation == f.reservation))) {
+      return ActionParentState::Stopped;
+    }
+  }
+  const bool paused = fresh && (req.flags & (kRequestResume | kRequestPause)) != 0u
+                          ? (req.flags & kRequestPause) != 0u
+                          : (pp.flags & kPbPausedUser) != 0u;
+  if (paused) return ActionParentState::Paused;
   if (!CategoryIgnoresPause(im, pp.categorySlot)) {
     const EventRef ref = SND_R(Playback_eventRef)[d];
     const BankRecord* br = RegisteredBank(im, ref.bankSlot);
     const bool eventIgnores =
         br != nullptr && (br->view->Column<bk::col::EVNT_flags>()[ref.eventIndex] & bf::kEventIgnorePause) != 0u;
-    if (!eventIgnores && CategoryPaused(im, pp.categorySlot)) return 1u;
+    if (!eventIgnores && CategoryPaused(im, pp.categorySlot)) return ActionParentState::Paused;
   }
-  return 0u;
+  return ActionParentState::Running;
 }
+
+namespace {
 
 void AddPending(Impl& im, const ActionPending& e) noexcept {
   if (im.ev.pendingCount < im.ev.deferredCap) {
@@ -1030,7 +1033,7 @@ void MarkActionStop(Ctx& c, Id target, ClockSample clock) noexcept {
 }
 
 // Takes the actions of the parent at row d with track time t in [from, to); an action at
-// track time u happens at clockAt(u). `due0` is the first block start of the next block.
+// track time u happens at clockAt(u).
 template <class ClockAt>
 void TakeActions(Ctx& c, std::uint32_t d, std::uint64_t from, std::uint64_t to, ClockAt&& clockAt,
                  bool includePlay = true) noexcept {
@@ -1056,31 +1059,11 @@ void TakeActions(Ctx& c, std::uint32_t d, std::uint64_t from, std::uint64_t to, 
       e.target = v.Column<bk::col::ACTN_target>()[a];
       e.value = v.Column<bk::col::ACTN_value>()[a];
       e.parent = self;
-      e.trackTime = at;
       e.clock = clockAt(at);
       switch (static_cast<bf::ActionKind>(v.Column<bk::col::ACTN_action>()[a])) {
         case bf::ActionKind::PlayEvent: {
           if (!includePlay) break;
-          const HandleRef h = im.playbackSlots.Acquire();
-          if (h.generation == 0u) {
-            ActionLimit(im, self);
-            break;
-          }
-          Deferred df{};
-          df.kind = DeferredKind::Play;
-          df.id = e.target;
-          df.handle = h;
-          df.ref = ResolveEvent(im, e.target);
-          df.emitter = SND_R(Playback_emitterSlot)[d];
-          df.emitterGen = df.emitter != kNoSlot ? t.Emitter.rows.generation[df.emitter] : 0u;
-          df.startClock = e.clock;
-          if (!Defer(im, df, self)) {
-            im.playbackSlots.Release(h);
-            break;
-          }
-          im.oneShot[h.slot].store(1u, std::memory_order_relaxed);
           e.kind = ActionPendingKind::Play;
-          e.child = h;
           AddPending(im, e);
           break;
         }
@@ -1102,16 +1085,7 @@ void TakeActions(Ctx& c, std::uint32_t d, std::uint64_t from, std::uint64_t to, 
           e.due = e.clock <= blockEnd
                       ? blockEnd
                       : blockEnd + ((e.clock - blockEnd + im.cfg.blockFrames - 1u) / im.cfg.blockFrames) * im.cfg.blockFrames;
-          if (e.due == blockEnd) {
-            Deferred df{};
-            df.kind = e.kind == ActionPendingKind::SetParam ? DeferredKind::SetParam : DeferredKind::ApplySnapshot;
-            df.id = e.target;
-            df.value = e.value;
-            df.handle = self;
-            Defer(im, df, self);
-          } else {
-            AddPending(im, e);
-          }
+          AddPending(im, e);
           break;
         }
       }
@@ -1119,24 +1093,17 @@ void TakeActions(Ctx& c, std::uint32_t d, std::uint64_t from, std::uint64_t to, 
   }
 }
 
-// The parent's taken actions that have not happened: dropped; a paused parent takes them
-// again from the earliest one.
-void DropPending(Ctx& c, HandleRef parent, bool rollBack) noexcept {
+// Leave entries in place while processing this block; RunPending removes them
+// after all starts, including parents whose reservations are refused, are known.
+void DropPending(Ctx& c, HandleRef parent) noexcept {
   Impl& im = c.im;
-  for (std::uint32_t i = 0; i < im.ev.pendingCount;) {
+  for (std::uint32_t i = 0; i < im.ev.pendingCount; ++i) {
     ActionPending& e = im.ev.pending[i];
-    if (e.parent.slot != parent.slot || e.parent.generation != parent.generation) {
-      ++i;
-      continue;
-    }
+    if (e.parent.Value() != parent.Value()) continue;
     if (e.kind == ActionPendingKind::Play && base::rows::IsCurrent(c.t.Playback.rows, e.child)) {
       Priv(im, e.child.slot).flags |= kPbCancelled;
     }
-    if (rollBack && base::rows::IsCurrent(c.t.Playback.rows, parent)) {
-      PlaybackPriv& pp = Priv(im, parent.slot);
-      if (e.trackTime < pp.actionHorizon) pp.actionHorizon = e.trackTime;
-    }
-    im.ev.pending[i] = im.ev.pending[--im.ev.pendingCount];
+    e.kind = ActionPendingKind::Done;
   }
 }
 
@@ -1154,50 +1121,7 @@ void CancelActionChildren(Ctx& c, HandleRef parent) noexcept {
     ApplyPriv::TentativeSnapshot& ts = im.ap.tentative[i];
     if (ts.parent.slot == parent.slot && ts.parent.generation == parent.generation) ts.cancelled = 1u;
   }
-  DropPending(c, parent, false);
-}
-
-// The pending actions whose block has come (start of RunEventLogic, after the commands of
-// this block: a pause or stop of the parent applied now cancels them).
-void RunPending(Ctx& c) noexcept {
-  Impl& im = c.im;
-  schema::Tables& t = c.t;
-  const ClockSample blockEnd = im.clock + im.cfg.blockFrames;
-  for (std::uint32_t i = 0; i < im.ev.pendingCount;) {
-    ActionPending& e = im.ev.pending[i];
-    if (e.kind == ActionPendingKind::Play) {
-      const std::uint32_t cd = base::rows::DenseOf(t.Playback.rows, e.child);
-      const PlaybackStateId cs = cd == kNoSlot ? PlaybackStateId::Ended : SND_W(Playback_state)[cd];
-      if (cs != PlaybackStateId::Pending && cs != PlaybackStateId::None) {  // started or gone
-        im.ev.pending[i] = im.ev.pending[--im.ev.pendingCount];
-        continue;
-      }
-    } else if (e.kind != ActionPendingKind::Stop && e.due > blockEnd) {
-      ++i;  // a later block
-      continue;
-    }
-    const std::uint32_t ps = ParentState(c, e.parent, e.clock);
-    if (ps != 0u) {
-      const HandleRef parent = e.parent;
-      DropPending(c, parent, ps == 1u);  // (compacts the list: look at i again)
-      continue;
-    }
-    if (e.kind == ActionPendingKind::Play) {  // waits for the child's start (this block)
-      ++i;
-      continue;
-    }
-    if (e.kind == ActionPendingKind::Stop) {
-      MarkActionStop(c, e.target, e.clock);
-    } else {
-      Deferred df{};
-      df.kind = e.kind == ActionPendingKind::SetParam ? DeferredKind::SetParam : DeferredKind::ApplySnapshot;
-      df.id = e.target;
-      df.value = e.value;
-      df.handle = e.parent;
-      Defer(im, df, e.parent);
-    }
-    im.ev.pending[i] = im.ev.pending[--im.ev.pendingCount];
-  }
+  DropPending(c, parent);
 }
 
 // After a playback started at `startClock` in this block: the actions of its first block
@@ -1212,9 +1136,24 @@ void ActionsAtStart(Ctx& c, std::uint32_t d, ClockSample startClock) noexcept {
   const std::uint64_t first = startClock < blockEnd ? blockEnd - startClock : 0u;
   const PlaybackRequest& req = SND_R(Playback_request)[d];
   pp.trackTime = 0u;
+  const HandleRef self{s, t.Playback.rows.generation[s]};
+  const auto status = ActionParentStatus(im, self, startClock);
+  if (status != ActionParentState::Running) {
+    CancelActionChildren(c, self);
+    if (status == ActionParentState::Paused) {
+      // Track time zero will fall on the first resumed block boundary.
+      TakeActions(c, d, 0u, im.cfg.blockFrames, [&](std::uint64_t u) noexcept { return blockEnd + u; });
+      pp.actionHorizon = im.cfg.blockFrames;
+      if (pp.actionOnlyEnd != 0u) {
+        const EventRef ref = SND_R(Playback_eventRef)[d];
+        const BankRecord* br = RegisteredBank(im, ref.bankSlot);
+        pp.actionOnlyEnd = ActionOnlyEnd(im, *br->view, ref.eventIndex, blockEnd);
+      }
+    }
+    return;
+  }
   if (pp.actionStart != 0u && pp.actionStart != startClock) {  // looked ahead with another clock
-    const HandleRef self{s, t.Playback.rows.generation[s]};
-    DropPending(c, self, false);
+    DropPending(c, self);
     pp.actionHorizon = 0u;
   }
   auto clockAt = [&](std::uint64_t u) noexcept { return startClock + u; };
@@ -1227,6 +1166,40 @@ void ActionsAtStart(Ctx& c, std::uint32_t d, ClockSample startClock) noexcept {
   }
   if (pp.actionHorizon < first) TakeActions(c, d, pp.actionHorizon, first, clockAt);
   if (pp.actionHorizon < first) pp.actionHorizon = first;
+}
+
+// Start the children prepared after UpdateTransport at their exact sample. Their
+// own actions can enqueue work for the next block, but cannot recurse in this one.
+void RunPending(Ctx& c) noexcept {
+  Impl& im = c.im;
+  const auto count = im.ev.pendingCount;
+  const auto blockEnd = im.clock + im.cfg.blockFrames;
+  for (std::uint32_t i = 0; i < count; ++i) {
+    ActionPending& e = im.ev.pending[i];
+    if (e.kind == ActionPendingKind::Stop && e.clock < blockEnd) {
+      if (ActionParentStatus(im, e.parent, e.clock) == ActionParentState::Running) MarkActionStop(c, e.target, e.clock);
+      e.kind = ActionPendingKind::Done;
+    }
+  }
+  for (std::uint32_t i = 0; i < count; ++i) {
+    ActionPending& e = im.ev.pending[i];
+    if (e.kind != ActionPendingKind::Play || e.child.generation == 0u) continue;
+    const auto d = base::rows::DenseOf(c.t.Playback.rows, e.child);
+    if (d != kNoSlot) {
+      if (ActionParentStatus(im, e.parent, e.clock) != ActionParentState::Running) {
+        Priv(im, e.child.slot).flags |= kPbCancelled;
+      } else {
+        const auto clock = e.clock < im.clock ? im.clock : e.clock;
+        if (StartPlayback(c, d, clock)) ActionsAtStart(c, d, clock);
+      }
+    }
+    e.kind = ActionPendingKind::Done;
+  }
+  std::uint32_t keep = 0;
+  for (std::uint32_t i = 0; i < im.ev.pendingCount; ++i) {
+    if (im.ev.pending[i].kind != ActionPendingKind::Done) im.ev.pending[keep++] = im.ev.pending[i];
+  }
+  im.ev.pendingCount = keep;
 }
 
 void ApplyFireEntry(Ctx& c, const music::FireEntry& f) noexcept {
@@ -1551,11 +1524,10 @@ void RunEventLogic(Impl& im) noexcept {
       if (prows.count == before) ++d;
     }
   }
-  // 0c. D-145: actions taken ahead whose block has come.
-  RunPending(c);
-
   // 1. Fired reservations (in fire order, 2.5).
   for (std::uint32_t i = 0; i < im.fire.count; ++i) ApplyFireEntry(c, im.fire.entries[i]);
+
+  RunPending(c);  // scheduled parents have now started or cancelled their actions
 
   // 2. Voices: source end, deferred controls of held voices, music gain ramps.
   //    (Virtualize / Devirtualize are sent by SelectVoices when it moves a voice.)

@@ -484,7 +484,8 @@ inline constexpr std::uint32_t kVoicePausedFlag = 1u << 4;  // core-internal Voi
 
 // D-145: actions taken ahead, waiting for their block (cancelled if the parent pauses,
 // stops or does not start before they happen). RunEventLogic private.
-enum class ActionPendingKind : std::uint32_t { Play = 0, Stop = 1, SetParam = 2, Snapshot = 3 };
+enum class ActionPendingKind : std::uint32_t { Play, Stop, SetParam, Snapshot, Done };
+enum class ActionParentState { Running, Paused, Stopped };
 struct ActionPending {
   ActionPendingKind kind;
   Id target;
@@ -492,7 +493,6 @@ struct ActionPending {
   HandleRef child;         // Play: the child playback
   float value;
   std::uint32_t reserved;
-  std::uint64_t trackTime; // the action's time on the parent's track
   ClockSample clock;       // the action's clock
   ClockSample due;         // SetParam / Snapshot: the block start it applies at
 };
@@ -863,6 +863,8 @@ inline float RampValue(const TimedRamp& r, ClockSample clock) noexcept {
 void ApplyCommands(Impl& im) noexcept;
 void UpdateTransport(Impl& im) noexcept;
 void EvaluateLogicParams(Impl& im) noexcept;
+ActionParentState ActionParentStatus(Impl& im, HandleRef parent, ClockSample at) noexcept;
+void ApplyDueActions(Impl& im) noexcept;
 void RunEventLogic(Impl& im) noexcept;
 void Compute3D(Impl& im) noexcept;
 void EvaluateDspParams(Impl& im) noexcept;

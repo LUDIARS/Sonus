@@ -368,6 +368,19 @@ void ActionChildLimit(Impl& im, HandleRef parent) noexcept {
   PostWarning(im, SND_ERR_LIMIT_REACHED, 0u, parent.Value());
 }
 
+HandleRef CreateActionChild(Impl& im, HandleRef parent, SlotIndex emitter, Id target, const snd_when& when) noexcept {
+  const HandleRef child = im.playbackSlots.Acquire();
+  if (child.generation == 0u) {
+    ActionChildLimit(im, parent);
+    return child;
+  }
+  const HandleRef em = emitter != kNoSlot ? HandleRef{emitter, im.tables.Emitter.rows.generation[emitter]} : HandleRef{};
+  im.oneShot[child.slot].store(1u, std::memory_order_relaxed);
+  CreatePlayback(im, child, em, target, ResolveEvent(im, target), when, nullptr, cmd::kPlayOneShot,
+                 DynamicSourceRef{SourceKind::Count, {0, 0, 0}, 0u});
+  return child;
+}
+
 // D-145: a play of a bank event that starts inside this block (immediate, or a CLOCK_SAMPLE /
 // DELAY_US start in this block) gets the actions of its start block here, in its start
 // block: Play actions create their child playbacks now (CLOCK_SAMPLE at start + time), and
@@ -417,20 +430,13 @@ void ApplyFirstBlockActions(Impl& im, HandleRef h, const EventRef& ref) noexcept
             ActionChildLimit(im, h);
             break;
           }
-          const HandleRef ch = im.playbackSlots.Acquire();
-          if (ch.generation == 0u) {
-            ActionChildLimit(im, h);
-            break;
-          }
-          im.oneShot[ch.slot].store(1u, std::memory_order_relaxed);
-          snd_when w{};
+          snd_when when{};
           if (clock > im.clock) {
-            w.kind = static_cast<std::uint8_t>(SND_WHEN_CLOCK_SAMPLE);
-            w.value = clock;
+            when.kind = static_cast<std::uint8_t>(SND_WHEN_CLOCK_SAMPLE);
+            when.value = clock;
           }
-          const HandleRef em = es != kNoSlot ? HandleRef{es, t.Emitter.rows.generation[es]} : HandleRef{};
-          CreatePlayback(im, ch, em, target, ResolveEvent(im, target), w, nullptr, cmd::kPlayOneShot,
-                         DynamicSourceRef{SourceKind::Count, {0, 0, 0}, 0u});
+          const HandleRef ch = CreateActionChild(im, h, es, target, when);
+          if (ch.generation == 0u) break;
           im.ap.actionChildren[im.ap.actionChildCount++] = ApplyPriv::ActionChild{h, ch};
           break;
         }
@@ -1111,6 +1117,53 @@ void ApplyDeferred(Impl& im) noexcept {
 }
 
 }  // namespace
+
+// D-145: ApplyCommands owns the playback rows and parameter/snapshot requests. Apply
+// actions here after UpdateTransport so stops fired in this block participate too.
+void ApplyDueActions(Impl& im) noexcept {
+  schema::Tables& t = im.tables;
+  const auto blockEnd = im.clock + im.cfg.blockFrames;
+  for (std::uint32_t i = 0; i < im.ev.pendingCount; ++i) {
+    ActionPending& e = im.ev.pending[i];
+    const bool value = e.kind == ActionPendingKind::SetParam || e.kind == ActionPendingKind::Snapshot;
+    const auto status = ActionParentStatus(im, e.parent, value ? e.due : e.clock);
+    if (status == ActionParentState::Stopped) {
+      e.kind = ActionPendingKind::Done;
+      continue;
+    }
+    if (status == ActionParentState::Paused) {
+      e.clock += im.cfg.blockFrames;
+      e.due += im.cfg.blockFrames;
+      continue;
+    }
+    if (e.kind == ActionPendingKind::Play && e.clock < blockEnd) {
+      const auto d = base::rows::DenseOf(t.Playback.rows, e.parent);
+      // RunEventLogic starts this row after its parent has been admitted at its clock.
+      e.child = CreateActionChild(im, e.parent, SND_W(Playback_emitterSlot)[d], e.target, snd_when{});
+      if (e.child.generation == 0u) e.kind = ActionPendingKind::Done;
+    } else if (value && e.due <= im.clock) {
+      if (e.kind == ActionPendingKind::SetParam) {
+        SetParamValue(im, ParamScope::Playback, e.parent, e.target, ParamKind::Continuous, e.value);
+      } else {
+        const auto slot = im.snapMap.Find(e.target);
+        if (slot != IdMap::kNotFound) {
+          const auto sd = base::rows::DenseOf(t.Snapshot.rows, slot);
+          const auto weight = SaneWeight(e.value);
+          if ((im.ev.pb[e.parent.slot].flags & kPbStarted) == 0u) {
+            if (im.ap.tentativeCount < im.ap.actionChildCap) {
+              im.ap.tentative[im.ap.tentativeCount++] = ApplyPriv::TentativeSnapshot{slot, weight, e.parent, 0u, 0u};
+            } else {
+              ActionChildLimit(im, e.parent);
+            }
+          } else if (sd != kNoSlot) {
+            SND_W(Snapshot_request)[sd].weight = TimedRamp{weight, weight, im.clock, 0u, 0u};
+          }
+        }
+      }
+      e.kind = ActionPendingKind::Done;
+    }
+  }
+}
 
 void ApplyCommands(Impl& im) noexcept {
   im.releasedEmitterCount = 0;
