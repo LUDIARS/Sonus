@@ -532,6 +532,22 @@ SND_TEST(Convolution, Cost) {
     snd::test::Note("convolution 2 s stereo IR, block %u, B %u, %s: %.1f us per block (worst %.1f), budget %.0f us, state %u bytes",
                     cs.block, cs.b, cs.zl != 0.0f ? "zero latency" : "latency B", us, worst, 1e6 * cs.block / kRate,
                     EffectStateBytes(fx.desc, kRate));
+    // D-218: the blocks where the IR switches (cross-fade: one extra FDL pass and the old head).
+    Ir ir2(taps, cs.b);
+    SND_REQUIRE(ir2.slot != 0u);
+    double sw = 0.0, swWorst = 0.0;
+    const int switches = blocks / 20 + 1;
+    for (int k = 0; k < switches; ++k) {
+      fx.params[kConvIrSlot] = static_cast<float>((k & 1) == 0 ? ir2.slot : ir.slot);
+      snd::ParamBlock pb{fx.params, fx.params, kConvParamCount, 1u, nullptr};
+      const auto a = std::chrono::steady_clock::now();
+      EffectProcess(fx.st(), p, p, 2, cs.block, &pb, nullptr);
+      const double t = std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - a).count();
+      sw += t;
+      swWorst = std::max(swWorst, t);
+      for (int q = 0; q < 3; ++q) EffectProcess(fx.st(), p, p, 2, cs.block, &pb, nullptr);
+    }
+    snd::test::Note("  IR switch blocks: %.1f us on average (worst %.1f)", sw / switches, swWorst);
   }
 }
 
