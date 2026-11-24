@@ -114,6 +114,16 @@ D-67a・D-100・D-101、`tool/ui/include/snd/tool/ui/*.hpp`、モデルの公開
 - J1 UI スレッドが画面の編集・フレームを回す中で、ライブリンクのクライアントのスレッドとゲームのスレッドが動く（TSan で
   報告なし、Release で 20 回）。UI の操作はすべて UI スレッドから。
 
-## K. 実装を読んだ後に足すもの
+## K. 実装を読んだ後に足したもの（`indep_s7_ui_defects_test.cpp`）
 
-（3 の手順で追記する。）
+- K1 入力した数値は欄の範囲で切り詰めずにモデルへ渡し、モデルが拒否すれば入力は開いたまま（kit.cpp の commitText が
+  `ClampNumber` してから setter を呼ぶのを狙う）。→ `Defect_TypedNumberOutsideTheFieldRangeIsClampedNotRefused`
+- K2 数値の欄のホイールは、宣言と宣言の間の複数のノッチを全部数える（宣言の時の値に足しているのを狙う）。
+  → `Defect_NumberFieldWheelNotchesBetweenFramesAreLost`
+- K3 クリップの縦のドラッグのトラックは移動量で決まり、押した点の位置で決まらない（離した点の局所座標の floor を狙う）。
+  → `Defect_ClipVerticalDragTrackComesFromThePressPointNotTheMotion`
+- K4 数値の欄の値の要素に幅がある（欄 − 44 px の幅が小さく・負になるのを狙う）。→ `Defect_NumberFieldValueHasNoRoom`
+- K5 上書きがある間に値だけ変えた文書へ書き戻しても、上書きの無いバスの新しい値は消えない（決定の案 g の stale なミキサー）。
+  → `WriteBackAfterStaleMixerKeepsNewerDocumentValues`（通過）
+- K6〜K8 仕様の穴の記録（今の振る舞いを出力する）: 構造の変更で上書きが消える、選択が番号で Undo の後に別の物を指す、
+  入力中の Ctrl+Z が文書に効く。→ `SpecGap_*`
