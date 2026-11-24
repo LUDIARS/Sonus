@@ -132,6 +132,28 @@ SND_TEST(IndepS7UiDefects, Defect_NumberFieldValueHasNoRoom) {
   SND_CHECK_MSG(narrow.empty(), "narrow number fields:%s", narrow.c_str());
 }
 
+// app.hpp: `void Pick(const std::string& value)` with `const Picker* picker()`: the obvious call
+// with the value of an item of the open list, `Pick(picker()->items[i].value)`, reads freed memory:
+// App::Pick resets the picker (its items) before it calls the pick function with `value` (found by
+// ASan: heap-use-after-free in PatchEditor::AddNode through the patch screen's "+ Node" pick).
+// The screen's own list buttons capture a copy, so clicks are safe; a host or a test calling Pick is
+// not. Expected: the pick function gets the item's value. (Without ASan the freed buffer usually
+// holds the allocator's bookkeeping, so the value arrives changed.)
+SND_TEST(IndepS7UiDefects, Defect_PickWithAnItemOfTheOpenListReadsFreedMemory) {
+  Rig r;
+  std::string got;
+  const std::string want = "the second item's value, long enough to live on the heap";
+  ui::Picker p;
+  p.field = "indep.picker";
+  p.title = "indep";
+  p.items = {ui::PickerItem{"one", "the first item's value, also long enough for the heap"}, ui::PickerItem{"two", want}};
+  p.pick = [&got](const std::string& v) { got = v; };
+  r.app->OpenPicker(std::move(p));
+  SND_REQUIRE(r.app->picker() != nullptr);
+  r.app->Pick(r.app->picker()->items[1].value);
+  SND_CHECK_MSG(got == want, "the pick function got %u bytes", static_cast<unsigned>(got.size()));
+}
+
 // Decision g + WriteBackMixer: with a live override the mixer is not rebound after value edits of
 // the document; "Write back" must still not put the mixer's stale bank values over the newer
 // document values of buses it does not override.

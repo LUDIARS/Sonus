@@ -201,6 +201,7 @@ set_tests_properties(tool_indep_s7_ui_limits_test PROPERTIES TIMEOUT 3600)
 _snd_tool_test(indep_s7_ui_defects_test "${_tool_ui_screen_link}")
 set_tests_properties(tool_indep_s7_ui_defects_test PROPERTIES DISABLED TRUE)  # run per test below
 foreach(_d Defect_TypedNumberOutsideTheFieldRangeIsClampedNotRefused Defect_NumberFieldWheelNotchesBetweenFramesAreLost
+        Defect_PickWithAnItemOfTheOpenListReadsFreedMemory
         Defect_ClipVerticalDragTrackComesFromThePressPointNotTheMotion Defect_NumberFieldValueHasNoRoom
         WriteBackAfterStaleMixerKeepsNewerDocumentValues SpecGap_StructuralEditDropsLiveOverridesSilently
         SpecGap_ClipSelectionIsAnIndexAcrossUndo SpecGap_UndoKeyDuringATextEntryUndoesTheDocument)
