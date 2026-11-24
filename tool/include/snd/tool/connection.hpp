@@ -93,9 +93,13 @@ class Connection {
   std::uint32_t roundTripUs() const { return roundTripUs_; }
   // 1.1 (group P): the game's protocol minor of the last handshake (0 = a 1.0 game, or none yet).
   std::uint16_t peerMinor() const { return hello_.protocolMinor; }
-  // deferSyncDecision: true while a BuildMismatch waits for DecideSync (state Handshake).
+  // deferSyncDecision: true while a BuildMismatch waits for DecideSync (state Handshake), as the
+  // last Poll saw it: awaitingSync(), hello() and generation() are one consistent picture (D-182).
   bool awaitingSync() const;
+  // The client's connection count (disconnects) at the last Poll: a new connection, a new number.
+  std::uint32_t generation() const { return generation_; }
   // Answers the waiting BuildMismatch: SendDiffs -> Online (mismatch() true), Refuse -> Rejected.
+  // false (nothing sent) if the connection Poll saw is no longer the one waiting.
   bool DecideSync(MismatchPolicy answer);
 
   livelink::Client* client() { return client_; }
@@ -108,6 +112,8 @@ class Connection {
   bool mismatch_ = false;
   std::uint32_t sessions_ = 0;
   std::uint32_t opens_ = 0;
+  bool awaiting_ = false;
+  std::uint32_t generation_ = 0;
   std::uint32_t seenConnects_ = 0;
   std::uint32_t seenDisconnects_ = 0;
   std::uint32_t roundTripUs_ = 0;
