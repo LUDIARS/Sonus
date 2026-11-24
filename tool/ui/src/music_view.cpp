@@ -420,9 +420,10 @@ void RulesTab(Kit& kit, float width, float height) {
       const auto pls = d->OfKind("playlist");
       if (pls.empty()) return app->Message("a state needs a playlist: make one first");
       std::string name;
+      const std::vector<std::string> taken = e.States();
       for (std::uint32_t n = 1; n < 10000u; ++n) {
         name = "State " + std::to_string(n);
-        if (std::find(e.States().begin(), e.States().end(), name) == e.States().end()) break;
+        if (std::find(taken.begin(), taken.end(), name) == taken.end()) break;
       }
       e.AddState(name, pls.front()->guid);
     }, 204, y, 70);
