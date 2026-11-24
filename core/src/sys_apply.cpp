@@ -2,9 +2,11 @@
 // registration order (normal region, reserve region, fallback section of each
 // arena, commands.hpp), creates / destroys rows, writes requests, and handles
 // bank registration and unloading (10.3).
+#include <algorithm>
 #include <bit>
 #include <cmath>
 #include <cstring>
+#include <limits>
 
 #include "access.hpp"
 #include "core_impl.hpp"
@@ -31,7 +33,10 @@ float SanePitch(float p) noexcept {
 float SaneWeight(float w) noexcept { return !(w >= 0.0f) ? 0.0f : (w > 1.0f ? 1.0f : w); }
 std::uint32_t FadeFrames(float seconds, std::uint32_t rate) noexcept {
   const float s = SaneFade(seconds);
-  return s > 0.0f ? static_cast<std::uint32_t>(static_cast<double>(s) * rate) : 0u;
+  if (s <= 0.0f) return 0u;
+  const double frames = static_cast<double>(s) * rate;
+  constexpr double maxFrames = std::numeric_limits<std::uint32_t>::max();
+  return static_cast<std::uint32_t>(std::min(frames, maxFrames));
 }
 
 bool IsMusicalWhen(std::uint8_t kind) noexcept { return kind >= SND_WHEN_NEXT_BEAT && kind <= SND_WHEN_SEGMENT_END; }

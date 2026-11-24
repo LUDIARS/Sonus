@@ -66,6 +66,27 @@ SND_TEST(CoreG3, SoloSubtreeAndFocusRestoreIndependentMute) {
   SND_CHECK_NEAR(Level(h), base, 1e-6f);
 }
 
+SND_TEST(CoreG3, LongSnapshotActionAtHighSampleRateKeepsFading) {
+  auto bank = SignalBank();
+  const auto quiet = HashId("Quiet");
+  bank.snapshots.push_back({quiet, {{0, 0, 0, -24}}});
+  bank.events[0].tracks[0].actions = {{0, static_cast<unsigned>(bf::ActionKind::ApplySnapshot), quiet, 1}};
+  auto cfg = SmallConfig();
+  cfg.sample_rate = 131072;
+  const auto bytes = bank.Build(HashId("Bank"));
+  const auto levelAfterAction = [&](float seconds) {
+    Harness h(cfg);
+    h.Load("b", bytes);
+    h.sys->SetSnapshotActionTransition(quiet, seconds);
+    h.sys->Play(HashId("E"), {}, nullptr);
+    return Level(h);
+  };
+  const float immediate = levelAfterAction(0);
+  const float longFade = levelAfterAction(32768);  // 2^32 frames before saturation
+  SND_CHECK(immediate > 0.0f);
+  SND_CHECK_NEAR(longFade, immediate * std::pow(10.0f, 24.0f / 20.0f), 1e-5f);
+}
+
 SND_TEST(CoreG3, SnapshotSendOffsetsStackAndRelease) {
   auto b = SignalBank();
   b.buses[0].parent = kNone;
