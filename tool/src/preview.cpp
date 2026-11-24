@@ -2,6 +2,7 @@
 #include "snd/tool/preview.hpp"
 
 #include <algorithm>
+#include <cmath>
 
 #include "snd/livelink/client.hpp"
 #include "snd/tool/connection.hpp"
@@ -104,8 +105,11 @@ AuditionResult AuditionRouter::PlayTransition(const TransitionAudition& t) {
     const PreviewStatus st = preview_->Status();
     const double rate = st.sampleRate == 0u ? 48000.0 : static_cast<double>(st.sampleRate);
     const double frames = st.blockFrames == 0u ? 256.0 : static_cast<double>(st.blockFrames);
-    // The request lands in the block that holds its sample (requests are applied at block starts).
-    const auto atBlock = start + static_cast<std::uint64_t>(t.requestSeconds * rate / frames);
+    // D-184: never earlier than asked: the first block start at or after the request, and at least
+    // one block after the start (the music starts in From). MusicEditor::Preview uses the same.
+    double k = std::ceil(t.requestSeconds * rate / frames - 1e-9);
+    if (!(k >= 1.0)) k = 1.0;
+    const auto atBlock = start + static_cast<std::uint64_t>(k);
     r.ok = preview_->SetMusicState(r.playback, t.from, start) && preview_->SetMusicState(r.playback, t.to, atBlock);
     if (!r.ok) r.error = "the preview engine refused the state";
     musicPlaybacks_.emplace_back(t.musicEvent, r.playback);
