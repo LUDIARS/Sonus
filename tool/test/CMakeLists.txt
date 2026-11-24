@@ -198,3 +198,11 @@ endforeach()
 add_test(NAME tool_indep_s7_ui_screen_missing_name COMMAND sonus-tool --headless --no-connect --frames 1 --screen)
 set_tests_properties(tool_indep_s7_ui_screen_missing_name PROPERTIES WILL_FAIL TRUE)
 set_tests_properties(tool_indep_s7_ui_limits_test PROPERTIES TIMEOUT 3600)
+_snd_tool_test(indep_s7_ui_defects_test "${_tool_ui_screen_link}")
+set_tests_properties(tool_indep_s7_ui_defects_test PROPERTIES DISABLED TRUE)  # run per test below
+foreach(_d Defect_TypedNumberOutsideTheFieldRangeIsClampedNotRefused Defect_NumberFieldWheelNotchesBetweenFramesAreLost
+        Defect_ClipVerticalDragTrackComesFromThePressPointNotTheMotion Defect_NumberFieldValueHasNoRoom
+        WriteBackAfterStaleMixerKeepsNewerDocumentValues SpecGap_StructuralEditDropsLiveOverridesSilently
+        SpecGap_ClipSelectionIsAnIndexAcrossUndo SpecGap_UndoKeyDuringATextEntryUndoesTheDocument)
+  add_test(NAME tool_indep_s7_ui_${_d} COMMAND tool_indep_s7_ui_defects_test --filter ${_d})
+endforeach()
