@@ -341,6 +341,12 @@ bool App::Key(const KeyEvent& k) {
     OnScreen(kF[k.key - kKeyF1 - 1u]);
     return true;
   }
+  if ((k.key == kKeyDelete || k.key == kKeyBackspace) && !ctrl && deleteAction_) {
+    const std::function<void()> fn = deleteAction_;
+    fn();
+    Edited();
+    return true;
+  }
   if (k.key == kKeyEscape) {
     view_.patch.pendingFrom.clear();
     return false;
@@ -351,6 +357,7 @@ bool App::Key(const KeyEvent& k) {
 // --- declaration -----------------------------------------------------------------------------
 void App::Declare(std::uint64_t nowNs) {
   nowNs_ = nowNs;
+  deleteAction_ = nullptr;
   TrackDocument();
   const tela::Viewport& vp = runtime_.viewport();
   const float scale = vp.dpi_scale > 0.0f ? vp.dpi_scale : 1.0f;

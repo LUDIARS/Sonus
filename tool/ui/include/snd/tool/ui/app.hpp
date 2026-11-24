@@ -16,6 +16,7 @@
 #define SND_TOOL_UI_APP_HPP
 
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <string>
@@ -117,6 +118,9 @@ class App final : public ControlSink, public Actions {
   // Rebuilds the session's project from the document now (MixerModel::Bind).
   void RebindProject();
   void Message(const std::string& text) { session_.Message(text); }
+  // What Delete (and Backspace outside a text entry) does on the current screen: set by the
+  // screen's declaration (the selected point, node, clip ...), cleared at each declaration.
+  void SetDeleteAction(std::function<void()> fn) { deleteAction_ = std::move(fn); }
   void OnDocUndo() { DocUndo(); }
   void OnDocRedo() { DocRedo(); }
 
@@ -163,6 +167,7 @@ class App final : public ControlSink, public Actions {
   bool dirty_ = false;
   std::string mixerShape_, mixerValues_;
   bool staleMixer_ = false;
+  std::function<void()> deleteAction_;
   std::unique_ptr<SpatialPreview> spatial_;
   std::string spatialEvent_;
 };

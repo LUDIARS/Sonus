@@ -378,9 +378,11 @@ void ClipPanel(Kit& kit, const std::string& g, float x, float y, float w, float 
       else if (cl->Find("synth") != nullptr) src = "synth " + StringAt(*cl, "synth.kind", "oscillator");
     }
     kit.Title(base + ".title", "Clip T" + std::to_string(t + 1u) + " / " + std::to_string(c + 1u) + ": " + src, x, y, w - 70);
-    kit.Action(base + ".remove", "Remove", [d, g, t, c, evp] {
+    auto removeClip = [d, g, t, c, evp] {
       if (EventEditor(*d, g).RemoveClip(t, c)) evp->clip = -1;
-    }, x + w - 66, y, 64);
+    };
+    kit.Action(base + ".remove", "Remove", removeClip, x + w - 66, y, 64);
+    app->SetDeleteAction(removeClip);
     y += 26.0f;
     const SequenceUse use = UseOf(ed.sequence());
     struct F {
