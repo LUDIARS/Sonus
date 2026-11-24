@@ -182,6 +182,21 @@ gcc Debug の全件を d51b8df で回したとき `api_indep_runtime_test`（Ind
 まだ届いていない）が 1 回失敗し、単独で 10 回回すと全通過、6d3c2cd の全件でも通過（負荷による時間の揺れと見ている。未解明）。
 回していない構成（差し戻しの後）: 6（テストなし Release）、7（Opus なし）、9（ツール入り）。
 
+### 差し戻し 2 回目の後（d399b0b）
+
+直した内容: D-173（失敗したリロードはゲーム自身の登録を外さない）と D-172（記録が一杯でも Remove は受け付ける）。上の「差し戻し 2 回目」の節。
+`IndepS7Recheck.Defect_FailedReloadUnloadsTheGamesOwnOtherBank` は通過。
+
+決定（D-172 の追記）と食い違って落ちる独立テスト（変えていない）:
+- `IndepS7Impl.StructEditBeyondTheLogIsRefusedAtAcceptance`（indep_s7_impl_test.cpp:79-80: 記録が一杯でライブのバス B1 の RemoveBus を LIMIT_REACHED と期待。今は打ち消しとして OK）
+- `IndepS7Recheck.StructLogAndReserveFollowTheModel`（模型が「Remove も受け付けで枠を取る」前提: indep_s7_recheck_test.cpp の RemoveBus live の分岐）
+
+| 構成 | ctest | 結果 |
+| --- | --- | --- |
+| 1+8 gcc Debug + TOOL_CORE | 全件（228） | 失敗は上の 2 件だけ。indep_s7 のほか（unit 15、live 31、record 8、fuzz 7、stress 2、recheck の残り 9、impl の残り 8）と既存の全テストは通過 |
+| MinGW 構文検査 | runtime.cpp、server.cpp、livelink_v11_live_test.cpp、struct_edit.hpp、runtime.hpp | 通過 |
+RESULTS_REST
+
 ## 未検証の箇所
 
 - 構造の変更が core に実際に反映されること（C-01 まで偽の編集器でしか確かめていない）。
