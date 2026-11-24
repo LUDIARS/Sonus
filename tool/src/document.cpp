@@ -899,6 +899,27 @@ void ProjectDocument::EndGroup() {
   closedLast_ = true;
 }
 
+void ProjectDocument::AbortGroup() {
+  if (groupDepth_ == 0u) return;
+  groupDepth_ = 0;
+  opOpen_ = false;
+  openKey_ = 0;
+  bool changed = false;
+  for (auto it = open_.changes.rbegin(); it != open_.changes.rend(); ++it) {
+    const DocObject* now = Find(it->guid);
+    const bool differs = (now != nullptr) != it->before.exists ||
+                         (now != nullptr && (now->file != it->before.object.file || !JsonEqual(now->doc, it->before.object.doc)));
+    if (differs) changed = true;
+    ApplySnapshot(it->guid, it->before);
+  }
+  if (changed) {
+    ++revision_;  // what the group showed is gone: observers look again
+    lastChanged_.clear();
+    for (const ObjChange& c : open_.changes) lastChanged_.push_back(c.guid);
+  }
+  open_ = Step{};
+}
+
 void ProjectDocument::ApplySnapshot(const std::string& guid, const Snapshot& s) {
   for (std::size_t i = 0; i < objects_.size(); ++i) {
     if (objects_[i].guid == guid) {
