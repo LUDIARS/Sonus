@@ -176,10 +176,12 @@ float Timeline(Kit& kit, const std::string& g, float x, float y, float w, float 
   kit.Action("ev.clip.add", "+ Clip", [d, g, evp, app, scroll] {
     if (evp->addAsset.empty()) return app->Message("choose an asset to add first");
     EventEditor e(*d, g);
+    d->BeginGroup();  // a track for it when there is none: one undo step
     if (e.TrackCount() == 0u) e.AddTrack(0);
     if (e.AddAssetClip(evp->track, evp->addAsset, std::max(0.0, scroll))) {
       evp->clip = static_cast<std::int32_t>(e.ClipCount(evp->track)) - 1;
     }
+    d->EndGroup();
   }, x + 366, y, 56, 22, tracks > 0u || !ev.addAsset.empty());
   kit.PickField("ev.clip.addevent", "", "+ Event clip", "Nested event", [d, g] {
     std::vector<PickerItem> v;

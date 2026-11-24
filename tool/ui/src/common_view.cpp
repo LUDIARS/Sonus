@@ -28,8 +28,11 @@ float ObjectList(Kit& kit, const ObjectListSpec& spec, float x, float y, float w
   std::string* sel = spec.selected;
   if (spec.create && spec.manage) {
     auto create = spec.create;
-    kit.Action(spec.id + ".new", "New", [create, sel, app] {
+    ProjectDocument* pd = &doc;
+    kit.Action(spec.id + ".new", "New", [create, sel, app, pd] {
+      pd->BeginGroup();  // the object and its initial members: one undo step
       const std::string g = create();
+      pd->EndGroup();
       if (g.empty()) {
         app->Message("refused: new object");
       } else if (sel != nullptr) {
@@ -66,12 +69,15 @@ float ObjectList(Kit& kit, const ObjectListSpec& spec, float x, float y, float w
   const std::uint32_t per = static_cast<std::uint32_t>(std::max(1.0f, (h - (rowsTop - y)) / 24.0f));
   const std::uint32_t first = kit.Pager(spec.id + ".pager", static_cast<std::uint32_t>(all.size()), per, spec.page, x,
                                         spec.manage ? y + 76 : y + 24, w);
+  KeySet keys;
+  for (std::size_t i = 0; i < first && i < all.size(); ++i) keys.Key(all[i]->guid, i);  // the same keys on every page
   for (std::uint32_t i = 0; i < per && first + i < all.size(); ++i) {
     const DocObject* o = all[first + i];
+    const std::string key = keys.Key(o->guid, first + i);
     const std::string g = o->guid;
     const std::string label = spec.label ? spec.label(*o) : o->name();
     const bool on = sel != nullptr && *sel == g;
-    Button(kit.doc(), spec.id + "." + ObjectKey(g), (on ? "> " : "  ") + Clip(label, 40),
+    Button(kit.doc(), spec.id + "." + key, (on ? "> " : "  ") + Clip(label, 40),
            [sel, g] {
              if (sel != nullptr) *sel = g;
            },
