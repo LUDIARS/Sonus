@@ -51,6 +51,8 @@
 
 ①×④の切断位置は独立に計算した。有限ループは179サンプル×2周。予約停止は310フレームで48サンプルの解放フェードに入り、同じ358フレームで無音になる。各経路の両チャンネルについて357の信号と以後の全サンプルを確認し、連続再生の同じ358フレームも対照に置いた。CPU性能は実装担当の128実声の測定と、受け入れ側の再測定を参照する。
 
+4件の停止試験を含め、追加確認後の独立ケースは37件。距離LPとの最小値合成は DistanceAndOcclusionChooseTheLowerCutoff、席別のゾーン量と定位は EachListenerContributesOnlyWhenInsideTheZone と OnlyListenersInsideZoneDetermineSendPan。B-1の生記録の命令数・順序・各欄は ShapeZoneAndClearRecordThePublishedWireFormat、公開書式からの波形再生は ReplayedShapeUsesTheDocumentedHalfExtentAxes が検査する。
+
 ### Cloud 差し戻し（修正前 e6635a2、独立担当）
 
 GCC 14 Debug の新規作成で空間16件すべて成功。経路と生記録17件のうち12成功、次の5件が失敗。全組横断の4件は別のビルド。以下を落ちる Defect_ として保存した。
