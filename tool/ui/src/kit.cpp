@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <limits>
 
 #include "snd/tool/ui/app.hpp"
 #include "snd/tool/ui/control_math.hpp"
@@ -11,7 +12,51 @@
 
 namespace snd::tool::ui {
 
+bool WholeU16(double v, std::uint16_t* out) {
+  if (!std::isfinite(v) || v != std::floor(v) || v < 0.0 || v > 65535.0) return false;
+  *out = static_cast<std::uint16_t>(v);
+  return true;
+}
+bool WholeU32(double v, std::uint32_t* out) {
+  if (!std::isfinite(v) || v != std::floor(v) || v < 0.0 || v > 4294967295.0) return false;
+  *out = static_cast<std::uint32_t>(v);
+  return true;
+}
+bool WholeU64(double v, std::uint64_t* out) {
+  if (!std::isfinite(v) || v != std::floor(v) || v < 0.0 || v >= 18446744073709551616.0) return false;
+  *out = static_cast<std::uint64_t>(v);
+  return true;
+}
+bool ToF32(double v, float* out) {
+  if (!std::isfinite(v) || std::fabs(v) > static_cast<double>(std::numeric_limits<float>::max())) return false;
+  *out = static_cast<float>(v);
+  return true;
+}
+std::uint32_t SatU32(double v, std::uint32_t def) {
+  if (!std::isfinite(v)) return def;
+  if (v <= 0.0) return 0u;
+  if (v >= 4294967295.0) return 4294967295u;
+  return static_cast<std::uint32_t>(v);
+}
+std::uint64_t SatU64(double v, std::uint64_t def) {
+  if (!std::isfinite(v)) return def;
+  if (v <= 0.0) return 0u;
+  if (v >= 18446744073709549568.0) return 18446744073709549568ull;
+  return static_cast<std::uint64_t>(v);
+}
+int SatInt(double v, int def) {
+  if (!std::isfinite(v)) return def;
+  if (v <= -2147483648.0) return std::numeric_limits<int>::min();
+  if (v >= 2147483647.0) return std::numeric_limits<int>::max();
+  return static_cast<int>(v);
+}
+std::string ShownNumber(double v, int decimals, const std::string& unit) {
+  if (!std::isfinite(v)) return "-";
+  return NumberText(v, decimals, unit);
+}
+
 std::string NumberText(double v, int decimals, const std::string& unit) {
+  if (!std::isfinite(v)) return "-";  // D-189: no "inf" / "nan" on the screen
   std::string s = FormatNumberText(v, decimals);
   if (!unit.empty()) s += " " + unit;
   return s;
@@ -26,8 +71,39 @@ std::string Clip(const std::string& s, std::size_t n) {
 
 Kit::Kit(tela::Document& doc, ViewContext& ctx) : doc_(doc), ctx_(ctx) {}
 
+std::string FiniteText(const std::string& text) {
+  // Tokens (between spaces and brackets) that printf made of a non-finite number: inf, nan, with a
+  // sign. Words such as "infinite" stay.
+  std::string out;
+  std::size_t i = 0;
+  while (i < text.size()) {
+    const char c = text[i];
+    const bool sep = c == ' ' || c == '(' || c == ')' || c == '=' || c == ',' || c == '/';
+    if (sep) {
+      out += c;
+      ++i;
+      continue;
+    }
+    std::size_t j = i;
+    while (j < text.size() && !(text[j] == ' ' || text[j] == '(' || text[j] == ')' || text[j] == '=' || text[j] == ',' ||
+                                 text[j] == '/')) {
+      ++j;
+    }
+    std::string tok = text.substr(i, j - i);
+    std::string core = tok;
+    if (!core.empty() && (core[0] == '-' || core[0] == '+')) core = core.substr(1);
+    std::string lower;
+    for (char ch : core) lower += static_cast<char>(ch >= 'A' && ch <= 'Z' ? ch - 'A' + 'a' : ch);
+    const bool nonFinite = lower.rfind("inf", 0) == 0 ? (lower == "inf" || lower == "infinity" || lower == "inf%")
+                                                      : (lower.rfind("nan", 0) == 0 && (lower.size() == 3 || lower[3] == '%' || lower[3] == '('));
+    out += nonFinite ? std::string("-") : tok;
+    i = j;
+  }
+  return out;
+}
+
 void Kit::Label(const std::string& id, const std::string& text, float x, float y, float w, float h, float scale) {
-  Text(doc_, id, text, x, y, w, h, scale);
+  Text(doc_, id, FiniteText(text), x, y, w, h, scale);  // D-189: every shown value is finite
 }
 
 void Kit::Title(const std::string& id, const std::string& text, float x, float y, float w) {
@@ -81,9 +157,10 @@ void Kit::NumberField(const std::string& id, const std::string& label, const Num
   const NumberSpec sp = spec;
   // A typed value goes to the model as typed: the model refuses what breaks its rules and the entry
   // then stays open (D-187; the field's own range only bounds the buttons, the drag and the wheel).
-  auto commitText = [set](const std::string& t) {
+  auto commitText = [set, integer = sp.integer](const std::string& t) {
     double v = 0.0;
     if (!ParseNumber(t, &v)) return false;
+    if (integer && v != std::floor(v)) return false;  // D-187: an integer field takes whole numbers only
     return set(v, 0u);
   };
   // Steps (buttons, wheel) start from the model's latest value: several of them between two
@@ -124,12 +201,13 @@ void Kit::NumberField(const std::string& id, const std::string& label, const Num
     }
     if (!moved) app->BeginText(id, FormatNumberText(sp.value, std::max(sp.decimals, 6)), commitText, true);
   };
-  h->cancel = [st, sp, app] {  // Esc during the drag: the drag's step is taken back
+  h->cancel = [st, sp, set, app] {  // Esc during the drag: as if it never happened (D-186)
     if (!st->grouped) return;
     st->grouped = false;
     if (sp.document && app->document() != nullptr) {
-      app->document()->EndGroup();
-      app->document()->Undo();
+      app->document()->AbortGroup();
+    } else {
+      set(st->anchor, 0u);  // a value outside the document: back to where the drag started
     }
     app->Edited();
   };
@@ -223,13 +301,10 @@ std::shared_ptr<DragHandler> DocumentDrag(App& app, std::function<void(float, fl
     *grouped = true;
     if (apply) apply(m);
   };
-  h->cancel = [a, grouped] {  // Esc during the drag: its step is taken back
+  h->cancel = [a, grouped] {  // Esc during the drag: discarded, no step, the history as before (D-186)
     if (!*grouped) return;
     *grouped = false;
-    if (a->document() != nullptr) {
-      a->document()->EndGroup();
-      a->document()->Undo();
-    }
+    if (a->document() != nullptr) a->document()->AbortGroup();
     a->Edited();
   };
   h->release = [a, grouped, release](bool moved, float x, float y) {

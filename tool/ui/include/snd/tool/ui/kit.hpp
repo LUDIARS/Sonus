@@ -106,6 +106,26 @@ class Kit {
   ViewContext& ctx_;
 };
 
+// --- numbers to the model's types without undefined behaviour (D-187) ------------------------
+// A typed or dragged value as a whole number of the type: false (refused, nothing converted) when it
+// is not finite, not whole, negative or beyond the type.
+bool WholeU16(double v, std::uint16_t* out);
+bool WholeU32(double v, std::uint32_t* out);
+bool WholeU64(double v, std::uint64_t* out);
+// A value as a float: false when it is not finite or beyond the float's range.
+bool ToF32(double v, float* out);
+// A number read from a file (any double) shown or used as an integer: clamped into the type, the
+// default when not finite.
+std::uint32_t SatU32(double v, std::uint32_t def = 0);
+std::uint64_t SatU64(double v, std::uint64_t def = 0);
+int SatInt(double v, int def = 0);
+// A number for display: "-" when not finite (D-189: every shown value is finite).
+std::string ShownNumber(double v, int decimals, const std::string& unit = {});
+
+// A label's text with every non-finite number ("inf", "-nan" as printf writes them) shown as "-".
+// Kit::Label passes every label through it.
+std::string FiniteText(const std::string& text);
+
 // Display text of a number with its unit.
 std::string NumberText(double v, int decimals, const std::string& unit);
 // A short label (at most n bytes, cut at a UTF-8 boundary, "~" appended when cut).

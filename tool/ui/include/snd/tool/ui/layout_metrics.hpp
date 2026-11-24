@@ -19,7 +19,13 @@ inline constexpr float kSidePanelWidth = 310.0f;
 inline constexpr float kStripWidth = 92.0f;
 inline constexpr float kStripGap = 6.0f;
 inline constexpr float kPagerHeight = 30.0f;
-inline constexpr std::size_t kMaxElements = 3800;  // Tela refuses more than 4096
+inline constexpr std::size_t kMaxElements = 3800;
+// The smallest window (logical pixels) the screens with number fields take (D-187, N4): the
+// editors (Buses .. Link) and the profiler's event log. Below it they show only "window too
+// small" (the mixer, the profiler's other tabs, Replay and Problems have no number fields and
+// draw down to 320 x 240). At 800 x 500 every number field lies inside the window.
+inline constexpr float kMinEditorWidth = 800.0f;
+inline constexpr float kMinEditorHeight = 500.0f;  // Tela refuses more than 4096
 
 struct StripMetrics {
   float width = kStripWidth;

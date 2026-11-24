@@ -234,7 +234,7 @@ void Side(Kit& kit, const std::string& g, float x, float y, float w, float h) {
       const pt::ParamInfo& pi = k->params[p];
       const std::string pname = pi.name;
       if (pi.choices != nullptr) {
-        const int cur = static_cast<int>(pe.Param(nid, pname));
+        const int cur = SatInt(pe.Param(nid, pname), -1);
         int count = 0;
         while (pi.choices[count] != nullptr) ++count;
         const std::string label = cur >= 0 && cur < count ? pi.choices[cur] : std::to_string(cur);
