@@ -1,6 +1,7 @@
-# セッション D・ソース組 2: Codex に渡す指示書
+# セッション D: Codex に渡す指示書（ソース組 2、dsp 組の再確認）
 
 本社で Codex に貼る指示をまとめたもの。作業の中身（範囲、実装の条件、受け入れテストの条件）は `D-hq-codex.md` にあり、この文書はそれを Codex のセッションごとの指示に切り分けたもの。
+0〜5 章がソース組 2（`int/s7-ext-src2`）、6 章が dsp 組の再確認と受け入れ（`int/s7-ext-dsp2`）。2 つは同時に進めてよい。
 
 ## 0. 使い方
 
@@ -214,7 +215,7 @@ run noopus -DSND_CODEC_OPUS=OFF
   ```
   ctest --test-dir <dir> --repeat until-fail:20 -R 'source_input|indep_input|indep_src1_(core|load|api)|<ソース組 2 の並行性のテスト>'
   ```
-- 失敗してよいのは、dsp の `Defect_` の実行ファイルだけ（クラウドが dsp の差し戻しを入れるまで）。`platform_device_play_test` は SKIP になる。
+- 失敗してよいのは、dsp の独立テストの実行ファイル 3 本（`dsp_indep_s7d_test`、`dsp_indep_s7d_test_scalar`、`dsp_indep_defects_dsp_test`）だけ（6 章の再確認が統合されるまで）。`platform_device_play_test` は SKIP になる。
 - MinGW の構文チェックを、`git diff --name-only origin/int/s7-ext..HEAD -- '*.cpp' '*.hpp' '*.h'` の全ファイルに掛ける。
 - 持ち場の外が変わっていないことを確かめる。次の出力が空であること。
   ```
@@ -226,3 +227,85 @@ run noopus -DSND_CODEC_OPUS=OFF
 ### 5.3 判定と報告
 
 `D-hq-codex.md` の 6.6 の 6 項目がそろったら受け入れる。`spec/handoff/parallel/report-D-src2.md` を書かせて（または書いて）push し、統合担当に知らせる。
+
+## 6. dsp 組の再確認と受け入れ（H6）
+
+クラウドのセッションが止めた所から引き取る分。状態、未判定の点、受け入れの条件は `D-hq-codex.md` の 8 章。ソース組 2（1〜5 章）と同時に進めてよい。
+
+始める前に、ブランチを作る。
+
+```
+git fetch origin int/s7-ext
+git checkout -b int/s7-ext-dsp2 origin/int/s7-ext
+git push -u origin int/s7-ext-dsp2
+```
+
+### 6.1 独立テストのセッションに貼る指示（新しいセッション）
+
+```
+あなたは Sonus（C++20 のゲーム用サウンドライブラリ）のセッション D・dsp 組の、独立テストの担当です。実装者とは別の立場で、差し戻しのあとの再確認をします。前任のテスト担当が書いたテストとメモを引き継ぎます。前任の会話は残っていません。
+
+ブランチは int/s7-ext-dsp2 です。push してよいのはこのブランチだけです。main、int/s2-integration、int/s7-ext、int/s7-ext-src2 には push しません。
+
+最初に、次をこの順で全部読んでください。実装のコード（dsp/src、dsp/include）は、3 まで読み終えて性質を書き出すまで読みません。
+1. spec/handoff/parallel/README.md と D-extensions.md（共通の決まりと、セッション D の指示）
+2. spec/handoff/parallel/D-hq-codex.md の 3 章、5.4、5.5、8 章
+3. spec/interface/CONTRACTS.md の「段階 7-D」の「dsp 組（D-208〜D-219）」の小節。ここから、確かめる性質を箇条書きにします
+4. spec/handoff/parallel/notes/D-dsp-indep-test-notes.md（前任のメモ）と notes/D-dsp-fix-notes.md（実装の担当の差し戻しのメモ）
+5. dsp/test/indep_fft_test.cpp、indep_time_stretch_test.cpp、indep_convolution_test.cpp、indep_defects_dsp_test.cpp
+
+やること:
+1. D-hq-codex.md の 8.1 の表の 9 件を、1 件ずつ確かめます。落ちる理由が本当に決定の変更（D-217〜D-219）なら、テストを決定に合わせて直します。許容差は、ただ緩めるのではなく、解析的に導ける上限で検査します。実装の誤りだと分かったものは、直さずに Defect_ のテストとして残します。
+   - IndepConvolution.RegistryConcurrency は範囲外を読んで SegFault になります。番号を添字にしない形に直します。
+   - IndepConvolution.Registry は、ほかのテストが登録を残していても通る形にします（表はプロセスに 1 つです）。
+2. Defect_ のテスト 4 件のうち、通るようになった 3 件は、名前から Defect_ を外して普通のテストのファイルへ移します。
+3. Defect_ConvolutionIrSwitchLagsOnePartition は、D-218 のクロスフェードを確かめるテストに書き直します。フェードの区間は決定の重みどおり、フェードのあとは新しい IR を最初から使った場合と一致、を見ます。
+4. D-218 のフェードの長さは、呼び出しが分割 B の倍数でないと B より短くなります。切り替えが周期の f フレーム目に来る場合を f = 0、B/2、B − 8、B − 1 で作り、切り替えの前後の出力の段差（隣り合うフレームの差の最大）を測って報告します。合否は付けず、数値を報告します（受け入れ側が判定します）。
+5. 差し戻しが新しい欠陥を持ち込んでいないかを確かめます。差分は git diff 3758bfc..885f344 -- dsp/ です。少なくとも次を、机上とテストの両方で見ます。
+   - 世代つきの登録番号: 古い番号、外した番号、枠が再利用されたあとの古い番号、別の世代の番号での Unregister、表が満杯のとき、登録と解決と解除の同時実行（TSan）
+   - 切り替え: フェードの途中の次の切り替え、IR なしとの行き来、休んでいるインスタンス、登録を外した直後に IR のメモリを書きつぶしても安全なこと
+   - IrSlot: max_frames より長い呼び出しで途中の番号を引かないこと
+   - 有限でない IR の拒否（配列と SCIR のブロブの両方）
+   - タイムストレッチ: チャンネルごとの相関の和（逆相、片チャンネル無音、全チャンネル無音、8 チャンネル）、探索 ±12 ms での 50〜220 Hz の残差、ランプの端点の ±Inf と NaN、1 回の呼び出しの上限
+6. D-217〜D-219 の項目の 1 つずつに、対応するテストが少なくとも 1 件あることを確かめ、無ければ足します。
+7. 新しい欠陥は Defect_ のテストとして残し、直さずに報告します。実装（dsp/src、dsp/include）と実装者のテスト（dsp/test のうち indep_ で始まらないもの）は変更しません。tests/framework、tests/mocks、ルートの CMakeLists.txt、cmake/ も変更しません。
+8. gcc Debug（最後に全体を 1 回）、address,undefined、thread、Release、-DSND_SIMD_SCALAR=ON、-DCMAKE_CXX_FLAGS="-mavx2 -mfma" で回します。警告ゼロ。並行性のテストは TSan（-j1）と Release で ctest --repeat until-fail:20。ビルドは -j2、ビルドディレクトリはリポジトリの外、1 度に 1 構成、終わったら消します。
+
+合否に数えない失敗: platform_device_play_test の SKIP と、ソース側の indep_osc_test、indep_input_test（別の組が直しています）。
+
+コミットは日本語の題で、ファイルごとか論点ごとに分けます。AGENTS.md や運用のファイルは作りません。
+
+報告: 直したテストの一覧と、1 件ずつの「決定の変更だった / 実装の誤りだった」の判定、移した Defect_、新しい欠陥（あれば、症状と再現するテスト名と原因の見立て）、4 の測定値、机上の検証の結論、仕様の穴、構成ごとの結果、検査できなかった性質、ブランチの先頭のハッシュ。
+```
+
+### 6.2 差し戻しの指示（実装のセッション。新しい欠陥か、直しが要るときだけ）
+
+クラウドの実装の担当の会話は残っていないので、新しいセッションで始める。先に `README.md`、`D-extensions.md`、`D-hq-codex.md` の 3 章と 8 章、`CONTRACTS.md` の「dsp 組」の小節、`notes/D-dsp-fix-notes.md` を読ませてから、3 章の差し戻しの指示を次のように読み替えて貼る。
+
+- 「ソース組 2」→「dsp 組」、`int/s7-ext-src2` → `int/s7-ext-dsp2`、`source/test/` → `dsp/test/`、`indep_defects_src2_test.cpp` → `indep_defects_dsp_test.cpp`、`CONTRACTS.md` の小節 →「dsp 組」。
+- 決定は D-217〜D-219 に項を足して書く（番号は使い切っている。`D-hq-codex.md` の 8.2 の 4）。
+- 既存の dsp のファイルは、セッション D が足した行のほかは変えない。変えたいことは依頼 D-12 に足す。
+- 回す構成に `-DSND_SIMD_SCALAR=ON` と `-DCMAKE_CXX_FLAGS="-mavx2 -mfma"` を足す。
+
+再確認は、6.1 のセッションを再開して 4 章の指示を同じ読み替えで貼る。
+
+### 6.3 受け入れ側がやること
+
+- 決定: `D-hq-codex.md` の 8.2 の 4 点（フェードの長さ、`Defect_` の書き直し、番号の一巡、決定の番号）と、6.1 の報告で出た欠陥・仕様の穴。判断の順は 5.1 と同じ。
+- 全構成: 5.2 の `accept.sh` の末尾に次の 2 行を足して回す。
+  ```
+  run scalar -DSND_SIMD_SCALAR=ON
+  run avx2 "-DCMAKE_CXX_FLAGS=-mavx2 -mfma"
+  ```
+- 繰り返し（TSan は `-j1`、Release も）:
+  ```
+  ctest --test-dir <dir> --repeat until-fail:20 -R 'dsp_indep_s7d_test|dsp_test'
+  ```
+- MinGW の構文チェックを、`git diff --name-only origin/int/s7-ext..HEAD -- 'dsp/*.cpp' 'dsp/*.hpp'` の全ファイルに掛ける。
+- 持ち場の外が変わっていないこと。次の出力が空であること。
+  ```
+  git diff --name-only origin/int/s7-ext..HEAD | grep -v -E '^(dsp/|spec/interface/CONTRACTS\.md$|spec/handoff/parallel/)'
+  ```
+- 既存の dsp のファイルで、セッション D が足した行のほかが変わっていないことを、`git diff origin/int/s2-integration..HEAD -- dsp/src/effects.cpp dsp/include/snd/dsp/effects.hpp dsp/src/fx_common.hpp` を読んで確かめる（削除された行が無いこと）。
+- 要所のコードを読む。少なくとも、`ConvolutionProcess` と `TimeStretchProcess` に確保とロックが無いこと、切り替えを見たあとに古い IR のポインタを読む経路が無いこと、登録表の読みが「番号 → IR → 番号」の順であること。
+- 判定は `D-hq-codex.md` の 8.4。`spec/handoff/parallel/report-D-dsp2.md` を書かせて（または書いて）push し、統合担当に知らせる。
