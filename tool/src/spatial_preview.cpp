@@ -44,6 +44,32 @@ bool SpatialPreview::valid() const {
 void SpatialPreview::SetListenerYaw(float r) { listener_.forward = Vec3f{std::sin(r), 0.0f, std::cos(r)}; }
 void SpatialPreview::SetEmitterYaw(float r) { emitter_.forward = Vec3f{std::sin(r), 0.0f, std::cos(r)}; }
 
+namespace {
+bool Coordinate(double v) { return std::isfinite(v) && std::fabs(v) <= SpatialPreview::kMaxCoordinate; }
+bool Angle(double v) { return std::isfinite(v) && std::fabs(v) <= SpatialPreview::kMaxAngle; }
+}  // namespace
+
+bool SpatialPreview::PlaceListener(double x, double z) {
+  if (!Coordinate(x) || !Coordinate(z)) return false;
+  MoveListener(static_cast<float>(x), static_cast<float>(z));
+  return true;
+}
+bool SpatialPreview::PlaceEmitter(double x, double z) {
+  if (!Coordinate(x) || !Coordinate(z)) return false;
+  MoveEmitter(static_cast<float>(x), static_cast<float>(z));
+  return true;
+}
+bool SpatialPreview::TurnListener(double radians) {
+  if (!Angle(radians)) return false;
+  SetListenerYaw(static_cast<float>(radians));
+  return true;
+}
+bool SpatialPreview::TurnEmitter(double radians) {
+  if (!Angle(radians)) return false;
+  SetEmitterYaw(static_cast<float>(radians));
+  return true;
+}
+
 void SpatialPreview::SetView(float cx, float cz, float mpp) {
   centerX_ = cx;
   centerZ_ = cz;

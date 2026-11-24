@@ -202,6 +202,10 @@ class ProjectDocument {
 
   void BeginGroup();
   void EndGroup();
+  // D-186: discards the open group (every level): the objects it touched go back to their state at
+  // BeginGroup, no step is filed and the undo / redo lists stay as they were (an Esc during a drag).
+  // Nothing happens without an open group.
+  void AbortGroup();
   bool InGroup() const { return groupDepth_ != 0u; }
   bool Undo();
   bool Redo();

@@ -103,6 +103,14 @@ class SpatialPreview {
   void MoveEmitter(float x, float z) { emitter_.position = Vec3f{x, emitter_.position.y, z}; }
   void SetEmitterYaw(float radians);
   void SetEmitterVelocity(float x, float z) { emitter_.velocity = Vec3f{x, 0.0f, z}; }
+  // D-189: positions and facings as typed (doubles). Refused (false, nothing changes) when not
+  // finite or beyond kMaxCoordinate metres / kMaxAngle radians: the float computation stays finite.
+  static constexpr double kMaxCoordinate = 1.0e6;
+  static constexpr double kMaxAngle = 1.0e6;
+  bool PlaceListener(double x, double z);
+  bool PlaceEmitter(double x, double z);
+  bool TurnListener(double radians);
+  bool TurnEmitter(double radians);
   // Parameter values for the event's parameter curves.
   std::map<std::string, ParamScopeValues>& parameters() { return params_; }
 
