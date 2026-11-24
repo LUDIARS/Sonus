@@ -420,6 +420,7 @@ using F32 = float;
   R(Render, Stream_control, Current)                                           \
   R(Render, Stream_ringRange, Current)                                         \
   R(Render, Stream_ringWrite, Async)                                           \
+  R(Render, Voice_playbackSlot, Current)  /* stage 3 D-132: voice effects */   \
   /* 10 Publish: everything that is published */                               \
   R(Publish, Playback_state, Current)                                          \
   R(Publish, Playback_schedule, Current)                                       \
