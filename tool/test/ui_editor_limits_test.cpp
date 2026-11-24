@@ -76,7 +76,8 @@ void FillPatch(ProjectDocument& doc) {
 
 void CheckLimits(const tela::Runtime& rt, const char* what, float dpi) {
   const auto& els = rt.elements();
-  SND_CHECK_MSG(els.size() < ui::kMaxElements, "%s at dpi %g: %zu elements", what, static_cast<double>(dpi), els.size());
+  SND_CHECK_MSG(els.size() < ui::kMaxElements, "%s at dpi %g: %u elements", what, static_cast<double>(dpi),
+                static_cast<unsigned>(els.size()));
   std::set<std::string> ids;
   for (const tela::PlacedElement& p : els) {
     SND_CHECK_MSG(ids.insert(p.element.id).second, "%s: duplicate id %s", what, p.element.id.c_str());
