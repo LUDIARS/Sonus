@@ -554,3 +554,87 @@ SND_TEST(LiveSync, MismatchAnswerIsRememberedForTheSameGameOnly) {
   r.sync->SetDecision(LiveDecision::Ask);
   SND_REQUIRE(r.sync->ChooseRefuse(r.conn));
 }
+
+// --- second round of decisions (D-182 .. D-184 additions) ----------------------------------------
+
+SND_TEST(LiveSync, StructuralEditAndValueEditInOneBuildBothReachTheGame) {
+  livetest::YesEditor editor;
+  snd::tool::preview::PreviewEngineDesc ed;
+  ed.structEditor = &editor;
+  Rig r(false, ed);
+  SND_REQUIRE(r.ok);
+  const double base = PlayTone(r);
+  SND_REQUIRE(r.Connect());
+  SND_REQUIRE(r.Settled());
+  SND_REQUIRE(r.doc.Insert(livetest::G(4), "effects", 0,
+                           Json("{\"type\": \"snd.fx.delay\", \"params\": [10, 0, 0, -96, 20000, 0, 100]}")));
+  SND_REQUIRE(r.doc.SetNumber(livetest::SfxGuid(), "volumeDb", -6.0));  // the same build
+  SND_REQUIRE(r.Settled());
+  SND_CHECK_EQ(editor.applied, 1u);
+  SND_CHECK_NEAR(r.Left() / base, Ratio(-6.0), 1e-5);
+  SND_CHECK(r.sync->reloads().empty());
+  // The same with the structural edit refused (no editor): the reload carries the value.
+  Rig r2;
+  SND_REQUIRE(r2.ok);
+  const double base2 = PlayTone(r2);
+  SND_REQUIRE(r2.Connect());
+  SND_REQUIRE(r2.Settled());
+  SND_REQUIRE(r2.doc.Insert(livetest::G(4), "effects", 0,
+                            Json("{\"type\": \"snd.fx.delay\", \"params\": [10, 0, 0, -96, 20000, 0, 100]}")));
+  SND_REQUIRE(r2.doc.SetNumber(livetest::SfxGuid(), "volumeDb", -6.0));
+  SND_REQUIRE(r2.Settled());
+  SND_REQUIRE(!r2.sync->reloads().empty());
+  SND_REQUIRE(r2.engine->Play(snd::HashId("Tone"), nullptr) != 0u);  // the reload stopped the bank's sounds
+  r2.Frames(8);
+  SND_CHECK_NEAR(r2.Left() / base2, Ratio(-6.0), 1e-5);
+}
+
+SND_TEST(LiveSync, ReconnectReloadsABankWithLiveStructuralEdits) {
+  for (const bool revert : {false, true}) {
+    livetest::YesEditor editor;
+    snd::tool::preview::PreviewEngineDesc ed;
+    ed.structEditor = &editor;
+    ed.revertOnDisconnect = revert;
+    Rig r(false, ed, livetest::MakeOptions(LiveDecision::SendDiffs));
+    SND_REQUIRE(r.ok);
+    SND_REQUIRE(r.Connect());
+    SND_REQUIRE(r.Settled());
+    SND_REQUIRE(r.doc.Insert(livetest::G(4), "effects", 0,
+                             Json("{\"type\": \"snd.fx.delay\", \"params\": [10, 0, 0, -96, 20000, 0, 100]}")));
+    SND_REQUIRE(r.Settled());
+    SND_REQUIRE_EQ(r.sync->reserve().effects, 1u);
+    r.conn.Close();
+    r.Frames(10);
+    SND_REQUIRE(r.Connect());
+    SND_REQUIRE(r.Settled());
+    SND_CHECK_EQ(editor.applied, 1u);  // never a second Add
+    SND_CHECK(!r.sync->reloads().empty());
+    SND_CHECK_EQ(r.sync->reloads().back().result, SND_OK);
+    SND_CHECK_EQ(r.sync->reserve().effects, 0u);
+    SND_CHECK(r.sync->structEdits().empty());
+  }
+}
+
+SND_TEST(LiveSync, PreviewLoadBuildAfterHotReloads) {
+  Rig r;
+  SND_REQUIRE(r.ok);
+  SND_REQUIRE(r.Connect());
+  SND_REQUIRE(r.Settled());
+  const json::Value init = Json("{\"bank\": \"Main\", \"bus\": \"Sfx\"}");
+  SND_REQUIRE(!r.doc.Create("event", "Fresh", &init).empty());
+  SND_REQUIRE(r.Settled());
+  SND_REQUIRE(!r.doc.Create("event", "Fresh2", &init).empty());
+  SND_REQUIRE(r.Settled());
+  SND_REQUIRE_EQ(r.sync->reloads().size(), 2u);
+  for (int round = 0; round < 3; ++round) {
+    snd::tool::ProjectDocument other;
+    livetest::LoadLive(other);
+    SND_REQUIRE(other.SetNumber(livetest::SfxGuid(), "volumeDb", -3.0 * round));
+    std::string err;
+    SND_CHECK_MSG(r.engine->LoadBuild(BuildDocument(other), &err), "round %d: %s", round, err.c_str());
+    SND_CHECK_EQ(r.engine->Status().banks, 1u);
+    SND_CHECK(r.engine->Play(snd::HashId("Tone"), nullptr) != 0u);
+    r.engine->Render(4, nullptr);
+    SND_CHECK_EQ(r.engine->StopAll(), 1u);
+  }
+}
