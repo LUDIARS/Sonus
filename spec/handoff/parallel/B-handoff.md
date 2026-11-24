@@ -24,8 +24,8 @@
 | gcc Debug | 222 件すべて通過、警告 0 | 同じ |
 | clang Debug | 222 件すべて通過、警告 0 | 同じ |
 | ASan/UBSan | 222 件すべて通過 | 同じ |
-| TSan | 222 件すべて通過 | 足したテストの 20 回繰り返しも通過 |
-| Release | **未完**（引き継ぎの時点で回している途中） | 222 件通過、足したテストの 20 回繰り返しも通過 |
+| TSan | 222 件すべて通過（2 回）。足したテストの 20 回繰り返しは**未完**（途中で打ち切った） | 足したテストの 20 回繰り返しも通過 |
+| Release | **未完**（ビルドの前で打ち切った） | 222 件通過、足したテストの 20 回繰り返しも通過 |
 | `-DSND_BUILD_TESTS=OFF -DCMAKE_BUILD_TYPE=Release` | **未実行** | 未実行 |
 | `-DSND_CODEC_OPUS=OFF` | **未実行** | 未実行 |
 | `-DSND_SIMD_SCALAR=ON` | **未完** | dsp と `indep_g2_*` が通過 |
@@ -181,3 +181,47 @@ ctest --test-dir /tmp/snd-<組>-<構成> -j2 --output-on-failure
 - 組②: 1.1 の未完・未実行の構成。api 層（公開関数 3 つの引数の検査と一巡）。キーバスのバンクだけを外した場合。遅れチャンクがあるときの直列と並列の一致（2.5 の条件の外）。
 - 組④: 4.1 のとおり。加えて、ピッチがカーブで動くときの N 回ループの切り位置、`Play.flags` のビット 2〜15、api 層。
 - `jobs_rt_claim_steal_test` が Release の全件で 1 回だけ落ちた（組②の実装担当の実行）。作り直して 20 回繰り返しても再現せず、ほかの実行でも出ていない。`jobs/` は B の持ち場の外。
+
+## 8. できていないことの一覧（2026-11-24 に作業を止めた時点）
+
+受け入れ側は、ここで作業を止めた。裏で回していた組②の受け入れも打ち切った。B-coverage §4 の完了条件は、どれも満たしていない。
+
+### 8.1 組②（マージ済みだが、受け入れが終わっていない）
+
+- 受け入れ側が回していない構成: Release の全件、`-DSND_BUILD_TESTS=OFF -DCMAKE_BUILD_TYPE=Release`、`-DSND_CODEC_OPUS=OFF`、`-DSND_SIMD_SCALAR=ON`、`-DCMAKE_CXX_FLAGS="-mavx2 -mfma"`、MinGW の構文検査。
+- 受け入れ側が回していない繰り返し: 足したテストの 20 回繰り返し（TSan `-j1` と Release）。TSan は途中で打ち切り、結果は無い。
+- `-DSND_BUILD_TESTS=OFF` と `-DSND_CODEC_OPUS=OFF` は、担当も受け入れ側も、誰も回していない。
+- 性能の数値は実装担当が b527335 で測ったもの。受け入れ側は測り直していない。マージした先頭（9e7b36e の内容）でも測っていない。
+- 直しの差分のうち、受け入れ側が自分で読んだのは Echo／Delay の頭打ち（`dsp/src/fx_delay.cpp`）と、未使用の定数の削除だけ。
+- `stage3-coverage.md` の「行 → テスト名」に、組②のテストを書いていない。
+- api 層のテスト、livelink の規則表、bank／buildtool の列は依頼（`requests/B-1.md`、`B-2.md`、`B-3.md`、`B-5.md`）を書いただけで、相手の持ち場には何も入っていない。
+
+### 8.2 組④（`wip/b-g4`、未マージ）
+
+- 落ちるテスト 2 件を直していない（4.1）。うち 1 件は決定も下していない。
+- 「奪われた再生の終了理由」を直していない（4.2）。本社の判断待ち。
+- `SpecHole_` 4 件に決定を下していない: `SpecHole_ThreeOverlappingLayers`、`SpecHole_TrackTimeOfALoopingOrPitchedParent`、`SpecHole_StolenPlaybackEndReason`、`SpecHole_FadeInOfARestartedVoice`。
+- テスト担当の再確認 1 が終わっていない（gcc Debug まで）。テスト担当の報告ファイルも無い。
+- 受け入れ側は、組④を新しいビルドで 1 構成も回していない。直しの差分も読んでいない。性能も測っていない。
+- `int/s7-coverage` の取り込みと衝突の解消をしていない（4.4）。
+- 決定 D-140〜D-148 は案のまま。`CONTRACTS.md` に書いていない（4.3）。
+- 持ち場の外への依頼を書いていない（4.5）。`requests/B-4.md`（source）は作っていない。
+
+### 8.3 組①（3D と距離カーブ）
+
+- 何も作っていない。ブランチ `wip/b-g1` も無い。有るのは実装担当への依頼文（`B/brief-g1-impl.md`）だけ。
+- 依頼文の中の「`scratchpad/`」のパスと「push しない」は、前の進め方のままになっている。`spec/handoff/parallel/B/` と、`B-codex.md` の push の決まりに読み替える。
+- 依頼文は、組④が後からマージされる前提で書いた。組④を先に入れるなら、その注意書きは要らない。
+
+### 8.4 組③（Parameter・スナップショット・ダッキング・カテゴリ）
+
+- 何も作っていない。依頼文（`B/brief-g3-impl.md`）も書いていない。有るのは 5.2 の要件の箇条書きだけ。
+- 5.2 は分類表から拾ったもので、設計書 4.3 と突き合わせて漏れを確かめてはいない。
+
+### 8.5 セッション全体
+
+- `spec/handoff/parallel/report-B.md` を書いていない。
+- `spec/interface/acceptance/stage3-coverage.md` の「行 → テスト名」を埋めていない（出発点のまま）。
+- 3.2 の条件（4 組をマージした先頭での全構成、決定論、確保 0、RT 違反 0、性能）は、何も確かめていない。
+- バスグラフの枝の並列化（5.3）は作っていない。
+- 独立テストの担当には、clang のビルドをさせていなかった（組②で clang だけの警告が受け入れのときに出た）。`B/brief-tester.md` にこの注意を足していない。
