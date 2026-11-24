@@ -210,3 +210,5 @@ GCC 14.2.0 の空の C プログラムで `gcc -fsanitize=address,undefined /tmp
 組②修正版 `ebaa5a6` の受け入れ側新規ビルド。GCC 14.2 の Opus なし Debug は787ビルド手順、223登録中222成功・実デバイス1スキップ・失敗0。Clang 19.1.7 Debug の初回に失敗した6件（embed_subproject、api_create_test、api_indep_create_test、api_indep_entry_test、integration_livelink_tcp_test、integration_indep_livelink_transport_test）は、ループバックを許可して同じビルドで `ctest -j2 --rerun-failed --output-on-failure` を実行し6/6成功した。初回と合わせた内訳は222成功・実デバイス1スキップ。両ビルドは `-Werror` 有効。MinGW-w64 GCC 14.2 POSIX は変更したソース・ヘッダ37/37の構文検査成功。
 
 組①×④の試作 `fc23017` は独立担当の新規GCC Debugで4/4。直達とゾーン送りを個別に測定し、有限ループと予約停止の双方で両チャンネルは357フレーム目で非ゼロ、358〜1023で厳密にゼロ。組③単独は実装担当の Release `7da170a` で128実声のCPUが直列312.6 µs（5.9%）、ワーカー2本466.3 µs（8.7%）。独立担当のGCC Debugは25/25。共有キーを持つバンクの解放・再駆動では、残存ボイスが終了せずコンプレッサーの音量が0.007076→0.056569→0.007076、レベルダックは0.028351→0.056569→0.028351。最終統合の実測は別途行う。
+
+組②修正版 `ebaa5a6` の GCC 14.2 ASan/UBSan Debug。新規ビルド922手順が警告0で成功。`ASAN_OPTIONS=detect_leaks=0 ctest --test-dir /tmp/snd-g2-asan -j2 --output-on-failure` は691.67秒、223登録中222成功・実デバイス1スキップ・失敗0。リーク検査は上記の起動制限により未検証。
