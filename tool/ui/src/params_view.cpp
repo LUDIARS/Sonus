@@ -100,18 +100,20 @@ void ParameterPanel(Kit& kit, float x, float y, float w, float h) {
   sp.decimals = 3;
   sp.enabled = !sw;
   sp.value = mn;
-  const float cw = (w - 8.0f) * 0.5f;
+  // One field per row (D-187: the column is narrow; every value keeps its room and its label).
   kit.NumberField("pc.par.min", "Min", sp, [d, g, mx](double v, std::uint32_t) { return ParameterEditor(*d, g).SetRange(v, mx); },
-                  x, y, cw, 40);
+                  x, y, w, 60);
+  y += kRow;
   sp.value = mx;
   kit.NumberField("pc.par.max", "Max", sp, [d, g, mn](double v, std::uint32_t) { return ParameterEditor(*d, g).SetRange(mn, v); },
-                  x + cw + 8, y, cw, 40);
+                  x, y, w, 60);
   y += kRow;
   sp.enabled = true;
   sp.value = pe.defaultValue();
   sp.integer = sw;
   kit.NumberField("pc.par.def", "Default", sp, [d, g](double v, std::uint32_t) { return ParameterEditor(*d, g).SetDefault(v); },
-                  x, y, cw, 54);
+                  x, y, w, 60);
+  y += kRow;
   NumberSpec rp;
   rp.value = pe.rampRate();
   rp.step = std::max(0.01, span / 20.0);
@@ -119,7 +121,7 @@ void ParameterPanel(Kit& kit, float x, float y, float w, float h) {
   rp.decimals = 3;
   rp.unit = "/s";
   kit.NumberField("pc.par.ramp", "Ramp", rp, [d, g](double v, std::uint32_t) { return ParameterEditor(*d, g).SetRampRate(v); },
-                  x + cw + 8, y, cw, 40);
+                  x, y, w, 60);
   y += kRow;
   // The follow speed: the runtime's trajectory from min to max (256-frame blocks at 48 kHz).
   const std::vector<float> traj = RampTrajectory(static_cast<float>(mn), static_cast<float>(mx),
@@ -223,7 +225,7 @@ void CurvePanel(Kit& kit, float x, float y, float w, float h) {
     y1 = std::max(y1, pts[i].y);
   }
   const float plotH = std::max(100.0f, std::min(260.0f, h - (y + 4.0f * kRow + 10.0f)));
-  const PlotAxes axes = PlotAxes::Fit(x0, x1, y0, y1, w, plotH, 0.12);
+  const PlotAxes axes = PlotAxes::Fit(x0, x1, y0, y1, w, plotH, 0.12, kCurveXMargin);
   // Background: press deselects, double click adds a point there.
   auto bg = std::make_shared<DragHandler>();
   bg->press = [pvp](float, float, std::uint32_t) { pvp->point = -1; };
@@ -241,8 +243,10 @@ void CurvePanel(Kit& kit, float x, float y, float w, float h) {
     // The axes stay those of the press for the whole drag (the plot would rescale under it).
     auto h2 = DocumentDrag(
         *app, [pvp, pi](float, float, std::uint32_t) { pvp->point = static_cast<std::int32_t>(pi); },
-        [d, ev, path, pi, axes, px, py](const DragMotion& m) {
-          CurveEditor(*d, ev, path).MovePoint(pi, axes.ValueX(px + m.dx), axes.ValueY(py + m.dy));
+        [d, ev, path, pi, axes, px, py, p = pts[i]](const DragMotion& m) {
+          // An axis without motion keeps its exact value (no round trip through the pixels).
+          CurveEditor(*d, ev, path).MovePoint(pi, m.dx == 0.0f ? p.x : axes.ValueX(px + m.dx),
+                                              m.dy == 0.0f ? p.y : axes.ValueY(py + m.dy));
         });
     kit.Hit("pc.pt." + std::to_string(i), h2, x + px - 6.0f, y + py - 6.0f, 12.0f, 12.0f);
   }

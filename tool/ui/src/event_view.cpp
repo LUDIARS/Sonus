@@ -110,8 +110,8 @@ void EventMembers(Kit& kit, const std::string& g, float x, float y, float w) {
                 x2, y, cw);
   y += kRow;
   if (is3D) {
-    const double in = NumberAt(e, "cone.innerDeg", 360.0), out = NumberAt(e, "cone.outerDeg", 360.0),
-                 odb = NumberAt(e, "cone.outerDb", 0.0);
+    const EventEditor::ConeDesc cone = ed.Cone();  // D-189: the cone in effect (none: 0 / 0 / 0 dB)
+    const double in = cone.innerDeg, out = cone.outerDeg, odb = cone.outerDb;
     const float w3 = (w - 16.0f) / 3.0f;
     NumberSpec sp;
     sp.step = 5;
@@ -324,11 +324,12 @@ float Timeline(Kit& kit, const std::string& g, float x, float y, float w, float 
       if (r.width <= 0.0f) continue;
       const std::uint32_t clip = c.clip;
       const double start = c.startMs;
-      auto moved = std::make_shared<std::uint32_t>(t);
+      auto pressY = std::make_shared<float>(0.0f);
       const float laneStep = kLaneH + kLaneGap;
       auto handler = DocumentDrag(
           *app,
-          [evp, t, clip](float, float, std::uint32_t) {
+          [evp, t, clip, pressY](float, float py, std::uint32_t) {
+            *pressY = py;
             evp->track = t;
             evp->clip = static_cast<std::int32_t>(clip);
           },
@@ -336,18 +337,19 @@ float Timeline(Kit& kit, const std::string& g, float x, float y, float w, float 
             const double ms = std::max(0.0, start + static_cast<double>(m.dx) * evp->msPerPx);
             EventEditor(*d, g).MoveClip(t, clip, ms);
           },
-          [d, g, t, clip, evp, laneStep, moved](bool wasMoved, float, float ly2) {
+          [d, g, t, clip, evp, laneStep, pressY](bool wasMoved, float, float ly2) {
             if (!wasMoved) return;
-            // Vertical: another track (rounded to lanes), at the clip's current start.
-            const int delta = static_cast<int>(std::floor(ly2 / laneStep));
+            // Vertical (D-187): the track moves by round(dy / lane), clamped to the first / last
+            // track; the clip keeps its current start.
             EventEditor e(*d, g);
-            const int to = static_cast<int>(t) + delta;
-            if (delta == 0 || to < 0 || static_cast<std::uint32_t>(to) >= e.TrackCount()) return;
+            const int count = static_cast<int>(e.TrackCount());
+            const int delta = static_cast<int>(std::lround((ly2 - *pressY) / laneStep));
+            const int to = std::clamp(static_cast<int>(t) + delta, 0, std::max(0, count - 1));
+            if (to == static_cast<int>(t)) return;
             const double ms = e.ClipNumberOf(t, clip, ClipNumber::StartMs);
             if (e.MoveClipToTrack(t, clip, static_cast<std::uint32_t>(to), ms)) {
               evp->track = static_cast<std::uint32_t>(to);
               evp->clip = static_cast<std::int32_t>(e.ClipCount(static_cast<std::uint32_t>(to))) - 1;
-              *moved = static_cast<std::uint32_t>(to);
             }
           });
       kit.Hit(tid + ".c" + std::to_string(clip), handler, lx + r.x, ly + r.y, r.width, r.height);

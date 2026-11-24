@@ -17,6 +17,7 @@
 
 #include <cstdint>
 #include <functional>
+#include <map>
 #include <memory>
 #include <optional>
 #include <string>
@@ -115,8 +116,15 @@ class App final : public ControlSink, public Actions {
   SpatialPreview* spatial();
   // Writes the mixer's live values into the document (one step) and rebinds the mixer.
   std::uint32_t WriteBackMixer();
-  // Rebuilds the session's project from the document now (MixerModel::Bind).
+  // Rebuilds the session's project from the document now and rebinds the mixer, carrying its live
+  // values over by object (MixerModel::Rebind). With values that have no place in the new project
+  // (D-188) it does not rebind: it asks (rebindPending; ResolveRebind) unless `discardUnmatched`.
   void RebindProject();
+  bool RebindProject(bool discardUnmatched);
+  bool rebindPending() const { return rebindPending_; }
+  const std::vector<LiveValue>& rebindDropped() const { return rebindDropped_; }
+  // The answer: write the live values into the document, or discard the ones that cannot go over.
+  void ResolveRebind(bool writeBack);
   void Message(const std::string& text) { session_.Message(text); }
   // The file the recording's Save / Load use, and the connection the Connect button opens.
   void SetRecordingPath(const std::string& path) { desc_.recordingPath = path; }
@@ -124,6 +132,10 @@ class App final : public ControlSink, public Actions {
   // What Delete (and Backspace outside a text entry) does on the current screen: set by the
   // screen's declaration (the selected point, node, clip ...), cleared at each declaration.
   void SetDeleteAction(std::function<void()> fn) { deleteAction_ = std::move(fn); }
+  // Number fields (kit.hpp): the latest value a field wrote since the last declaration (else the
+  // declared one), so that steps between two declarations add up.
+  double FieldBase(const std::string& field, double declared) const;
+  void FieldWrote(const std::string& field, double value);
   void OnDocUndo() { DocUndo(); }
   void OnDocRedo() { DocRedo(); }
 
@@ -150,6 +162,7 @@ class App final : public ControlSink, public Actions {
 
  private:
   void TrackDocument();
+  void ClearPositionSelections();
   std::string MixerSignature(bool withValues) const;
   Session& session_;
   AppDesc desc_;
@@ -170,7 +183,11 @@ class App final : public ControlSink, public Actions {
   bool dirty_ = false;
   std::string mixerShape_, mixerValues_;
   bool staleMixer_ = false;
+  bool rebindPending_ = false;
+  std::vector<LiveValue> rebindDropped_;
+  std::uint64_t rebindMixerRevision_ = 0;
   std::function<void()> deleteAction_;
+  std::map<std::string, std::pair<std::uint64_t, double>> fieldLatest_;  // field -> (declaration, value)
   std::unique_ptr<SpatialPreview> spatial_;
   std::string spatialEvent_;
 };

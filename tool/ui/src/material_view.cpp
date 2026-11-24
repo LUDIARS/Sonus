@@ -82,9 +82,10 @@ void MaterialsColumn(Kit& kit, const std::string& g, float x, float y, float w, 
   const std::uint32_t per = static_cast<std::uint32_t>(std::max(1.0f, (h - y - 40.0f) / 24.0f));
   const std::uint32_t first = kit.Pager("ma.mat.pager", static_cast<std::uint32_t>(mats.size()), per, &mv->listPage, x, y, w);
   if (mats.size() > per) y += 22.0f;
+  const std::vector<std::string> keys = NameKeys::Of(mats);
   for (std::uint32_t i = first; i < mats.size() && i < first + per; ++i) {
     const std::string m = mats[i];
-    Button(kit.doc(), "ma.mat." + std::to_string(i), (m == mv->material ? "> " : "  ") + std::to_string(i) + ": " + Clip(m, 24),
+    Button(kit.doc(), "ma.mat." + keys[i], (m == mv->material ? "> " : "  ") + std::to_string(i) + ": " + Clip(m, 24),
            [mv, m] { mv->material = m; }, x, y, w, 22, 0.55f);
     y += 24.0f;
   }
@@ -172,7 +173,7 @@ void MaterialProps(Kit& kit, const std::string& g, float x, float y, float w, fl
   cl.width = w;
   cl.height = plotH;
   const double full = std::max(1e-6, static_cast<double>(c.impulseToVelocity[3]));
-  cl.axes = PlotAxes::Fit(0.0, full * 1.2, 0.0, 1.0, w, plotH, 0.05);
+  cl.axes = PlotAxes::Fit(0.0, full * 1.2, 0.0, 1.0, w, plotH, 0.05, kCurveXMargin);
   cl.points = {CurvePoint{0.0, 0.0, 0.0}, CurvePoint{full, 1.0, 0.0}, CurvePoint{full * 1.2, 1.0, 0.0}};
   cl.hasMarker = true;
   cl.markerX = mv->impulse;
@@ -196,6 +197,7 @@ void PairsAndResolve(Kit& kit, const std::string& g, float x, float y, float w, 
     kit.Action("ma.pair.right", ">", [mv] { ++mv->pairCol; }, x + w - 28, y, 24);
   }
   y += 24.0f;
+  const std::vector<std::string> keys = NameKeys::Of(mats);
   const float headW = 70.0f;
   const float cellW = std::max(30.0f, (w - headW) / static_cast<float>(kWindow));
   for (std::uint32_t c = 0; c < kWindow && mv->pairCol + c < n; ++c) {
@@ -209,7 +211,7 @@ void PairsAndResolve(Kit& kit, const std::string& g, float x, float y, float w, 
     for (std::uint32_t c = 0; c < kWindow && mv->pairCol + c < n; ++c) {
       const std::string b = mats[mv->pairCol + c];
       const std::string ev = me.Pair(a, b);
-      kit.PickField("ma.pair." + std::to_string(r) + "." + std::to_string(c), "", ev.empty() ? std::string(".") : Clip(RefName(*d, "event", ev), 7),
+      kit.PickField("ma.pair." + keys[mv->pairRow + r] + "." + keys[mv->pairCol + c], "", ev.empty() ? std::string(".") : Clip(RefName(*d, "event", ev), 7),
                     a + " x " + b, [d] { return DocItems(*d, "event", "(none)"); },
                     [d, g, a, b](const std::string& v) { MaterialEditor(*d, g).SetPair(a, b, v); },
                     x + headW + static_cast<float>(c) * cellW, y, cellW - 2);

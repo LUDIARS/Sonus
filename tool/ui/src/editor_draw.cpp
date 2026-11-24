@@ -158,7 +158,7 @@ tela::Drawing DrawTopDown(const TopDownLook& l, const Palette& p, TopDownShape* 
     if (r < 4000.0f) d.Ellipse(s.circle, tela::Color{0, 0, 0, 0}, Line(p.textDim, 1.5f));
   }
   // Cone: inner and outer half angles around the emitter's facing.
-  if (l.emitter3D && l.outerDeg < 360.0f) {
+  if (l.emitter3D && l.outerDeg > 0.0f && l.outerDeg < 360.0f) {  // a cone is active with outerDeg > 0 (core)
     for (float deg : {l.innerDeg, l.outerDeg}) {
       const float half = deg * 0.5f * kPi / 180.0f;
       const tela::Color c = deg == l.innerDeg ? p.solo : p.mute;

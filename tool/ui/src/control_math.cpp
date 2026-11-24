@@ -159,7 +159,8 @@ double PlotAxes::ValueY(float py) const {
   return height > 0.0f ? y0 + static_cast<double>(height - py) / height * (y1 - y0) : y0;
 }
 
-PlotAxes PlotAxes::Fit(double x0, double x1, double y0, double y1, float width, float height, double yMargin) {
+PlotAxes PlotAxes::Fit(double x0, double x1, double y0, double y1, float width, float height, double yMargin,
+                       double xMargin) {
   PlotAxes a;
   if (!std::isfinite(x0) || !std::isfinite(x1)) x0 = 0.0, x1 = 1.0;
   if (!std::isfinite(y0) || !std::isfinite(y1)) y0 = 0.0, y1 = 1.0;
@@ -168,8 +169,9 @@ PlotAxes PlotAxes::Fit(double x0, double x1, double y0, double y1, float width, 
   if (x1 - x0 <= 0.0) x0 -= 0.5, x1 += 0.5;
   if (y1 - y0 <= 0.0) y0 -= 0.5, y1 += 0.5;
   const double m = (y1 - y0) * std::max(0.0, yMargin);
-  a.x0 = x0;
-  a.x1 = x1;
+  const double mx = (x1 - x0) * std::max(0.0, xMargin);
+  a.x0 = x0 - mx;
+  a.x1 = x1 + mx;
   a.y0 = y0 - m;
   a.y1 = y1 + m;
   a.width = std::max(1.0f, width);

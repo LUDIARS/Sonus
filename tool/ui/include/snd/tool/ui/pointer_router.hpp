@@ -82,6 +82,9 @@ struct DragHandler {
   std::function<void(bool moved, float x, float y)> release;
   std::function<void(float x, float y)> doubleClick;
   std::function<void(float notches, std::uint32_t modifiers, std::uint32_t mergeKey)> wheel;
+  // Esc during the gesture (PointerRouter::Cancel): take it back. Absent: the gesture just ends
+  // (release with moved = false is not called).
+  std::function<void()> cancel;
 };
 
 struct ControlBinding {
@@ -108,6 +111,9 @@ class PointerRouter {
   bool Pointer(tela::Runtime& runtime, const tela::HostPointerEvent& event, std::uint64_t timeMs, bool forward);
   // Once per frame: ends a drag whose Tela gesture was cancelled.
   void Tick(const tela::Runtime& runtime);
+  // Esc: a drag in progress is cancelled (a custom gesture's cancel; a fader / knob drag ends and
+  // its value goes back to where the drag started). true if there was one.
+  bool Cancel();
 
   bool dragging() const { return drag_ >= 0; }
   const ControlBinding* active() const;

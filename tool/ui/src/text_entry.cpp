@@ -109,7 +109,7 @@ bool TextEntry::Key(const KeyEvent& k, bool* refused) {
     PopUtf8(&text_);
     return true;
   }
-  if ((k.modifiers & kModControl) != 0u) return false;  // shortcuts pass (Ctrl+S commits first, App)
+  if ((k.modifiers & kModControl) != 0u) return true;  // shortcuts do nothing while typing (D-186)
   if (k.text >= 0x20u && k.text != 0x7Fu) {
     if (numeric_) {
       const bool ok = (k.text >= '0' && k.text <= '9') || k.text == '-' || k.text == '+' || k.text == '.' ||
@@ -121,9 +121,9 @@ bool TextEntry::Key(const KeyEvent& k, bool* refused) {
     if (next.size() <= kMaxBytes) text_ = std::move(next);
     return true;
   }
-  // Other keys (arrows, Delete, F-keys) while typing: used up so that they do not edit the
-  // selection behind the field.
-  return k.key != 0u && k.key != kKeyTab && !(k.key >= kKeyF1 && k.key < kKeyF1 + 12u);
+  // Other keys (arrows, Delete, Tab, F-keys) while typing: used up so that they do not edit the
+  // selection or change the screen behind the field (D-186).
+  return true;
 }
 
 }  // namespace snd::tool::ui

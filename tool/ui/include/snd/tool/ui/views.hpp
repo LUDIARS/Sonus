@@ -92,7 +92,8 @@ struct SpatialView {
 struct MusicView {
   std::uint32_t tab = 0;      // 0 segments, 1 playlists, 2 states and rules, 3 stingers
   std::string segment, playlist, event;
-  std::int32_t tempo = -1, marker = -1, stem = -1, entry = -1, rule = -1, stinger = -1;
+  std::int32_t tempo = -1, stem = -1, entry = -1, rule = -1;
+  std::string marker;         // selected marker by name (D-186)
   std::uint32_t listPage = 0, rulePage = 0, rowPage = 0, lookPage = 0;
   std::string from, to;       // transition preview states
   double requestSeconds = 1.0;
@@ -200,6 +201,8 @@ void DeclarePatch(tela::Document& doc, ViewContext& ctx, float width, float heig
 void DeclareReplay(tela::Document& doc, ViewContext& ctx, float width, float height);
 void DeclareLink(tela::Document& doc, ViewContext& ctx, float width, float height);
 void DeclareProblems(tela::Document& doc, ViewContext& ctx, float width, float height);
+// The question of a pending mixer rebind (D-188), above the body.
+void DeclareRebindQuestion(tela::Document& doc, ViewContext& ctx, float width);
 // The overlay of an open candidate list (App::OpenPicker), above everything.
 void DeclarePicker(tela::Document& doc, ViewContext& ctx, float width, float height);
 
@@ -211,6 +214,9 @@ std::string CategoryId(std::uint32_t categoryId);    // "cat.0a1b2c3d"
 std::string ParameterId(std::uint32_t parameterId);  // "par.0a1b2c3d"
 // Element id part of a document object: its GUID without dashes (32 hex digits).
 std::string ObjectKey(const std::string& guid);
+// Element id part of an item named uniquely inside an object (a material, a state, a marker, a
+// stinger; D-189): the 8 hex digits of HashId(name). Positions are used only for nameless items.
+std::string NameKey(const std::string& name);
 
 }  // namespace snd::tool::ui
 

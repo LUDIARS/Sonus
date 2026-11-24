@@ -9,6 +9,7 @@
 #include <cstdio>
 
 #include "editor_util.hpp"
+#include "snd/tool/event_editor.hpp"
 #include "snd/tool/preview.hpp"
 #include "snd/tool/spatial_preview.hpp"
 #include "snd/tool/ui/app.hpp"
@@ -120,12 +121,13 @@ void TopDown(Kit& kit, SpatialPreview* sp, float x, float y, float w, float h) {
     };
     return hd;
   };
-  kit.Hit("sp.listener", mover(true), x + look.listener.x - 12.0f, y + look.listener.y - 12.0f, 24.0f, 24.0f);
-  kit.Hit("sp.emitter", mover(false), x + look.emitter.x - 12.0f, y + look.emitter.y - 12.0f, 24.0f, 24.0f);
+  // The facing handles first, the bodies above them (a body wins where they meet).
   kit.Hit("sp.listener.yaw", turner(true, look.listener, shape.listenerHandle.x - 7.0f, shape.listenerHandle.y - 7.0f),
           x + shape.listenerHandle.x - 7.0f, y + shape.listenerHandle.y - 7.0f, 14.0f, 14.0f);
   kit.Hit("sp.emitter.yaw", turner(false, look.emitter, shape.emitterHandle.x - 7.0f, shape.emitterHandle.y - 7.0f),
           x + shape.emitterHandle.x - 7.0f, y + shape.emitterHandle.y - 7.0f, 14.0f, 14.0f);
+  kit.Hit("sp.listener", mover(true), x + look.listener.x - 12.0f, y + look.listener.y - 12.0f, 24.0f, 24.0f);
+  kit.Hit("sp.emitter", mover(false), x + look.emitter.x - 12.0f, y + look.emitter.y - 12.0f, 24.0f, 24.0f);
   Canvas(kit.doc(), "sp.view", drawing, x, y, w, h);
   kit.Label("sp.view.scale", "grid " + FormatNumberText(step, 3) + " m", x + 4, y + h - 18, 120, 16, 0.45f);
 }
@@ -232,7 +234,8 @@ void Values(Kit& kit, SpatialPreview* sp, float x, float y, float w, float h) {
     cl.dpi = kit.ctx().dpi;
     cl.width = w;
     cl.height = plotH;
-    cl.axes = PlotAxes::Fit(0.0, std::max<double>(pts.back().x, std::max(1.0f, sp->MaxDistance())), y0, y1, w, plotH, 0.1);
+    cl.axes = PlotAxes::Fit(0.0, std::max<double>(pts.back().x, std::max(1.0f, sp->MaxDistance())), y0, y1, w, plotH, 0.1,
+                            kCurveXMargin);
     cl.points = pts;
     cl.hasMarker = true;
     cl.markerX = r.distance;
@@ -291,11 +294,13 @@ void DeclareSpatial(tela::Document& doc, ViewContext& ctx, float width, float he
   const float vx = kListW + 8.0f, vw = std::max(200.0f, width - kListW - kSideW - 16.0f);
   Panel(doc, "sp.viewpanel", vx, 0, vw, height, [&] {
     kit.Action("sp.fit", "Fit view", [sp, vw, height] { sp->FitView(vw - 12.0f, height - 46.0f); }, 0, 0, 80);
-    float inner = 0.0f, outer = 0.0f, odb = 0.0f;
-    sp->Cone(&inner, &outer, &odb);
-    kit.Label("sp.info", "maxDistance " + FormatNumberText(sp->MaxDistance(), 2) + " m   cone " +
-                             FormatNumberText(inner, 1) + " / " + FormatNumberText(outer, 1) + " deg " +
-                             FormatNumberText(odb, 1) + " dB   (drag the listener, the emitter, their handles)",
+    // The cone as the Event screen shows it (D-189: EventEditor::Cone, none = no cone).
+    const EventEditor::ConeDesc cone = EventEditor(*app->document(), sv.event).Cone();
+    const std::string coneText = cone.active() ? FormatNumberText(cone.innerDeg, 1) + " / " + FormatNumberText(cone.outerDeg, 1) +
+                                                     " deg " + FormatNumberText(cone.outerDb, 1) + " dB"
+                                               : std::string("none");
+    kit.Label("sp.info", "maxDistance " + FormatNumberText(sp->MaxDistance(), 2) + " m   cone " + coneText +
+                             "   (drag the listener, the emitter, their handles)",
               86, 0, vw - 98, 22, 0.5f);
     TopDown(kit, sp, 0, 28, vw - 12, height - 46);
   }, 6.0f);

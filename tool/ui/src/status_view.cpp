@@ -28,6 +28,8 @@ std::string ObjectKey(const std::string& guid) {
   return k;
 }
 
+std::string NameKey(const std::string& name) { return Hex32(HashId(name)); }
+
 const char* ScreenName(Screen s) {
   switch (s) {
     case Screen::Mixer: return "mixer";
