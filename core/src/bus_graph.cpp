@@ -60,8 +60,8 @@ void MixBuses(Impl& im) noexcept {
     if (rd.parallel != 0u && !im.rt.ChunkDone(c)) continue;
     const ChunkInfo& ci = set.chunks[c];
     for (std::uint32_t s = 0; s < ci.segCount; ++s) {
-      const ChunkSeg& seg = set.segs[std::size_t{c} * im.cfg.voicesPerChunk + s];
-      const float* src = set.accum + (std::size_t{c} * im.cfg.voicesPerChunk + s) * kMaxChannels * frames;
+      const ChunkSeg& seg = set.segs[std::size_t{c} * im.cfg.segmentsPerChunk + s];
+      const float* src = set.accum + (std::size_t{c} * im.cfg.segmentsPerChunk + s) * kMaxChannels * frames;
       float* dst = seg.bus == kNoSlot || !base::rows::IsLive(br, seg.bus) ? rd.outBuf : BusBuffer(im, seg.bus);
       const std::uint32_t dstCh = seg.bus == kNoSlot || !base::rows::IsLive(br, seg.bus) ? im.cfg.outChannels
                                                                                          : im.busDefs[seg.bus].channels;

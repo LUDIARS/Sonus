@@ -1,5 +1,6 @@
 // System::Create / Destroy: every byte of the runtime is allocated here
 // (design 3.3). After Create the audio-thread path never allocates.
+#include <algorithm>
 #include <atomic>
 #include <cmath>
 #include <cstring>
@@ -98,6 +99,9 @@ void ComputeCfg(const snd_config& c, const CoreLimits& lim, Cfg& g) noexcept {
   g.voicesPerChunk = c.jobs.voices_per_chunk;
   g.maxChunks = (g.realTotal + g.voicesPerChunk - 1u) / g.voicesPerChunk;
   g.busCap = lim.maxBuses + c.dev_reserve.buses;
+  // Each voice may select a dry bus and a distance-send bus. Zones are shared
+  // per listener, so there can be at most four additional buses per listener.
+  g.segmentsPerChunk = std::min(g.busCap + 1u, g.voicesPerChunk * 2u + SND_MAX_LISTENERS * kMaxZones);
   g.catCap = lim.maxCategories + 1u;
   g.snapCap = lim.maxSnapshots;
   g.groupCap = lim.maxLimitGroups;
@@ -283,8 +287,8 @@ bool InitRenderSet(Impl& im, RenderSet& s) noexcept {
   s.items = Arr<source::RenderItem>(im, g.realTotal, MemTag::Tables);
   s.inputs = Arr<ItemInput>(im, g.realTotal, MemTag::Tables);
   s.chunks = Arr<ChunkInfo>(im, g.maxChunks, MemTag::Tables);
-  s.segs = Arr<ChunkSeg>(im, std::size_t{g.maxChunks} * g.voicesPerChunk, MemTag::Tables);
-  s.accum = Arr<float>(im, std::size_t{g.maxChunks} * g.voicesPerChunk * kMaxChannels * g.blockFrames,
+  s.segs = Arr<ChunkSeg>(im, std::size_t{g.maxChunks} * g.segmentsPerChunk, MemTag::Tables);
+  s.accum = Arr<float>(im, std::size_t{g.maxChunks} * g.segmentsPerChunk * kMaxChannels * g.blockFrames,
                        MemTag::Tables);
   return s.items != nullptr && s.inputs != nullptr && s.chunks != nullptr && s.segs != nullptr &&
          s.accum != nullptr;
@@ -460,6 +464,8 @@ snd_result CreateImpl(Impl& im) noexcept {
   im.dp.duckDb = Arr<float>(im, g.duckCap, MemTag::Tables);
   im.dp.catPlaying = Arr<std::uint32_t>(im, g.catCap, MemTag::Tables);
   im.dp.catGainPrev = Arr<float>(im, g.catCap, MemTag::Tables);
+  im.dp.mix = Arr<VoiceSpatialMix>(im, g.maxVirtual, MemTag::Tables);
+  if (!im.dp.mix) return SND_ERR_OUT_OF_BUDGET;
   im.dp.pan = Arr<float>(im, g.maxVirtual, MemTag::Tables);
   if (im.dp.pan == nullptr) return SND_ERR_OUT_OF_BUDGET;
   im.sel.voiceGen = Arr<std::uint32_t>(im, g.realTotal, MemTag::Tables);
@@ -471,6 +477,8 @@ snd_result CreateImpl(Impl& im) noexcept {
   }
   // Render.
   RenderPriv& rd = im.rd;
+  rd.paths = Arr<PathHistory>(im, g.realTotal, MemTag::Tables);
+  if (!rd.paths) return SND_ERR_OUT_OF_BUDGET;
   rd.resamplerPool = Arr<std::uint8_t>(im, im.cfg.resamplerSlotBytes * g.realTotal, MemTag::Tables);
   rd.lastAssign = Arr<std::uint32_t>(im, g.realTotal, MemTag::Tables);
   rd.stateChannels = Arr<std::uint32_t>(im, g.realTotal, MemTag::Tables);
