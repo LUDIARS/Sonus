@@ -203,9 +203,7 @@ Disabled 2 件を除く 88 件、核だけの構成は 49 件）。
 
 MinGW（`x86_64-w64-mingw32-g++ -std=c++20 -fsyntax-only -Werror -Wall -Wextra -fno-exceptions -fno-rtti`、Tela のインクルードパス）:
 `tool/ui/src/*.cpp` 全部、`tool/app/main.cpp`・`options.cpp`・`host_headless.cpp`、`host_windows.cpp`（`-fexceptions`、Tela の
-`windows_view.hpp`）、新しいテスト 11 本: 全部通過（ccb6aea）。その後に変えた `common_view.cpp`・`buses_view.cpp`・`patch_view.cpp`・
-`event_view.cpp`・`music_view.cpp`・`replay_view.cpp` と `ui_editor_raster_test.cpp` は MinGW では検査し直していない（clang の
-`-Wshadow` つき構文検査と 5 構成のビルドは通った）。`host_macos.mm` は検査していない（Objective-C++ のコンパイラが無い）。
+`windows_view.hpp`）、新しいテスト 12 本: 全部通過（ccb6aea、その後に変えた `tool/ui/src/*.cpp` 全部と変えたテスト 3 本は 5f2c311 で検査し直して通過）。`host_macos.mm` は検査していない（Objective-C++ のコンパイラが無い）。
 構成 1〜7（ツールなし）は組 U の差分が `tool/` だけなので回していない（受け入れ側の全構成の確認に任せる）。
 
 ## 未検証の箇所
