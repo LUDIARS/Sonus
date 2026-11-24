@@ -648,6 +648,18 @@ void Render(Impl& im) noexcept {
     }
     // Filter.
     in.filter = SND_R(Voice_filterTarget)[d];
+    const float sharedLp = std::min(in.filter.lowpassHz, dsp::kVoiceLowpassOffHz);
+    if (in.directLp < sharedLp) {
+      // A stricter path needs a separate cutoff. Run exactly one lowpass per
+      // route after the voice effects; keep the common highpass before them.
+      in.sendLp = std::min(sharedLp, in.sendLp);
+      in.filter.lowpassHz = dsp::kVoiceLowpassOffHz;
+      if (in.flags & kItemInitPan) dsp::VoiceFilterInit(t.RealVoice.col.filterState[r], in.filter);
+    } else {
+      // The existing clip/parameter/distance cutoff already dominates both.
+      in.directLp = dsp::kVoiceLowpassOffHz;
+      in.sendLp = dsp::kVoiceLowpassOffHz;
+    }
     const bool targetOpen = in.filter.lowpassHz >= dsp::kVoiceLowpassOffHz && in.filter.highpassHz <= dsp::kVoiceHighpassOffHz;
     in.filterActive = (!targetOpen || !dsp::VoiceFilterIsOpen(t.RealVoice.col.filterState[r], im.cfg.sampleRate)) ? 1u : 0u;
     VfxPrepareItem(im, it, in);  // D-132: voice-effect slot and this block's parameters
