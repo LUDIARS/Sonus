@@ -17,10 +17,12 @@
 
 - 公開 C / C++ の SetEmitterShape、SetReverbZone は core::System に配線。snd_config 末尾に doppler_factor（0〜16）、speed_of_sound（1〜100000 m/s）。既存構造体サイズの受理・末尾詰め物は API 担当 B-3。
 - SetParam の Emitter variant 2 は形状種別と半寸法3値、variant 3 はゾーン量と距離。SetSwitch の Emitter variant 2 はバスID。ゾーン設定2命令は一括の空き容量確認を行う。記録再生・LiveLink の検査は B-1。
-- Emitter に shapeKind、halfExtents、zoneBus、zoneAmount、zoneFade、Spatial に shapeSpread、azimuth。列の書き手はそれぞれ ApplyCommands と Compute3D。契約版は1.2。
+- Emitter に shapeKind、halfExtents、zoneBus、zoneAmount、zoneFade、Spatial に shapeSpread、azimuth、coneAngle。列の書き手はそれぞれ ApplyCommands と Compute3D。契約版は1.2。
 - Event 専用のリバーブ送り先、コーン外側の LP はbank/buildtoolに列が必要。距離音量カーブで線形・対数の減衰は表現できる。Splitの物理出力分離はplatform/api。空間化プラグイン用の方位・仰角・距離・spreadはB-5。
 - 実装前の速度指定は既存の `indep_g2_kinds_test.cpp` にある。係数1の場合の決定論は同じ速度を与えた台本同士で比較する。
 
 ## 実装担当の検証
 
 `CoreG1.MovingShapesAndFourZonesReplayBitExactly` は18移動音源の直列2回・RTワーカー2本の波形、レンダー後の確保とRT違反を検査する。`CoreG1.Split128MovingSourcesWithFourZonesWithinBudget` はSplit 2リスナー・128実声・4ゾーンの毎ブロックの移動を入力し、120ブロックのレンダーCPUを測る。実測待ち。組④との有限ループ試験は④取り込み後に実施する。
+
+距離送りとゾーン送りでは、リスナーごとの送量を同じバス宛てで1まで合計し、各席の定位行列と寄与率を掛けてから合成する。一方の席だけがゾーン内なら、その席が聞く方向のみに送る。
