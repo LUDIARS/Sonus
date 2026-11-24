@@ -48,6 +48,9 @@ bool InitAnalysis(Impl& im) noexcept {
   const CoreLimits& lim = im.desc.limits;
   std::uint32_t fft = lim.spectrumFftSize;
   if (fft < 32u || fft > 8192u || (fft & (fft - 1u)) != 0u) fft = 1024u;
+  // Each meter needs a loudness state and a ring in the allocation log,
+  // including the output meter. Reject impossible capacities before adding it.
+  if (lim.maxMeteredBuses >= (im.allocationCap - im.allocationCount) / 2u) return false;
   rd.meterCount = lim.maxMeteredBuses + 1u;
   rd.meters = Take<MeterSlot>(im, rd.meterCount, MemTag::Tables);
   rd.busMeter = Take<std::uint32_t>(im, im.cfg.busCap, MemTag::Tables);
@@ -58,8 +61,10 @@ bool InitAnalysis(Impl& im) noexcept {
   a.ringChannels = im.cfg.outChannels < 2u ? 2u : im.cfg.outChannels;
   a.meterCount = rd.meterCount;
   a.meterBytes = sizeof(MeterHeader) + sizeof(float) * std::size_t{a.ringChannels} * fft;
+  std::size_t frameBytes;
+  if (!base::CheckedMul(a.meterBytes, a.meterCount, &frameBytes)) return false;
   for (auto& f : a.frames) {
-    f.data = Take<std::uint8_t>(im, a.meterBytes * a.meterCount, MemTag::Notify);
+    f.data = Take<std::uint8_t>(im, frameBytes, MemTag::Notify);
     if (f.data == nullptr) return false;
   }
   a.spectrum = Take<std::uint8_t>(im, dsp::SpectrumStateBytes(fft), MemTag::Notify);
