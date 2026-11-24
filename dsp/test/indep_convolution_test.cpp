@@ -298,7 +298,11 @@ SND_TEST(IndepConvolution, PartitionRuleAndStateSize) {
           const std::uint64_t cap = (static_cast<std::uint64_t>(std::ceil(ms * 0.001 * rate)) + b - 1u) / b;
           const std::uint64_t fdl = 8ull * ch * cap * b;
           SND_CHECK(bytes % 64u == 0u);
-          SND_CHECK_MSG(bytes >= fdl && bytes <= fdl + 64ull * ch * b + 200000ull,
+          const auto routes = ch * ch <= 16u ? ch * ch : ch;
+          const auto taps = 5ull * routes * b * sizeof(float);
+          // D-214: five tap banks plus the input delay line, additional
+          // O(ch*B) workspace and the FFT plan. Keep the previous upper bound.
+          SND_CHECK_MSG(bytes >= fdl + taps && bytes <= fdl + 64ull * ch * b + 200000ull,
                         "ch %u %g ms B %u rate %u: %llu bytes, FDL %llu", ch, ms, b, rate,
                         static_cast<unsigned long long>(bytes), static_cast<unsigned long long>(fdl));
         }
@@ -1238,8 +1242,8 @@ SND_TEST(IndepConvolution, IrSwitchCrossfadeMatchesDirectConvolution) {
     o.partition = b;
     o.zl = zl;
     const auto old = Direct(x, h1, zl == 0 ? b : 0), fresh = Direct(x, h2, zl == 0 ? b : 0);
-    {
-      const unsigned start = 1024;
+    for (unsigned f : {0u, b / 2, b - 8, b - 1}) {
+      const unsigned start = 1024 + f;
       auto y = x;
       Conv fx(1, a.slot, o);
       Select(fx, y.data(), start, a.slot, a.slot);
@@ -1267,6 +1271,7 @@ SND_TEST(IndepConvolution, SwitchStepMeasurements) {
     Select(fx, y.data() + start, 512 - start, a.slot, c.slot);
     float step = 0;
     for (unsigned i = start; i < y.size(); ++i) step = std::max(step, std::fabs(y[i] - y[i - 1]));
+    SND_CHECK_EQ(step, 2.0f / b);
     snd::test::Note("DC 1, gains +1 to -1, B=%u f=%u: maximum adjacent step %.8f", b, f, step);
   }
 }
@@ -1311,4 +1316,133 @@ SND_TEST(IndepConvolution, SubsequentSwitchAtFadeBoundary) {
   for (unsigned i = 64; i < 128; ++i) SND_CHECK_EQ(y[i], 1.0f - float(i - 63) / b);
   for (unsigned i = 128; i < 192; ++i) SND_CHECK_EQ(y[i], -float(i - 127) / b);
   for (unsigned i = 192; i < 256; ++i) SND_CHECK_EQ(y[i], -1.0f);
+}
+
+namespace {
+struct Registrations {
+  std::vector<unsigned> numbers;
+  ~Registrations() {
+    for (auto id : numbers) ConvolutionUnregisterIr(id);
+  }
+};
+}
+
+SND_TEST(IndepConvolution, RegistryFindsSoleFreeEntryAtNumberWrap) {
+  Ir delta({{1.0f}}, 64, kRate, 1.0f, kRate, false);
+  Registrations owned;
+  unsigned zeroEntry = 0;
+  for (unsigned i = 0; i < 1024; ++i) {
+    const unsigned id = ConvolutionRegisterIr(delta.ir);
+    if (id == 0) break;
+    if ((id & 1023u) == 0) zeroEntry = id;
+    else owned.numbers.push_back(id);
+  }
+  SND_REQUIRE(zeroEntry != 0);
+  // Keep every other entry busy. Each call must find entry zero again,
+  // including the transition from number 16777215 back to number 1.
+  bool crossed = false;
+  for (unsigned generation = 0; generation < (1u << 14); ++generation) {
+    const unsigned previous = zeroEntry;
+    SND_REQUIRE(ConvolutionUnregisterIr(previous));
+    zeroEntry = ConvolutionRegisterIr(delta.ir);
+    SND_CHECK_MSG(zeroEntry != 0, "entry zero is vacant; last number %u", previous);
+    if (zeroEntry == 0) break;
+    if (zeroEntry < previous) {
+      crossed = true;
+      break;
+    }
+  }
+  if (zeroEntry != 0) SND_CHECK(ConvolutionUnregisterIr(zeroEntry));
+  SND_CHECK(crossed);
+}
+
+
+SND_TEST(IndepConvolution, FadeLastsFullPartitionAfterUnregister) {
+  constexpr unsigned b = 64;
+  // A nonzero tap in each of three partitions. An impulse after the switch
+  // also checks that the old side uses real future input before fading out.
+  std::vector<float> taps(2 * b + 3);
+  taps[0] = 0.5f;
+  taps[b + 1] = -0.25f;
+  taps[2 * b + 2] = 0.125f;
+  const float* channels[] = {taps.data()};
+  const ConvolutionIrDesc irDesc{channels, 1, unsigned(taps.size()), kRate, 1.0f};
+  for (unsigned latency : {0u, b}) {
+    for (unsigned f : {0u, b / 2, b - 8, b - 1}) {
+      dsptest::AlignedMem irMemory(ConvolutionIrBytes(irDesc, kRate, b));
+      const auto* ir = ConvolutionPrepareIr(irMemory.get(), irMemory.size(), irDesc, kRate, b);
+      const auto id = ConvolutionRegisterIr(ir);
+      SND_REQUIRE(id != 0u);
+      Registrations owned;
+      owned.numbers.push_back(id);
+      float params[kMaxEffectParams]{};
+      EffectDefaultParams(EffectKind::Convolution, params);
+      params[kConvPartitionFrames] = b;
+      params[kConvZeroLatency] = latency == 0 ? 1.0f : 0.0f;
+      params[kConvIrSlot] = static_cast<float>(id);
+      snd::EffectDesc d{};
+      d.effect_type = kEffectConvolution;
+      d.channels = 1;
+      d.max_frames = 37;
+      d.param_count = kConvParamCount;
+      d.initial_params = params;
+      dsptest::AlignedMem mem(EffectStateBytes(d, kRate));
+      SND_REQUIRE(EffectInit(mem.get(), mem.size(), d, kRate));
+      std::vector<float> x(640);
+      dsptest::Noise noise(42);
+      for (float& v : x) v = noise.Next(0.5f);
+      auto y = x;
+      const unsigned start = 256 + f;
+      float* before[] = {y.data()};
+      EffectProcess(mem.get(), before, before, 1, start, nullptr, nullptr);
+      SND_REQUIRE(ConvolutionUnregisterIr(id));
+      owned.numbers.clear();
+      std::memset(irMemory.get(), 0xff, irMemory.size());
+      float* after[] = {y.data() + start};
+      EffectProcess(mem.get(), after, after, 1, unsigned(y.size()) - start, nullptr, nullptr);
+      double worst = 0;
+      for (unsigned i = start; i < y.size(); ++i) {
+        const auto t = i - latency;
+        const double old = 0.5 * x[t] - 0.25 * x[t - b - 1] + 0.125 * x[t - 2 * b - 2];
+        const double g = std::min(1.0, double(i - start + 1) / b);
+        worst = std::max(worst, std::fabs(y[i] - (1.0 - g) * old));
+      }
+      // Three dyadic taps of magnitude <=1, two 128-point FFTs (7 stages).
+      // Budget 2 float ulps per stage and one for interpolation.
+      constexpr double tolerance = (2 * 2 * 7 + 1) * 0x1p-23;
+      SND_CHECK_MSG(worst <= tolerance, "latency %u f=%u: full-fade error %.8g", latency, f, worst);
+    }
+  }
+}
+
+SND_TEST(IndepConvolution, PendingSwitchStartsAtFirstFreeSample) {
+  constexpr unsigned b = 64, first = 256 + 13;
+  const auto h1 = DecayIr(340, 91, 140), h2 = DecayIr(410, 73, 190), h3 = DecayIr(480, 21, 250);
+  Ir a({h1}, b), superseded({{6.0f}}, b), current({h2}, b), last({h3}, b);
+  SND_REQUIRE(a.slot && current.slot && superseded.slot && last.slot);
+  const auto x = Noise(640, 58);
+  for (auto delay : {0u, b}) {
+    const auto old = Direct(x, h1, delay), middle = Direct(x, h2, delay), fresh = Direct(x, h3, delay);
+    std::vector<float> previous;
+    for (auto maxFrames : {8u, 13u, 256u}) {
+      Opt o;
+      o.partition = b;
+      o.zl = delay == 0 ? 1.0f : 0.0f;
+      o.maxFrames = maxFrames;
+      Conv fx(1, a.slot, o);
+      auto y = x;
+      Select(fx, y.data(), first, a.slot, a.slot);
+      Select(fx, y.data() + first, 9, a.slot, current.slot);
+      Select(fx, y.data() + first + 9, 17, current.slot, superseded.slot);
+      Select(fx, y.data() + first + 26, unsigned(y.size()) - first - 26, superseded.slot, last.slot);
+      for (unsigned i = 0; i < y.size(); ++i) {
+        const double u = i < first ? 0 : std::min(1.0, double(i - first + 1) / b);
+        const double v = i < first + b ? 0 : std::min(1.0, double(i - first - b + 1) / b);
+        const double want = (1 - v) * ((1 - u) * old[i] + u * middle[i]) + v * fresh[i];
+        SND_CHECK_NEAR(y[i], want, std::max({Tol(h1, 0.5f), Tol(h2, 0.5f), Tol(h3, 0.5f)}));
+      }
+      if (!previous.empty()) SND_CHECK(previous == y);
+      previous = y;
+    }
+  }
 }

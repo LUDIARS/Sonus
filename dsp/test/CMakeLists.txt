@@ -43,7 +43,7 @@ snd_add_test(dsp_indep_contract11_test SOURCES indep_contract11_dsp_test.cpp LIN
 
 # Independent tests of stage 7-D dsp (FFT, time stretch, convolution; D-208..D-215).
 # Built twice like dsp_test: against sonus_dsp and against the dsp sources with the
-# scalar SIMD path forced. Defect_ tests (currently failing) are a separate executable.
+# scalar SIMD path forced.
 set(SND_DSP_INDEP_S7D_SOURCES
   indep_fft_test.cpp
   indep_time_stretch_test.cpp
@@ -58,8 +58,3 @@ target_include_directories(dsp_indep_s7d_test_scalar PRIVATE ${CMAKE_CURRENT_SOU
                                                             ${CMAKE_CURRENT_SOURCE_DIR}/../src)
 target_compile_definitions(dsp_indep_s7d_test_scalar PRIVATE SND_SIMD_FORCE_SCALAR=1)
 set_tests_properties(dsp_indep_s7d_test dsp_indep_s7d_test_scalar PROPERTIES TIMEOUT 1800)
-# Defect_ tests of the independent tests above: they fail until the defects are fixed.
-snd_add_test(dsp_indep_defects_dsp_test
-  SOURCES indep_defects_dsp_test.cpp
-  LINK sonus_dsp sonus_mocks)
-set_tests_properties(dsp_indep_defects_dsp_test PROPERTIES TIMEOUT 1800)

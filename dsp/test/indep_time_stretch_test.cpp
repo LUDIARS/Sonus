@@ -901,3 +901,26 @@ SND_TEST(IndepTimeStretch, CallLimitSilencesOnlyTheExcess) {
   SND_CHECK(x == y);
   SND_CHECK(clipped.Run(src, 256, 256, 1) == reference.Run(src, 256, 256, 1));
 }
+
+// Power-of-two scaling changes every nonzero candidate score by the same
+// positive factor. It cannot change which source position wins (D-217).
+SND_TEST(IndepTimeStretch, QuietFiniteInputKeepsCorrelationChoice) {
+  constexpr unsigned frames = 4096;
+  std::vector<float> results[2];
+  for (unsigned k = 0; k < 2; ++k) {
+    const float scale = k ? 0x1p-60f : 1.0f;
+    dsptest::AlignedMem mem(TimeStretchStateBytes(1, kRate));
+    SND_REQUIRE(TimeStretchInit(mem.get(), mem.size(), 1, kRate));
+    const unsigned n = TimeStretchInputFrames(mem.get(), frames, 2, 2);
+    const unsigned pad = TimeStretchPadFrames(mem.get());
+    std::vector<float> input(n + pad);
+    dsptest::Noise noise(17);
+    for (unsigned i = 0; i < n; ++i) input[pad + i] = scale * noise.Next(0.5f);
+    results[k].resize(frames);
+    float* in[] = {input.data()};
+    float* out[] = {results[k].data()};
+    SND_REQUIRE_EQ(TimeStretchProcess(mem.get(), in, n, out, frames, 2, 2), n);
+    for (float& v : results[k]) v /= scale;
+  }
+  SND_CHECK(results[0] == results[1]);
+}
