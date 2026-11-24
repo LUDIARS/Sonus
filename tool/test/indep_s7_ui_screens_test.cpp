@@ -614,7 +614,7 @@ SND_TEST(IndepS7UiScreens, MaterialRowsLastMaterialAndSymmetricPairs) {
   MaterialEditor me(r.doc, G(25));
   SND_CHECK_EQ(r.Prefixed("ma.mat.", "").size() >= me.Materials().size(), true);
   for (std::size_t i = 0; i < me.Materials().size(); ++i) {
-    SND_CHECK_MSG(r.El("ma.mat." + std::to_string(i)) != nullptr, "row %zu", i);
+    SND_CHECK_MSG(r.El("ma.mat." + std::to_string(i)) != nullptr, "row %u", static_cast<unsigned>(i));
   }
   // Symmetric pairs: the table shows (0, 1) and (1, 0) the same.
   const tela::PlacedElement* a = r.El("ma.pair.0.1");

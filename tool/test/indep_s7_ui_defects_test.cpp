@@ -163,8 +163,9 @@ SND_TEST(IndepS7UiDefects, SpecGap_StructuralEditDropsLiveOverridesSilently) {
   const std::size_t messages = r.s.messages().size();
   SND_REQUIRE(!MixerEditor(r.doc).AddBus("New", G(2)).empty());
   r.Frame();
-  std::printf("SpecGap: overrides %zu -> %zu, messages %zu -> %zu\n", before, r.s.mixer().Overrides().size(), messages,
-              r.s.messages().size());
+  std::printf("SpecGap: overrides %u -> %u, messages %u -> %u\n", static_cast<unsigned>(before),
+              static_cast<unsigned>(r.s.mixer().Overrides().size()), static_cast<unsigned>(messages),
+              static_cast<unsigned>(r.s.messages().size()));
   SND_CHECK_EQ(r.s.mixer().buses().size(), std::size_t{4});
 }
 
@@ -198,7 +199,7 @@ SND_TEST(IndepS7UiDefects, SpecGap_UndoKeyDuringATextEntryUndoesTheDocument) {
   SND_REQUIRE(r.ClickId("ev.list.name"));
   SND_REQUIRE(r.app->text().active());
   r.Key('Z', ui::kModControl);
-  std::printf("SpecGap: Ctrl+Z in an entry: entry %s, document undo steps %zu (1 before)\n",
-              r.app->text().active() ? "open" : "closed", r.doc.UndoCount());
+  std::printf("SpecGap: Ctrl+Z in an entry: entry %s, document undo steps %u (1 before)\n",
+              r.app->text().active() ? "open" : "closed", static_cast<unsigned>(r.doc.UndoCount()));
   SND_CHECK(true);
 }
