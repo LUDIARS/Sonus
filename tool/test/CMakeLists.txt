@@ -167,7 +167,7 @@ set_tests_properties(tool_indep_app_dpi_above tool_indep_app_dpi_below PROPERTIE
 # Independent tests of group U (tool/test/indep_s7_ui_properties.md, written from the specs and
 # the public headers before reading the screens' code). The Defect_* tests are in their own
 # executable, one CTest test each; they fail on purpose (each documents a defect).
-foreach(_t indep_s7_ui_common_test indep_s7_ui_limits_test indep_s7_ui_screens_test)
+foreach(_t indep_s7_ui_common_test indep_s7_ui_limits_test indep_s7_ui_screens_test indep_s7_ui_gesture_test indep_s7_ui_raster_test indep_s7_ui_threads_test)
   _snd_tool_test(${_t} "${_tool_ui_screen_link}")
 endforeach()
 # I1 / I2: every screen headless on an empty and a large generated project (the limits test writes
