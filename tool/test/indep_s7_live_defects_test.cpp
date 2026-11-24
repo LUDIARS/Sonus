@@ -7,6 +7,8 @@
 #include <unistd.h>
 
 #include "indep_s7_live_fixture.hpp"
+#include "snd/tool/music_editor.hpp"
+#include "snd/tool/preview.hpp"
 #include "snd/tool/recording_report.hpp"
 
 using namespace snd::tool;
@@ -209,4 +211,71 @@ SND_TEST(IndepS7LiveDefects, Defect_ConfigLineAcceptsNegativeAndOutOfRangeIntege
   SND_CHECK(!ParseConfigLine("max_banks", "4294967296", &c));
   SND_CHECK(!ParseConfigLine("max_banks", "99999999999999999999999", &c));
   SND_CHECK_EQ(c.max_banks, before);
+}
+
+namespace {
+// Plays Tune from Calm and asks for Fight at `request` s through the router; returns the
+// transitions and the output, and what MusicEditor::Preview computes.
+struct TransitionRun {
+  bool ok = false;
+  TransitionPreview p;
+  std::uint64_t startClock = 0;
+  std::vector<preview::PreviewTransition> tr;
+  std::vector<float> out;
+  std::uint32_t channels = 2;
+};
+TransitionRun RunTransition(double request) {
+  TransitionRun t;
+  Engine en(true);
+  if (en.e == nullptr) return t;
+  MusicEditor me(en.doc, G(236));
+  MusicSettings ms;
+  ms.sampleRate = en.e->Status().sampleRate;
+  ms.blockFrames = en.e->Status().blockFrames;
+  t.p = me.Preview("Calm", "Fight", request, ms);
+  AuditionRouter router;
+  router.Bind(nullptr, en.e.get());
+  en.Frames(2);
+  t.startClock = en.e->NextBlock() * ms.blockFrames;
+  if (!router.PlayTransition(TransitionAudition{snd::HashId("Tune"), snd::HashId("Calm"), snd::HashId("Fight"), request}).ok) return t;
+  en.e->Render(static_cast<std::uint32_t>((t.p.fireSeconds + 1.0) * ms.sampleRate / ms.blockFrames), &t.out);
+  t.tr = en.e->Transitions();
+  t.channels = en.e->Status().channels;
+  t.ok = t.p.valid;
+  return t;
+}
+}  // namespace
+
+// P-impl 4: the transition audition plays From and switches to To where the rule table says
+// (MusicEditor::Preview, D-179: the tool's computation equals the runtime's). A request exactly on a
+// bar line (2.0 s, 3/4 at 90 BPM, a block boundary too): MusicEditor::Preview says the next bar (4.0 s);
+// the preview engine switches at once (2.0 s). One of the two is wrong (the router's request
+// block, or the model's "next bar" at a bar line, group M); the audition does not do what the
+// tool shows. The same 1 ms before a bar line (3.999 s): the model adds its lookahead (one block)
+// and says the bar after; the engine switches at the near bar (it applies the request at the start
+// of the block that contains the request time, 4.3 ms early).
+SND_TEST(IndepS7LiveDefects, Defect_TransitionAuditionNearABarLineDisagreesWithThePreview) {
+  for (const double request : {2.0, 3.999}) {
+    const TransitionRun t = RunTransition(request);
+    SND_REQUIRE(t.ok);
+    SND_REQUIRE(!t.tr.empty());
+    const std::uint64_t want = t.startClock + static_cast<std::uint64_t>(std::llround(t.p.fireSeconds * 48000.0));
+    SND_CHECK_MSG(t.tr.back().clock == want, "request %.3f s: switch at %.4f s, MusicEditor::Preview %.4f s (lookahead %.2f ms)",
+                  request, static_cast<double>(t.tr.back().clock - t.startClock) / 48000.0, t.p.fireSeconds, t.p.lookaheadMs);
+  }
+}
+
+// P-impl 4 "From の State で鳴らし、要求の時刻に To へ切り替える". A request at 0 s: MusicEditor::Preview
+// says Calm plays and Fight starts at the first bar (2.0 s); the preview engine starts in Fight
+// directly (no transition, Calm is never heard): the state request lands before the music starts.
+SND_TEST(IndepS7LiveDefects, Defect_TransitionAuditionAtTimeZeroSkipsTheFromState) {
+  const TransitionRun t = RunTransition(0.0);
+  SND_REQUIRE(t.ok);
+  SND_CHECK_MSG(!t.tr.empty(), "no transition (MusicEditor::Preview: at %.4f s)", t.p.fireSeconds);
+  // 0.5 s after the start the From state (Calm, DC kDc) must be playing, not Fight (3 kDc).
+  const std::size_t at = static_cast<std::size_t>(24000) * t.channels;
+  SND_REQUIRE(at < t.out.size());
+  const float early = t.out[at], late = t.out[t.out.size() - t.channels];
+  SND_CHECK_MSG(std::fabs(late / early - 3.0f) < 1e-3f, "level at 0.5 s %g, at the end %g", static_cast<double>(early),
+                static_cast<double>(late));
 }
