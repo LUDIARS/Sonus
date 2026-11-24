@@ -303,8 +303,12 @@ SND_TEST(MusicEditor, MinimumLookaheadAndTransitionPreview) {
   // Too close: at 1.495 s the next beat (1.5 s) is 5 ms away, SegB is in memory: 10 ms needed ->
   // late rule nextGrid: the following beat (2.0 s).
   p = m.Preview("Explore", "Battle", 1.495, s);
-  SND_CHECK(p.lateApplied);
-  SND_CHECK_NEAR(p.fireSeconds, 2.0, 1e-9);
+  // D-184 (the runtime's rules, music transition.cpp): taken at the first block start at or after
+  // the request (10 ms blocks: block 150 = 1.5 s); the beat at that block start counts; the first
+  // material (the bridge's preloaded stream) needs no prime and there is no extra lead block -> not
+  // late, 1.5 s.
+  SND_CHECK(!p.lateApplied);
+  SND_CHECK_NEAR(p.fireSeconds, 1.5, 1e-9);
   // Battle -> Explore: "* -> *", next bar on SegB (60 BPM 3/4: a bar is 3 s), the fade of
   // the built-in default does not apply (a row matched): 0.
   p = m.Preview("Battle", "Explore", 0.2, s);
