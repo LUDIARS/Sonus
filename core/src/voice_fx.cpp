@@ -177,8 +177,7 @@ std::uint32_t Acquire(Impl& im, SlotIndex v, std::uint32_t d, SlotIndex r, std::
     const std::uint64_t requested =
         plugin != nullptr ? plugin->state_bytes(plugin->user, &dd) : dsp::EffectStateBytes(dd, im.cfg.sampleRate);
     if (requested == 0u) continue;  // unknown kind: the stage is skipped
-    constexpr std::uint64_t alignmentMask = kBufferAlignment - 1u;
-    const std::uint64_t aligned = (requested + alignmentMask) & ~alignmentMask;
+    const std::uint64_t aligned = base::AlignUp64(requested, kBufferAlignment);
     if (aligned > remaining) {  // D-133: the chain does not fit the slot
       ++x.dry;
       ++x.dryTooLarge;
