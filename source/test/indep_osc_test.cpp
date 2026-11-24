@@ -24,6 +24,8 @@ using isrc::kTwoPi;
 namespace {
 
 constexpr double kRate = 48000.0;
+// D-200 decrements gain before rendering: at 48 kHz the 240th sample is silent.
+constexpr std::size_t kFirstSilentFrame = 240 - 1;
 
 src::OscillatorParams Osc(bf::Waveform w, float hz, float duty = 0.5f) {
   src::OscillatorParams p{};
@@ -282,6 +284,9 @@ SND_TEST(IndepOsc, ExtremeFrequenciesAndRatiosStayFinite) {
         SND_CHECK_MSG(isrc::AllFinite(x), "wave %u f %g r %g: not finite", unsigned(w), double(f), double(r));
         SND_CHECK_MSG(isrc::MaxAbs(x) < 2.5, "wave %u f %g r %g: peak %g", unsigned(w), double(f), double(r),
                       isrc::MaxAbs(x));
+        if (!std::isfinite(f) || f <= 0.0f || r == 0.0f) {
+          for (std::size_t i = kFirstSilentFrame; i < x.size(); ++i) SND_CHECK_EQ(x[i], 0.0f);
+        }
       }
     }
   }
@@ -305,6 +310,7 @@ SND_TEST(IndepOsc, ExtremeFrequenciesAndRatiosStayFinite) {
   const double held = std::sin(kTwoPi * 100.0 / 48.0);
   for (int i = 0; i < 256; ++i)
     SND_CHECK_NEAR(v.out[0][100 + i], held * std::max(0, 239 - i) / 240, 2e-5);
+  for (std::size_t i = kFirstSilentFrame; i < 256; ++i) SND_CHECK_EQ(v.out[0][100 + i], 0.0f);
   d.Block({&v});
   for (std::size_t i = 0; i < 256; ++i) {
     SND_CHECK_NEAR(v.out[0][356 + i], std::sin(kTwoPi * double(100 + i) / 48.0) * std::min(1.0, double(i + 1) / 240), 2e-5);
@@ -683,6 +689,7 @@ SND_TEST(IndepOsc, NonFiniteRenderInputsAreSafe) {
       d.Block({&v}, m);
       for (int i = 0; i < 256; ++i)
         SND_CHECK_NEAR(v.out[0][256 + i], std::sin(kTwoPi * 256 / 48.0) * std::max(0, 239 - i) / 240, 2e-5);
+      for (std::size_t i = kFirstSilentFrame; i < 256; ++i) SND_CHECK_EQ(v.out[0][256 + i], 0.0f);
       d.Advance(v, 1000, b);
       d.Block({&v});
       for (std::size_t i = 0; i < 256; ++i) {
