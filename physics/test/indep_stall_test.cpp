@@ -249,7 +249,10 @@ SND_TEST(IndepStall, SlidesDuringAStall) {
   SND_REQUIRE_EQ(f.rec.Count(SND_PHYSICS_RECORD_UPDATE), 1u);
   SND_CHECK_EQ(f.rec.Of(SND_PHYSICS_RECORD_UPDATE)[0].r.position.x, lastX);
   SND_CHECK_EQ(f.rec.Of(SND_PHYSICS_RECORD_UPDATE)[0].Param(P(SND_PHYSICS_PARAM_SPEED_NAME)), lastSpeed);
-  for (int i = 0; i < 20; ++i) {
+  // Wait past slide 2's stop: its fade (tracking_fade_seconds 0.1 = 18.75 periods) plus the
+  // render-ahead; its tail on the left would otherwise fall into the window (seen in TSan and
+  // Release: |L| decaying over the first 1-2 periods, slide 1's R constant).
+  for (int i = 0; i < 40; ++i) {
     f.s.Advance(1);
     SND_CHECK_EQ(f.Submit({Slide(1, lastX, lastSpeed)}), SND_OK);
   }
