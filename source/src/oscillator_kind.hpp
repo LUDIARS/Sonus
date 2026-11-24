@@ -28,9 +28,12 @@
 // in [0, 1] over tables 0 .. count - 1, linear between neighbouring tables and
 // linear inside a table. No band limiting (no mip levels in bank format 2.0).
 // Frequencies at or above Nyquist are clamped to just below it (dt < 0.5).
-// D-198: while the effective frequency is 0 (0, negative, NaN, +-Inf frequency or
-// pitch) every waveform outputs 0 and the phase waits; it continues from there once
-// the frequency is positive again. RenderItem inputs that are not finite are made
+// D-198 / D-200: while the effective frequency is 0 (0, negative, NaN, +-Inf frequency or
+// pitch) the phase waits and the output fades linearly to 0 over 5 ms (per sample, from
+// the waveform at the held phase); once the frequency is positive again the phase goes
+// on from there and the output fades back in over the same 5 ms. One gain state per
+// voice (it may turn around mid-fade); a voice whose frequency is 0 at its start starts
+// at gain 0. Independent of the block size. RenderItem inputs that are not finite are made
 // safe per block (pitch -> 0, offsets -> 0): no NaN out, no undefined conversion.
 //
 // Control: Seek(frame) sets the phase to where an unmodulated voice would be
@@ -64,6 +67,11 @@ struct OscInst {
   std::uint32_t tableLength = 0;
   std::uint32_t tableCount = 0;
   std::uint32_t tableOrigin = 0;  // first frame of table 0 (loopStart with a loop, D-198)
+  // D-200: output gain while the frequency goes to 0 and back: fadePos / fadeFrames_
+  // (linear, per sample; render state). heldDt: the last positive dt (the waveform at the
+  // held phase is evaluated with it while fading out).
+  std::uint32_t fadePos = 0;
+  double heldDt = 0.0;
 };
 
 class OscillatorKind final : public ISourceKind {
@@ -94,6 +102,7 @@ class OscillatorKind final : public ISourceKind {
   std::uint32_t freeCount_ = 0;
   std::uint32_t cap_ = 0;
   double sampleRate_ = 48000.0;
+  std::uint32_t fadeFrames_ = 240;  // D-200: 5 ms
   std::atomic<std::uint32_t> live_{0};
 };
 

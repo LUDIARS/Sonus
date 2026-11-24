@@ -9,7 +9,11 @@
 //
 // One port = one lock-free single-producer / single-consumer ring of
 // `Capacity()` frames (a power of two) x `Channels()` non-interleaved float
-// channels, allocated by Runtime::Init (no allocation afterwards).
+// channels, allocated by Runtime::Init (no allocation afterwards). D-200: the capacity
+// is at least 4 blocks (4 x Config.blockSize, rounded up to a power of two): a port
+// smaller than that moves, empty, to memory in the Input kind's pool when core creates
+// the kind (and back when core destroys it), so do not write a port during core's
+// Create / Destroy. Capacity() is valid again after them.
 //   Producer  Write(): any thread, ONE writer per port at a time. It copies
 //             what fits and drops the rest (the newest frames: overrun, counted
 //             in InputPortStats::droppedFrames). Samples that are not finite
@@ -42,7 +46,10 @@ struct InputPortStats {
   std::uint64_t droppedFrames = 0;  // refused by Write (ring full: overrun on the writer side)
   std::uint64_t readFrames = 0;     // delivered to voices (heard or advanced virtually)
   std::uint64_t skippedFrames = 0;  // dropped by the consumer (start, resume, latency bound)
-  std::uint64_t underruns = 0;      // blocks a playing voice found too few frames
+  // D-200 (D-197 (3)): shortages that began, i.e. blocks that came short right after a
+  // block that got every requested frame. The following short blocks of the same shortage
+  // are not counted again (nor are a voice's first block or the block after a skip).
+  std::uint64_t underruns = 0;
 };
 
 class InputPort {
@@ -71,6 +78,11 @@ class InputPort {
 
   // --- the Input kind (consumer side; audio thread / RT worker of the reading voice) ---
   void Bind(float* data, std::uint32_t channels, std::uint32_t frames) noexcept;
+  // Owner thread, while nothing writes or reads the port (the Input kind's Init / Shutdown,
+  // D-200): moves the port to other memory of `frames` (power of two) frames per channel,
+  // emptied (positions 0). Configure's values and the statistics are kept.
+  void Rebind(float* data, std::uint32_t frames) noexcept;
+  float* Data() const noexcept { return data_; }
   // Owner thread (the Input kind's Init): the block size, for the latency floor (D-197).
   void SetBlockFrames(std::uint32_t frames) noexcept { blockFrames_.store(frames, std::memory_order_relaxed); }
   // A voice starts / resumes live: drops what was written so far except the newest

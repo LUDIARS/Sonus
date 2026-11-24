@@ -12,7 +12,11 @@
 //   Render     reads what was written; missing frames are silence. A short block
 //              is `starved` (an underrun) only when the voice's previous block got
 //              every requested frame (D-197: not the first block, not the block
-//              after a skip). The voice never ends by itself.
+//              after a skip; D-200: one count per shortage that begins, the next
+//              short blocks of it are not counted). The voice never ends by itself.
+//   Ports      D-200: a port of less than 4 blocks (4 x blockFrames) is moved, empty,
+//              into a ring of NextPow2(4 blocks) in this kind's pool at Init and back
+//              at Shutdown, so "live" and the latency bound always have room.
 //   Virtual    the frames the voice would have played are consumed (discarded), so
 //              the voice stays live when it becomes real again.
 //   Control    Seek / Resume: skip to live (keep the newest block; a paused voice
@@ -78,6 +82,12 @@ class InputKind final : public ISourceKind {
   std::uint32_t blockFrames_ = 256;
   InputInst* inst_ = nullptr;
   std::uint32_t* freeInst_ = nullptr;
+  struct PortHome {  // D-200: the Runtime's memory of a port moved into the pool
+    float* data;
+    std::uint32_t frames;
+  };
+  static std::uint32_t MinPortFrames(const SourceLimits& limits) noexcept;
+  PortHome* homes_ = nullptr;
   std::uint32_t* portOwner_ = nullptr;  // audio thread: claiming instance per port (kInvalidSlot: none)
   std::uint32_t freeCount_ = 0;
   std::uint32_t cap_ = 0;
