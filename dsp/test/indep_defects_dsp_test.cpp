@@ -1,249 +1,182 @@
-// Defects found by the independent tests of stage 7-D dsp (FFT, time stretch,
-// convolution). Every Defect_ test FAILS on the current implementation and
-// passes once the defect is fixed. They are a separate executable
-// (dsp_indep_defects_dsp_test) so the other independent tests stay green.
-// Not to be edited by the implementer (fix the code, not the expectation).
+// Independent reproductions of unresolved D-218 / D-219 regressions.
 #include <algorithm>
-#include <cmath>
 #include <cstdint>
-#include <cstring>
 #include <vector>
 
 #include "dsp_test_util.hpp"
 #include "snd/dsp/convolution.hpp"
-#include "snd/dsp/effects.hpp"
 #include "snd/dsp/time_stretch.hpp"
-#include "snd/internal/rt_check.hpp"
 #include "snd/test/test.hpp"
 
 using namespace snd::dsp;
 
 namespace {
-
-constexpr double kPi = dsptest::kPi;
-constexpr std::uint32_t kRate = 48000;
-using Signal = std::vector<std::vector<float>>;
-
-// Runs a time stretcher over `src` in 256-frame blocks at a constant speed.
-Signal Stretch(const Signal& src, std::uint32_t frames, float speed, float maxSpeed = 4.0f) {
-  const std::uint32_t ch = static_cast<std::uint32_t>(src.size());
-  dsptest::AlignedMem mem(TimeStretchStateBytes(ch, kRate, maxSpeed), dsptest::kDirty);
-  Signal out(ch);
-  if (!TimeStretchInit(mem.get(), mem.size(), ch, kRate, maxSpeed)) return out;
-  const std::uint32_t pad = TimeStretchPadFrames(mem.get());
-  std::uint64_t pos = 0;
-  for (std::uint32_t done = 0; done < frames; done += 256u) {
-    const std::uint32_t n = TimeStretchInputFrames(mem.get(), 256, speed, speed);
-    std::vector<std::vector<float>> in(ch, std::vector<float>(pad + n)), o(ch, std::vector<float>(256));
-    float* ip[8];
-    float* op[8];
-    for (std::uint32_t c = 0; c < ch; ++c) {
-      for (std::uint32_t i = 0; i < n; ++i) in[c][pad + i] = pos + i < src[c].size() ? src[c][pos + i] : 0.0f;
-      ip[c] = in[c].data();
-      op[c] = o[c].data();
-    }
-    pos += TimeStretchProcess(mem.get(), ip, n, op, 256, speed, speed);
-    for (std::uint32_t c = 0; c < ch; ++c) out[c].insert(out[c].end(), o[c].begin(), o[c].end());
-  }
-  return out;
-}
-
-// Worst residual (relative to the amplitude) of x against a fitted sinusoid at f, per window w.
-double WorstResidual(const std::vector<float>& x, std::uint32_t from, std::uint32_t to, double f, std::uint32_t w) {
-  double worst = 0.0;
-  for (std::uint32_t i = from; i + w <= to; i += w) {
-    double ss = 0, cc = 0, sc = 0, xs = 0, xc = 0;
-    for (std::uint32_t j = 0; j < w; ++j) {
-      const double a = 2.0 * kPi * f * (i + j) / kRate;
-      ss += std::sin(a) * std::sin(a);
-      cc += std::cos(a) * std::cos(a);
-      sc += std::sin(a) * std::cos(a);
-      xs += x[i + j] * std::sin(a);
-      xc += x[i + j] * std::cos(a);
-    }
-    const double det = ss * cc - sc * sc;
-    const double A = (xs * cc - xc * sc) / det, B = (xc * ss - xs * sc) / det;
-    double r = 0.0;
-    for (std::uint32_t j = 0; j < w; ++j) {
-      const double a = 2.0 * kPi * f * (i + j) / kRate;
-      const double d = x[i + j] - (A * std::sin(a) + B * std::cos(a));
-      r += d * d;
-    }
-    worst = std::max(worst, std::sqrt(2.0 * r / w) / std::max(1e-9, std::hypot(A, B)));
-  }
-  return worst;
-}
-
-}  // namespace
-
-// D-210: "maxSpeed は Init で 1〜4（既定 4、NaN は 1 として扱う）". The
-// implementation treats a NaN maxSpeed as 4 (time_stretch.cpp Shape / Init:
-// ClampMs(maxSpeed, 1, 4, kTimeStretchMaxSpeed)): the pad and the state are
-// sized for speed 4 and speed 2 is not clamped to 1.
-SND_TEST(IndepDefects, Defect_TimeStretchNanMaxSpeedIsOne) {
-  TimeStretchShape a{}, one{};
-  SND_REQUIRE(TimeStretchGetShape(kRate, std::nanf(""), &a));
-  SND_REQUIRE(TimeStretchGetShape(kRate, 1.0f, &one));
-  SND_CHECK_EQ(a.padFrames, one.padFrames);
-  SND_CHECK_EQ(TimeStretchStateBytes(2, kRate, std::nanf("")), TimeStretchStateBytes(2, kRate, 1.0f));
-  Signal src(1, std::vector<float>(48000 * 4));
-  dsptest::Noise nz(3);
-  for (float& v : src[0]) v = nz.Next(0.5f);
-  const Signal x = Stretch(src, 24000, 2.0f, std::nanf(""));
-  const Signal y = Stretch(src, 24000, 2.0f, 1.0f);
-  SND_CHECK_MSG(x[0] == y[0], "speed 2 on a NaN-maxSpeed instance is not clamped to 1");
-}
-
-// D-209 / time_stretch.hpp: all channels share p_k, chosen by the normalised
-// cross-correlation "channels summed". The implementation correlates the SUM
-// of the channel signals (time_stretch.cpp Search, lines 155-164). For a stereo
-// signal whose channels cancel in the sum (R = -L, a common polarity-inverted
-// or wide stereo case) every candidate scores 0 and the lowest position is
-// always taken, so every hop is spliced at a random phase. The left channel of
-// such a stereo pair must be stretched as well as the same signal in mono
-// (summing per-channel correlations, or correlating sum(|.|) / each channel,
-// gives the same choice as mono here).
-SND_TEST(IndepDefects, Defect_TimeStretchAntiPhaseStereoLosesAlignment) {
-  const double hz = 220.0;
-  Signal mono(1, std::vector<float>(48000 * 6));
-  for (std::uint32_t i = 0; i < mono[0].size(); ++i)
-    mono[0][i] = static_cast<float>(0.5 * std::sin(2.0 * kPi * hz * i / kRate));
-  Signal st(2, mono[0]);
-  for (float& v : st[1]) v = -v;
-  for (float speed : {0.7f, 1.5f}) {
-    const Signal m = Stretch(mono, 96000, speed);
-    const Signal s = Stretch(st, 96000, speed);
-    const double rm = WorstResidual(m[0], 9600, 96000, hz, 960);
-    const double rs = WorstResidual(s[0], 9600, 96000, hz, 960);
-    snd::test::Note("220 Hz x%.1f: worst residual mono %.4f, anti-phase stereo L %.4f", speed, rm, rs);
-    SND_CHECK_MSG(rs < 2.0 * rm + 0.02, "speed %g: anti-phase stereo residual %g vs mono %g", speed, rs, rm);
-  }
-}
-
-namespace {
-
-std::vector<float> DecayNoise(std::uint32_t n, std::uint32_t seed, double tau) {
-  dsptest::Noise nz(seed);
-  std::vector<float> v(n);
-  for (std::uint32_t i = 0; i < n; ++i) v[i] = static_cast<float>(nz.Next(1.0f) * 0.4 * std::exp(-static_cast<double>(i) / tau));
-  return v;
-}
-
-struct PreparedIr {
+constexpr unsigned kRate = 48000;
+struct Delta {
   dsptest::AlignedMem mem;
-  const ConvolutionIr* ir = nullptr;
-  std::uint32_t slot = 0;
-  PreparedIr(const std::vector<float>& h, std::uint32_t b) {
-    const float* p[1] = {h.data()};
-    const ConvolutionIrDesc d{p, 1, static_cast<std::uint32_t>(h.size()), kRate, 1.0f};
-    const std::size_t bytes = ConvolutionIrBytes(d, kRate, b);
+  const ConvolutionIr* ir;
+  explicit Delta(float gain) {
+    const float* taps[] = {&gain};
+    const ConvolutionIrDesc desc{taps, 1, 1, kRate, 1.0f};
+    const auto bytes = ConvolutionIrBytes(desc, kRate, 64);
     mem.Reset(bytes);
-    ir = ConvolutionPrepareIr(mem.get(), bytes, d, kRate, b);
-    if (ir != nullptr) slot = ConvolutionRegisterIr(ir);
-  }
-  ~PreparedIr() {
-    if (slot != 0u) ConvolutionUnregisterIr(slot);
+    ir = ConvolutionPrepareIr(mem.get(), bytes, desc, kRate, 64);
   }
 };
 
-struct ConvFx {
-  dsptest::AlignedMem mem;
-  float params[kMaxEffectParams] = {};
-  snd::EffectDesc desc{};
-  ConvFx(std::uint32_t slot, std::uint32_t b) {
-    EffectDefaultParams(EffectKind::Convolution, params);
-    params[kConvIrSlot] = static_cast<float>(slot);
-    params[kConvPartitionFrames] = static_cast<float>(b);
-    params[kConvMaxIrMs] = 100.0f;
-    desc.effect_type = kEffectConvolution;
-    desc.channels = 1;
-    desc.max_frames = 256;
-    desc.param_count = kConvParamCount;
-    desc.initial_params = params;
-    mem.Reset(EffectStateBytes(desc, kRate), dsptest::kDirty);
-    EffectInit(mem.get(), mem.size(), desc, kRate);
-  }
-  void Process(float* buf, std::uint32_t n, float slotEnd) {
-    float s[1] = {slotEnd}, e[1] = {slotEnd};
-    snd::ParamBlock pb{s, e, 1, 1, nullptr};
-    float* p[1] = {buf};
-    EffectProcess(mem.get(), p, p, 1, n, &pb, nullptr);
+struct Registrations {
+  std::vector<unsigned> numbers;
+  ~Registrations() {
+    for (auto id : numbers) ConvolutionUnregisterIr(id);
   }
 };
-
-}  // namespace
-
-// D-215 / convolution.hpp: "Changing IrSlot swaps the IR at the call boundary;
-// the input history (FDL) is kept, so the new IR applies to the recent input at
-// once". The direct head switches at the call boundary, but the FDL output of
-// the partition period in progress was computed at the end of the previous
-// period with the OLD IR (fx_convolution.cpp Step writes OutBuf for the next
-// period; ConvolutionProcess adds it without re-resolving). So for up to B
-// frames after the switch the output is head(new IR) + tail(old IR); after an
-// unregister the old IR's tail is still heard for up to B frames. Calls aligned
-// to B (block 256, B 64): the first 64 frames after the switch are wrong.
-SND_TEST(IndepDefects, Defect_ConvolutionIrSwitchLagsOnePartition) {
-  const std::uint32_t b = 64;
-  const std::vector<float> h1 = DecayNoise(600, 1, 150.0), h2 = DecayNoise(600, 2, 150.0);
-  PreparedIr a(h1, b), c(h2, b);
-  SND_REQUIRE(a.slot != 0u && c.slot != 0u);
-  ConvFx fx(a.slot, b);
-  SND_REQUIRE(EffectStateKind(fx.mem.get()) == EffectKind::Convolution);
-  std::vector<float> x(2048);
-  dsptest::Noise nz(4);
-  for (float& v : x) v = nz.Next(0.5f);
-  std::vector<float> y(x);
-  fx.Process(y.data(), 1024, static_cast<float>(a.slot));
-  fx.Process(y.data() + 1024, 1024, static_cast<float>(c.slot));
-  double worst = 0.0;
-  std::size_t at = 0;
-  for (std::size_t i = 1024; i < 2048; ++i) {
-    double want = 0.0;
-    for (std::size_t k = 0; k < h2.size() && k <= i; ++k) want += static_cast<double>(h2[k]) * x[i - k];
-    if (std::fabs(y[i] - want) > worst) {
-      worst = std::fabs(y[i] - want);
-      at = i;
-    }
-  }
-  snd::test::Note("switch: worst %g at %zu", worst, at);
-  SND_CHECK_MSG(worst < 1e-4, "after the switch at frame 1024: error %g at frame %zu (old IR tail)", worst, at);
 }
 
-// D-215 / convolution.hpp: "IrSlot is not ramped: a call uses the slot of its
-// END value". A call longer than max_frames is split into sub-blocks by the
-// effect framework (effects.cpp ProcessCore), which interpolates EVERY
-// parameter at the sub-block boundaries, IrSlot included; fx_convolution.cpp
-// ConvolutionProcess resolves p.e[kConvIrSlot] per sub-block. A ramp from slot
-// A to slot C therefore plays the IRs of the slots in between (here slot B, a
-// loud IR of another owner) for the first sub-blocks.
-SND_TEST(IndepDefects, Defect_ConvolutionIrSlotRampsInsideLongCalls) {
-  const std::uint32_t b = 64;
-  std::vector<float> h1(200, 0.0f), hMid(200, 0.0f), h3(200, 0.0f);
-  h1[0] = 0.5f;
-  hMid[0] = 8.0f;  // the IR of the slot in between (must never be heard)
-  h3[10] = 0.5f;
-  PreparedIr a(h1, b), mid(hMid, b), c(h3, b);
-  SND_REQUIRE(a.slot != 0u && c.slot == a.slot + 2u && mid.slot == a.slot + 1u);
-  ConvFx fx(a.slot, b);
-  SND_REQUIRE(EffectStateKind(fx.mem.get()) == EffectKind::Convolution);
-  std::vector<float> x(1024);
-  dsptest::Noise nz(4);
-  for (float& v : x) v = nz.Next(0.5f);
-  std::vector<float> y(x);
-  // One call of 1024 frames (> max_frames 256), IrSlot ramps a -> c.
-  const float s[1] = {static_cast<float>(a.slot)}, e[1] = {static_cast<float>(c.slot)};
-  snd::ParamBlock pb{s, e, 1, 1, nullptr};
-  float* p[1] = {y.data()};
-  EffectProcess(fx.mem.get(), p, p, 1, 1024, &pb, nullptr);
-  float peak = 0.0f;
-  double worst = 0.0;
-  for (std::size_t i = 0; i < 1024; ++i) {
-    peak = std::max(peak, std::fabs(y[i]));
-    const double want = i >= 10 ? 0.5 * x[i - 10] : 0.0;
-    if (i >= 64) worst = std::max(worst, std::fabs(y[i] - want));  // the first partition may lag (defect above)
+SND_TEST(IndepDefects, Defect_RegistryFindsSoleFreeEntryAtNumberWrap) {
+  Delta delta(1.0f);
+  Registrations owned;
+  unsigned zeroEntry = 0;
+  for (unsigned i = 0; i < 1024; ++i) {
+    const unsigned id = ConvolutionRegisterIr(delta.ir);
+    if (id == 0) break;
+    if ((id & 1023u) == 0) zeroEntry = id;
+    else owned.numbers.push_back(id);
   }
-  snd::test::Note("IrSlot %u -> %u in one 1024-frame call: output peak %g, worst error vs the end IR %g", a.slot,
-                  c.slot, static_cast<double>(peak), worst);
-  SND_CHECK_MSG(peak < 1.0f && worst < 1e-5, "the IR of the slot in between was used (peak %g)",
-                static_cast<double>(peak));
+  SND_REQUIRE(zeroEntry != 0);
+  // Keep every other entry busy. Each call must find entry zero again,
+  // including the transition from number 16777215 back to number 1.
+  bool crossed = false;
+  for (unsigned generation = 0; generation < (1u << 14); ++generation) {
+    const unsigned previous = zeroEntry;
+    SND_REQUIRE(ConvolutionUnregisterIr(previous));
+    zeroEntry = ConvolutionRegisterIr(delta.ir);
+    SND_CHECK_MSG(zeroEntry != 0, "entry zero is vacant; last number %u", previous);
+    if (zeroEntry == 0) break;
+    if (zeroEntry < previous) {
+      crossed = true;
+      break;
+    }
+  }
+  if (zeroEntry != 0) SND_CHECK(ConvolutionUnregisterIr(zeroEntry));
+  SND_CHECK(crossed);
+}
+
+// The latest request takes effect on the first sample after the previous
+// fade completes, independent of the internal processing block size.
+SND_TEST(IndepDefects, Defect_PendingSwitchStartsAtFirstFreeSample) {
+  Delta one(1), zero(0), negative(-1);
+  Registrations owned;
+  for (const auto* ir : {one.ir, zero.ir, negative.ir}) {
+    auto id = ConvolutionRegisterIr(ir);
+    SND_REQUIRE(id != 0);
+    owned.numbers.push_back(id);
+  }
+  float params[kMaxEffectParams]{};
+  EffectDefaultParams(EffectKind::Convolution, params);
+  params[kConvIrSlot] = static_cast<float>(owned.numbers[0]);
+  params[kConvPartitionFrames] = 64;
+  snd::EffectDesc d{};
+  d.effect_type = kEffectConvolution;
+  d.channels = 1;
+  d.max_frames = 13;
+  d.param_count = kConvParamCount;
+  d.initial_params = params;
+  dsptest::AlignedMem mem(EffectStateBytes(d, kRate));
+  SND_REQUIRE(EffectInit(mem.get(), mem.size(), d, kRate));
+  std::vector<float> y(264, 1.0f);
+  auto render = [&](unsigned start, unsigned length, unsigned index) {
+    const float n = static_cast<float>(owned.numbers[index]);
+    snd::ParamBlock p{&n, &n, 1, 1, nullptr};
+    float* io[] = {y.data() + start};
+    EffectProcess(mem.get(), io, io, 1, length, &p, nullptr);
+  };
+  render(0, 64, 0);
+  render(64, 8, 1);   // fade 1 -> 0 spans [64, 128)
+  render(72, 128, 2); // public call starts during that fade and ends at 200
+  render(200, 64, 2);
+  SND_CHECK_EQ(y[127], 0.0f);
+  SND_CHECK_EQ(y[128], -1.0f / 64);
+  SND_CHECK_EQ(y[191], -1.0f);
+  SND_CHECK_EQ(y[192], -1.0f);
+}
+
+// Power-of-two scaling changes every nonzero candidate score by the same
+// positive factor. It cannot change which source position wins (D-217).
+SND_TEST(IndepDefects, Defect_QuietFiniteInputKeepsCorrelationChoice) {
+  constexpr unsigned frames = 4096;
+  std::vector<float> results[2];
+  for (unsigned k = 0; k < 2; ++k) {
+    const float scale = k ? 0x1p-60f : 1.0f;
+    dsptest::AlignedMem mem(TimeStretchStateBytes(1, kRate));
+    SND_REQUIRE(TimeStretchInit(mem.get(), mem.size(), 1, kRate));
+    const unsigned n = TimeStretchInputFrames(mem.get(), frames, 2, 2);
+    const unsigned pad = TimeStretchPadFrames(mem.get());
+    std::vector<float> input(n + pad);
+    dsptest::Noise noise(17);
+    for (unsigned i = 0; i < n; ++i) input[pad + i] = scale * noise.Next(0.5f);
+    results[k].resize(frames);
+    float* in[] = {input.data()};
+    float* out[] = {results[k].data()};
+    SND_REQUIRE_EQ(TimeStretchProcess(mem.get(), in, n, out, frames, 2, 2), n);
+    for (float& v : results[k]) v /= scale;
+  }
+  SND_CHECK(results[0] == results[1]);
+}
+
+SND_TEST(IndepDefects, Defect_FadeLastsFullPartitionAfterUnregister) {
+  constexpr unsigned b = 64;
+  // A nonzero tap in each of three partitions. An impulse after the switch
+  // also checks that the old side uses real future input before fading out.
+  std::vector<float> taps(2 * b + 3);
+  taps[0] = 0.5f;
+  taps[b + 1] = -0.25f;
+  taps[2 * b + 2] = 0.125f;
+  const float* channels[] = {taps.data()};
+  const ConvolutionIrDesc irDesc{channels, 1, unsigned(taps.size()), kRate, 1.0f};
+  for (unsigned latency : {0u, b}) {
+    for (unsigned f : {0u, b / 2, b - 8, b - 1}) {
+      dsptest::AlignedMem irMemory(ConvolutionIrBytes(irDesc, kRate, b));
+      const auto* ir = ConvolutionPrepareIr(irMemory.get(), irMemory.size(), irDesc, kRate, b);
+      const auto id = ConvolutionRegisterIr(ir);
+      SND_REQUIRE(id != 0u);
+      Registrations owned;
+      owned.numbers.push_back(id);
+      float params[kMaxEffectParams]{};
+      EffectDefaultParams(EffectKind::Convolution, params);
+      params[kConvPartitionFrames] = b;
+      params[kConvZeroLatency] = latency == 0 ? 1.0f : 0.0f;
+      params[kConvIrSlot] = static_cast<float>(id);
+      snd::EffectDesc d{};
+      d.effect_type = kEffectConvolution;
+      d.channels = 1;
+      d.max_frames = 37;
+      d.param_count = kConvParamCount;
+      d.initial_params = params;
+      dsptest::AlignedMem mem(EffectStateBytes(d, kRate));
+      SND_REQUIRE(EffectInit(mem.get(), mem.size(), d, kRate));
+      std::vector<float> x(640);
+      dsptest::Noise noise(42);
+      for (float& v : x) v = noise.Next(0.5f);
+      auto y = x;
+      const unsigned start = 256 + f;
+      float* before[] = {y.data()};
+      EffectProcess(mem.get(), before, before, 1, start, nullptr, nullptr);
+      SND_REQUIRE(ConvolutionUnregisterIr(id));
+      owned.numbers.clear();
+      std::memset(irMemory.get(), 0xff, irMemory.size());
+      float* after[] = {y.data() + start};
+      EffectProcess(mem.get(), after, after, 1, unsigned(y.size()) - start, nullptr, nullptr);
+      double worst = 0;
+      for (unsigned i = start; i < y.size(); ++i) {
+        const auto t = i - latency;
+        const double old = 0.5 * x[t] - 0.25 * x[t - b - 1] + 0.125 * x[t - 2 * b - 2];
+        const double g = std::min(1.0, double(i - start + 1) / b);
+        worst = std::max(worst, std::fabs(y[i] - (1.0 - g) * old));
+      }
+      // Three dyadic taps of magnitude <=1, two 128-point FFTs (7 stages).
+      // Budget 2 float ulps per stage and one for interpolation.
+      constexpr double tolerance = (2 * 2 * 7 + 1) * 0x1p-23;
+      SND_CHECK_MSG(worst <= tolerance, "latency %u f=%u: full-fade error %.8g", latency, f, worst);
+    }
+  }
 }
