@@ -2,6 +2,7 @@
 #include <limits>
 
 #include "indep_g1_scene.hpp"
+#include "indep_g2_fixture.hpp"
 #include "snd/test/rt_guard.hpp"
 
 namespace {
@@ -234,6 +235,40 @@ SND_TEST(IndepG1Routing, InvalidZoneAndShapeDoNotOverwriteValidSettings) {
     s.h.Steps(8);
     SND_CHECK_NEAR(s.Level(), initial, 0.0001);
   }
+}
+
+SND_TEST(IndepG1Routing, UnknownParameterVariantLeavesOrdinaryEmitterParameterUntouched) {
+  enum class Command { NoChange, Public, Legacy, Unknown };
+  auto wave = [](Command command) {
+    g2::RawFx rig(Config());
+    g2::FxBank bank;
+    bank.Event("E", 300.0f).flags = bf::kEvent3D;
+    rig.Load("raw", bank.Build("Raw"));
+    const auto em = rig.sys->CreateEmitter();
+    const auto listener = Listener();
+    SND_CHECK_EQ(rig.sys->SetListener(0, &listener), SND_OK);
+    SND_CHECK_EQ(rig.sys->SetTransform(em, &kFront, nullptr, nullptr), SND_OK);
+    rig.sys->Play(HashId("E"), em, nullptr);
+    rig.Steps(4);
+    if (command == Command::Public) {
+      SND_CHECK_EQ(rig.sys->SetParamEmitter(em, HashId("snd.occlusion"), 1), SND_OK);
+    } else if (command != Command::NoChange) {
+      snd::cmd::SetParam param{};
+      param.target = snd::HandleRef::FromValue(em.value);
+      param.scope = static_cast<std::uint8_t>(snd::ParamScope::Emitter);
+      param.param = HashId("snd.occlusion");
+      param.value = 1;
+      param.reserved[0] = command == Command::Unknown ? 255 : 0;
+      rig.Queue(snd::cmd::CommandType::SetParam, param);
+    }
+    rig.Steps(8);
+    return rig.all;
+  };
+  const auto ordinary = wave(Command::Public);
+  const auto original = wave(Command::NoChange);
+  SND_REQUIRE(ordinary != original);
+  SND_CHECK(ordinary == wave(Command::Legacy));
+  SND_CHECK(original == wave(Command::Unknown));
 }
 
 std::vector<float> Replay(std::uint32_t workers) {
