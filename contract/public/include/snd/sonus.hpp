@@ -645,6 +645,13 @@ inline Result SetPlaybackEffectParam(System* sys, PlaybackHandle p, std::uint32_
   return detail::R(snd_set_playback_effect_param(sys, p.ToC(), slot, paramIndex, value));
 }
 
+inline Result SetEmitterShape(System* sys, EmitterHandle emitter, snd_emitter_shape kind, const Vec3& extents) noexcept {
+  return detail::R(snd_set_emitter_shape(sys, emitter.ToC(), kind, &extents));
+}
+inline Result SetReverbZone(System* sys, EmitterHandle emitter, Id bus, float amount, float fadeDistance) noexcept {
+  return detail::R(snd_set_reverb_zone(sys, emitter.ToC(), bus, amount, fadeDistance));
+}
+
 }  // namespace snd
 
 #endif  // SND_SONUS_HPP

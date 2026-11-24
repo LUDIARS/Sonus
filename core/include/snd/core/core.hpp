@@ -244,6 +244,8 @@ class System {
   snd_result DestroyEmitter(snd_emitter_handle emitter) noexcept;
   snd_result SetTransform(snd_emitter_handle emitter, const snd_vec3* position, const snd_vec3* forward,
                           const snd_vec3* velocity) noexcept;
+  snd_result SetEmitterShape(snd_emitter_handle emitter, snd_emitter_shape kind, const snd_vec3* halfExtents) noexcept;
+  snd_result SetReverbZone(snd_emitter_handle emitter, snd_id bus, float amount, float fadeDistance) noexcept;
   snd_result SetListener(std::uint32_t index, const snd_listener_desc* listener) noexcept;
   snd_result SetParamGlobal(Id param, float value) noexcept;
   snd_result SetParamEmitter(snd_emitter_handle emitter, Id param, float value) noexcept;

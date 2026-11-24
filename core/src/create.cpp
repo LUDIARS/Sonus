@@ -63,6 +63,8 @@ snd_result Validate(const snd_config& c) noexcept {
   if (!std::isfinite(c.tuning.steal_hysteresis_db) || c.tuning.steal_hysteresis_db < 0.0f) {
     return SND_ERR_INVALID_ARGUMENT;
   }
+  if (!std::isfinite(c.doppler_factor) || c.doppler_factor < 0 || c.doppler_factor > 16 ||
+      !std::isfinite(c.speed_of_sound) || c.speed_of_sound < 1 || c.speed_of_sound > 100000) return SND_ERR_INVALID_ARGUMENT;
   if (c.listener_mode > SND_LISTENER_SPLIT) return SND_ERR_INVALID_ARGUMENT;
   // Stage 3 (D-132): voice effects.
   if (c.voice_effect_chain > kMaxVoiceEffectChain || c.voice_effect_bytes > (64u << 20) ||

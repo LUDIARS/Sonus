@@ -544,6 +544,13 @@ constexpr std::uint32_t BusEffectParamReserved(std::uint32_t effect, std::uint32
          ((param & kBusVolumeIndexMask) << kBusVolumeParamIndexShift);
 }
 
+// Emitter SetParam variant 2: kind in reserved[1], x/y/z float bits
+// in param/value/reserved2. Variant 3 holds zone amount/value and fade/reserved2.
+inline constexpr std::uint8_t kParamVariantShape = 2u;
+inline constexpr std::uint8_t kParamVariantZone = 3u;
+// Emitter SetSwitch variant 2: value = zone bus (zero removes).
+inline constexpr std::uint8_t kSwitchVariantZone = 2u;
+
 }  // namespace snd::cmd
 
 #endif  // SND_INTERNAL_COMMANDS_HPP

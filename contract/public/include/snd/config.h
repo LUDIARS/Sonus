@@ -134,7 +134,10 @@ typedef uint32_t snd_output_kind;
   X(max_voice_effects, maxVoiceEffects, uint32_t, uint32_t, 4u)                                   \
   X(voice_effect_chain, voiceEffectChain, uint32_t, uint32_t, 2u)                                 \
   X(voice_effect_bytes, voiceEffectBytes, uint32_t, uint32_t, (160u << 10))                       \
-  X(voice_effect_settings, voiceEffectSettings, uint32_t, uint32_t, 64u)
+  X(voice_effect_settings, voiceEffectSettings, uint32_t, uint32_t, 64u) \
+  /* Factor [0,16], sound speed [1,100000] m/s; Doppler ratio [0.25,4]. */ \
+  X(doppler_factor, dopplerFactor, float, float, 1.0f) \
+  X(speed_of_sound, speedOfSound, float, float, 343.0f)
 
 /* Memory budgets (3.3) ----------------------------------------------------- */
 #define SND_CONFIG_MEMORY(X)                                                                      \

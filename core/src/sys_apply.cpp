@@ -278,6 +278,11 @@ SlotIndex CreateEmitterRow(Impl& im, HandleRef h) noexcept {
   if (d == kNoSlot) return kNoSlot;
   SND_W(Emitter_position)[d] = Vec3{0, 0, 0};
   SND_W(Emitter_velocity)[d] = Vec3{0, 0, 0};
+  SND_W(Emitter_shapeKind)[d] = SND_EMITTER_SHAPE_POINT;
+  SND_W(Emitter_halfExtents)[d] = Vec3{};
+  SND_W(Emitter_zoneBus)[d] = SND_ID_NONE;
+  SND_W(Emitter_zoneAmount)[d] = 0;
+  SND_W(Emitter_zoneFade)[d] = 0;
   SND_W(Emitter_forward)[d] = Vec3{0, 0, 1};
   SND_W(Emitter_lastUpdateBlock)[d] = im.block;
   SND_W(Emitter_createdBlock)[d] = im.block;
@@ -648,6 +653,22 @@ void ApplyOne(Impl& im, const cmd::CommandHeader& h, const std::uint8_t* p) noex
     }
     case CT::SetParam: {
       const auto c = Load<cmd::SetParam>(p);
+      if (c.reserved[0] == cmd::kParamVariantShape || c.reserved[0] == cmd::kParamVariantZone) {
+        const auto d = base::rows::DenseOf(t.Emitter.rows, c.target);
+        if (c.scope != static_cast<std::uint8_t>(ParamScope::Emitter) || d == kNoSlot) break;
+        const float z = std::bit_cast<float>(c.reserved2);
+        if (!std::isfinite(z) || z < 0 || !std::isfinite(c.value) || c.value < 0) break;
+        if (c.reserved[0] == cmd::kParamVariantShape) {
+          const float x = std::bit_cast<float>(c.param);
+          if (!std::isfinite(x) || x < 0 || c.reserved[1] > SND_EMITTER_SHAPE_BOX) break;
+          SND_W(Emitter_shapeKind)[d] = c.reserved[1];
+          SND_W(Emitter_halfExtents)[d] = Vec3{x, c.value, z};
+        } else if (c.value <= 1) {
+          SND_W(Emitter_zoneAmount)[d] = c.value;
+          SND_W(Emitter_zoneFade)[d] = z;
+        }
+        break;
+      }
       if (c.reserved[0] == kParamVariantVoiceEffect) {  // stage 3 (D-132): voice effect parameter
         ApplyVoiceFxParam(im, c);
         break;
@@ -658,6 +679,11 @@ void ApplyOne(Impl& im, const cmd::CommandHeader& h, const std::uint8_t* p) noex
     }
     case CT::SetSwitch: {
       const auto c = Load<cmd::SetSwitch>(p);
+      if (c.reserved[0] == cmd::kSwitchVariantZone) {
+        const auto d = base::rows::DenseOf(t.Emitter.rows, c.target);
+        if (c.scope == static_cast<std::uint8_t>(ParamScope::Emitter) && d != kNoSlot) SND_W(Emitter_zoneBus)[d] = c.value;
+        break;
+      }
       if (c.reserved[0] == kSwitchVariantVoiceEffect) {  // stage 3 (D-132): voice effect kind of an Event
         ApplyVoiceFxSwitch(im, c);
         break;
