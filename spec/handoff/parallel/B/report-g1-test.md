@@ -50,3 +50,15 @@
 | ①×④ | FiniteLoopCutsDirectFilterAtItsLastSample、FiniteLoopCutsZoneSendFilterAtItsLastSample、ScheduledStopCutsDirectFilterAtEndOfFade、ScheduledStopCutsZoneSendFilterAtEndOfFade |
 
 ①×④の切断位置は独立に計算した。有限ループは179サンプル×2周。予約停止は310フレームで48サンプルの解放フェードに入り、同じ358フレームで無音になる。各経路の両チャンネルについて357の信号と以後の全サンプルを確認し、連続再生の同じ358フレームも対照に置いた。CPU性能は実装担当の128実声の測定と、受け入れ側の再測定を参照する。
+
+### Cloud 差し戻し（修正前 e6635a2、独立担当）
+
+GCC 14 Debug の新規作成で空間16件すべて成功。経路と生記録17件のうち12成功、次の5件が失敗。全組横断の4件は別のビルド。以下を落ちる Defect_ として保存した。
+
+| 検査 | 実測と判定 |
+| --- | --- |
+| OnlyListenersInsideZoneDetermineSendPan | 対称2席の片方だけゾーン内。Split、Weightedとも左0.025、右0.025。左0、右0.05を期待。左右の方向を持つ各席の送量と定位を掛け合わせる。 |
+| DistanceAndOcclusionChooseTheLowerCutoff | 距離LP300 Hzで1500 Hz/187.5 Hzの周波数応答比を測り、対照で正規化。遮蔽時は直達・送りとも0.405174、閉塞時の直達は0.272836。正規化比1を期待。重ねた遮蔽/閉塞のLPは距離LPより高く、各経路で最小値一段を適用する。 |
+| PartialZoneCommandNeverChangesItsDestination | 残り1命令で宛先と量の一括設定を拒否する部分は成功。B-1の解除も -6 で拒否された。解除はSetSwitch 1命令で成功し送りが0となるはずだが、0.0707107のまま。 |
+| ShapeZoneAndClearRecordThePublishedWireFormat | 形、ゾーン登録、解除の記録が5件（期待4件）。半寸法X2.5、Y1.25を与えたSetParamのvalueは1.25、paramは0x40200000、期待はvalue 2.5、param 0x3fa00000。 |
+| ReplayedShapeUsesTheDocumentedHalfExtentAxes | B-1記載のvalue X、param Y bitsで線音源を再生した波形が、同じ半寸法を指定した公開操作の波形と異なった。 |
