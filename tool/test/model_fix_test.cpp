@@ -62,7 +62,7 @@ SND_TEST(ToolModelFix, ConeInEffectAndProblemsOnce) {
   c = ed.Cone();
   SND_CHECK(c.present && c.active() && c.innerDeg == 20.0 && c.outerDeg == 80.0 && c.outerDb == -6.0);
   SND_REQUIRE(doc.Set(doctest::G(8), "tracks[0].clips[0].asset", String("nope")));
-  const std::vector<DocIssue> issues = CheckDocument(doc);
+  const std::vector<DocIssue> issues = DistinctIssues(CheckDocument(doc));
   SND_CHECK(!issues.empty());
   std::set<std::string> seen;
   for (const DocIssue& i : issues) SND_CHECK_MSG(seen.insert(i.text).second, "twice: %s", i.text.c_str());

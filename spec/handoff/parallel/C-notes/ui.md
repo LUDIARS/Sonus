@@ -62,6 +62,39 @@ Tela に渡さない）、`host_macos.mm`（キーコードと文字を `App::Ke
 組の表のセルの画素、DPI 1・2）、`tool_app_screen_<名前>`（12 面のヘッドレス）と
 `tool_app_bad_screen`。内容は `tool/README.md` の「段階5 の画面（組 U）」の表。
 
+## 差し戻し（独立テストの後の決定 D-186〜D-189）で変えた点
+
+決定の案の行き先: a・b・f・i・j・l・m → D-186、c・d・e → D-187、g・h → D-188、k → D-189（名前で一意な物は名前から）。
+
+| 決定 | 欠陥・仕様の穴 | 変えたこと | コミット |
+| --- | --- | --- | --- |
+| D-187 | 欠陥 5 | `App::Pick` は値を写してから一覧を閉じる（同じ形の箇所はほかに無かった: `TextEntry::CommitNow` は写してから呼ぶ、ほかの関数は値渡し） | 353bee2 |
+| D-187 | 欠陥 1 | 打った数値は切り詰めずに setter へ（拒否なら開いたまま）。± / ドラッグ / ホイールは欄の範囲で止まる | 00986ce |
+| D-187 | 欠陥 2 | ステップ（ホイール、±）は `App::FieldBase` / `FieldWrote`（宣言の後に書いた最新の値）に足す | 00986ce |
+| D-187 | 欠陥 3、穴 4 | 縦のドラッグは押した点からの移動量 `round(dy / 48)`、範囲の外は端のトラック | 00986ce |
+| D-187 | 欠陥 4 | 数値の欄の値は 48 px 以上（`kMinNumberValue`）。ラベルが縮み、24 px 未満なら値の文字へ。ボタンの入らない欄はボタン無し。Params のパラメータの欄は 1 行に 1 つ | 00986ce |
+| D-186 | 穴 2 | 入力中は全キーが入力欄へ（Ctrl+Z / Y、Delete、F キー、Ctrl+PageUp/Down は何もしない） | 00986ce |
+| D-186 | 穴 9 | Esc は常にツールが受ける（`App::Key` は true）。ドラッグ中なら `PointerRouter::Cancel`（`DragHandler::cancel`: 文書のドラッグは 1 手を戻す、フェーダー・ノブは押した時の値へ）、パッチの接続待ちを消す。Windows のホストは Esc を Tela に渡さない | 00986ce |
+| D-186 | 穴 1 | 位置で持つ選択（クリップ、アクション、点、テンポ点、Stem、Playlist の行、ルール）を Undo / Redo と画面の切り替えで外す。マーカーの選択は名前で持つ | 00986ce |
+| D-188 | 穴 3 | 構造の変更での結び直しは `MixerModel::Rebind` でライブの値を対象で引き継ぐ。引き継げない値があれば保留して質問（`rebind.writeback` / `rebind.discard`、本体の上の帯）。構造が元に戻れば（Undo）質問も消える。上書きを戻して引き継げない値が無くなっても結び直す | e4fa328, 00986ce |
+| D-189 | 穴 6 | 材質（`ma.mat.<NameKey>`、`ma.pair.<a>.<b>`）、State、マーカー（タイムラインと表）、Stinger の ID は名前から（`ui::NameKey` = HashId の 16 進 8 桁、重なれば `_<位置>`） | 00986ce |
+| D-189 | 穴 5 | `EventEditor::Cone()`（実効のコーン、無いときは 0 / 0 / 0 dB）。Event 画面の欄と 3D 画面の行が同じ値（無ければ「none」）。図はコーンが有効（0 < outer < 360）なときだけ | e4fa328, 00986ce |
+| D-189 | 穴 7 | 3D の既定のエミッタは maxDistance の半分（無ければ 5 m）だけ右前（(0.6d, 0.8d)）。取っ手を先、本体を後に宣言（本体が上） | 00986ce |
+| D-189 | 穴 8 | カーブの図は x にも 4 % の余白（`PlotAxes::Fit` の xMargin、`kCurveXMargin`）。点のドラッグで動かない軸は元の値のまま | 00986ce |
+| D-189 | 穴 10 | Link は未接続なら「not connected」（版・機能の理由を出さない） | 00986ce |
+| D-189 | 穴 11 | 同じファイル・行・列・種類・文言の問題を 1 回にする関数 `DistinctIssues` を `doc_build` に足し、Problems の一覧（`App::problems`）はそれを通す。**`CheckDocument` 自体は変えなかった**: 決定は「`CheckDocument` の側で」だったが、既存の `Document.IssuesMatchTheBuildToolWordForWord`（`tool_document_test`、組 M）が `CheckDocument` と buildtool の診断の件数の一致を確かめていて（今は 8 件 = 重複を含む）、`CheckDocument` で除くとそれが落ちる（一度そう直して確かめた）。既存のアサーションは変えないので、`CheckDocument` で除くならそのテストの直しが要る（受け入れ側の判断） | e4fa328 → 下の追いのコミット |
+| テスト | 弱い箇所 | `ui_editor_fix_test`（上の全部）、`model_fix_test`（核）、上限を画面ごとの別プロセスで 320×240 まで（`tool_ui_editor_limits_<画面>`） | fbc68cb ほか |
+
+モデルに足した・直したもの（U-fix.md で許された `mixer`・`event_editor`・`doc_build` だけ）:
+- `mixer.hpp/.cpp`: `struct LiveValue`、`MixerModel::LiveValues()`、`static Unmatched(project, values)`、`Rebind(project, values, dropped)`。
+- `event_editor.hpp/.cpp`: `EventEditor::ConeDesc`、`EventEditor::Cone()`。
+- `doc_build.hpp/.cpp`: `DistinctIssues(issues)`（新しい関数。`CheckDocument` は変えていない）。
+
+決定と食い違って落ちる独立テスト（`indep_s7_*` は変えていない）:
+- `IndepS7Ui.ChangingTheScreenEndsTheTextEntry`（`tool_indep_s7_ui_common_test`）: 入力中の F4 で画面が変わり入力が終わることを期待。D-186 で入力中の画面の切り替えのキーは入力欄が受ける（何もしない）。`OnScreen` での切り替え（ボタン）では今も入力が終わる。
+- `IndepS7UiScreens.MaterialRowsLastMaterialAndSymmetricPairs`（`tool_indep_s7_ui_screens_test`）: `ma.mat.<番号>` の ID を期待。D-189 で材質の ID は名前から。
+- `IndepS7UiDefects.SpecGap_ClipSelectionIsAnIndexAcrossUndo`（`tool_indep_s7_ui_SpecGap_ClipSelectionIsAnIndexAcrossUndo`）: 今の振る舞い（Undo の後の Delete で 1 つ消える）を記録する。D-186 で選択は外れ、Delete は何も消さない（クリップは 2 つのまま）。
+
 ## 決定の案（受け入れ側が D-番号を振る。番号は振っていない）
 
 a. **画面とキー**: 12 面（Mixer、Buses、Event、Params、3D、Music、Material、Patch、Profiler、Replay、Link、Problems）。ミキサーの

@@ -286,7 +286,11 @@ SND_TEST(ToolUiFix, ConeCurveMarginsHandlesLinkAndProblems) {
   t.s.AttachDocument(nullptr);
   // Problems: each problem once (a clip naming no asset).
   SND_REQUIRE(t.doc.Set(kShot, "tracks[0].clips[0].asset", String("nope")));
-  const std::vector<DocIssue> issues = CheckDocument(t.doc);
+  const std::vector<DocIssue> issues = DistinctIssues(CheckDocument(t.doc));
+  t.app.RefreshProblems();  // the Problems screen's list: each problem once
+  std::set<std::string> listed;
+  for (const DocIssue& i : t.app.problems()) SND_CHECK_MSG(listed.insert(i.text).second, "listed twice: %s", i.text.c_str());
+  SND_CHECK_EQ(listed.size(), issues.size());
   std::set<std::string> seen;
   for (const DocIssue& i : issues) SND_CHECK_MSG(seen.insert(i.text).second, "twice: %s", i.text.c_str());
   SND_CHECK(!issues.empty());

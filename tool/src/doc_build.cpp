@@ -725,17 +725,17 @@ DocBuild BuildDocument(const ProjectDocument& doc, const DocBuildOptions& option
   return out;
 }
 
-std::vector<DocIssue> CheckDocument(const ProjectDocument& doc) {
-  // D-189: the same problem once (the build can report one problem from two places: same file,
-  // line, column, kind and words). Order kept; the build's diagnostics themselves are unchanged.
+std::vector<DocIssue> CheckDocument(const ProjectDocument& doc) { return BuildDocument(doc).issues; }
+
+std::vector<DocIssue> DistinctIssues(const std::vector<DocIssue>& issues) {
   std::vector<DocIssue> out;
-  for (DocIssue& i : BuildDocument(doc).issues) {
+  for (const DocIssue& i : issues) {
     bool seen = false;
     for (const DocIssue& o : out) {
       seen = seen || (o.error == i.error && o.file == i.file && o.line == i.line && o.column == i.column &&
                       o.message == i.message);
     }
-    if (!seen) out.push_back(std::move(i));
+    if (!seen) out.push_back(i);
   }
   return out;
 }

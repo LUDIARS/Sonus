@@ -138,9 +138,12 @@ struct DocBuild {
 };
 
 DocBuild BuildDocument(const ProjectDocument& doc, const DocBuildOptions& options = {});
-// The build's problems only (in memory, nothing written), each problem once (D-189: two reports with
-// the same file, line, column, kind and message are one).
+// The build's problems only (in memory, nothing written), word for word as the build tool reports
+// them (a problem can come twice from two places of the build).
 std::vector<DocIssue> CheckDocument(const ProjectDocument& doc);
+// D-189: each problem once (same file, line, column, kind and message), order kept: what the
+// screens list.
+std::vector<DocIssue> DistinctIssues(const std::vector<DocIssue>& issues);
 // Problems about one object.
 std::vector<DocIssue> IssuesOf(const std::vector<DocIssue>& issues, const std::string& guid);
 
