@@ -17,7 +17,7 @@ struct RingState {
   std::uint32_t ringOff;
   std::uint32_t size;   // frames per channel ring
   std::uint32_t write;  // next write index (shared by channels)
-  std::uint32_t pad;
+  float maxDelay;       // echo / delay: MaxDelay in frames at the run rate (0: not used)
   float lp[kMaxChannels];      // damping filter state (delay)
   double phase;                // LFO / pitch window phase [0, 1)
   float fb[kMaxChannels];      // last wet output per channel (feedback)
@@ -50,10 +50,16 @@ float* Ring(void* state, std::uint32_t c) noexcept {
   return At<float>(state, s->ringOff) + static_cast<std::size_t>(c) * s->size;
 }
 
-// Delay in frames from milliseconds, clamped to what the ring can hold.
+// Delay in frames from milliseconds at the run rate. Stage 3 (re-check 2): a delay above
+// MaxDelay is exactly MaxDelay (the same frames as Delay = MaxDelay), at any rate; the
+// ring (sized at the sizing rate, + 4 frames) is the second bound only when the run rate
+// is higher than the sizing rate.
+float MsFrames(float ms, std::uint32_t rate) noexcept { return ms * static_cast<float>(rate) / 1000.0f; }
 float DelayFrames(const RingState& s, float ms) noexcept {
-  const float d = ms * static_cast<float>(s.h.sampleRate) / 1000.0f;
-  return detail::Clamp(d, 1.0f, static_cast<float>(s.size - 3u));
+  const float d = MsFrames(ms, s.h.sampleRate);
+  float hi = static_cast<float>(s.size - 3u);
+  if (s.maxDelay > 0.0f && s.maxDelay < hi) hi = s.maxDelay;
+  return detail::Clamp(d, 1.0f, hi);
 }
 
 void FinishBlock(RingState& s, std::uint32_t frames, float peak) noexcept {
@@ -77,9 +83,10 @@ void FinishBlock(RingState& s, std::uint32_t frames, float peak) noexcept {
 std::size_t EchoLayout(void* state, const FxConfig& cfg) noexcept {
   return RingLayout(state, cfg, cfg.init[4]);
 }
-void EchoInit(void* state, const FxConfig&) noexcept {
+void EchoInit(void* state, const FxConfig& cfg) noexcept {
   auto* s = static_cast<RingState*>(state);
   s->h.tailFrames = s->size;
+  s->maxDelay = MsFrames(cfg.init[4], cfg.sampleRate);
 }
 void EchoReset(void* state) noexcept { RingReset(state); }
 
@@ -115,9 +122,10 @@ void EchoProcess(void* state, const FxIo& io, const FxParams& p) noexcept {
 std::size_t DelayLayout(void* state, const FxConfig& cfg) noexcept {
   return RingLayout(state, cfg, cfg.init[6]);
 }
-void DelayInit(void* state, const FxConfig&) noexcept {
+void DelayInit(void* state, const FxConfig& cfg) noexcept {
   auto* s = static_cast<RingState*>(state);
   s->h.tailFrames = s->size;
+  s->maxDelay = MsFrames(cfg.init[6], cfg.sampleRate);
 }
 void DelayReset(void* state) noexcept { RingReset(state); }
 

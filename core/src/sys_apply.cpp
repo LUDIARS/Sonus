@@ -648,17 +648,32 @@ void ApplyOne(Impl& im, const cmd::CommandHeader& h, const std::uint8_t* p) noex
     }
     case CT::SetParam: {
       const auto c = Load<cmd::SetParam>(p);
+      if (c.reserved[0] == kParamVariantVoiceEffect) {  // stage 3 (D-132): voice effect parameter
+        ApplyVoiceFxParam(im, c);
+        break;
+      }
+      if (c.reserved[0] != 0u) break;  // unknown variant: dropped
       SetParamValue(im, static_cast<ParamScope>(c.scope), c.target, c.param, ParamKind::Continuous, c.value);
       break;
     }
     case CT::SetSwitch: {
       const auto c = Load<cmd::SetSwitch>(p);
+      if (c.reserved[0] == kSwitchVariantVoiceEffect) {  // stage 3 (D-132): voice effect kind of an Event
+        ApplyVoiceFxSwitch(im, c);
+        break;
+      }
+      if (c.reserved[0] != 0u) break;  // unknown variant: dropped
       SetParamValue(im, static_cast<ParamScope>(c.scope), c.target, c.group, ParamKind::Switch,
                     std::bit_cast<float>(c.value));
       break;
     }
     case CT::SetBusVolume: {
       const auto c = Load<cmd::SetBusVolume>(p);
+      if ((c.reserved & kBusVolumeVariantMask) == kBusVolumeVariantEffectParam) {  // stage 3 (D-130)
+        ApplyBusEffectParam(im, c);
+        break;
+      }
+      if ((c.reserved & kBusVolumeVariantMask) != 0u) break;  // unknown variant: dropped
       const std::uint32_t slot = im.busMap.Find(c.bus == 0u && im.rd.masterSlot != kNoSlot ? im.busDefs[im.rd.masterSlot].id : c.bus);
       const std::uint32_t d = slot == IdMap::kNotFound ? kNoSlot : base::rows::DenseOf(t.Bus.rows, slot);
       if (d == kNoSlot) {
