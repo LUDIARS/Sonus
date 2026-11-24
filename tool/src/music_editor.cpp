@@ -809,8 +809,14 @@ std::vector<LookaheadEntry> MusicEditor::MinimumLookahead(const MusicSettings& s
     if (to.empty()) to.push_back(TransitionRule{});
     for (const TransitionRule& r : to) {
       LookaheadEntry e = best;
-      PrimeOf(doc_, asset, r.start == StartPosition::Head, r.prepare, seg != nullptr && BoolAt(seg->doc, "entryPreload", false),
-              s, &e);
+      // A rule with a bridge primes the bridge first (the runtime's lead, D-184).
+      const DocObject* bseg = r.bridge.empty() ? nullptr : doc_.Find(r.bridge);
+      if (bseg != nullptr) {
+        PrimeOf(doc_, doc_.Resolve("asset", StringAt(bseg->doc, "asset")), true, r.prepare, false, s, &e);
+      } else {
+        PrimeOf(doc_, asset, r.start == StartPosition::Head, r.prepare,
+                seg != nullptr && BoolAt(seg->doc, "entryPreload", false), s, &e);
+      }
       if (!any || e.primeMs > best.primeMs) best = e;
       any = true;
     }
@@ -887,11 +893,17 @@ TransitionPreview MusicEditor::Preview(const std::string& from, const std::strin
   if (!(blocks >= 1.0)) blocks = 1.0;
   p.applySeconds = blocks * applyFrames / applyRate;
   p.requestTick = map.TickAtSeconds(requestSeconds);
-  // Lookahead of this target.
+  // Lookahead of the first material the transition plays (D-184, music transition.cpp
+  // FirstMaterialPrime): the rule's bridge when it has one (from its head), else the target.
   LookaheadEntry le;
-  const DocObject* dseg = doc_.Find(dstGuid);
-  PrimeOf(doc_, dseg != nullptr ? doc_.Resolve("asset", StringAt(dseg->doc, "asset")) : nullptr, r.start == StartPosition::Head,
-          r.prepare, dseg != nullptr && BoolAt(dseg->doc, "entryPreload", false), s, &le);
+  const DocObject* bseg = r.bridge.empty() ? nullptr : doc_.Find(r.bridge);
+  if (bseg != nullptr) {
+    PrimeOf(doc_, doc_.Resolve("asset", StringAt(bseg->doc, "asset")), true, r.prepare, false, s, &le);
+  } else {
+    const DocObject* dseg = doc_.Find(dstGuid);
+    PrimeOf(doc_, dseg != nullptr ? doc_.Resolve("asset", StringAt(dseg->doc, "asset")) : nullptr,
+            r.start == StartPosition::Head, r.prepare, dseg != nullptr && BoolAt(dseg->doc, "entryPreload", false), s, &le);
+  }
   const double blockMs = 1000.0 * s.blockFrames / (s.sampleRate == 0u ? 48000.0 : s.sampleRate);
   p.lookaheadMs = blockMs + le.primeMs;
   // Timing (from where the runtime takes the request).
