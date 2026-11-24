@@ -5,6 +5,7 @@
 #ifndef SND_CORE_TEST_TEST_BANK_HPP
 #define SND_CORE_TEST_TEST_BANK_HPP
 
+#include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <vector>
