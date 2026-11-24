@@ -109,3 +109,4 @@ snd_add_test(source_input_floor_test SOURCES source_input_floor_test.cpp LINK so
 snd_add_test(source_granular_test SOURCES source_granular_test.cpp LINK sonus_source sonus_base sonus_mocks)
 snd_add_test(source_patch_test SOURCES source_patch_test.cpp LINK sonus_source sonus_base sonus_mocks)
 snd_add_test(source_resident_synth_load_test SOURCES source_resident_synth_load_test.cpp LINK sonus_source sonus_base sonus_mocks)
+snd_add_test(indep_granular_test SOURCES indep_granular_test.cpp LINK sonus_source sonus_base sonus_mocks)
