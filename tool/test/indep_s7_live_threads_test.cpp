@@ -87,11 +87,12 @@ SND_TEST(IndepS7LiveThreads, OwnerEditsWhileAudioReaderAndReplayRun) {
     }
   });
 
+  // At least 2 s and 600 frames (a slow build, TSan: the frame-numbered steps below all happen).
   const auto end = std::chrono::steady_clock::now() + std::chrono::milliseconds(2000);
   std::uint32_t frames = 0;
   std::uint64_t spot = 0;
   bool created = false;
-  while (std::chrono::steady_clock::now() < end) {
+  while (std::chrono::steady_clock::now() < end || frames < 600u) {
     ++frames;
     engine->Pump();
     sync.Tick(conn, conn.Poll(), Now());
