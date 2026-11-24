@@ -40,3 +40,26 @@ set_tests_properties(dsp_test dsp_test_scalar PROPERTIES TIMEOUT 1200)
 snd_add_test(dsp_effect_rate_test SOURCES effect_rate_test.cpp LINK sonus_dsp)
 # Independent: D-48 for every standard kind, D-44 pitch-ratio limit / resampler pool slot.
 snd_add_test(dsp_indep_contract11_test SOURCES indep_contract11_dsp_test.cpp LINK sonus_dsp)
+
+# Independent tests of stage 7-D dsp (FFT, time stretch, convolution; D-208..D-215).
+# Built twice like dsp_test: against sonus_dsp and against the dsp sources with the
+# scalar SIMD path forced. Defect_ tests (currently failing) are a separate executable.
+set(SND_DSP_INDEP_S7D_SOURCES
+  indep_fft_test.cpp
+  indep_time_stretch_test.cpp
+  indep_convolution_test.cpp)
+snd_add_test(dsp_indep_s7d_test
+  SOURCES ${SND_DSP_INDEP_S7D_SOURCES}
+  LINK sonus_dsp sonus_mocks)
+snd_add_test(dsp_indep_s7d_test_scalar
+  SOURCES ${SND_DSP_INDEP_S7D_SOURCES} ${_snd_dsp_src_abs}
+  LINK sonus_base sonus_platform sonus_mocks)
+target_include_directories(dsp_indep_s7d_test_scalar PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../include
+                                                            ${CMAKE_CURRENT_SOURCE_DIR}/../src)
+target_compile_definitions(dsp_indep_s7d_test_scalar PRIVATE SND_SIMD_FORCE_SCALAR=1)
+set_tests_properties(dsp_indep_s7d_test dsp_indep_s7d_test_scalar PROPERTIES TIMEOUT 1800)
+# Defect_ tests of the independent tests above: they fail until the defects are fixed.
+snd_add_test(dsp_indep_defects_dsp_test
+  SOURCES indep_defects_dsp_test.cpp
+  LINK sonus_dsp sonus_mocks)
+set_tests_properties(dsp_indep_defects_dsp_test PROPERTIES TIMEOUT 1800)
