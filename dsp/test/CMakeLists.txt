@@ -58,3 +58,7 @@ target_include_directories(dsp_indep_s7d_test_scalar PRIVATE ${CMAKE_CURRENT_SOU
                                                             ${CMAKE_CURRENT_SOURCE_DIR}/../src)
 target_compile_definitions(dsp_indep_s7d_test_scalar PRIVATE SND_SIMD_FORCE_SCALAR=1)
 set_tests_properties(dsp_indep_s7d_test dsp_indep_s7d_test_scalar PROPERTIES TIMEOUT 1800)
+
+# Stream 2^32 frames through the public API once per configuration. Keep this
+# serial history test separate from the concurrency suite repeated twenty times.
+snd_add_test(dsp_indep_long_stream_test SOURCES indep_long_stream_test.cpp LINK sonus_dsp)
