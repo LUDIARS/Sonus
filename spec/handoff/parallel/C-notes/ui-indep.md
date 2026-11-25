@@ -386,3 +386,39 @@ P5 の見え方（Release、ASan なし）: 1e308 で「fires at - s (bar -21474
 - 入れ子の `AbortGroup` の決まり（記録だけ）。
 - Windows のホストの Esc（`App::Key` で確かめた）。
 - 小さい窓でのキー操作（Ctrl+PageDown）で全部の画面に届くことは前回確かめたが、ポインタで届かないこと（P2）は宣言の位置で見た。
+
+## 再確認 3 回目（3 回目の差し戻しの後）
+
+実装担当の修正（7600de5 最小の窓 1024×640、fb79bdb 選択はリビジョンで外す、b9498d2 バンクに入らない数値と変換の範囲と遷移の試聴の時刻、
+a90c020 エフェクトの列が変わったら質問、先頭 68f3eaa）の上。前回の P1〜P5 はすべて通過。テストは `tool/test/indep_s7_ui_recheck3_test.cpp`
+（性質 N、1 件ずつ `tool_indep_s7_ui_recheck3_<名前>`）。
+
+### 決定に合わせて更新したテスト
+
+なし（前回までのテストに決定と食い違うものは無かった。最小の窓は `ui::kMinEditorWidth` / `kMinEditorHeight` を読んでいる）。
+
+### 結果
+
+| 性質 | テスト | 結果 |
+| --- | --- | --- |
+| N1 最小の窓（ちょうど・1 物理画素小さい・縦長・横長 × DPI 0.25〜4 × 27 の状態: 全画面・全タブ・一覧・結び直しの質問） | `SmallestWindowEverywhere` | 通過（以上で外のボタン 0、未満は `body.small` だけ、重複なし） |
+| N1 大きさをまたぐ | `ResizingAcrossTheMinimumKeepsTheState` | 通過（ドラッグ中に縮めて離すとグループが閉じ手は高々 1、小さい間の Delete は何も消さない、入力は Esc で閉じて何も書かない） |
+| N2 選択 | `SelectionsAcrossEditsOfEveryKind` | 通過（自分のドラッグ・打った値で残る。ホストの値の変更・Undo・フッタの Redo・書き戻しで外れ、直後の Delete は何も消さない） |
+| N3 バンクに入らない数値 | `NumbersThatDoNotFitTheBankAreRefused` | 通過（FLT_MAX ちょうどを受け付け、次の double・±3.5e38・1e300 を拒否、ファイルの 1e300 はほかの編集で残る、`Modify` で持ち込む 1e300 は拒否） |
+| N4 壊れたファイル（7 種類の値 × 21 の項目） | `BrokenNumbersInFilesAreShownWithoutUndefinedConversions` | 通過（float-cast-overflow の構成は下の表） |
+| N5 エフェクトの列の質問（6 通り）と列が変わらない時 | `EffectChainChangesAsk` | 通過 |
+| N6 名前が inf / nan | `Defect_NamesThatReadInfOrNanAreShownAsADash` | **欠陥 Q1** |
+
+### 新しい欠陥（失敗のまま）
+
+- **Q1 `Defect_NamesThatReadInfOrNanAreShownAsADash`（低）**: `Kit::Label` が文字を全部 `FiniteText` に通すので、名前が「inf」「nan」の
+  オブジェクトが「-」と出る。例: Buses のグラフの順「graph order: Sfx - Master」（バス「nan」）、Params の合成の行
+  「curve 0: - = 1.000 (default) -> pitch …」（パラメータ「inf」）。数値でない名前まで置き換えている（実装担当が未検証と書いた点）。
+  直し方の例: 数値を文字にするところ（`ShownNumber` など）でだけ有限にし、ラベル全体は置き換えない。
+
+ほかに新しい欠陥は無い。
+
+### 残る仕様の穴
+
+- 最小の窓は「物理画素」で決まるので、DPI 0.25 では論理の 1 画素ではなく 4 画素単位で大きさが変わる（1023 論理は 1024 に丸まる）。
+  問題ではないが、README の「1024 × 640（論理）」はそのように読める。
