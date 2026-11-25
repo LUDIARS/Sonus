@@ -66,7 +66,7 @@ bool App::WindowTooSmall() const {
 
 void App::DeclareTooSmall(tela::Document& doc, const std::string& id, float w, float h) {
   char b[96];
-  std::snprintf(b, sizeof b, "window too small: this screen needs %.0f x %.0f", static_cast<double>(kMinEditorWidth),
+  std::snprintf(b, sizeof b, "window too small: the tool needs %.0f x %.0f", static_cast<double>(kMinEditorWidth),
                 static_cast<double>(kMinEditorHeight));
   Text(doc, id, b, 0, 0, std::max(1.0f, w), std::min(std::max(1.0f, h), 22.0f), 0.6f);
 }
@@ -486,16 +486,20 @@ void App::Declare(std::uint64_t nowNs) {
   std::vector<ControlBinding> controls;
   ViewContext ctx{session_, palette_, view_, *this, runtime_, controls, nowNs, desc_.recordingPath, scale, this};
   tela::Document doc;
+  if (WindowTooSmall()) {
+    // Below the smallest window only the notice (D-187): no tab, button or field outside the window.
+    Panel(doc, "root", 0, inset, w, h, [&] { DeclareTooSmall(doc, "body.small", w, h); });
+    runtime_.document(std::move(doc));
+    router_.SetControls(std::move(controls));
+    ++declarations_;
+    return;
+  }
   Panel(doc, "root", 0, inset, w, h, [&] {
     Panel(doc, "header", 0, 0, w, kHeaderHeight, [&] { DeclareHeader(doc, ctx, w); });
     const float bodyH = h - kHeaderHeight - kFooterHeight;
     Panel(doc, "body", 0, kHeaderHeight, w, bodyH, [&] {
       const float bw = w - 12.0f, bh = bodyH - 12.0f;
-      const bool editor = view_.screen != Screen::Mixer && view_.screen != Screen::Profiler &&
-                          view_.screen != Screen::Replay && view_.screen != Screen::Problems;
-      if (editor && WindowTooSmall()) {
-        DeclareTooSmall(doc, "body.small", bw, bh);
-      } else switch (view_.screen) {
+      switch (view_.screen) {
         case Screen::Mixer: DeclareMixer(doc, ctx, bw, bh); break;
         case Screen::Profiler: DeclareProfiler(doc, ctx, bw, bh); break;
         case Screen::Buses: DeclareBuses(doc, ctx, bw, bh); break;

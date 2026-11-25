@@ -123,6 +123,18 @@ void Graph(Kit& kit, const std::string& g, float x, float y, float w, float h) {
     look.wires.push_back(wire);
   }
   const std::vector<std::string> keys = NodeKeys(nodes);
+  // A hit is the part of its rectangle inside the view (nodes partly scrolled out stay pressable
+  // where they are seen; nothing lies outside the window, D-187). false if nothing is left.
+  auto clip = [x, y, w, h](float& rx, float& ry, float& rw, float& rh) {
+    const float x0 = std::max(rx, x), y0 = std::max(ry, y);
+    const float x1 = std::min(rx + rw, x + w), y1 = std::min(ry + rh, y + h);
+    if (x1 - x0 < 1.0f || y1 - y0 < 1.0f) return false;
+    rx = x0;
+    ry = y0;
+    rw = x1 - x0;
+    rh = y1 - y0;
+    return true;
+  };
   // Node hits: body (select, drag to move), output port (drag onto an input to connect, or click to
   // start a connection), input ports (complete a connection, or disconnect).
   for (std::size_t i = 0; i < nodes.size(); ++i) {
@@ -136,29 +148,36 @@ void Graph(Kit& kit, const std::string& g, float x, float y, float w, float h) {
                              [d, g, nid, n](const DragMotion& m) {
                                PatchEditor(*d, g).MoveNode(nid, std::round(n.x + m.dx), std::round(n.y + m.dy));
                              });
-    kit.Hit(id, body, x + box.x + 8.0f, y + box.y, box.width - 16.0f, box.height);
+    float bx = x + box.x + 8.0f, by = y + box.y, bw = box.width - 16.0f, bh = box.height;
+    if (!clip(bx, by, bw, bh)) continue;
+    kit.Hit(id, body, bx, by, bw, bh);
     if (k != nullptr && k->output != pt::Signal::None) {
       const tela::Point op = PatchOutputPort(box);
+      float px = x + op.x - 7.0f, py = y + op.y - 7.0f, pw = 14.0f, ph = 14.0f;
+      const bool shown = clip(px, py, pw, ph);
+      const float ox = px - x, oy = py - y;  // the hit's origin in graph coordinates
       auto out = std::make_shared<DragHandler>();
       const std::vector<PatchNode> all = nodes;
-      out->release = [d, g, pv, nid, all, op, sx, sy, app](bool moved, float lx, float ly) {
+      out->release = [d, g, pv, nid, all, ox, oy, sx, sy, app](bool moved, float lx, float ly) {
         if (!moved) {  // a click: connect from here, then click an input
           pv->pendingFrom = pv->pendingFrom == nid ? std::string() : nid;
           return;
         }
         std::string to, input;
         // The release point in graph coordinates (the port hit is 14 px around the port).
-        if (!InputAt(all, sx, sy, op.x - 7.0f + lx, op.y - 7.0f + ly, &to, &input)) return;
+        if (!InputAt(all, sx, sy, ox + lx, oy + ly, &to, &input)) return;
         if (!PatchEditor(*d, g).Connect(nid, to, input)) app->Message("refused: connection (signal, an input taken, a cycle)");
         app->Edited();
       };
-      kit.Hit(id + ".out", out, x + op.x - 7.0f, y + op.y - 7.0f, 14.0f, 14.0f);
+      if (shown) kit.Hit(id + ".out", out, px, py, pw, ph);
     }
     for (std::uint32_t in = 0; k != nullptr && in < k->inputCount; ++in) {
       const tela::Point ip = PatchInputPort(box, in);
       const std::string input = k->inputs[in].name;
       bool connected = false;
       for (const PatchConnection& c : cons) connected = connected || (c.to == nid && c.input == input);
+      float px = x + ip.x - 7.0f, py = y + ip.y - 7.0f, pw = 14.0f, ph = 14.0f;
+      if (!clip(px, py, pw, ph)) continue;
       Button(kit.doc(), id + ".in." + input, std::string(), [d, g, pv, nid, input, connected, app] {
         if (!pv->pendingFrom.empty()) {
           if (!PatchEditor(*d, g).Connect(pv->pendingFrom, nid, input)) app->Message("refused: connection");
@@ -166,7 +185,7 @@ void Graph(Kit& kit, const std::string& g, float x, float y, float w, float h) {
         } else if (connected) {
           PatchEditor(*d, g).Disconnect(nid, input);
         }
-      }, x + ip.x - 7.0f, y + ip.y - 7.0f, 14.0f, 14.0f);
+      }, px, py, pw, ph);
     }
   }
   Canvas(kit.doc(), "pa.view", DrawPatch(look, kit.palette()), x, y, w, h);

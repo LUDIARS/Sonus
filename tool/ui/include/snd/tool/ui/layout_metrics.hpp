@@ -20,12 +20,12 @@ inline constexpr float kStripWidth = 92.0f;
 inline constexpr float kStripGap = 6.0f;
 inline constexpr float kPagerHeight = 30.0f;
 inline constexpr std::size_t kMaxElements = 3800;
-// The smallest window (logical pixels) the screens with number fields take (D-187, N4): the
-// editors (Buses .. Link) and the profiler's event log. Below it they show only "window too
-// small" (the mixer, the profiler's other tabs, Replay and Problems have no number fields and
-// draw down to 320 x 240). At 800 x 500 every number field lies inside the window.
-inline constexpr float kMinEditorWidth = 800.0f;
-inline constexpr float kMinEditorHeight = 500.0f;  // Tela refuses more than 4096
+// The smallest window the tool takes (logical pixels, the same at every DPI; D-187). From it up
+// every tab, the footer's buttons and every button and field of every screen lie inside the
+// window (ui_editor_window_test checks it at DPI 0.25 .. 4); below it the tool declares only the
+// "window too small" notice (`body.small`). Keys still work.
+inline constexpr float kMinEditorWidth = 1024.0f;
+inline constexpr float kMinEditorHeight = 640.0f;  // Tela refuses more than 4096
 
 struct StripMetrics {
   float width = kStripWidth;
