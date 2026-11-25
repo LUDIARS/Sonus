@@ -23,4 +23,6 @@ snd_add_module(core
     src/bus_graph.cpp
     src/sys_publish.cpp
     src/frame.cpp
+    src/live_plugin_pool.cpp
+    src/live_structure.cpp
     src/live_link.cpp)

@@ -57,6 +57,9 @@ struct LiveArenaView;
 
 namespace snd::livelink {
 
+// Recording-only flag. The arena reproduces routes present before StartRecording.
+inline constexpr std::uint32_t kInitialRoutingArena = 1u << 30;
+
 struct ArenaSections {
   std::uint32_t normalBytes;
   std::uint32_t reserveBytes;
@@ -89,7 +92,8 @@ inline constexpr std::uint32_t BitWordsOf(std::uint32_t bits) noexcept { return 
 // a MessageRing (one message = one record). false if it does not fit (the caller
 // counts the drop; the recording is then incomplete).
 std::uint32_t ArenaRecordBytes(const core::LiveArenaView& arena, const FallbackCaps& caps) noexcept;
-bool WriteArenaRecord(MessageRing& ring, const core::LiveArenaView& arena, const FallbackCaps& caps) noexcept;
+bool WriteArenaRecord(MessageRing& ring, const core::LiveArenaView& arena, const FallbackCaps& caps,
+                      const void* const* rejectedStructs = nullptr, std::uint32_t rejectedCount = 0) noexcept;
 
 // --- reading (non-RT) ------------------------------------------------------------------
 struct RecordItem {

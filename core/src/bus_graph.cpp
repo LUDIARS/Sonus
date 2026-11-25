@@ -8,6 +8,7 @@
 //   3. root buses (no parent, not an auxiliary output) into the master output;
 //      voices without a bus go straight to the output.
 // The LOD bypass (Bus.effectBypass) skips a chain once its tail is done (2.4).
+#include <algorithm>
 #include <cmath>
 #include <cstring>
 
@@ -88,6 +89,18 @@ void MixBuses(Impl& im) noexcept {
   rc.sample_rate = im.cfg.sampleRate;
   rc.block_frames = frames;
   rc.transport_beats = -1.0;
+  for (auto* e = im.tails; e;) {
+    auto* next = e->nextTail;
+    float* planes[kMaxChannels];
+    std::fill_n(im.tailScratch, std::size_t{e->channels} * frames, 0.0f);
+    for (std::uint32_t c = 0; c < e->channels; ++c) planes[c] = im.tailScratch + std::size_t{c} * frames;
+    snd_param_block params{e->params, e->params, e->paramCount, 0u, &rc};
+    dsp::EffectSlot slot{e->type, e->plugin, e->state, &params, nullptr, 0u, 0u};
+    dsp::ProcessEffectChain(&slot, 1, planes, e->channels, frames);
+    Downmix(im.tailScratch, e->channels, BusBuffer(im, e->tailBus), im.busDefs[e->tailBus].channels, frames, 1);
+    if (dsp::EffectSlotIsTailDone(slot)) FinishEffectTail(im, *e);
+    e = next;
+  }
   for (std::uint32_t oi = 0; oi < nb; ++oi) {
     const SlotIndex s = order[oi];
     if (s == kNoSlot) continue;
@@ -106,15 +119,16 @@ void MixBuses(Impl& im) noexcept {
     }
     const BankRecord* rec = RegisteredBank(im, def.defBank);
     // Effect chain.
-    if (rec != nullptr && effects[d].count != 0u) {
+    const auto count = def.customChain ? def.chainCount : effects[d].count;
+    if (rec != nullptr && count != 0u) {
       dsp::EffectSlot slots[kMaxBusEffects];
       snd_param_block blocks[kMaxBusEffects];
       std::uint32_t n = 0;
       bool tailDone = true;
-      for (std::uint32_t k = 0; k < effects[d].count && n < kMaxBusEffects; ++k) {
+      for (std::uint32_t k = 0; k < count && n < kMaxBusEffects; ++k) {
         const std::uint32_t x = effects[d].first + k;
-        if (x >= rec->effectCount) break;
-        EffectInstance& e = rec->effects[x];
+        if (!def.customChain && x >= rec->effectCount) break;
+        EffectInstance& e = def.customChain ? *def.chain[k] : rec->effects[x];
         if (e.ok == 0u) continue;
         blocks[n] = snd_param_block{e.params, e.params, e.paramCount, 0u, &rc};
         slots[n] = dsp::EffectSlot{e.type, e.plugin, e.state, &blocks[n], nullptr, 0u, 0u};
@@ -128,6 +142,11 @@ void MixBuses(Impl& im) noexcept {
     // Pre-fader sends (graph order: targets come later).
     auto doSends = [&](bool pre, float g) {
       if (rec == nullptr) return;
+      for (const auto* send = def.sends; send; send = send->nextSend) {
+        if (send->pre == pre) {
+          Downmix(buf, ch, BusBuffer(im, send->target), im.busDefs[send->target].channels, frames, g * send->gain);
+        }
+      }
       const bk::BankView& v = *rec->view;
       for (std::uint32_t k = 0; k < sends[d].count; ++k) {
         const std::uint32_t row = sends[d].first + k;

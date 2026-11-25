@@ -1270,7 +1270,7 @@ std::vector<LiveFeature> LiveSync::features() const {
       LiveFeature{"bank list at connection (QueryBanks)", v11, why},
       LiveFeature{"hot reload (ReloadBank)", v11 && static_cast<bool>(options_.writer),
                   !v11 ? why : (options_.writer ? std::string() : "no output for rebuilt banks")},
-      LiveFeature{"structural edits (StructEdit)", v11, v11 ? "the game answers UNSUPPORTED until core can (C-01)" : why},
+      LiveFeature{"structural edits (StructEdit)", v11, v11 ? std::string() : why},
       LiveFeature{"item revert (RevertValue)", v11, why},
       LiveFeature{"read-back (ReadCell)", v11, why},
       LiveFeature{"stop all auditions", v11, why},

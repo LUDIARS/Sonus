@@ -135,7 +135,7 @@ bool Replay(const Recording& rec, const std::vector<ReportBank>& banks, const Re
   rd.allocator = &base::DefaultAllocator();
   rd.record = rec.records.data();
   rd.bytes = rec.records.size();
-  rd.structEditor = o.structEditor;
+  rd.structEditor = o.structEditor ? o.structEditor : &ll::CoreStructEditor();
   rd.applyStartState = o.applyStartState;
   rd.maxDecisions = o.maxDecisions;
   ll::Replayer* r = nullptr;

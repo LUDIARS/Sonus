@@ -79,6 +79,7 @@
 
 namespace snd::core {
 class System;
+class LivePluginPool;
 struct CoreDesc;
 struct LiveArenaView;
 }  // namespace snd::core
@@ -95,6 +96,8 @@ struct ReplayDesc {
   IStructEditor* structEditor = nullptr;  // replays structural edits (null: counted, not applied)
   std::uint32_t maxDecisions = 8192;      // decision log entries kept (0: no log)
   bool applyStartState = true;            // write RecordCell / apply RecordOverride at the start
+  // Prep the state of every recorded external DSP before rendering (0: dev_reserve.bytes).
+  std::uint64_t pluginPreparationBytes = 0;
 };
 
 // 1.1: what the replay reports about the 2.5 conditions (ReplayInfo::conditions).
@@ -217,6 +220,7 @@ class Replayer {
     std::uint64_t relBlock;
     std::uint32_t normalOffset, normalBytes;
     std::uint32_t reserveOffset, reserveBytes;
+    std::uint32_t producer;
     std::uint32_t flags;
     std::uint32_t fallback;  // index into fallbacks_, or ~0u
   };
@@ -246,6 +250,9 @@ class Replayer {
   BankRef* banks_ = nullptr;
   std::uint32_t bankCount_ = 0;
   // 1.1
+  std::uint32_t producer_ = 0;
+  std::uint32_t sessions_[64]{};  // validated max_registered_threads
+  core::LivePluginPool* pluginPool_ = nullptr;
   IStructEditor* structEditor_ = nullptr;
   PendingChunk* chunks_ = nullptr;  // [chunkCount_] the recorded LiveReplaceChunk data
   std::uint8_t* chunkMemory_ = nullptr;

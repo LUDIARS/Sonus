@@ -112,6 +112,7 @@ struct CoreLimits {
 using LiveCommandFn = void (*)(void* user, cmd::CommandType type, const void* payload) noexcept;
 
 class System;
+struct PreparedLivePlugin;
 
 // --- Live link taps (11.2 profiler, 11.3 recording; dev builds) ----------------------
 // Called on the audio thread. Principle 1 applies: copy into preallocated memory
@@ -149,6 +150,7 @@ struct LiveTap {
   // End of every RenderBlock (suspended blocks too). The Live* queries below may be
   // called from here.
   void (*block)(void* user, System& sys) noexcept = nullptr;
+  void (*arenaApplied)(void* user, const LiveArenaView& arena) noexcept = nullptr;
 };
 
 // One editable cell of a registered bank's override layer (11.2).
@@ -330,6 +332,20 @@ class System {
   std::uint32_t LiveFindBanks(Id bankId, std::uint32_t* slots, std::uint32_t capacity) const noexcept;
   // Rows of table `fourcc` in the override layer of a registered bank (0 if none).
   std::uint32_t LiveTableRows(std::uint32_t bankSlot, std::uint32_t fourcc) const noexcept;
+  // Block boundary only. Tokens identify an edit across index shifts and bank reloads.
+  // Thread-safe worker lookup for preparing plugin state; Apply rechecks the actual layout.
+  std::uint32_t PublishedBusChannels(Id id) const noexcept;
+  snd_result LiveAddBus(Id bus, Id parent, std::uint32_t channels, float db, std::uint64_t token) noexcept;
+  snd_result LiveRemoveBus(Id bus, std::uint64_t token) noexcept;
+  snd_result LiveAddEffect(Id bus, Id type, std::uint32_t position, const float* params,
+                           std::uint32_t count, std::uint64_t token, PreparedLivePlugin* prepared = nullptr) noexcept;
+  snd_result LiveRemoveEffect(Id bus, std::uint32_t index, std::uint64_t token) noexcept;
+  snd_result LiveAddSend(Id from, Id to, float db, bool pre, std::uint64_t token) noexcept;
+  std::uint64_t LiveBusBank(Id bus) const noexcept;
+  std::uint64_t LiveOrigin(Id bus, bool effect, std::uint32_t index) const noexcept;
+  snd_result LiveUndoEdit(std::uint64_t token) noexcept;
+  void LiveReserveLeft(std::uint32_t* buses, std::uint32_t* effects, std::uint32_t* events,
+                       std::uint64_t* bytes) const noexcept;
   // Reads (*previous) and, with apply, writes one cell, then refreshes what core derived
   // from it at registration (bus / category volume, voice limits, parameter definitions,
   // ducking, effect parameters). apply = false only validates.

@@ -1097,6 +1097,12 @@ void QueryPriming(Ctx& c) noexcept {
 
 void RunEventLogic(Impl& im) noexcept {
   schema::Tables& t = im.tables;
+  if (im.routesPending) {
+    auto* bus = SND_W(Voice_busSlot);
+    for (std::uint32_t d = 0; d < t.Voice.rows.count; ++d) {
+      if (bus[d] != kNoSlot) bus[d] = im.retiredRoutes[bus[d]];
+    }
+  }
   Ctx c{im, t, im.clock, im.cfg.blockFrames};
   im.endedCount = 0;
   im.ev.controlCount = 0;
