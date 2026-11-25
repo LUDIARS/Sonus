@@ -103,6 +103,10 @@ enum PlayFlags : std::uint32_t {
   kPlayOneShot = 1u << 0,      // no handle returned; no on_end callback
   kPlayHasPosition = 1u << 1,  // PlayAt: use `position`, no emitter
 };
+// Stage 3 (D-146): Play.flags bits 16..31 = fade-in of the start in milliseconds (0 = none,
+// 1..65535), recorded by snd_play_fade. Bits 2..15 stay 0.
+inline constexpr std::uint32_t kPlayFadeInMsShift = 16;
+inline constexpr std::uint32_t kPlayFadeInMsMask = 0xFFFF0000u;
 struct Play {
   HandleRef playback;  // allocated by the game side (one-shots too)
   HandleRef emitter;

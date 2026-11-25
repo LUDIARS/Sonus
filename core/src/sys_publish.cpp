@@ -171,8 +171,8 @@ void Publish(Impl& im) noexcept {
                                                                   im.cfg.blockFrames) / im.cfg.blockFrames));
       }
     }
-    b.loudnessShort = dsp::LoudnessShortTerm(*im.rd.loudness);
-    b.loudnessIntegrated = dsp::LoudnessIntegrated(*im.rd.loudness);
+    // D-147: the bus's own loudness (output for the master; kBusMeter buses), NaN = not measured.
+    AnalysisLoudness(im, s, &b.loudnessShort, &b.loudnessIntegrated);
     if (nb < f.busCapacity) base::notify::SnapshotStore(&f.buses[nb++], b);
   };
   const SlotIndex master = im.rd.masterSlot != kNoSlot && base::rows::IsLive(br, im.rd.masterSlot) ? im.rd.masterSlot : kNoSlot;
@@ -185,6 +185,7 @@ void Publish(Impl& im) noexcept {
   }
   base::notify::SetFrameHeader(f, im.block + 1u, im.clock + im.cfg.blockFrames, st, nb);
   base::notify::EndSnapshot(*im.triple);
+  AnalysisPublish(im);  // stage 3 (group 4), D-148: spectrum rings while a reader asks
   // 4. Background work of the sources (prefetch, decode, callbacks ahead).
   const source::BlockInfo bi{im.block, im.clock, im.cfg.blockFrames, im.cfg.sampleRate};
   for (std::size_t k = 0; k < static_cast<std::size_t>(SourceKind::Count); ++k) {

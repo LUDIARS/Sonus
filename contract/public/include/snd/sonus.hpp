@@ -645,6 +645,16 @@ inline Result SetPlaybackEffectParam(System* sys, PlaybackHandle p, std::uint32_
   return detail::R(snd_set_playback_effect_param(sys, p.ToC(), slot, paramIndex, value));
 }
 
+// Stage 3 (D-146, D-148).
+inline PlaybackHandle PlayFade(System* sys, Id event, EmitterHandle emitter, const When& when,
+                               float fadeInSeconds) noexcept {
+  return PlaybackHandle::FromC(snd_play_fade(sys, event, emitter.ToC(), detail::W(when), fadeInSeconds));
+}
+inline Result GetSpectrum(const System* sys, Id bus, std::uint32_t channel, float* outMagnitudes,
+                          std::uint32_t binCount) noexcept {
+  return detail::R(snd_get_spectrum(sys, bus, channel, outMagnitudes, binCount));
+}
+
 }  // namespace snd
 
 #endif  // SND_SONUS_HPP
