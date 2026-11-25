@@ -13,6 +13,7 @@
 //     inside the root and behind a link that leaves it (a writer's O_NONBLOCK open succeeds
 //     only while someone has the FIFO open for reading).
 #include <atomic>
+#include <barrier>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -53,30 +54,42 @@ SND_TEST(IndepHostFix, OutputClockIsNeverTornNorFalse) {
   SND_REQUIRE(dev.Open(snd::DeviceDesc{48000, 2, 64, 0}, &Silence, nullptr));
   SND_REQUIRE(dev.Start());
   SND_REQUIRE_EQ(dev.Advance(1, nullptr), 1u);
-  std::atomic<bool> stop{false};
+  constexpr int readerCount = 3, batches = 4, periodsPerBatch = 50000;
+  constexpr unsigned minSamplesPerBatch = 128;
+  std::barrier batchFinished(readerCount + 1);
+  std::atomic<int> publishedBatches{0};
   std::atomic<std::uint64_t> torn{0}, falses{0}, back{0}, reads{0}, badRate{0};
   std::vector<std::thread> readers;
-  for (int i = 0; i < 3; ++i) {
+  for (int i = 0; i < readerCount; ++i) {
     readers.emplace_back([&] {
       std::uint64_t lastW = 0, lastT = 0;
-      while (!stop.load(std::memory_order_relaxed)) {
-        snd::platform::OutputClockSample v{};
-        if (!dev.OutputClock(&v)) {
-          falses.fetch_add(1);
-          continue;
-        }
-        reads.fetch_add(1, std::memory_order_relaxed);
-        if (v.framesPlayed != v.framesWritten || v.framesWritten % 64u != 0u) torn.fetch_add(1);
-        if (v.framesWritten < lastW || v.timestampNs < lastT) back.fetch_add(1);
-        if (v.sampleRate != 48000u) badRate.fetch_add(1);
-        lastW = v.framesWritten;
-        lastT = v.timestampNs;
+      for (int batch = 0; batch < batches; ++batch) {
+        unsigned samples = 0;
+        do {
+          ++samples;
+          snd::platform::OutputClockSample v{};
+          if (!dev.OutputClock(&v)) {
+            falses.fetch_add(1);
+            continue;
+          }
+          reads.fetch_add(1, std::memory_order_relaxed);
+          if (v.framesPlayed != v.framesWritten || v.framesWritten % 64u != 0u) torn.fetch_add(1);
+          if (v.framesWritten < lastW || v.timestampNs < lastT) back.fetch_add(1);
+          if (v.sampleRate != 48000u) badRate.fetch_add(1);
+          lastW = v.framesWritten;
+          lastT = v.timestampNs;
+        } while (samples < minSamplesPerBatch || publishedBatches.load() <= batch);
+        batchFinished.arrive_and_wait();
       }
     });
   }
   std::uint64_t periods = 1;
-  for (int k = 0; k < 200000; ++k) periods += dev.Advance(1, nullptr);
-  stop.store(true);
+  for (int batch = 0; batch < batches; ++batch) {
+    for (int k = 0; k < periodsPerBatch; ++k) periods += dev.Advance(1, nullptr);
+    // Keep checking during writes, and give each reader a turn between batches on a busy host.
+    publishedBatches.store(batch + 1);
+    batchFinished.arrive_and_wait();
+  }
   for (std::thread& t : readers) t.join();
   snd::test::Note("%llu periods, %llu reads", static_cast<unsigned long long>(periods),
                   static_cast<unsigned long long>(reads.load()));
@@ -84,7 +97,7 @@ SND_TEST(IndepHostFix, OutputClockIsNeverTornNorFalse) {
   SND_CHECK_EQ(falses.load(), 0u);
   SND_CHECK_EQ(back.load(), 0u);
   SND_CHECK_EQ(badRate.load(), 0u);
-  SND_CHECK(reads.load() > 1000u);
+  SND_CHECK(reads.load() >= readerCount * batches * minSamplesPerBatch);
   SND_REQUIRE(dev.OutputClock(&s));
   SND_CHECK_EQ(s.framesWritten, periods * 64u);
   dev.Close();
