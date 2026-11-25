@@ -113,7 +113,7 @@ Tela に渡さない）、`host_macos.mm`（キーコードと文字を `App::Ke
 | 3 | N4 | 窓を詰めて並べ直す方ではなく、**App が受け付ける最小の論理サイズを数値の欄のある画面で 800 × 500 に引き上げた**（`kMinEditorWidth` / `kMinEditorHeight`）。それより小さい窓では本体に「window too small: this screen needs 800 x 500」だけを出す（`body.small`、Profiler の Event log は `prof.log.small`）。対象は Buses、Event、Params、3D、Music、Material、Patch、Link と Profiler の Event log。Mixer（数値の欄なし。段階2 の `NarrowWindowPagesTheStrips` の 560 × 700 を保つ）、Profiler のほかのタブ、Replay、Problems は 320 × 240 まで描く。値は 640 × 400 で 9 個、800 × 500 で 0 個が窓の外（試した大きさ 640×400、800×500、960×600、1024×640、1280×720）から決めた。README に書いた | 2d8b692 |
 | 4 | N5 | 「書き戻す」は、行き場の無い上書きの名前を控えてから `RebindProject(true)`（GUID・エフェクトの種類・パラメータで引き継ぎ、引き継げない物は捨てる）、その後で `WriteBackMixer`。消えた・種類の変わったエフェクトの上書きは新しい物に書かれず、「mixer: discarded N live overrides without a place: 名前…」をメッセージに出す。質問が出ている間に Write back を押しても同じ道を通る | 2d8b692 |
 | 5 | N6 | `SpatialPreview::PlaceListener` / `PlaceEmitter`（±1e6 m）、`TurnListener` / `TurnEmitter`（±1e6 rad）で範囲の外と非有限を拒否。3D の欄はこれを通す。`NumberText` は非有限で「-」、`FiniteText` が printf の inf / nan を「-」に替え、`Kit::Label` の文字は全部これを通す | 0629b4a, 2d8b692 |
-| 6 | 選択 | 位置で持つ選択は、画面自身の編集（ポインタ・キー・Pick の後の revision を `knownRevision_` に控える）以外で revision が変わったとき外す。ただしホストの値だけの変更で外すと `Defect_TypedNumberOutsideTheFieldRangeIsClampedNotRefused`（選んだクリップをホストが `MoveClip` で動かしてから開始位置を打つ。組 U の Defect なので通す必要がある）が落ちるので、**選択の指す配列の形（トラックごとのクリップ数・アクション数、カーブの点の数、テンポ点・Stem・Playlist の行・ルールの数）が変わったときだけ**外す（`App::PositionShape`）。Undo / Redo、画面の切り替え、書き戻し、結び直しの答えでは今まで通り常に外す | 2d8b692 |
+| 6 | 選択 | （3 回目で revision だけの判断に変えた）位置で持つ選択は、画面自身の編集（ポインタ・キー・Pick の後の revision を `knownRevision_` に控える）以外で revision が変わったとき外す。ただしホストの値だけの変更で外すと `Defect_TypedNumberOutsideTheFieldRangeIsClampedNotRefused`（選んだクリップをホストが `MoveClip` で動かしてから開始位置を打つ。組 U の Defect なので通す必要がある）が落ちるので、**選択の指す配列の形（トラックごとのクリップ数・アクション数、カーブの点の数、テンポ点・Stem・Playlist の行・ルールの数）が変わったときだけ**外す（`App::PositionShape`）。Undo / Redo、画面の切り替え、書き戻し、結び直しの答えでは今まで通り常に外す | 2d8b692 |
 | 7 | テスト | `ui_editor_fix2_test`（7 本: Esc と履歴、フェーダーの Esc、整数の欄、窓の最小、書き戻しの対応、3D の値、ホストの変更と選択） | 1e7771d |
 
 モデルに足した・直したもの（許された `document`・`spatial_preview` だけ。`event_editor`・`doc_build`・`mixer` は今回変えていない）:
@@ -121,6 +121,31 @@ Tela に渡さない）、`host_macos.mm`（キーコードと文字を `App::Ke
 - `spatial_preview.hpp/.cpp`: `kMaxCoordinate`、`kMaxAngle`、`PlaceListener`、`PlaceEmitter`、`TurnListener`、`TurnEmitter`。
 - UI の公開の型: `ControlSink::ControlCancel`（`pointer_router.hpp`）、`App::WindowTooSmall` / `DeclareTooSmall`、`kit.hpp` の
   `WholeU16/U32/U64`・`ToF32`・`SatU32/U64/Int`・`ShownNumber`・`FiniteText`、`layout_metrics.hpp` の `kMinEditorWidth/Height`。
+
+## 差し戻し 3 回目（ui-indep.md「再確認 2 回目」の P1〜P5 と決定 1〜6）で変えた点
+
+| 決定 | 欠陥 | 変えたこと | コミット |
+| --- | --- | --- | --- |
+| 1 | P1・P2 | 最小の窓を全画面で 1 つ、**論理 1024 × 640** にした（`kMinEditorWidth` / `kMinEditorHeight`、DPI によらない）。未満では `App::Declare` が「window too small: the tool needs 1024 x 640」（`body.small`）だけを宣言し、タブ・フッタ・本体は宣言しない（キーは効く）。Profiler の Event log だけの `prof.log.small` はやめた。以上では全画面のボタンと欄が窓の中: パッチのノードの当たり（本体・出力・入力の端子）は図の矩形に切り、全部外なら宣言しない（出力の端子のドラッグの座標は切った後の原点から計算）。値は `ui_editor_window_test` の `SND_UI_WINDOW` で全画面（Mixer、Profiler 6 タブ、Replay、Problems、Link、エディタ 15 の選び方）× DPI 0.25 / 1 / 2 / 4 を確かめて決めた: 800×500 は Material の組の表と既定・解決、Segment のグリッド、Event の Add synth、記録の行のボタンが外、900×560・960×600 も Material と記録の行、1000×620 は記録の行のボタン 1 個、1024×640 で 0 個（1280×720 でも 0）。独立テストは `ui::kMinEditorWidth` / `kMinEditorHeight` を読むので食い違いは無い | 7600de5 |
+| 3 | P4 | 位置で持つ選択は、画面自身の編集の後の revision（`knownRevision_`）と文書の revision が違えば外す（値だけの変更でも）。`App::PositionShape` はやめた | fb79bdb |
+| 2 | P3・P5 | `ProjectDocument` の `Create` / `Set` / `SetDefaulted` / `Insert` は、どの列（U32 / F32 / U64 / I64）にも入らない数値（非有限、最大の有限 float 超）を拒否。`Modify` はその値を新しく持ち込むときだけ拒否（ファイルに元からある値で編集全部が止まらないように）。整数の列は前から各エディタが型の範囲で拒否している（`EventEditor::SetNumber` の priority / maxInstances、loopCount など）。モデルの浮動小数→整数は `ClampToU32` / `ClampToU64` / `ClampToI32`（NaN は 0、範囲で飽和）と `U32At` / `U64At` に: `TempoMap::Musical`、`project.cpp` の channels、`SegmentEditor::Tempo` の tick・beatsPerBar・beatUnit、マーカーの frame、スナップショットの effect / param / send、ルールの timingCount。遷移の試聴は `MusicEditor::kMaxRequestSeconds`（1e6 s）の外・負・非有限で無効、画面の `mu.pv.req` は拒否（最小先読み `mu.pv.prime` も 0〜1e5 ms）。ミキサーのパラメータの名前の値（`FormatValue`）は非有限で「-」 | b9498d2 |
+| 4 | 穴（同じ種類の別のエフェクト） | `LiveValue::effectChain`（値を取った時のバスのエフェクトの種類の列）。結び直しで列（数・並び・種類）が変わったバスのエフェクトの値は引き継がず、質問に出す（名前に「バス 種類 パラメータ」） | a90c020 |
+| 5 | 穴（入れ子の Abort） | `AbortGroup` のヘッダに「どの段から呼んでも一番外のグループごと捨て、全段を閉じる。その後の EndGroup は何もしない」と書いた（振る舞いは変えていない） | b9498d2 |
+| 6 | テスト | `model_fix3_test`（核）、`ui_editor_fix3_test`、`ui_editor_window_test` | cf9a167, 7600de5 |
+
+自分のテストで決定に合わせて変えたもの:
+- `ToolUiDeclaration.NarrowWindowPagesTheStrips`（段階2）: 560 × 700 の窓は最小未満になり、ストリップのページ送りを見られない。
+  560 × 700 では「too small」だけでストリップもページ送りも無いこと、最小の窓ではこのプロジェクトのストリップが 1 ページに入ること
+  を確かめる形にし、ページ送りは `ToolUiWindow.MixerPagesAtTheSmallestWindow`（ストリップの多いプロジェクト、最小の窓）に移した。
+- `ToolUiFix2.EditorsAskForTheirSmallestWindow`: 640 × 400 の Mixer も「too small」（タブ・フッタなし）を期待するように。
+- `ToolUiFix2.HostChangesDropSelectionsWhenTheArraysChange` → `HostChangesDropSelections`: ホストの値だけの変更でも外れることを期待。
+
+モデルに足した・直したもの（今回）:
+- `document.hpp/.cpp`: `ClampToU32` / `ClampToU64` / `ClampToI32`、`U32At` / `U64At`。`Create` / `Set` / `SetDefaulted` / `Insert` /
+  `Modify` がバンクに入らない数値を拒否（`OutOfBank`）。`AbortGroup` のヘッダ。
+- `music_editor.hpp/.cpp`: `MusicEditor::kMaxRequestSeconds` と `Preview` の範囲、`TempoMap::Musical`・`Tempo`・`Markers`・`Rules` の変換。
+- `mixer.hpp/.cpp`: `LiveValue::effectChain` と `Locate`（`Unmatched` / `Rebind`）の比較。
+- `mixer_editor.cpp`（スナップショットの値の変換）、`project.cpp`（channels の変換）。
 
 ## 決定の案（受け入れ側が D-番号を振る。番号は振っていない）
 

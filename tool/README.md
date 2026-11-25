@@ -348,24 +348,34 @@ WM_KEYDOWN と WM_CHAR、macOS は NSEvent のローカルモニタ）、ツー�
   ライブの履歴にも段が残らない）。それ以外は何もしない（Windows でも Tela にウィンドウを閉じさせない）。
 - 打った数値は切り詰めずにモデルに渡す（拒否なら入力は開いたまま、文書は変わらない）。整数の欄は変換の前に、有限でない・
   整数でない（2.5）・負・型の範囲の外の値を拒否する（`WholeU16` / `WholeU32` / `WholeU64`。Link の Port は 1〜65535）。
-  ファイルから読んだ値などを整数にするところは飽和させる（`SatU32` / `SatU64` / `SatInt`。浮動小数から整数への未定義の変換は無い）。
-- 表示する値は常に有限（`NumberText` と `Kit::Label` は inf / nan を「-」に）。3D の位置は ±1,000,000 m、向きは ±1,000,000 rad
-  まで（`SpatialPreview::PlaceListener` / `PlaceEmitter` / `TurnListener` / `TurnEmitter`、超えれば入力は開いたまま）。
-- **窓の最小の大きさ**: 数値の欄のある画面（Buses、Event、Params、3D、Music、Material、Patch、Link と Profiler の Event log）は
-  論理 **800 × 500**（`kMinEditorWidth` / `kMinEditorHeight`、`layout_metrics.hpp`）以上の窓で数値の欄を全部窓の中に置く。それより
-  小さい窓では本体に「window too small: this screen needs 800 x 500」だけを出す（ヘッダのタブとフッタは出る）。Mixer、Profiler の
-  ほかのタブ、Replay、Problems は数値の欄が無いので 320 × 240 まで描く。± / ドラッグ / ホイールは欄の範囲で止まる。
+  ファイルから読んだ値などを整数にするところは飽和させる（UI は `SatU32` / `SatU64` / `SatInt`、モデルは `ClampToU32` /
+  `ClampToU64` / `ClampToI32` と `U32At` / `U64At`。浮動小数から整数への変換は必ず範囲を確かめてから）。
+- モデルの数値の設定は、バンクのどの列にも入らない数値（非有限、最大の有限 float を超える値）を拒否する（`ProjectDocument` の
+  `Create` / `Set` / `SetDefaulted` / `Insert` と、値を持ち込む `Modify`）。整数の列は各エディタが型の範囲で拒否する。
+- 表示する値は常に有限（`NumberText` と `Kit::Label` は inf / nan を「-」に。約束の「-inf dB」と凡例「(0=inf)」は除く）。
+  3D の位置は ±1,000,000 m、向きは ±1,000,000 rad まで（`SpatialPreview::PlaceListener` / `PlaceEmitter` / `TurnListener` /
+  `TurnEmitter`、超えれば入力は開いたまま）。遷移の試聴の要求時刻は 0〜1,000,000 s（`MusicEditor::kMaxRequestSeconds`。外は
+  `Preview` が無効を返し、画面は入力を拒否）、最小先読みは 0〜100,000 ms。
+- **窓の最小の大きさ（全画面で 1 つ）: 論理 1024 × 640**（`kMinEditorWidth` / `kMinEditorHeight`、`layout_metrics.hpp`。DPI に
+  よらず論理の大きさで判断する）。それ以上の窓では、ヘッダのタブ、フッタのボタン（Undo / Redo / Save、問題の数）、全画面の
+  本体のボタンと欄が窓の中にある（パッチのノードの当たりは図の中に切る）。それ未満の窓では「window too small: the tool needs
+  1024 x 640」だけを宣言し、ほかの要素は宣言しない（キーの操作は効く）。値は全画面（Mixer、Profiler の 6 タブ、Replay、Problems、
+  Link と各エディタ）を 800×500 から 1280×720 まで DPI 0.25〜4 で確かめて決めた（800×500 では Material の組の表・既定、Segment
+  のグリッドの行、Event の Add synth、記録の行のボタンが、1000×620 では記録の行のボタンが外に出る。`ui_editor_window_test`）。
+  ± / ドラッグ / ホイールは欄の範囲で止まる。
   ホイールと連打の ± は、宣言の間でもモデルの最新の値に足す（n ノッチは n ステップ）。数値の欄の値は少なくとも 48 px（ラベルが
   先に縮み、24 px を切ればラベルを値の文字に入れる。ボタンの入らない欄はボタン無し）。
 - クリップを上下に動かすと、トラックは `round(縦の移動量 / 48 px)` だけ移り、範囲の外は端のトラックへ。
 - 選択は対象で持つ（GUID、名前、ノード id）。オブジェクトの中の位置で持つ選択（クリップ、アクション、カーブの点、テンポ点、
   Stem、Playlist の行、ルール）は、Undo / Redo と画面の切り替え（ほかの画面の編集）、書き戻し、結び直しの答えで外す（選んでいない
-  物を Delete で消さない）。画面の外（ホスト、ライブ、読み込み直し）で文書の revision が変わったときは、選択の指す配列（トラックの
-  クリップ・アクション、カーブの点、テンポ点、Stem、Playlist の行、ルール）の形が変わっていれば外す（`App::PositionShape`）。
+  物を Delete で消さない）。画面の外（ホスト、ライブ、読み込み直し）で文書が変わったときも、値だけの変更でも外す（文書の
+  revision と、画面が最後に行った編集の後の revision を比べる）。
 - 文書の構造が変わってミキサーを結び直すとき、ライブの値は対象（GUID、エフェクトの種類と位置）で引き継ぐ
   （`MixerModel::Rebind`）。引き継げない値があれば結び直しを保留し、本体の上に「書き戻す／捨てる」の質問を出す。答えるまで上書きは残る。
   「書き戻す」も先に対象（GUID、エフェクトの種類、パラメータ）で結び直してから書くので、消えた・種類の変わったエフェクトの上書きは
-  新しい物に書かれず捨てられ、「mixer: discarded N live overrides without a place: …」と出る。
+  新しい物に書かれず捨てられ、「mixer: discarded N live overrides without a place: …」と出る。エフェクトには GUID が無いので、
+  上書きのあるバスのエフェクトの数か並び（種類の列）が変わったら、そのバスのエフェクトの値は引き継がずに質問する（同じ種類の
+  別のエフェクトに乗らない。`LiveValue::effectChain`）。
 - 名前で一意な物（材質、State、マーカー、Stinger）の要素の ID は名前から作る（`NameKey`）。位置の番号は名前の無い行だけ。
 - コーンは `EventEditor::Cone()`（無いときは 0 / 0 / 0 dB = コーンなし）で Event と 3D の両画面に同じ値を出す。3D の既定のエミッタは
   maxDistance の半分（無ければ 5 m）だけ右前に置く。カーブの図は x にも余白（`kCurveXMargin`）。Link は未接続なら相手の版を出さない。
@@ -402,6 +412,9 @@ WM_KEYDOWN と WM_CHAR、macOS は NSEvent のローカルモニタ）、ツー�
 | `tool_ui_editor_fix_test` | 差し戻しの決定: 打った数値の拒否、宣言の間のホイールと連打、縦のドラッグの移動量と端、数値の欄の幅（1280×800 と 640×400）、Pick、入力中のキー、Esc とドラッグの取り消し、位置の選択と Undo、ミキサーの結び直しの引き継ぎと質問、コーン・取っ手・余白・未接続・問題を 1 回、名前から作る ID |
 | `tool_ui_editor_fix2_test` | 差し戻し 2 回目: Esc で Undo / Redo の数が変わらない（行って戻るドラッグ、動かさない押下、数値の欄、フェーダー）、整数の欄の拒否（2.5、-1、1e300、4294967296、Port 0 / 70000）、窓の最小の大きさ、書き戻しの対象の対応、3D の値の範囲と表示、ホストの変更での選択 |
 | `tool_ui_editor_limits_<名前>` | 上限のテストを画面ごとに別のプロセスで（320×240 まで） |
+| `tool_ui_editor_fix3_test` | 差し戻し 3 回目: 遷移の試聴の要求時刻の範囲、Params で float を超える値の拒否と全画面で inf / nan が出ないこと |
+| `tool_ui_editor_window_test` | 最小の窓（1024 × 640）以上で全画面の全部のボタンが窓の中（DPI 0.25〜4）、未満では「too small」だけ、最小の窓でのストリップのページ送り（`SND_UI_WINDOW=<w>x<h>` で外に出る物を表示） |
+| `tool_model_fix3_test`（核） | バンクに入らない数値の拒否、`ClampTo*` と `TempoMap::Musical`・壊れたファイルの値の変換、エフェクトの並びが変わったときの結び直し、入れ子の `AbortGroup` |
 | `tool_model_fix_test`（核） | `MixerModel::LiveValues` / `Unmatched` / `Rebind`、`EventEditor::Cone`、`DistinctIssues` |
 | `tool_app_screen_<名前>` | `sonus-tool --headless --screen <名前>` が全画面で画像を書く |
 
