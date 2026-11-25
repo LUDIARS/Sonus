@@ -364,3 +364,25 @@
   今は問題にならない。決めておくなら「呼んだ段だけを捨てる」か「外まで捨てる」か。
 - **最小の窓の数**: 800×500 は DPI 1 でボタンがはみ出し（P1）、DPI 2 では出ない（同じ論理サイズで違う）。最小の論理サイズを
   DPI によらず決めるかどうか。
+
+P5 の見え方（Release、ASan なし）: 1e308 で「fires at - s (bar -2147483647 beat -2147483647)」、1e300 で 300 桁の秒数の行。
+
+### 再確認 2 回目で回した構成と結果
+
+ビルドは `$S/ui-indep/b-*`、-j2、1 つずつ（終わったら消した）。tool のターゲットだけをビルドし `ctest -R ^tool`。
+
+| 構成 | コミット | 結果 |
+| --- | --- | --- |
+| 9: Tela 入り、gcc Debug | 53e94f3 | 203 件のうち失敗は組 U の新しい `Defect_*` 4 件（P1〜P4）だけ（`tool_ui_editor_fix2_test` は最初の回でビルドの一覧に無く Not Run、ビルドして通過）。組 P の `Defect_*` も今回は通過。前の `Defect_*` 11 件（1〜5、N1〜N6）は通過 |
+| 9 ＋ ASan / UBSan ＋ `float-cast-overflow` | 53e94f3（P5 は 5f901c9 で足して実行） | ASan の報告なし。`float-cast-overflow` の報告 3 件: 組 U の P5（`music_editor.cpp:107`、画面の値から）と、組 M のモデルの 2 件（`project.cpp:294`、`music_editor.cpp:254`、ファイルの値から。`tool_indep_s7_robust_test`・`tool_indep_model_test` が失敗）。組 U の整数の欄からの報告は無い。ほかの失敗は P1〜P4 |
+| 9 ＋ TSan | 5f901c9 | `tool_indep_s7_ui_threads_test`・`tool_ui_editor_concurrency_test`・`tool_ui_concurrency_test`・`tool_indep_concurrency_test` を -j1 で 20 回: 通過、報告なし |
+| 9 ＋ Release | 5f901c9 | 204 件のうち失敗 5 = P1〜P5 だけ。並行性の 2 本を 20 回: 通過 |
+| MinGW の構文検査 | 5f901c9 | `indep_s7_ui_recheck2_test.cpp`、`indep_s7_ui_defects_test.cpp`: 通過 |
+
+回していない構成: clang、核だけ（今回の依頼の範囲外）、9 の全体（tool 以外）。
+
+### 再確認 2 回目で確かめていないこと
+
+- 入れ子の `AbortGroup` の決まり（記録だけ）。
+- Windows のホストの Esc（`App::Key` で確かめた）。
+- 小さい窓でのキー操作（Ctrl+PageDown）で全部の画面に届くことは前回確かめたが、ポインタで届かないこと（P2）は宣言の位置で見た。
