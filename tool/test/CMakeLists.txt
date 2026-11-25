@@ -244,7 +244,8 @@ foreach(_r AbortGroupRestoresEverything RandomSequencesWithAbortsKeepTheHistory 
         EscOnFaderAndKnobDragsLeavesTheLiveHistoryAsBefore IntegerFieldsRefuseBeforeConverting
         Defect_BodyButtonsOutsideTheWindowAtSmallSizes WriteBackIsMatchedByObject Defect_NonFiniteTextAfterExtremeValues
         OwnEditsKeepThePositionSelection HostStructuralEditDropsThePositionSelection WriteBackDropsThePositionSelection
-        Defect_HostValueEditKeepsThePositionSelection Defect_HeaderAndFooterButtonsOutsideSmallWindows)
+        Defect_HostValueEditKeepsThePositionSelection Defect_HeaderAndFooterButtonsOutsideSmallWindows
+        Defect_HugeTransitionRequestTimeMakesNaNMusicalPositions)
   add_test(NAME tool_indep_s7_ui_recheck2_${_r} COMMAND tool_indep_s7_ui_recheck2_test --filter ${_r})
   set_tests_properties(tool_indep_s7_ui_recheck2_${_r} PROPERTIES TIMEOUT 3600)
 endforeach()
