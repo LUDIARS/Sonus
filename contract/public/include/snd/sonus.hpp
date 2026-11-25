@@ -284,6 +284,7 @@ struct Config {
   SND_CONFIG_TOP_1_2(SND_CONFIG_CPP_FIELD)  // contract 1.2 (maxBuses .. maxDuckRules, D-92)
   SND_CONFIG_TOP_1_2_HOST(SND_CONFIG_CPP_FIELD)  // contract 1.2 (fileSystemRoot, outputKind; D-102, D-103)
   SND_CONFIG_TOP_S3_VOICE_FX(SND_CONFIG_CPP_FIELD)  // stage 3 (maxVoiceEffects .. voiceEffectSettings; D-132)
+  SND_CONFIG_TOP_S3_SPATIAL(SND_CONFIG_CPP_FIELD)
   MemoryConfig memory;
   CommandsConfig commands;
   JobsConfig jobs;
@@ -311,6 +312,7 @@ inline void ToC(const Config& in, snd_config* out) noexcept {
   SND_CONFIG_TOP_1_2(SND_TO_C_TOP)
   SND_CONFIG_TOP_1_2_HOST(SND_TO_C_TOP)
   SND_CONFIG_TOP_S3_VOICE_FX(SND_TO_C_TOP)
+  SND_CONFIG_TOP_S3_SPATIAL(SND_TO_C_TOP)
   SND_CONFIG_MEMORY(SND_TO_C_MEMORY)
   SND_CONFIG_COMMANDS(SND_TO_C_COMMANDS)
   SND_CONFIG_JOBS(SND_TO_C_JOBS)
@@ -643,6 +645,23 @@ inline Result SetEventVoiceEffect(System* sys, Id event, std::uint32_t slot, Id 
 inline Result SetPlaybackEffectParam(System* sys, PlaybackHandle p, std::uint32_t slot, std::uint32_t paramIndex,
                                      float value) noexcept {
   return detail::R(snd_set_playback_effect_param(sys, p.ToC(), slot, paramIndex, value));
+}
+
+inline Result SetEmitterShape(System* sys, EmitterHandle emitter, snd_emitter_shape kind, const Vec3& extents) noexcept {
+  return detail::R(snd_set_emitter_shape(sys, emitter.ToC(), kind, &extents));
+}
+inline Result SetReverbZone(System* sys, EmitterHandle emitter, Id bus, float amount, float fadeDistance) noexcept {
+  return detail::R(snd_set_reverb_zone(sys, emitter.ToC(), bus, amount, fadeDistance));
+}
+
+// Stage 3 (D-146, D-148).
+inline PlaybackHandle PlayFade(System* sys, Id event, EmitterHandle emitter, const When& when,
+                               float fadeInSeconds) noexcept {
+  return PlaybackHandle::FromC(snd_play_fade(sys, event, emitter.ToC(), detail::W(when), fadeInSeconds));
+}
+inline Result GetSpectrum(const System* sys, Id bus, std::uint32_t channel, float* outMagnitudes,
+                          std::uint32_t binCount) noexcept {
+  return detail::R(snd_get_spectrum(sys, bus, channel, outMagnitudes, binCount));
 }
 
 inline Result SetCategorySolo(System* sys, Id category, bool solo) noexcept {

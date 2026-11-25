@@ -24,22 +24,151 @@ namespace {
 constexpr schema::SystemId kSys = schema::SystemId::EvaluateDspParams;
 constexpr float kPi = 3.14159265358979f;
 
-// Nearest valid listener of an emitter (listener mode Nearest; Weighted / Split are stage 3).
-std::uint32_t NearestSpatial(const Impl& im, SlotIndex emitter) noexcept {
+float Unit(float x) noexcept { return std::clamp(x, 0.0f, 1.0f); }
+
+float Curve(const bk::BankView* view, std::uint32_t curve, float distance, float fallback) noexcept {
+  return curve != bf::kNone && view ? EvaluateCurve(*view, curve, distance) : fallback;
+}
+
+struct SpatialTarget {
+  float distanceDb;
+  float coneDb;
+  float inverse;
+  float blend;
+  float spread;
+  float filter;
+  float ratio;
+  float send;
+};
+
+SpatialTarget SpatialAt(const Impl& im, SlotIndex spatial, const bk::BankView* view, std::uint32_t row,
+                        SlotIndex playback, SlotIndex emitter) noexcept {
   const schema::Tables& t = im.tables;
-  if (emitter == kNoSlot || emitter >= im.cfg.maxEmitters) return kNoSlot;
-  std::uint32_t best = kNoSlot;
-  float bestD = 0.0f;
-  for (std::uint32_t l = 0; l < im.cfg.maxListeners; ++l) {
-    const std::uint32_t s = emitter * im.cfg.maxListeners + l;
-    if (!base::rows::IsLive(t.Spatial.rows, s) || SND_R(Spatial_valid)[s] == 0u) continue;
-    const float dd = SND_R(Spatial_distance)[s];
-    if (best == kNoSlot || dd < bestD) {
-      best = s;
-      bestD = dd;
+  const float distance = SND_R(Spatial_distance)[spatial];
+  SpatialTarget result{0, 0, 1 / std::max(distance, 1.0f), 1, SND_R(Spatial_shapeSpread)[spatial],
+                       1.0e9f, SND_R(Spatial_dopplerRatio)[spatial], 0};
+  if (!view) return result;
+  const auto volume = view->Column<bk::col::EVNT_curveVolume>()[row];
+  if (volume != bf::kNone) {
+    result.inverse = 1;
+    result.distanceDb = EvaluateCurve(*view, volume, distance);
+  } else {
+    const float maxD = view->Column<bk::col::EVNT_maxDistance>()[row];
+    if (maxD > 0 && distance > maxD) result.inverse = 0;
+  }
+  const float inner = view->Column<bk::col::EVNT_coneInnerDeg>()[row];
+  const float outer = view->Column<bk::col::EVNT_coneOuterDeg>()[row];
+  if (outer > 0 && outer >= inner) {
+    const float angle = SND_R(Spatial_coneAngle)[spatial];
+    if (angle > inner) {
+      const float f = angle >= outer ? 1.0f : (angle - inner) / std::max(outer - inner, 1e-6f);
+      result.coneDb = view->Column<bk::col::EVNT_coneOuterDb>()[row] * f;
     }
   }
-  return best;
+  SpatialCurveParams params{};
+  const auto first = view->Column<bk::col::EVNT_curveFirst>()[row];
+  const auto count = first == bf::kNone ? 0u : view->Column<bk::col::EVNT_curveCount>()[row];
+  for (std::uint32_t i = 0; i < count; ++i) {
+    const auto cv = first + i;
+    const auto target = static_cast<bf::CurveTarget>(view->Column<bk::col::CURV_target>()[cv]);
+    SpatialCurveProduct* product = nullptr;
+    switch (target) {
+      case bf::CurveTarget::Spread: product = &params.spread; break;
+      case bf::CurveTarget::Blend3D: product = &params.blend; break;
+      case bf::CurveTarget::ReverbSend: product = &params.send; break;
+      default: continue;
+    }
+    const auto input = view->Column<bk::col::CURV_input>()[cv];
+    const float x = input == bf::kInputDistance ? distance : ParamValueOf<kSys>(im, input, playback, emitter);
+    product->Add(EvaluateCurve(*view, cv, x));
+  }
+  const auto blend = view->Column<bk::col::EVNT_curveBlend3D>()[row];
+  const auto spread = view->Column<bk::col::EVNT_curveSpread>()[row];
+  const auto send = view->Column<bk::col::EVNT_curveReverbSend>()[row];
+  result.blend = Unit(params.blend.Apply(Curve(view, blend, distance, 1), blend != bf::kNone));
+  result.spread = std::max(result.spread, Unit(params.spread.Apply(Curve(view, spread, distance, 0), spread != bf::kNone)));
+  result.filter = Curve(view, view->Column<bk::col::EVNT_curveLowpass>()[row], distance, 1.0e9f);
+  result.send = Unit(params.send.Apply(Curve(view, send, distance, 0), send != bf::kNone));
+  if (result.blend == 0) {
+    result.ratio = 1;
+    result.filter = 1.0e9f;
+  } else if (result.blend < 1) {
+    if (result.ratio != 1) result.ratio = std::pow(result.ratio, result.blend);
+    if (result.filter < dsp::kVoiceLowpassOffHz && result.filter > 0)
+      result.filter = dsp::kVoiceLowpassOffHz * std::pow(result.filter / dsp::kVoiceLowpassOffHz, result.blend);
+  }
+  return result;
+}
+
+struct SpatialGain {
+  float distanceDb = 0, coneDb = 0, linear = 1, filter = 1e9f, ratio = 1, distance = 0, blend = 1;
+};
+
+SpatialGain ListenerMix(const Impl& im, SlotIndex em, const bk::BankView* view, std::uint32_t row,
+                        SlotIndex playback, VoiceSpatialMix& mix) noexcept {
+  const schema::Tables& t = im.tables;
+  SpatialGain out{};
+  mix = VoiceSpatialMix{};
+  if (em >= im.cfg.maxEmitters) return out;
+  SlotIndex nearest = kNoSlot;
+  float nearestD = 0;
+  bool hasWeight = false;
+  for (unsigned l = 0; l < im.cfg.maxListeners; ++l) {
+    const SlotIndex s = em * im.cfg.maxListeners + l;
+    if (!base::rows::IsLive(t.Spatial.rows, s) || !SND_R(Spatial_valid)[s]) continue;
+    const float d = SND_R(Spatial_distance)[s];
+    if (nearest == kNoSlot || d < nearestD) { nearest = s; nearestD = d; }
+    const float weight = im.cfg.listenerMode == SND_LISTENER_WEIGHTED ? SND_R(Listener_weight)[l] : 1;
+    mix.listeners[mix.count++] = ListenerContribution{s, std::max(0.0f, weight), 0, 1, 0};
+    hasWeight |= weight > 0;
+  }
+  if (nearest == kNoSlot) return out;
+  if (im.cfg.listenerMode == SND_LISTENER_NEAREST) {
+    mix.count = 1;
+    mix.listeners[0] = ListenerContribution{nearest, 1, 0, 1, 0};
+  } else if (!hasWeight) {
+    for (unsigned i = 0; i < mix.count; ++i) mix.listeners[i].weight = 1;
+  }
+  double sumWeight = 0, sumGain = 0, best = -1;
+  double contribution[SND_MAX_LISTENERS]{};
+  for (unsigned i = 0; i < mix.count; ++i) {
+    auto& item = mix.listeners[i];
+    const SpatialTarget target = SpatialAt(im, item.spatial, view, row, playback, em);
+    item.blend = target.blend;
+    item.spread = target.spread;
+    item.curveSend = target.send * target.blend;
+    const float gain3 = target.inverse * DbToGain(target.distanceDb + target.coneDb);
+    const float gain = (1 - target.blend) + target.blend * gain3;
+    contribution[i] = static_cast<double>(item.weight) * gain;
+    sumGain += contribution[i];
+    sumWeight += item.weight;
+    if (contribution[i] > best) {
+      best = contribution[i];
+      mix.dominant = item.spatial % im.cfg.maxListeners;
+      out.filter = target.filter;
+      out.ratio = target.ratio;
+      out.distance = SND_R(Spatial_distance)[item.spatial];
+      out.blend = target.blend;
+    }
+    if (mix.count == 1) {
+      item.weight = 1;
+      mix.curveSend = item.curveSend;
+      // Preserve the original order of dB additions at full blend.
+      if (item.blend == 1) {
+        out.distanceDb = target.distanceDb;
+        out.coneDb = target.coneDb;
+        out.linear = target.inverse;
+      } else out.linear = gain;
+      return out;
+    }
+  }
+  out.linear = static_cast<float>(sumGain / sumWeight);
+  for (unsigned i = 0; i < mix.count; ++i) {
+    auto& item = mix.listeners[i];
+    item.weight = sumGain > 0 ? static_cast<float>(contribution[i] / sumGain) : 0;
+    mix.curveSend += item.weight * item.curveSend;
+  }
+  return out;
 }
 
 // Snapshot rows name objects in the snapshot's own bank. The bus with that ID
@@ -88,6 +217,34 @@ void ClearSnapshotOffsets(Impl& im) noexcept {
       for (std::uint32_t p = 0; p < effect.paramCount; ++p) effect.ctl[p].contrib = 0.0f;
     }
   }
+}
+
+// D-143: layer crossfade weight of clip `ci` of track `tr` at parameter value x. Each
+// clip has its range [layerMin, layerMax]: 0 outside, 1 where no other clip of the track
+// overlaps it, and where it overlaps another clip an equal-power crossfade from the low
+// end of the overlap to the high end (the clip whose range starts lower fades out with
+// cos, the other fades in with sin). Clips whose ranges only touch switch at the shared
+// value (the clip above takes it), smoothed by the caller (short fade, D-15).
+float LayerWeight(const bk::BankView& v, std::uint32_t tr, std::uint32_t ci, float x) noexcept {
+  const std::uint32_t cf = v.Column<bk::col::TRAK_clipFirst>()[tr];
+  const std::uint32_t cc = v.Column<bk::col::TRAK_clipCount>()[tr];
+  const float lo = v.Column<bk::col::CLIP_layerMin>()[ci];
+  const float hi = v.Column<bk::col::CLIP_layerMax>()[ci];
+  if (!(x >= lo) || !(x <= hi)) return 0.0f;
+  float w = 1.0f;
+  for (std::uint32_t k = cf; k < cf + cc; ++k) {
+    if (k == ci) continue;
+    const float lo2 = v.Column<bk::col::CLIP_layerMin>()[k];
+    const float hi2 = v.Column<bk::col::CLIP_layerMax>()[k];
+    const bool otherAbove = lo2 > lo || (lo2 == lo && k > ci);
+    if (x == hi && lo2 == hi && hi2 > hi) return 0.0f;  // touching ranges: the clip above takes the value
+    const float ol = lo > lo2 ? lo : lo2;
+    const float oh = hi < hi2 ? hi : hi2;
+    if (!(oh > ol) || x < ol || x > oh) continue;
+    const float u = (x - ol) / (oh - ol) * (kPi * 0.5f);
+    w *= otherAbove ? std::cos(u) : std::sin(u);
+  }
+  return w < 0.0f ? 0.0f : w;
 }
 
 }  // namespace
@@ -144,8 +301,6 @@ void EvaluateDspParams(Impl& im) noexcept {
     float gainDb = vs.gainDb;
     float cents = vs.pitchCents;
     float pan = vs.pan;
-    auto& spatialParams = im.dp.spatialParams[v];
-    spatialParams = SpatialCurveParams{};
     float lowpass = vs.lowpassHz > 0.0f ? vs.lowpassHz : 1.0e9f;
     float highpass = 0.0f;
     float linear = vs.linearGain * vs.musicGain;
@@ -155,18 +310,24 @@ void EvaluateDspParams(Impl& im) noexcept {
     if (pd != kNoSlot) fadeEnd = SND_R(Playback_logic)[pd].fadeGain;
     const BankRecord* br = RegisteredBank(im, vclip[d].bankSlot);
     const bk::BankView* view = br != nullptr ? br->view : nullptr;
-    const std::uint32_t spatial = (vs.flags & kVs3D) != 0u ? NearestSpatial(im, vem[d]) : kNoSlot;
-    const float distance = spatial != kNoSlot ? SND_R(Spatial_distance)[spatial] : 0.0f;
+    const bool event = view && vs.eventRow < view->Rows(bf::chunk::EVNT);
+    const bool emitterLive = base::rows::IsCurrent(t.Emitter.rows, HandleRef{vem[d], vs.emitterGeneration});
+    const SlotIndex em = (vs.flags & kVs3D) != 0u && emitterLive ? vem[d] : kNoSlot;
+    VoiceSpatialMix& mix = im.dp.mix[v];
+    const SpatialGain spatial = ListenerMix(im, em, event ? view : nullptr, vs.eventRow, pb, mix);
+    const float distance = spatial.distance;
     if (view != nullptr && vs.eventRow < view->Rows(bf::chunk::EVNT)) {
       const std::uint32_t row = vs.eventRow;
       // Parameter curves (4.3): volume dB add, pitch cents add, lowpass min, highpass max, others multiply.
       const std::uint32_t cf = view->Column<bk::col::EVNT_curveFirst>()[row];
       const std::uint32_t cc = cf == bf::kNone ? 0u : view->Column<bk::col::EVNT_curveCount>()[row];
-      const SlotIndex emitter = pd != kNoSlot ? SND_R(Voice_emitterSlot)[d] : kNoSlot;
+      const SlotIndex emitter = pd != kNoSlot && emitterLive ? vem[d] : kNoSlot;
       float panProduct = 1.0f;
       bool multiplyPan = false;
       for (std::uint32_t k = 0; k < cc; ++k) {
         const std::uint32_t cv = cf + k;
+        const auto destination = static_cast<bf::CurveTarget>(view->Column<bk::col::CURV_target>()[cv]);
+        if (destination > bf::CurveTarget::Pan) continue;  // spatial curves were evaluated at each listener
         const Id input = view->Column<bk::col::CURV_input>()[cv];
         float x = 0.0f;
         if (input == bf::kInputDistance) {
@@ -174,8 +335,26 @@ void EvaluateDspParams(Impl& im) noexcept {
         } else {
           x = ParamValueOf<kSys>(im, input, pb, emitter);
         }
-        const float y = EvaluateCurve(*view, cv, x);
-        switch (static_cast<bf::CurveTarget>(view->Column<bk::col::CURV_target>()[cv])) {
+        float y = EvaluateCurve(*view, cv, x);
+        if (input == bf::kInputDistance && mix.count && spatial.blend < 1) {
+          // The same blend applies to distance-input CURV rows as to the
+          // dedicated EVNT curves. Other parameter inputs remain active in 2D.
+          const float b = spatial.blend;
+          if (b == 0) continue;
+          switch (destination) {
+            case bf::CurveTarget::Volume: y = 20 * std::log10((1 - b) + b * DbToGain(y)); break;
+            case bf::CurveTarget::Pitch:
+            case bf::CurveTarget::Pan: y *= b; break;
+            case bf::CurveTarget::Lowpass:
+              y = dsp::kVoiceLowpassOffHz * std::pow(std::max(y, 10.0f) / dsp::kVoiceLowpassOffHz, b);
+              break;
+            case bf::CurveTarget::Highpass:
+              y = dsp::kVoiceHighpassOffHz * std::pow(std::max(y, 10.0f) / dsp::kVoiceHighpassOffHz, b);
+              break;
+            default: break;
+          }
+        }
+        switch (destination) {
           case bf::CurveTarget::Volume: gainDb += y; break;
           case bf::CurveTarget::Pitch: cents += y; break;
           case bf::CurveTarget::Lowpass: lowpass = y < lowpass ? y : lowpass; break;
@@ -188,57 +367,41 @@ void EvaluateDspParams(Impl& im) noexcept {
               pan += y;  // Legacy banks: preserve each addition to the clip pan, including rounding.
             }
             break;
-          case bf::CurveTarget::Spread: spatialParams.spread.Add(y); break;
-          case bf::CurveTarget::Blend3D: spatialParams.blend.Add(y); break;
-          case bf::CurveTarget::ReverbSend: spatialParams.send.Add(y); break;
           default: break;  // CURV contains no SEND or EFFX row address.
         }
       }
       if (multiplyPan) pan += panProduct;
-      // Layer crossfade (4.2): weight by the track's layer parameter.
+      // Layer crossfade (4.2, D-143): equal-power weight by the track's layer parameter (its
+      // ramp makes it continuous); a jump of the weight is spread over the short fade (D-15).
       if (view->Column<bk::col::EVNT_sequenceKind>()[row] == static_cast<std::uint32_t>(bf::SequenceKind::LayerCrossfade) &&
           vs.trackRow < view->Rows(bf::chunk::TRAK) && vclip[d].clipIndex < view->Rows(bf::chunk::CLIP)) {
         const Id lp = view->Column<bk::col::TRAK_layerParam>()[vs.trackRow];
         if (lp != 0u) {
           const float x = ParamValueOf<kSys>(im, lp, pb, emitter);
-          const float lo = view->Column<bk::col::CLIP_layerMin>()[vclip[d].clipIndex];
-          const float hi = view->Column<bk::col::CLIP_layerMax>()[vclip[d].clipIndex];
-          const float w = (hi - lo) * 0.1f;
-          float g = 1.0f;
-          if (x < lo) g = w > 0.0f ? 1.0f - (lo - x) / w : 0.0f;
-          if (x > hi) g = w > 0.0f ? 1.0f - (x - hi) / w : 0.0f;
-          linear *= g < 0.0f ? 0.0f : g;
-        }
-      }
-      // Basic 3D: distance and cone.
-      if (spatial != kNoSlot) {
-        const std::uint32_t cvol = view->Column<bk::col::EVNT_curveVolume>()[row];
-        if (cvol != bf::kNone) {
-          gainDb += EvaluateCurve(*view, cvol, distance);
-        } else {
-          const float maxD = view->Column<bk::col::EVNT_maxDistance>()[row];
-          linear *= (maxD > 0.0f && distance > maxD) ? 0.0f : 1.0f / (distance > 1.0f ? distance : 1.0f);
-        }
-        const std::uint32_t clp = view->Column<bk::col::EVNT_curveLowpass>()[row];
-        if (clp != bf::kNone) {
-          const float y = EvaluateCurve(*view, clp, distance);
-          lowpass = y < lowpass ? y : lowpass;
-        }
-        const float inner = view->Column<bk::col::EVNT_coneInnerDeg>()[row];
-        const float outer = view->Column<bk::col::EVNT_coneOuterDeg>()[row];
-        if (outer > 0.0f && outer >= inner) {
-          float cc2 = SND_R(Spatial_coneCos)[spatial];
-          cc2 = cc2 < -1.0f ? -1.0f : (cc2 > 1.0f ? 1.0f : cc2);
-          const float angle = 2.0f * std::acos(cc2) * 180.0f / kPi;  // full cone angle
-          const float outerDb = view->Column<bk::col::EVNT_coneOuterDb>()[row];
-          if (angle > inner) {
-            const float tt = angle >= outer ? 1.0f : (angle - inner) / (outer - inner > 1e-6f ? outer - inner : 1.0f);
-            gainDb += outerDb * tt;
+          const float target = LayerWeight(*view, vs.trackRow, vclip[d].clipIndex, x);
+          float& lg = im.dp.layerGain[v];
+          if (vlc[d].state == static_cast<std::uint8_t>(VoiceStateId::Starting)) {
+            lg = target;
+          } else {
+            const float step = im.cfg.shortFadeFrames == 0u
+                                   ? 1.0f
+                                   : static_cast<float>(im.cfg.blockFrames) / static_cast<float>(im.cfg.shortFadeFrames);
+            lg = target > lg + step ? lg + step : (target < lg - step ? lg - step : target);
           }
+          linear *= lg;
         }
       }
-    } else if (spatial != kNoSlot) {
-      linear *= 1.0f / (distance > 1.0f ? distance : 1.0f);  // dynamic voices: plain inverse distance
+    }
+    if (mix.count != 0) {
+      gainDb += spatial.distanceDb;
+      gainDb += spatial.coneDb;
+      linear *= spatial.linear;
+      lowpass = std::min(lowpass, spatial.filter);
+      const auto ed = base::rows::DenseOf(t.Emitter.rows, em);
+      const Occlusion occ = SND_R(Emitter_occlusion)[ed];
+      if (occ.occlusion > 0) gainDb -= 12 * occ.occlusion;
+      mix.occlusion = occ.occlusion;
+      mix.obstruction = occ.obstruction;
     }
     // Category gain and the "voices playing" count for rule ducking.
     float cat = 1.0f;
@@ -262,6 +425,7 @@ void EvaluateDspParams(Impl& im) noexcept {
     // Voice releases (stops, steals) are applied per sample by Render (sample accurate).
     const float gEnd = DbToGain(gainDb) * linear * cat * fadeEnd * env;
     float pEnd = std::exp2(cents / 1200.0f);
+    pEnd *= spatial.ratio;
     if (ownPb) pEnd *= im.ap.playbackPitch[pb];
     // 1.2 (D-88): the voices of a music playback follow its transport's pitch (8.1).
     if (pd != kNoSlot) {
@@ -318,7 +482,15 @@ void EvaluateDspParams(Impl& im) noexcept {
   float* sw = SND_W(Snapshot_weight);
   for (std::uint32_t d = 0; d < sr.count; ++d) {
     const SlotIndex s = base::rows::SlotAt(sr, d);
-    const float w = RampValue(SND_R(Snapshot_request)[d].weight, endClock);
+    auto request = SND_R(Snapshot_request)[d].weight;
+    // D-145: a snapshot action at the first frame of a play that started in this block.
+    for (std::uint32_t i = 0; i < im.ap.tentativeCount; ++i) {
+      const auto& ts = im.ap.tentative[i];
+      if (ts.snapshot == s && ts.snapshotGeneration == sr.generation[s] && ts.cancelled == 0u) {
+        request = SnapshotActionRamp(request, ts.weight, ts.start, ts.duration);
+      }
+    }
+    const float w = RampValue(request, endClock);
     sw[d] = w;
     if (w == 0.0f) continue;
     const SnapDef& def = im.snapDefs[s];

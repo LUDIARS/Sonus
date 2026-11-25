@@ -287,6 +287,11 @@ SlotIndex CreateEmitterRow(Impl& im, HandleRef h) noexcept {
   if (d == kNoSlot) return kNoSlot;
   SND_W(Emitter_position)[d] = Vec3{0, 0, 0};
   SND_W(Emitter_velocity)[d] = Vec3{0, 0, 0};
+  SND_W(Emitter_shapeKind)[d] = SND_EMITTER_SHAPE_POINT;
+  SND_W(Emitter_halfExtents)[d] = Vec3{};
+  SND_W(Emitter_zoneBus)[d] = SND_ID_NONE;
+  SND_W(Emitter_zoneAmount)[d] = 0;
+  SND_W(Emitter_zoneFade)[d] = 0;
   SND_W(Emitter_forward)[d] = Vec3{0, 0, 1};
   SND_W(Emitter_lastUpdateBlock)[d] = im.block;
   SND_W(Emitter_createdBlock)[d] = im.block;
@@ -356,9 +361,135 @@ void CreatePlayback(Impl& im, HandleRef h, HandleRef emitter, Id event, EventRef
     }
   }
   SND_W(Playback_request)[d] = req;
+  // D-145: the start clock known ahead (CLOCK_SAMPLE; DELAY_US resolved as UpdateTransport does).
+  im.ap.playbackStartClock[h.slot] = 0u;
+  if (req.startReservation != kNoSlot && w.kind == SND_WHEN_CLOCK_SAMPLE) im.ap.playbackStartClock[h.slot] = w.value;
+  if (req.startReservation != kNoSlot && w.kind == SND_WHEN_DELAY_US) {
+    im.ap.playbackStartClock[h.slot] =
+        im.clock + static_cast<ClockSample>(static_cast<double>(w.value) * im.cfg.sampleRate / 1e6 + 0.5);
+  }
   ResetChain(im, im.ap.playbackChain[h.slot], true);
   im.ap.playbackVolume[h.slot] = 1.0f;  // D-104: a new playback starts at its own 1 / 1
   im.ap.playbackPitch[h.slot] = 1.0f;
+  // D-146: snd_play_fade's fade-in (Play.flags bits 16..31, milliseconds).
+  im.ap.playbackFadeIn[h.slot] = static_cast<float>((flags & cmd::kPlayFadeInMsMask) >> cmd::kPlayFadeInMsShift) * 0.001f;
+}
+
+// D-145: one LIMIT_REACHED warning per block when action children do not fit.
+void ActionChildLimit(Impl& im, HandleRef parent) noexcept {
+  if (im.ap.actionChildWarned != 0u) return;
+  im.ap.actionChildWarned = 1u;
+  PostWarning(im, SND_ERR_LIMIT_REACHED, 0u, parent.Value());
+}
+
+HandleRef CreateActionChild(Impl& im, HandleRef parent, SlotIndex emitter, Id target, const snd_when& when) noexcept {
+  const HandleRef child = im.playbackSlots.Acquire();
+  if (child.generation == 0u) {
+    ActionChildLimit(im, parent);
+    return child;
+  }
+  const HandleRef em = emitter != kNoSlot ? HandleRef{emitter, im.tables.Emitter.rows.generation[emitter]} : HandleRef{};
+  im.oneShot[child.slot].store(1u, std::memory_order_relaxed);
+  CreatePlayback(im, child, em, target, ResolveEvent(im, target), when, nullptr, cmd::kPlayOneShot,
+                 DynamicSourceRef{SourceKind::Count, {0, 0, 0}, 0u});
+  return child;
+}
+
+// D-145: a play of a bank event that starts inside this block (immediate, or a CLOCK_SAMPLE /
+// DELAY_US start in this block) gets the actions of its start block here, in its start
+// block: Play actions create their child playbacks now (CLOCK_SAMPLE at start + time), and
+// the parameter / snapshot actions at its very first frame apply now (the parameter in the
+// play's own scope; the snapshot as a tentative weight that RunEventLogic cancels if the
+// play does not start, committed by the next ApplyCommands). RunEventLogic does the rest of
+// the block (StopEvent, later parameters and snapshots) once the play started, and cancels
+// the children (actionChildren) if it did not. Only for recorded plays (not for the children
+// of actions: a chain of actions cannot recurse within one block).
+void ApplyFirstBlockActions(Impl& im, HandleRef h, const EventRef& ref) noexcept {
+  schema::Tables& t = im.tables;
+  const BankRecord* br = RegisteredBank(im, ref.bankSlot);
+  const std::uint32_t d = base::rows::DenseOf(t.Playback.rows, h);
+  if (br == nullptr || d == kNoSlot || (ref.flags & (kEventRefDynamic | kEventRefMusic)) != 0u) return;
+  PlaybackRequest& req = SND_W(Playback_request)[d];
+  if ((req.flags & kRequestRejectReservationFull) != 0u) return;
+  const ClockSample blockEnd = im.clock + im.cfg.blockFrames;
+  ClockSample start = im.clock;
+  if (req.startReservation != kNoSlot) {
+    start = im.ap.playbackStartClock[h.slot];
+    if (start < im.clock || start >= blockEnd) return;  // not in this block (or not known)
+  }
+  const bk::BankView& v = *br->view;
+  if (ref.eventIndex >= v.Rows(bf::chunk::EVNT)) return;
+  const std::uint32_t tf = v.Column<bk::col::EVNT_trackFirst>()[ref.eventIndex];
+  const std::uint32_t tc = v.Column<bk::col::EVNT_trackCount>()[ref.eventIndex];
+  bool any = false;
+  for (std::uint32_t tr = tf; tr < tf + tc; ++tr) {
+    if (v.Column<bk::col::TRAK_actionFirst>()[tr] != bf::kNone && v.Column<bk::col::TRAK_actionCount>()[tr] != 0u) any = true;
+  }
+  if (!any) return;
+  req.flags |= kRequestActionsApplied;
+  const SlotIndex es = SND_W(Playback_emitterSlot)[d];
+  for (std::uint32_t tr = tf; tr < tf + tc; ++tr) {
+    const std::uint32_t af = v.Column<bk::col::TRAK_actionFirst>()[tr];
+    const std::uint32_t ac = v.Column<bk::col::TRAK_actionCount>()[tr];
+    if (af == bf::kNone) continue;
+    for (std::uint32_t a = af; a < af + ac; ++a) {
+      const std::uint64_t at = ActionFrame(im, v.Column<bk::col::ACTN_timeMs>()[a]);
+      const ClockSample clock = start + at;
+      if (clock >= blockEnd) continue;
+      const Id target = v.Column<bk::col::ACTN_target>()[a];
+      const float value = v.Column<bk::col::ACTN_value>()[a];
+      switch (static_cast<bf::ActionKind>(v.Column<bk::col::ACTN_action>()[a])) {
+        case bf::ActionKind::PlayEvent: {
+          if (im.ap.actionChildCount >= im.ap.actionChildCap) {
+            ActionChildLimit(im, h);
+            break;
+          }
+          snd_when when{};
+          if (clock > im.clock) {
+            when.kind = static_cast<std::uint8_t>(SND_WHEN_CLOCK_SAMPLE);
+            when.value = clock;
+          }
+          const HandleRef ch = CreateActionChild(im, h, es, target, when);
+          if (ch.generation == 0u) break;
+          im.ap.actionChildren[im.ap.actionChildCount++] = ApplyPriv::ActionChild{h, ch};
+          break;
+        }
+        case bf::ActionKind::SetParam:
+          if (clock == im.clock) SetParamValue(im, ParamScope::Playback, h, target, ParamKind::Continuous, value);
+          break;
+        case bf::ActionKind::ApplySnapshot: {
+          if (clock != im.clock) break;
+          const std::uint32_t slot = im.snapMap.Find(target);
+          if (slot == IdMap::kNotFound) break;
+          if (im.ap.tentativeCount >= im.ap.actionChildCap) {
+            ActionChildLimit(im, h);
+            break;
+          }
+          im.ap.tentative[im.ap.tentativeCount++] = ApplyPriv::TentativeSnapshot{
+              slot, SaneWeight(value), h, 0u, im.tables.Snapshot.rows.generation[slot], im.clock,
+              im.snapDefs[slot].actionFadeFrames};
+          break;
+        }
+        case bf::ActionKind::StopEvent:
+          break;  // RunEventLogic, once the play started (ActionsAtStart)
+      }
+    }
+  }
+}
+
+// D-145: the tentative snapshot weights of the last block whose play started become the
+// snapshots' requests (before this block's commands, which may change them again).
+void CommitTentativeSnapshots(Impl& im) noexcept {
+  schema::Tables& t = im.tables;
+  for (std::uint32_t i = 0; i < im.ap.tentativeCount; ++i) {
+    const ApplyPriv::TentativeSnapshot& ts = im.ap.tentative[i];
+    const std::uint32_t sd = base::rows::DenseOf(t.Snapshot.rows, ts.snapshot);
+    if (ts.cancelled == 0u && sd != kNoSlot && t.Snapshot.rows.generation[ts.snapshot] == ts.snapshotGeneration) {
+      auto& weight = SND_W(Snapshot_request)[sd].weight;
+      weight = SnapshotActionRamp(weight, ts.weight, ts.start, ts.duration);
+    }
+  }
+  im.ap.tentativeCount = 0;
 }
 
 PlaybackRequest* RequestOf(Impl& im, HandleRef h) noexcept {
@@ -506,8 +637,10 @@ void ApplyOne(Impl& im, const cmd::CommandHeader& h, const std::uint8_t* p) noex
       break;  // the name table lives on the game side (D-50)
     case CT::Play: {
       const auto c = Load<cmd::Play>(p);
-      CreatePlayback(im, c.playback, c.emitter, c.event, ResolveEvent(im, c.event), c.when, &c.position, c.flags,
+      const EventRef ref = ResolveEvent(im, c.event);
+      CreatePlayback(im, c.playback, c.emitter, c.event, ref, c.when, &c.position, c.flags,
                      DynamicSourceRef{SourceKind::Count, {0, 0, 0}, 0u});
+      ApplyFirstBlockActions(im, c.playback, ref);  // D-145
       break;
     }
     case CT::LiveAudition: {
@@ -657,6 +790,22 @@ void ApplyOne(Impl& im, const cmd::CommandHeader& h, const std::uint8_t* p) noex
     }
     case CT::SetParam: {
       const auto c = Load<cmd::SetParam>(p);
+      if (c.reserved[0] == cmd::kParamVariantShape || c.reserved[0] == cmd::kParamVariantZone) {
+        const auto d = base::rows::DenseOf(t.Emitter.rows, c.target);
+        if (c.scope != static_cast<std::uint8_t>(ParamScope::Emitter) || d == kNoSlot) break;
+        const float z = std::bit_cast<float>(c.reserved2);
+        if (!std::isfinite(z) || z < 0 || !std::isfinite(c.value) || c.value < 0) break;
+        if (c.reserved[0] == cmd::kParamVariantShape) {
+          const float y = std::bit_cast<float>(c.param);
+          if (!std::isfinite(y) || y < 0 || c.reserved[1] > SND_EMITTER_SHAPE_BOX) break;
+          SND_W(Emitter_shapeKind)[d] = c.reserved[1];
+          SND_W(Emitter_halfExtents)[d] = Vec3{c.value, y, z};
+        } else if (c.value <= 1) {
+          SND_W(Emitter_zoneAmount)[d] = c.value;
+          SND_W(Emitter_zoneFade)[d] = z;
+        }
+        break;
+      }
       if (c.reserved[0] == kParamVariantVoiceEffect) {  // stage 3 (D-132): voice effect parameter
         ApplyVoiceFxParam(im, c);
         break;
@@ -667,6 +816,11 @@ void ApplyOne(Impl& im, const cmd::CommandHeader& h, const std::uint8_t* p) noex
     }
     case CT::SetSwitch: {
       const auto c = Load<cmd::SetSwitch>(p);
+      if (c.reserved[0] == cmd::kSwitchVariantZone) {
+        const auto d = base::rows::DenseOf(t.Emitter.rows, c.target);
+        if (c.scope == static_cast<std::uint8_t>(ParamScope::Emitter) && d != kNoSlot) SND_W(Emitter_zoneBus)[d] = c.value;
+        break;
+      }
       if (c.reserved[0] == kSwitchVariantVoiceEffect) {  // stage 3 (D-132): voice effect kind of an Event
         ApplyVoiceFxSwitch(im, c);
         break;
@@ -706,6 +860,10 @@ void ApplyOne(Impl& im, const cmd::CommandHeader& h, const std::uint8_t* p) noex
       if (c.reserved == 1u) {
         im.snapDefs[slot].actionFadeFrames = FadeFrames(c.timeSeconds, im.cfg.sampleRate);
         break;
+      }
+      // This later command supersedes all earlier first-frame actions for this target.
+      for (std::uint32_t i = 0; i < im.ap.tentativeCount; ++i) {
+        if (im.ap.tentative[i].snapshot == slot) im.ap.tentative[i].cancelled = 1u;
       }
       TimedRamp& r = SND_W(Snapshot_request)[d].weight;
       const float from = RampValue(r, im.clock);
@@ -1011,15 +1169,15 @@ void ApplyDeferred(Impl& im) noexcept {
         break;
       }
       case DeferredKind::SetParam:
-        SetParamValue(im, ParamScope::Global, HandleRef{}, df.id, ParamKind::Continuous, df.value);
+        // D-145: the scope of the playback that owns the action (ACTN has no scope column).
+        SetParamValue(im, ParamScope::Playback, df.handle, df.id, ParamKind::Continuous, df.value);
         break;
       case DeferredKind::ApplySnapshot: {
         const std::uint32_t slot = im.snapMap.Find(df.id);
         const std::uint32_t d = slot == IdMap::kNotFound ? kNoSlot : base::rows::DenseOf(t.Snapshot.rows, slot);
         if (d != kNoSlot) {
           TimedRamp& weight = SND_W(Snapshot_request)[d].weight;
-          weight = TimedRamp{RampValue(weight, im.clock), SaneWeight(df.value), im.clock,
-                             im.snapDefs[slot].actionFadeFrames, 0u};
+          weight = SnapshotActionRamp(weight, SaneWeight(df.value), im.clock, im.snapDefs[slot].actionFadeFrames);
         }
         break;
       }
@@ -1030,9 +1188,62 @@ void ApplyDeferred(Impl& im) noexcept {
 
 }  // namespace
 
+// D-145: ApplyCommands owns the playback rows and parameter/snapshot requests. Apply
+// actions here after UpdateTransport so stops fired in this block participate too.
+void ApplyDueActions(Impl& im) noexcept {
+  schema::Tables& t = im.tables;
+  const auto blockEnd = im.clock + im.cfg.blockFrames;
+  for (std::uint32_t i = 0; i < im.ev.pendingCount; ++i) {
+    ActionPending& e = im.ev.pending[i];
+    const bool value = e.kind == ActionPendingKind::SetParam || e.kind == ActionPendingKind::Snapshot;
+    const auto status = ActionParentStatus(im, e.parent, value ? e.due : e.clock);
+    if (status == ActionParentState::Stopped) {
+      e.kind = ActionPendingKind::Done;
+      continue;
+    }
+    if (status == ActionParentState::Paused) {
+      e.clock += im.cfg.blockFrames;
+      e.due += im.cfg.blockFrames;
+      continue;
+    }
+    if (e.kind == ActionPendingKind::Play && e.clock < blockEnd) {
+      const auto d = base::rows::DenseOf(t.Playback.rows, e.parent);
+      // RunEventLogic starts this row after its parent has been admitted at its clock.
+      e.child = CreateActionChild(im, e.parent, SND_W(Playback_emitterSlot)[d], e.target, snd_when{});
+      if (e.child.generation == 0u) e.kind = ActionPendingKind::Done;
+    } else if (value && e.due <= im.clock) {
+      if (e.kind == ActionPendingKind::SetParam) {
+        SetParamValue(im, ParamScope::Playback, e.parent, e.target, ParamKind::Continuous, e.value);
+      } else {
+        const auto slot = im.snapMap.Find(e.target);
+        if (slot != IdMap::kNotFound) {
+          const auto sd = base::rows::DenseOf(t.Snapshot.rows, slot);
+          const auto weight = SaneWeight(e.value);
+          if ((im.ev.pb[e.parent.slot].flags & kPbStarted) == 0u) {
+            if (im.ap.tentativeCount < im.ap.actionChildCap) {
+              im.ap.tentative[im.ap.tentativeCount++] = ApplyPriv::TentativeSnapshot{
+                  slot, weight, e.parent, 0u, t.Snapshot.rows.generation[slot], im.clock,
+                  im.snapDefs[slot].actionFadeFrames};
+            } else {
+              ActionChildLimit(im, e.parent);
+            }
+          } else if (sd != kNoSlot) {
+            auto& request = SND_W(Snapshot_request)[sd].weight;
+            request = SnapshotActionRamp(request, weight, im.clock, im.snapDefs[slot].actionFadeFrames);
+          }
+        }
+      }
+      e.kind = ActionPendingKind::Done;
+    }
+  }
+}
+
 void ApplyCommands(Impl& im) noexcept {
   im.releasedEmitterCount = 0;
   im.releasedUserBufferCount = 0;
+  im.ap.actionChildCount = 0;  // D-145: per block
+  im.ap.actionChildWarned = 0u;
+  CommitTentativeSnapshots(im);
   // Music inputs are reset after RunMusicLogic consumed them (sys_event.cpp RunMusic).
   ReleaseOwnedRows(im);
   ApplyDeferred(im);

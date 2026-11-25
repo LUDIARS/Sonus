@@ -578,3 +578,27 @@ snd_result snd_set_snapshot_action_transition(snd_system* sys, snd_id snapshot, 
 }
 
 }  // extern "C"
+
+extern "C" snd_result snd_set_emitter_shape(snd_system* sys, snd_emitter_handle emitter, snd_emitter_shape kind,
+                                            const snd_vec3* half_extents) {
+  return sys ? sys->core->SetEmitterShape(emitter, kind, half_extents) : SND_ERR_INVALID_ARGUMENT;
+}
+extern "C" snd_result snd_set_reverb_zone(snd_system* sys, snd_emitter_handle emitter, snd_id bus, float amount,
+                                          float fade_distance) {
+  return sys ? sys->core->SetReverbZone(emitter, bus, amount, fade_distance) : SND_ERR_INVALID_ARGUMENT;
+}
+
+// ---------------------------------------------------------------------------------------
+// Stage 3 additions (session B, group 4: D-146, D-148)
+// ---------------------------------------------------------------------------------------
+extern "C" {
+snd_playback_handle snd_play_fade(snd_system* sys, snd_id event, snd_emitter_handle emitter, const snd_when* when,
+                                  float fade_in_seconds) {
+  return sys ? sys->core->PlayFade(event, emitter, when, fade_in_seconds) : snd_playback_handle{0};
+}
+snd_result snd_get_spectrum(const snd_system* sys, snd_id bus, uint32_t channel, float* out_magnitudes,
+                            uint32_t bin_count) {
+  if (sys == nullptr || out_magnitudes == nullptr) return SND_ERR_INVALID_ARGUMENT;
+  return sys->core->GetSpectrum(bus, channel, out_magnitudes, bin_count);
+}
+}  // extern "C"

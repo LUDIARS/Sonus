@@ -73,6 +73,7 @@ set_tests_properties(indep_g2_impl_test PROPERTIES TIMEOUT 600)
 # Re-check 1 of group 2 (implementation 192bace).
 snd_add_test(indep_g2_recheck_test SOURCES indep_g2_recheck_test.cpp LINK ${_core_test_link})
 set_tests_properties(indep_g2_recheck_test PROPERTIES TIMEOUT 600)
+snd_add_test(indep_g2_plugin_budget_test SOURCES indep_g2_plugin_budget_test.cpp LINK ${_core_test_link})
 
 snd_add_test(indep_g3_mix_test SOURCES indep_g3_mix_test.cpp indep_g3_curve_test.cpp LINK ${_core_test_link})
 snd_add_test(indep_g3_control_test SOURCES indep_g3_control_test.cpp LINK ${_core_test_link})
@@ -85,3 +86,36 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/indep_g1_scene.hpp" AND
   snd_add_test(indep_b_cross_test SOURCES indep_b_cross_test.cpp indep_g3_spatial_curves_test.cpp LINK ${_core_test_link})
   set_tests_properties(indep_b_cross_test PROPERTIES TIMEOUT 600)
 endif()
+
+# Stage 3, session B group 4 (voice management, sequences, notifications, analysis).
+snd_add_test(core_g4_test SOURCES core_voice2_test.cpp core_sequence2_test.cpp core_notify2_test.cpp core_analysis_test.cpp
+  core_g4_fix1_test.cpp
+  LINK ${_core_test_link})
+# Determinism (serial / parallel), no allocation, RT safety of the new paths. Repeat under
+# TSan / Release: ctest --repeat until-fail:20 -R core_g4_system_test
+snd_add_test(core_g4_system_test SOURCES core_g4_system_test.cpp LINK ${_core_test_link})
+set_tests_properties(core_g4_system_test PROPERTIES TIMEOUT 300)
+# Load: 4x the limit over steal modes; 128 voices with loudness and spectrum (< 30 % in Release).
+snd_add_test(core_g4_load_test SOURCES core_g4_load_test.cpp LINK ${_core_test_link})
+set_tests_properties(core_g4_load_test PROPERTIES TIMEOUT 600)
+
+# Stage 3 group 4, independent tester (own fixture indep_g4_fixture.hpp). Defect_* tests fail
+# on purpose until the implementation is fixed.
+snd_add_test(indep_g4_seq_test SOURCES indep_g4_seq_test.cpp LINK ${_core_test_link})
+set_tests_properties(indep_g4_seq_test PROPERTIES TIMEOUT 600)
+snd_add_test(indep_g4_voice_test SOURCES indep_g4_voice_test.cpp LINK ${_core_test_link})
+set_tests_properties(indep_g4_voice_test PROPERTIES TIMEOUT 600)
+snd_add_test(indep_g4_analysis_test SOURCES indep_g4_analysis_test.cpp LINK ${_core_test_link})
+set_tests_properties(indep_g4_analysis_test PROPERTIES TIMEOUT 600)
+snd_add_test(indep_g4_system_test SOURCES indep_g4_system_test.cpp LINK ${_core_test_link})
+set_tests_properties(indep_g4_system_test PROPERTIES TIMEOUT 600)
+snd_add_test(indep_g4_recheck_test SOURCES indep_g4_recheck_test.cpp LINK ${_core_test_link})
+snd_add_test(indep_g4_boundaries_test SOURCES indep_g4_boundaries_test.cpp LINK ${_core_test_link} sonus_music)
+
+snd_add_test(indep_g1_spatial_test SOURCES indep_g1_spatial_test.cpp LINK ${_core_test_link})
+snd_add_test(indep_g1_routing_test SOURCES indep_g1_routing_test.cpp LINK ${_core_test_link})
+snd_add_test(indep_g1_stop_test SOURCES indep_g1_stop_test.cpp LINK ${_core_test_link})
+
+snd_add_test(core_g1_scene_test SOURCES core_g1_scene_test.cpp LINK ${_core_test_link})
+
+target_sources(indep_g1_routing_test PRIVATE indep_g1_wire_test.cpp)

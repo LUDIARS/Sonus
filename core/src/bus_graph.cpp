@@ -70,8 +70,8 @@ void MixBuses(Impl& im) noexcept {
     if (rd.parallel != 0u && !im.rt.ChunkDone(c)) continue;
     const ChunkInfo& ci = set.chunks[c];
     for (std::uint32_t s = 0; s < ci.segCount; ++s) {
-      const ChunkSeg& seg = set.segs[std::size_t{c} * im.cfg.voicesPerChunk + s];
-      const float* src = set.accum + (std::size_t{c} * im.cfg.voicesPerChunk + s) * kMaxChannels * frames;
+      const ChunkSeg& seg = set.segs[std::size_t{c} * im.cfg.segmentsPerChunk + s];
+      const float* src = set.accum + (std::size_t{c} * im.cfg.segmentsPerChunk + s) * kMaxChannels * frames;
       float* dst = seg.bus == kNoSlot || !base::rows::IsLive(br, seg.bus) ? rd.outBuf : BusBuffer(im, seg.bus);
       const std::uint32_t dstCh = seg.bus == kNoSlot || !base::rows::IsLive(br, seg.bus) ? im.cfg.outChannels
                                                                                          : im.busDefs[seg.bus].channels;
@@ -93,6 +93,7 @@ void MixBuses(Impl& im) noexcept {
   const std::uint32_t* bypass = SND_R(Bus_effectBypass);
   float* busGain = SND_W(Bus_gain);
   BusPeak* busPeak = SND_W(Bus_peak);
+  AnalysisMaintain(im);  // stage 3 (group 4): meters of buses that are gone
   snd_render_context rc{};
   rc.clock_sample = im.clock;
   rc.sample_rate = im.cfg.sampleRate;
@@ -192,6 +193,7 @@ void MixBuses(Impl& im) noexcept {
     busPeak[d] = pk;
     // D-131: keep this output for the sidechains that read it next block.
     if (anySidechain) StoreSidechainSources(im, s, oi, buf, ch);
+    AnalysisMixBus(im, s, d, chans, ch);  // stage 3 (group 4), D-147 / D-148: kBusMeter buses
     // Into the parent, or the output for root buses.
     const SlotIndex p = parent[d];
     if (p != kNoSlot && base::rows::IsLive(br, p)) {
@@ -200,10 +202,8 @@ void MixBuses(Impl& im) noexcept {
       Downmix(buf, ch, rd.outBuf, im.cfg.outChannels, frames, 1.0f);
     }
   }
-  // Master loudness (4.6, dsp meter).
-  float* outCh[kMaxChannels];
-  for (std::uint32_t c = 0; c < im.cfg.outChannels; ++c) outCh[c] = rd.outBuf + std::size_t{c} * frames;
-  dsp::LoudnessMeterProcess(*rd.loudness, outCh, frames);
+  // Output loudness and spectrum ring (4.6; stage 3 group 4: meter 0, analysis.cpp).
+  AnalysisMixOutput(im);
 }
 
 }  // namespace snd::core

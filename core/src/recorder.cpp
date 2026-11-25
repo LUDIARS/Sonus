@@ -438,6 +438,28 @@ snd_playback_handle System::Play(Id event, snd_emitter_handle emitter, const snd
   return snd_playback_handle{h.Value()};
 }
 
+// Stage 3 (group 4), D-146: Play with a fade-in, in Play.flags bits 16..31 (milliseconds,
+// rounded, 1..65535; 0 = none). NaN, infinite or negative: invalid handle.
+snd_playback_handle System::PlayFade(Id event, snd_emitter_handle emitter, const snd_when* when,
+                                     float fadeInSeconds) noexcept {
+  if (!(fadeInSeconds >= 0.0f) || !(fadeInSeconds < 1.0e9f)) return snd_playback_handle{0};
+  SND_PRODUCER_OR(snd_playback_handle{0})
+  if (!ValidWhen(when)) return snd_playback_handle{0};
+  const HandleRef h = im.playbackSlots.Acquire();
+  if (h.generation == 0u) return snd_playback_handle{0};
+  cmd::Play c{};
+  c.playback = h;
+  c.emitter = Ref(emitter.value);
+  c.event = event;
+  float ms = fadeInSeconds * 1000.0f + 0.5f;
+  ms = ms > 65535.0f ? 65535.0f : ms;
+  c.flags = static_cast<std::uint32_t>(ms) << cmd::kPlayFadeInMsShift;
+  c.when = WhenOf(when);
+  c.priorityHint = PriorityHint(im, event);
+  RecordPlay(im, *pr, c, event, false);
+  return snd_playback_handle{h.Value()};
+}
+
 snd_result System::PlayOneShot(Id event, snd_emitter_handle emitter, const snd_when* when) noexcept {
   SND_PRODUCER_OR(SND_ERR_THREAD_NOT_REGISTERED)
   if (!ValidWhen(when)) return SND_ERR_INVALID_ARGUMENT;
@@ -924,6 +946,53 @@ snd_result System::SetPlaybackEffectParam(snd_playback_handle playback, std::uin
   c.reserved[2] = static_cast<std::uint8_t>(paramIndex);
   c.target = h;
   c.value = value;
+  return ResultOf(RecordVariant(im, *pr, c));
+}
+
+snd_result System::SetEmitterShape(snd_emitter_handle emitter, snd_emitter_shape kind, const snd_vec3* extent) noexcept {
+  SND_PRODUCER_OR(SND_ERR_THREAD_NOT_REGISTERED)
+  const HandleRef h = Ref(emitter.value);
+  if (!im.emitterSlots.IsCurrent(h)) return SND_ERR_INVALID_HANDLE;
+  if (kind > SND_EMITTER_SHAPE_BOX || (kind != SND_EMITTER_SHAPE_POINT && !extent)) return SND_ERR_INVALID_ARGUMENT;
+  const Vec3 e = extent ? *extent : Vec3{};
+  if (!std::isfinite(e.x) || !std::isfinite(e.y) || !std::isfinite(e.z) || e.x < 0 || e.y < 0 || e.z < 0)
+    return SND_ERR_INVALID_ARGUMENT;
+  cmd::SetParam c{};
+  c.scope = static_cast<std::uint8_t>(ParamScope::Emitter);
+  c.target = h;
+  c.reserved[0] = cmd::kParamVariantShape;
+  c.reserved[1] = static_cast<std::uint8_t>(kind);
+  c.param = std::bit_cast<Id>(e.y);
+  c.value = e.x;
+  c.reserved2 = std::bit_cast<std::uint32_t>(e.z);
+  return ResultOf(RecordVariant(im, *pr, c));
+}
+
+snd_result System::SetReverbZone(snd_emitter_handle emitter, Id bus, float amount, float fadeDistance) noexcept {
+  SND_PRODUCER_OR(SND_ERR_THREAD_NOT_REGISTERED)
+  const HandleRef h = Ref(emitter.value);
+  if (!im.emitterSlots.IsCurrent(h)) return SND_ERR_INVALID_HANDLE;
+  if (!std::isfinite(amount) || amount < 0 || amount > 1 || !std::isfinite(fadeDistance) || fadeDistance < 0)
+    return SND_ERR_INVALID_ARGUMENT;
+  const unsigned bytes = cmd::CommandTraits<cmd::SetSwitch>::kSize +
+                         (bus == SND_ID_NONE ? 0u : cmd::CommandTraits<cmd::SetParam>::kSize);
+  if (!ArenaFits(im, *pr, bytes)) {
+    im.reserveOverflows.fetch_add(1u, std::memory_order_relaxed);
+    return SND_ERR_COMMAND_BUFFER_FULL;
+  }
+  cmd::SetSwitch sw{};
+  sw.scope = static_cast<std::uint8_t>(ParamScope::Emitter);
+  sw.target = h;
+  sw.reserved[0] = cmd::kSwitchVariantZone;
+  sw.value = bus;
+  if (RecordVariant(im, *pr, sw) != Rec::Ok) return SND_ERR_COMMAND_BUFFER_FULL;
+  if (bus == SND_ID_NONE) return SND_OK;
+  cmd::SetParam c{};
+  c.scope = sw.scope;
+  c.target = h;
+  c.reserved[0] = cmd::kParamVariantZone;
+  c.value = amount;
+  c.reserved2 = std::bit_cast<std::uint32_t>(fadeDistance);
   return ResultOf(RecordVariant(im, *pr, c));
 }
 

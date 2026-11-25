@@ -157,7 +157,7 @@ std::uint32_t Acquire(Impl& im, SlotIndex v, std::uint32_t d, SlotIndex r, std::
   // Size every stage first: all of the chain fits, or the voice plays dry (D-133).
   snd_effect_desc descs[kMaxVoiceEffectChain];
   std::uint32_t bytes[kMaxVoiceEffectChain] = {};
-  std::uint32_t used = 0;
+  std::uint64_t remaining = x.slotBytes;
   sl.stages = 0;
   for (std::uint32_t k = 0; k < x.chain; ++k) {
     if (kinds[k] == 0u) continue;
@@ -174,17 +174,18 @@ std::uint32_t Acquire(Impl& im, SlotIndex v, std::uint32_t d, SlotIndex r, std::
     dd.param_count = count;
     dd.initial_params = sl.base[n];
     dd.sample_rate = im.cfg.sampleRate;
-    std::uint32_t b = plugin != nullptr ? plugin->state_bytes(plugin->user, &dd) : dsp::EffectStateBytes(dd, im.cfg.sampleRate);
-    if (b == 0u) continue;  // unknown kind: the stage is skipped
-    b = (b + 63u) & ~63u;
-    if (std::uint64_t{used} + b > x.slotBytes) {  // D-133: the chain does not fit the slot
+    const std::uint64_t requested =
+        plugin != nullptr ? plugin->state_bytes(plugin->user, &dd) : dsp::EffectStateBytes(dd, im.cfg.sampleRate);
+    if (requested == 0u) continue;  // unknown kind: the stage is skipped
+    const std::uint64_t aligned = base::AlignUp64(requested, kBufferAlignment);
+    if (aligned > remaining) {  // D-133: the chain does not fit the slot
       ++x.dry;
       ++x.dryTooLarge;
       PostWarning(im, SND_ERR_LIMIT_REACHED, SND_END_DETAIL_VOICE_EFFECT_SLOTS, pbHandle);
       return 0u;
     }
-    bytes[n] = b;
-    used += b;
+    bytes[n] = static_cast<std::uint32_t>(aligned);
+    remaining -= aligned;
     sl.kind[n] = sc.kind;
     sl.plugin[n] = plugin;
     sl.count[n] = count;
