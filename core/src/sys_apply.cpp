@@ -2,9 +2,11 @@
 // registration order (normal region, reserve region, fallback section of each
 // arena, commands.hpp), creates / destroys rows, writes requests, and handles
 // bank registration and unloading (10.3).
+#include <algorithm>
 #include <bit>
 #include <cmath>
 #include <cstring>
+#include <limits>
 
 #include "access.hpp"
 #include "core_impl.hpp"
@@ -31,7 +33,10 @@ float SanePitch(float p) noexcept {
 float SaneWeight(float w) noexcept { return !(w >= 0.0f) ? 0.0f : (w > 1.0f ? 1.0f : w); }
 std::uint32_t FadeFrames(float seconds, std::uint32_t rate) noexcept {
   const float s = SaneFade(seconds);
-  return s > 0.0f ? static_cast<std::uint32_t>(static_cast<double>(s) * rate) : 0u;
+  if (s <= 0.0f) return 0u;
+  const double frames = static_cast<double>(s) * rate;
+  constexpr double maxFrames = std::numeric_limits<std::uint32_t>::max();
+  return static_cast<std::uint32_t>(std::min(frames, maxFrames));
 }
 
 bool IsMusicalWhen(std::uint8_t kind) noexcept { return kind >= SND_WHEN_NEXT_BEAT && kind <= SND_WHEN_SEGMENT_END; }
@@ -204,6 +209,10 @@ void SetParamValue(Impl& im, ParamScope scope, HandleRef target, Id id, ParamKin
     }
     return;
   }
+  const std::uint32_t scopeIndex = static_cast<std::uint32_t>(scope);
+  const auto definition = im.paramDefMap.Find(id);
+  if (scopeIndex > 2u || (definition != IdMap::kNotFound &&
+      (im.paramDefs[definition].scopeMask & (1u << scopeIndex)) == 0u)) return;
   const float rate = kind == ParamKind::Switch ? 0.0f : RampRateOf(im, id);
   if (kind == ParamKind::Continuous) value = ClampParam(im, id, value);
   switch (scope) {
@@ -456,7 +465,9 @@ void ApplyFirstBlockActions(Impl& im, HandleRef h, const EventRef& ref) noexcept
             ActionChildLimit(im, h);
             break;
           }
-          im.ap.tentative[im.ap.tentativeCount++] = ApplyPriv::TentativeSnapshot{slot, SaneWeight(value), h, 0u, 0u};
+          im.ap.tentative[im.ap.tentativeCount++] = ApplyPriv::TentativeSnapshot{
+              slot, SaneWeight(value), h, 0u, im.tables.Snapshot.rows.generation[slot], im.clock,
+              im.snapDefs[slot].actionFadeFrames};
           break;
         }
         case bf::ActionKind::StopEvent:
@@ -473,8 +484,9 @@ void CommitTentativeSnapshots(Impl& im) noexcept {
   for (std::uint32_t i = 0; i < im.ap.tentativeCount; ++i) {
     const ApplyPriv::TentativeSnapshot& ts = im.ap.tentative[i];
     const std::uint32_t sd = base::rows::DenseOf(t.Snapshot.rows, ts.snapshot);
-    if (ts.cancelled == 0u && sd != kNoSlot) {
-      SND_W(Snapshot_request)[sd].weight = TimedRamp{ts.weight, ts.weight, im.clock, 0u, 0u};
+    if (ts.cancelled == 0u && sd != kNoSlot && t.Snapshot.rows.generation[ts.snapshot] == ts.snapshotGeneration) {
+      auto& weight = SND_W(Snapshot_request)[sd].weight;
+      weight = SnapshotActionRamp(weight, ts.weight, ts.start, ts.duration);
     }
   }
   im.ap.tentativeCount = 0;
@@ -838,11 +850,20 @@ void ApplyOne(Impl& im, const cmd::CommandHeader& h, const std::uint8_t* p) noex
     }
     case CT::ApplySnapshot: {
       const auto c = Load<cmd::ApplySnapshot>(p);
+      if (c.reserved > 1u) break;
       const std::uint32_t slot = im.snapMap.Find(c.snapshot);
       const std::uint32_t d = slot == IdMap::kNotFound ? kNoSlot : base::rows::DenseOf(t.Snapshot.rows, slot);
       if (d == kNoSlot) {
         PostWarning(im, SND_ERR_NOT_FOUND, 0u, c.snapshot);
         break;
+      }
+      if (c.reserved == 1u) {
+        im.snapDefs[slot].actionFadeFrames = FadeFrames(c.timeSeconds, im.cfg.sampleRate);
+        break;
+      }
+      // This later command supersedes all earlier first-frame actions for this target.
+      for (std::uint32_t i = 0; i < im.ap.tentativeCount; ++i) {
+        if (im.ap.tentative[i].snapshot == slot) im.ap.tentative[i].cancelled = 1u;
       }
       TimedRamp& r = SND_W(Snapshot_request)[d].weight;
       const float from = RampValue(r, im.clock);
@@ -853,7 +874,11 @@ void ApplyOne(Impl& im, const cmd::CommandHeader& h, const std::uint8_t* p) noex
     case CT::PauseCategory:
     case CT::MuteCategory: {
       Id id = 0;
-      if (static_cast<CT>(h.type) == CT::SetCategoryVolume) id = Load<cmd::SetCategoryVolume>(p).category;
+      if (static_cast<CT>(h.type) == CT::SetCategoryVolume) {
+        const auto c = Load<cmd::SetCategoryVolume>(p);
+        if (c.reserved > 1u) break;
+        id = c.category;
+      }
       if (static_cast<CT>(h.type) == CT::PauseCategory) id = Load<cmd::PauseCategory>(p).category;
       if (static_cast<CT>(h.type) == CT::MuteCategory) id = Load<cmd::MuteCategory>(p).category;
       const std::uint32_t slot = id == 0u ? im.globalCategory : im.catMap.Find(id);
@@ -865,6 +890,8 @@ void ApplyOne(Impl& im, const cmd::CommandHeader& h, const std::uint8_t* p) noex
       CategoryRequest& r = SND_W(Category_request)[d];
       if (static_cast<CT>(h.type) == CT::SetCategoryVolume) {
         const auto c = Load<cmd::SetCategoryVolume>(p);
+        if (c.reserved == 1u) im.catDefs[slot].solo = c.volume != 0.0f;
+        if (c.reserved != 0u) break;
         r.volume = TimedRamp{RampValue(r.volume, im.clock), SaneVolume(c.volume), im.clock,
                              FadeFrames(c.fadeSeconds, im.cfg.sampleRate), 0u};
       } else if (static_cast<CT>(h.type) == CT::PauseCategory) {
@@ -1146,10 +1173,12 @@ void ApplyDeferred(Impl& im) noexcept {
         SetParamValue(im, ParamScope::Playback, df.handle, df.id, ParamKind::Continuous, df.value);
         break;
       case DeferredKind::ApplySnapshot: {
-        // ACTN has no time column for the snapshot: the weight applies at once.
         const std::uint32_t slot = im.snapMap.Find(df.id);
         const std::uint32_t d = slot == IdMap::kNotFound ? kNoSlot : base::rows::DenseOf(t.Snapshot.rows, slot);
-        if (d != kNoSlot) SND_W(Snapshot_request)[d].weight = TimedRamp{SaneWeight(df.value), SaneWeight(df.value), im.clock, 0u, 0u};
+        if (d != kNoSlot) {
+          TimedRamp& weight = SND_W(Snapshot_request)[d].weight;
+          weight = SnapshotActionRamp(weight, SaneWeight(df.value), im.clock, im.snapDefs[slot].actionFadeFrames);
+        }
         break;
       }
     }
@@ -1192,12 +1221,15 @@ void ApplyDueActions(Impl& im) noexcept {
           const auto weight = SaneWeight(e.value);
           if ((im.ev.pb[e.parent.slot].flags & kPbStarted) == 0u) {
             if (im.ap.tentativeCount < im.ap.actionChildCap) {
-              im.ap.tentative[im.ap.tentativeCount++] = ApplyPriv::TentativeSnapshot{slot, weight, e.parent, 0u, 0u};
+              im.ap.tentative[im.ap.tentativeCount++] = ApplyPriv::TentativeSnapshot{
+                  slot, weight, e.parent, 0u, t.Snapshot.rows.generation[slot], im.clock,
+                  im.snapDefs[slot].actionFadeFrames};
             } else {
               ActionChildLimit(im, e.parent);
             }
           } else if (sd != kNoSlot) {
-            SND_W(Snapshot_request)[sd].weight = TimedRamp{weight, weight, im.clock, 0u, 0u};
+            auto& request = SND_W(Snapshot_request)[sd].weight;
+            request = SnapshotActionRamp(request, weight, im.clock, im.snapDefs[slot].actionFadeFrames);
           }
         }
       }

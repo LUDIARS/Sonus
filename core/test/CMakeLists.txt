@@ -75,6 +75,18 @@ snd_add_test(indep_g2_recheck_test SOURCES indep_g2_recheck_test.cpp LINK ${_cor
 set_tests_properties(indep_g2_recheck_test PROPERTIES TIMEOUT 600)
 snd_add_test(indep_g2_plugin_budget_test SOURCES indep_g2_plugin_budget_test.cpp LINK ${_core_test_link})
 
+snd_add_test(indep_g3_mix_test SOURCES indep_g3_mix_test.cpp indep_g3_curve_test.cpp LINK ${_core_test_link})
+snd_add_test(indep_g3_control_test SOURCES indep_g3_control_test.cpp LINK ${_core_test_link})
+snd_add_test(core_g3_mix_test SOURCES core_g3_mix_test.cpp LINK ${_core_test_link})
+
+# The stage-wide script uses area-source, voice-FX, snapshot and spectrum
+# interfaces together. Group 3 in isolation has only its own API plus group 2.
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/indep_g1_scene.hpp" AND
+   EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/indep_g4_fixture.hpp")
+  snd_add_test(indep_b_cross_test SOURCES indep_b_cross_test.cpp indep_g3_spatial_curves_test.cpp LINK ${_core_test_link})
+  set_tests_properties(indep_b_cross_test PROPERTIES TIMEOUT 600)
+endif()
+
 # Stage 3, session B group 4 (voice management, sequences, notifications, analysis).
 snd_add_test(core_g4_test SOURCES core_voice2_test.cpp core_sequence2_test.cpp core_notify2_test.cpp core_analysis_test.cpp
   core_g4_fix1_test.cpp

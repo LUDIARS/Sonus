@@ -631,6 +631,18 @@ snd_result System::SetBusVolume(Id bus, float volume, float fadeSeconds) noexcep
   if (!std::isfinite(volume) || volume < 0.0f || !std::isfinite(fadeSeconds)) return SND_ERR_INVALID_ARGUMENT;
   return ResultOf(Record(im, *pr, cmd::SetBusVolume{bus, volume, fadeSeconds < 0 ? 0 : fadeSeconds, 0u}));
 }
+void System::SetFocusLost(bool lost) noexcept {
+  impl_->focusLost.store(lost, std::memory_order_relaxed);
+}
+snd_result System::SetCategorySolo(Id category, bool solo) noexcept {
+  SND_PRODUCER_OR(SND_ERR_THREAD_NOT_REGISTERED)
+  return ResultOf(Record(im, *pr, cmd::SetCategoryVolume{category, solo ? 1.0f : 0.0f, 0.0f, 1u}));
+}
+snd_result System::SetSnapshotActionTransition(Id snapshot, float seconds) noexcept {
+  SND_PRODUCER_OR(SND_ERR_THREAD_NOT_REGISTERED)
+  if (!std::isfinite(seconds) || seconds < 0.0f) return SND_ERR_INVALID_ARGUMENT;
+  return ResultOf(Record(im, *pr, cmd::ApplySnapshot{snapshot, 0.0f, seconds, 1u}));
+}
 snd_result System::ApplySnapshot(Id snapshot, float weight, float timeSeconds) noexcept {
   SND_PRODUCER_OR(SND_ERR_THREAD_NOT_REGISTERED)
   if (!std::isfinite(weight) || !std::isfinite(timeSeconds)) return SND_ERR_INVALID_ARGUMENT;
