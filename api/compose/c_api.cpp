@@ -572,6 +572,15 @@ snd_result snd_set_playback_effect_param(snd_system* sys, snd_playback_handle pl
 
 }  // extern "C"
 
+extern "C" snd_result snd_set_emitter_shape(snd_system* sys, snd_emitter_handle emitter, snd_emitter_shape kind,
+                                            const snd_vec3* half_extents) {
+  return sys ? sys->core->SetEmitterShape(emitter, kind, half_extents) : SND_ERR_INVALID_ARGUMENT;
+}
+extern "C" snd_result snd_set_reverb_zone(snd_system* sys, snd_emitter_handle emitter, snd_id bus, float amount,
+                                          float fade_distance) {
+  return sys ? sys->core->SetReverbZone(emitter, bus, amount, fade_distance) : SND_ERR_INVALID_ARGUMENT;
+}
+
 // ---------------------------------------------------------------------------------------
 // Stage 3 additions (session B, group 4: D-146, D-148)
 // ---------------------------------------------------------------------------------------
