@@ -237,3 +237,14 @@ foreach(_r EveryKeyWhileTypingIsTheEntrys EscClosesTheEntryAndTheListAndIsAlways
   add_test(NAME tool_indep_s7_ui_recheck_${_r} COMMAND tool_indep_s7_ui_recheck_test --filter ${_r})
   set_tests_properties(tool_indep_s7_ui_recheck_${_r} PROPERTIES TIMEOUT 3600)
 endforeach()
+# Second re-check after the second return (indep_s7_ui_properties.md M).
+_snd_tool_test(indep_s7_ui_recheck2_test "${_tool_ui_screen_link}")
+set_tests_properties(tool_indep_s7_ui_recheck2_test PROPERTIES DISABLED TRUE)  # run per test below
+foreach(_r AbortGroupRestoresEverything RandomSequencesWithAbortsKeepTheHistory EscOnEveryDragLeavesTheHistoryAsBefore
+        EscOnFaderAndKnobDragsLeavesTheLiveHistoryAsBefore IntegerFieldsRefuseBeforeConverting
+        Defect_BodyButtonsOutsideTheWindowAtSmallSizes WriteBackIsMatchedByObject NoNonFiniteTextAfterExtremeValues
+        OwnEditsKeepThePositionSelection HostStructuralEditDropsThePositionSelection WriteBackDropsThePositionSelection
+        Defect_HostValueEditKeepsThePositionSelection Defect_HeaderAndFooterButtonsOutsideSmallWindows)
+  add_test(NAME tool_indep_s7_ui_recheck2_${_r} COMMAND tool_indep_s7_ui_recheck2_test --filter ${_r})
+  set_tests_properties(tool_indep_s7_ui_recheck2_${_r} PROPERTIES TIMEOUT 3600)
+endforeach()
