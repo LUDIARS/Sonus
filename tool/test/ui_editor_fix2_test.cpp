@@ -239,23 +239,32 @@ SND_TEST(ToolUiFix2, SpatialValuesStayFinite) {
   SND_CHECK_EQ(ui::FiniteText("x inf y -nan z"), std::string("x - y - z"));
 }
 
-// Decision 6: a change that does not come from the screens drops the selections by position when
-// the arrays they point into change; write back drops them too.
-SND_TEST(ToolUiFix2, HostChangesDropSelectionsWhenTheArraysChange) {
+// Decision 6 (third round): any change that does not come from the screens drops the selections by
+// position, a value only too (judged by the revision); write back drops them too.
+SND_TEST(ToolUiFix2, HostChangesDropSelections) {
   Editor t(ui::Screen::Event);
   EventEditor ed(t.doc, kShot);
   SND_REQUIRE(ed.AddAssetClip(0, doctest::G(7), 500.0));
   t.Frame();
   SND_REQUIRE(t.Click("ev.t0.c1"));
   SND_CHECK_EQ(t.app.view().event.clip, 1);
-  SND_REQUIRE(ed.MoveClip(0, 1, 700.0));  // the same clip moved by a host: still selected
+  t.app.view().event.msPerPx = 1.0;
+  t.Frame();
+  const tela::Point c = Center(t.El("ev.t0.c1"));  // the screen's own drag keeps it
+  t.ptr.Down(c.x, c.y);
+  t.ptr.Move(c.x + 10.0f, c.y);
+  t.ptr.Up(c.x + 10.0f, c.y);
   t.Frame();
   SND_CHECK_EQ(t.app.view().event.clip, 1);
-  SND_REQUIRE(ed.RemoveClip(0, 0));  // the array changed: position 1 is no longer that clip
+  SND_REQUIRE(ed.MoveClip(0, 1, 900.0));  // a host moves the selected clip: a value only
   t.Frame();
   SND_CHECK_EQ(t.app.view().event.clip, -1);
   SND_REQUIRE(t.Click("ev.t0.c0"));
   SND_CHECK_EQ(t.app.view().event.clip, 0);
+  SND_REQUIRE(ed.RemoveClip(0, 1));  // structural
+  t.Frame();
+  SND_CHECK_EQ(t.app.view().event.clip, -1);
+  SND_REQUIRE(t.Click("ev.t0.c0"));
   t.app.WriteBackMixer();
   t.Frame();
   SND_CHECK_EQ(t.app.view().event.clip, -1);
