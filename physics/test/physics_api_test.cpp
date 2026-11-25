@@ -477,7 +477,7 @@ SND_TEST(PhysicsApi, AudioStallDetectionBoundaryAndDrops) {
   SND_CHECK_EQ(snd_physics_play_at(p, 5u, &pos), SND_OK);
   SND_CHECK_EQ(Stats(p).requested_play_at, 1u);
   // The system moves: the stall ends at the next call and hits play again.
-  sys.Advance(1);
+  SND_REQUIRE(sys.AdvanceToNewBlock());
   hit();
   s = Stats(p);
   SND_CHECK_EQ(s.audio_stalled_calls, 11u);
@@ -558,7 +558,7 @@ SND_TEST(PhysicsApi, AudioStallHoldsSlidesAndCatchesUp) {
   SND_CHECK_EQ(Stats(p).tracking_timeouts, 1u);
   SND_CHECK_EQ(rec.Count(SND_PHYSICS_RECORD_STOP), 0u);
   // The system moves: the first call times A out (its last report is 100 ms old).
-  sys.Advance(1);
+  SND_REQUIRE(sys.AdvanceToNewBlock());
   SND_CHECK_EQ(snd_phys_submit_contacts(p, nullptr, 0, 0.02f), SND_OK);
   SND_CHECK_EQ(Stats(p).tracking_timeouts, 2u);
   SND_REQUIRE_EQ(rec.Count(SND_PHYSICS_RECORD_STOP), 1u);
@@ -580,7 +580,7 @@ SND_TEST(PhysicsApi, AudioStallHoldsSlidesAndCatchesUp) {
     SND_CHECK_EQ(snd_phys_submit_contacts(p, &a, 1, 0.0f), SND_OK);  // still stalled
   }
   SND_CHECK_EQ(rec.recs.size(), 0u);
-  sys.Advance(1);
+  SND_REQUIRE(sys.AdvanceToNewBlock());
   {
     const snd_contact a = slide(1, 8.0f, 3.0f);
     SND_CHECK_EQ(snd_phys_submit_contacts(p, &a, 1, 0.0f), SND_OK);

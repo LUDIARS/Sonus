@@ -82,6 +82,19 @@ struct Sys {
     }
     snd_update(sys);
   }
+  // Advance(1) until snd_get_stats().block_index has moved (one period does not always move
+  // it: the block can be published a period later). false when it did not move at all.
+  bool AdvanceToNewBlock(int maxPeriods = 50) {
+    snd_stats before{};
+    snd_get_stats(sys, &before);
+    for (int i = 0; i < maxPeriods; ++i) {
+      Advance(1);
+      snd_stats now{};
+      snd_get_stats(sys, &now);
+      if (now.block_index != before.block_index) return true;
+    }
+    return false;
+  }
   std::uint64_t Frames() const { return out.size() / 2u; }
   float L(std::uint64_t f) const { return out[static_cast<std::size_t>(f) * 2u]; }
   float R(std::uint64_t f) const { return out[static_cast<std::size_t>(f) * 2u + 1u]; }
