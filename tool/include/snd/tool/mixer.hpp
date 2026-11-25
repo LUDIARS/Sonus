@@ -81,6 +81,10 @@ struct LiveValue {
   std::string name;                     // its name (for the question when it cannot be carried)
   std::uint32_t effect = 0, param = 0;  // EffectParam
   std::string effectType;               // EffectParam: the effect's type at `effect`
+  // EffectParam: the bus's effect types in order when the value was taken. Effects have no GUID, so
+  // a value goes over only while the bus's chain is the same (count and order, D-188); when it is
+  // empty only `effectType` at `effect` is compared.
+  std::vector<std::string> effectChain;
   float value = 0.0f;
 };
 
@@ -106,8 +110,9 @@ class MixerModel {
   // D-188: every value that differs from the bank (faders, mute, solo, effect parameters, category
   // faders and mutes, parameter overrides), by object.
   std::vector<LiveValue> LiveValues() const;
-  // The values whose object (and, for an effect parameter, the effect type at that index and the
-  // parameter) is not in `project`: what a rebind would lose.
+  // The values whose object (and, for an effect parameter, the same chain of effect types on the
+  // bus, the effect type at that index and the parameter) is not in `project`: what a rebind would
+  // lose. A bus whose effects changed in number or order loses its effect values (D-188: asked).
   static std::vector<LiveValue> Unmatched(const Project& project, const std::vector<LiveValue>& values);
   // Bind(project), then puts `values` back where their objects are (no history; normalized as Set
   // does). Returns the number put back; the others go to `dropped` (may be null).

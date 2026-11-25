@@ -59,6 +59,8 @@ std::vector<LiveValue> MixerModel::LiveValues() const {
     if (s.faderDb != ClampFader(d.volumeDb)) add(Control::BusFader, d.guid, d.name, s.faderDb);
     if (s.muted) add(Control::BusMute, d.guid, d.name, 1.0f);
     if (s.soloed) add(Control::BusSolo, d.guid, d.name, 1.0f);
+    std::vector<std::string> chain;
+    for (const EffectDesc& fx : d.effects) chain.push_back(fx.type);
     for (std::size_t e = 0; e < s.params.size() && e < d.effects.size(); ++e) {
       for (std::size_t k = 0; k < s.params[e].size() && k < d.effects[e].params.size(); ++k) {
         if (s.params[e][k] == d.effects[e].params[k].projectValue) continue;
@@ -69,6 +71,7 @@ std::vector<LiveValue> MixerModel::LiveValues() const {
         lv.effect = static_cast<std::uint32_t>(e);
         lv.param = static_cast<std::uint32_t>(k);
         lv.effectType = d.effects[e].type;
+        lv.effectChain = chain;
         lv.value = s.params[e][k];
         out.push_back(lv);
       }
@@ -104,6 +107,13 @@ bool Locate(const Project& p, const LiveValue& v, Target* t) {
             (v.effect >= d.effects.size() || d.effects[v.effect].type != v.effectType ||
              v.param >= d.effects[v.effect].params.size())) {
           return false;
+        }
+        if (v.control == Control::EffectParam && !v.effectChain.empty()) {
+          // No GUID on effects: the same chain (count, order and types) or nothing (D-188).
+          if (d.effects.size() != v.effectChain.size()) return false;
+          for (std::size_t e = 0; e < d.effects.size(); ++e) {
+            if (d.effects[e].type != v.effectChain[e]) return false;
+          }
         }
         *t = Target{v.control, static_cast<std::int32_t>(i), static_cast<std::int32_t>(v.effect),
                     static_cast<std::int32_t>(v.param)};
