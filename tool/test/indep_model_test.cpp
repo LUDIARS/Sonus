@@ -537,7 +537,7 @@ SND_TEST(IndepToolRecording, TruncatedOrDamagedFilesAreRefused) {
   Recording r;
   r.info.sampleRate = 48000;
   r.records = Records();
-  const std::vector<std::uint8_t> f = EncodeRecording(r);
+  std::vector<std::uint8_t> f = EncodeRecording(r);
   Recording out;
   std::string err;
   for (std::size_t n = 0; n < f.size(); ++n) {
@@ -545,10 +545,6 @@ SND_TEST(IndepToolRecording, TruncatedOrDamagedFilesAreRefused) {
     SND_CHECK(!DecodeRecording(f.data(), n, &out, &err));
     SND_CHECK(!err.empty());
   }
-  // Extra bytes at the end.
-  std::vector<std::uint8_t> longer = f;
-  longer.push_back(0);
-  SND_CHECK(!DecodeRecording(longer.data(), longer.size(), &out, &err));
   // Every bit of the file is checked (version 2: the checksum covers the header too).
   auto checked = [](std::size_t) { return true; };
   for (std::size_t o = 0; o < f.size(); ++o) {
@@ -573,6 +569,9 @@ SND_TEST(IndepToolRecording, TruncatedOrDamagedFilesAreRefused) {
   dir.WriteBytes("bad.snrec", bad);
   SND_CHECK(!p.LoadRecording((dir.dir() / "bad.snrec").string(), &err));
   SND_CHECK(!p.LoadRecording((dir.dir() / "missing.snrec").string(), &err));
+  // Append to the original valid encoding after the checks that need it intact.
+  f.push_back(0);
+  SND_CHECK(!DecodeRecording(f.data(), f.size(), &out, &err));
 }
 
 // D-67a: version 2's checksum covers the header, so damage to any header field (build
