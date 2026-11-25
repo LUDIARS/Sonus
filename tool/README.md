@@ -352,12 +352,19 @@ WM_KEYDOWN と WM_CHAR、macOS は NSEvent のローカルモニタ）、ツー�
   `ClampToU64` / `ClampToI32` と `U32At` / `U64At`。浮動小数から整数への変換は必ず範囲を確かめてから）。
 - モデルの数値の設定は、バンクのどの列にも入らない数値（非有限、最大の有限 float を超える値）を拒否する（`ProjectDocument` の
   `Create` / `Set` / `SetDefaulted` / `Insert` と、値を持ち込む `Modify`）。整数の列は各エディタが型の範囲で拒否する。
-- 表示する値は常に有限（`NumberText` と `Kit::Label` は inf / nan を「-」に。約束の「-inf dB」と凡例「(0=inf)」は除く）。
+- 表示する値は常に有限。守りは数値を文字にする所だけ（`NumberText`・`ShownNumber` は「-」、画面の書式は `SnprintfFinite`:
+  %f %e %g %a の変換の非有限の値を「-」にし、%s などはそのまま。`FormatDb` は -144 dB 以下が約束の「-inf dB」、NaN / +inf は
+  「- dB」）。名前（オブジェクト・バス・パラメータ・材質・マーカーなど）はどんな文字列でもそのまま出す（「inf」「nan」でも）。
+  壊れたテンポ点（bpm・beatsPerBar・beatUnit・tick が範囲外）は Problems に出し（`ToolIssues`、ビルドの検査に足すツールの検査）、
+  モデルは 120 BPM 4/4 として読む。表示の算術（小節・拍の +1）は 64 ビットで、飽和した位置は「-」。
   3D の位置は ±1,000,000 m、向きは ±1,000,000 rad まで（`SpatialPreview::PlaceListener` / `PlaceEmitter` / `TurnListener` /
   `TurnEmitter`、超えれば入力は開いたまま）。遷移の試聴の要求時刻は 0〜1,000,000 s（`MusicEditor::kMaxRequestSeconds`。外は
   `Preview` が無効を返し、画面は入力を拒否）、最小先読みは 0〜100,000 ms。
-- **窓の最小の大きさ（全画面で 1 つ）: 論理 1024 × 640**（`kMinEditorWidth` / `kMinEditorHeight`、`layout_metrics.hpp`。DPI に
-  よらず論理の大きさで判断する）。それ以上の窓では、ヘッダのタブ、フッタのボタン（Undo / Redo / Save、問題の数）、全画面の
+- **窓の最小の大きさ（全画面で 1 つ）: 論理 1024 × 640**（`kMinEditorWidth` / `kMinEditorHeight`、`layout_metrics.hpp`）。
+  判断は `App::WindowTooSmall`: ビューポートは物理画素の整数（ホストが丸めた値、`SetViewport` の幅・高さ）で、それを DPI で割った
+  幅が 1024 未満、または DPI で割った高さから上の空き（`insetTop`、macOS のタイトルバー）を引いた値が 640 未満なら小さい。
+  つまり物理画素で 1024 × DPI 以上・(640 + insetTop) × DPI 以上が必要で、DPI 0.25 では物理 256 × 160（論理の 4 画素単位でしか
+  変わらない）、DPI 2 では 2048 × 1280。どの DPI でも同じ論理の値と比べる。それ以上の窓では、ヘッダのタブ、フッタのボタン（Undo / Redo / Save、問題の数）、全画面の
   本体のボタンと欄が窓の中にある（パッチのノードの当たりは図の中に切る）。それ未満の窓では「window too small: the tool needs
   1024 x 640」だけを宣言し、ほかの要素は宣言しない（キーの操作は効く）。値は全画面（Mixer、Profiler の 6 タブ、Replay、Problems、
   Link と各エディタ）を 800×500 から 1280×720 まで DPI 0.25〜4 で確かめて決めた（800×500 では Material の組の表・既定、Segment
@@ -413,6 +420,7 @@ WM_KEYDOWN と WM_CHAR、macOS は NSEvent のローカルモニタ）、ツー�
 | `tool_ui_editor_fix2_test` | 差し戻し 2 回目: Esc で Undo / Redo の数が変わらない（行って戻るドラッグ、動かさない押下、数値の欄、フェーダー）、整数の欄の拒否（2.5、-1、1e300、4294967296、Port 0 / 70000）、窓の最小の大きさ、書き戻しの対象の対応、3D の値の範囲と表示、ホストの変更での選択 |
 | `tool_ui_editor_limits_<名前>` | 上限のテストを画面ごとに別のプロセスで（320×240 まで） |
 | `tool_ui_editor_fix3_test` | 差し戻し 3 回目: 遷移の試聴の要求時刻の範囲、Params で float を超える値の拒否と全画面で inf / nan が出ないこと |
+| `tool_ui_editor_fix4_test` | 差し戻し 4 回目: 名前「inf」「nan」「-inf」「NaN」がそのまま出る、`SnprintfFinite` と `FormatDb`、壊れたテンポ点が Problems に出て Music 画面が桁あふれなく出す |
 | `tool_ui_editor_window_test` | 最小の窓（1024 × 640）以上で全画面の全部のボタンが窓の中（DPI 0.25〜4）、未満では「too small」だけ、最小の窓でのストリップのページ送り（`SND_UI_WINDOW=<w>x<h>` で外に出る物を表示） |
 | `tool_model_fix3_test`（核） | バンクに入らない数値の拒否、`ClampTo*` と `TempoMap::Musical`・壊れたファイルの値の変換、エフェクトの並びが変わったときの結び直し、入れ子の `AbortGroup` |
 | `tool_model_fix_test`（核） | `MixerModel::LiveValues` / `Unmatched` / `Rebind`、`EventEditor::Cone`、`DistinctIssues` |
