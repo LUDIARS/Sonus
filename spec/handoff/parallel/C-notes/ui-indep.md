@@ -405,7 +405,7 @@ a90c020 エフェクトの列が変わったら質問、先頭 68f3eaa）の上�
 | N1 大きさをまたぐ | `ResizingAcrossTheMinimumKeepsTheState` | 通過（ドラッグ中に縮めて離すとグループが閉じ手は高々 1、小さい間の Delete は何も消さない、入力は Esc で閉じて何も書かない） |
 | N2 選択 | `SelectionsAcrossEditsOfEveryKind` | 通過（自分のドラッグ・打った値で残る。ホストの値の変更・Undo・フッタの Redo・書き戻しで外れ、直後の Delete は何も消さない） |
 | N3 バンクに入らない数値 | `NumbersThatDoNotFitTheBankAreRefused` | 通過（FLT_MAX ちょうどを受け付け、次の double・±3.5e38・1e300 を拒否、ファイルの 1e300 はほかの編集で残る、`Modify` で持ち込む 1e300 は拒否） |
-| N4 壊れたファイル（7 種類の値 × 21 の項目） | `BrokenNumbersInFilesAreShownWithoutUndefinedConversions` | 通過（float-cast-overflow の構成は下の表） |
+| N4 壊れたファイル（7 種類の値 × 34 の項目） | `BrokenNumbersInFilesAreShownWithoutUndefinedConversions` | 通過（float-cast-overflow の構成は下の表） |
 | N5 エフェクトの列の質問（6 通り）と列が変わらない時 | `EffectChainChangesAsk` | 通過 |
 | N6 名前が inf / nan | `Defect_NamesThatReadInfOrNanAreShownAsADash` | **欠陥 Q1** |
 
