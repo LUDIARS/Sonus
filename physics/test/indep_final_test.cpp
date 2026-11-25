@@ -344,7 +344,18 @@ SND_TEST(IndepFinal, LongStallWithoutAdvanceKeepsDroppingThenRecovers) {
   SND_REQUIRE_EQ(f.Table({kDc}, {kLoop}), SND_OK);
   f.s.Advance(2);
   std::uint64_t obj = 10;
+  std::uint64_t lastBlock = 0;
+  int firstCallOnBlock = 0;
+  std::uint64_t expectedStalled = 0;
+  const auto threshold = static_cast<int>(Fx::OpenCfg().stall_calls);
   for (int frame = 0; frame < 4000; ++frame) {
+    // snd_update can publish a late render-ahead block during the flood. Count
+    // eligible calls in each observed snapshot, even if that happens after call 64.
+    snd_stats snapshot{};
+    SND_REQUIRE_EQ(snd_get_stats(f.s.sys, &snapshot), SND_OK);
+    if (frame == 0 || snapshot.block_index != lastBlock) firstCallOnBlock = frame;
+    lastBlock = snapshot.block_index;
+    if (frame - firstCallOnBlock >= threshold) ++expectedStalled;
     std::vector<snd_contact> cs = {Slide(1, -2.0f)};
     if (frame == 0) cs.push_back(Slide(2, -3.0f));
     for (int i = 0; i < 2; ++i, obj += 2) cs.push_back(Hit(obj, 2.0f + 0.6f * static_cast<float>(i)));
@@ -368,8 +379,9 @@ SND_TEST(IndepFinal, LongStallWithoutAdvanceKeepsDroppingThenRecovers) {
   // stalled; the groups after that are dropped as dropped_audio_stalled (not no_emitter), and
   // nothing is recorded for contacts, so the command area does not overflow.
   SND_CHECK_EQ(st.group_requests + st.dropped_no_emitter + st.dropped_audio_stalled, 2u * 4000u);
-  SND_CHECK(st.dropped_audio_stalled >= 2u * (4000u - 70u));
-  SND_CHECK(st.audio_stalled_calls >= 4000u - 70u);
+  SND_REQUIRE(expectedStalled > 0u);
+  SND_CHECK_EQ(st.dropped_audio_stalled, 2u * expectedStalled);
+  SND_CHECK_EQ(st.audio_stalled_calls, expectedStalled);
   SND_CHECK_EQ(ss.rejected_commands, 0u);
   SND_CHECK_EQ(ss.reserve_overflows, 0u);
   SND_CHECK_EQ(st.tracking_timeouts, 1u);  // slide 2
@@ -406,7 +418,7 @@ SND_TEST(IndepFinal, LongStallWithoutAdvanceKeepsDroppingThenRecovers) {
 // playback at every call (D-119), i.e. up to max_held_emitters commands a frame; while
 // suspended nothing consumes them, the command reserve overflows and snd_resume itself is
 // refused with SND_ERR_COMMAND_BUFFER_FULL - for good (retrying with snd_update does not
-// help). Core shares the blame (CoreA005_ResumeRefusedAfterRecordingWhileSuspended). Fixed in physics by
+// help). Core shares the blame (CoreA005_ResumeSurvivesSuspendedFlood). Fixed in physics by
 // D-125 (nothing recorded for contacts while the audio side is stalled).
 SND_TEST(IndepFinal, Defect_LongSuspendWithPhysicsCannotResume) {
   Fx f;
@@ -444,34 +456,30 @@ SND_TEST(IndepFinal, Defect_LongSuspendWithPhysicsCannotResume) {
   SND_CHECK_EQ(l, 0.0);
 }
 
-// Record of a core defect (request A-005), public API only: snd_suspend, then 64
-// snd_set_param_global a frame with snd_update for 2000 frames (a game that keeps updating its
-// parameters while suspended). Passes when snd_resume is
-//   (a) accepted (core fixed), or
-//   (b) refused with SND_ERR_COMMAND_BUFFER_FULL even after retries (the known defect: nothing
-//       consumes the commands while suspended, so the resume cannot be recorded any more),
-// and says which. Anything else fails. (Was Defect_CoreResumeRefusedForeverAfterRecordingWhileSuspended.)
-SND_TEST(IndepFinal, CoreA005_ResumeRefusedAfterRecordingWhileSuspended) {
+// A-005, public API only. Keep the manual device stationary during the flood.
+SND_TEST(IndepFinal, CoreA005_ResumeSurvivesSuspendedFlood) {
   Sys s;
   SND_REQUIRE_EQ(s.created, SND_OK);
   s.Advance(2);
-  SND_CHECK_EQ(snd_suspend(s.sys), SND_OK);
+  SND_REQUIRE_EQ(snd_suspend(s.sys), SND_OK);
   for (int frame = 0; frame < 2000; ++frame) {
-    for (int i = 0; i < 64; ++i) snd_set_param_global(s.sys, 0x5000u + static_cast<snd_id>(i), static_cast<float>(frame));
-    snd_update(s.sys);
+    for (int i = 0; i < 64; ++i) {
+      const auto r = snd_set_param_global(s.sys, 0x5000u + static_cast<snd_id>(i), static_cast<float>(frame));
+      SND_REQUIRE(r == SND_OK || r == SND_ERR_COMMAND_BUFFER_FULL);
+    }
+    SND_REQUIRE_EQ(snd_update(s.sys), SND_OK);
   }
-  snd_result rr = snd_resume(s.sys);
-  int retries = 0;
-  for (; retries < 100 && rr != SND_OK; ++retries) {
-    snd_update(s.sys);
-    rr = snd_resume(s.sys);
-  }
-  const bool fixed = rr == SND_OK;
-  const bool known = rr == SND_ERR_COMMAND_BUFFER_FULL;
-  snd::test::Note("core A-005: %s (resume %d after %d retries)",
-                  fixed ? "(a) fixed: the resume is accepted" : known ? "(b) known defect: COMMAND_BUFFER_FULL" : "neither",
-                  static_cast<int>(rr), retries);
-  SND_CHECK(fixed || known);
+  snd_stats full{};
+  SND_REQUIRE_EQ(snd_get_stats(s.sys, &full), SND_OK);
+  SND_REQUIRE(full.fallback_commands > 0u);
+  SND_REQUIRE_EQ(snd_resume(s.sys), SND_OK);  // no output advance or retry to make room
+  s.Advance(12);
+  snd_stats a{}, b{};
+  SND_REQUIRE_EQ(snd_get_stats(s.sys, &a), SND_OK);
+  s.Advance(12);
+  SND_REQUIRE_EQ(snd_get_stats(s.sys, &b), SND_OK);
+  SND_CHECK(b.clock_sample > a.clock_sample);
+  SND_CHECK_EQ(s.advanceErrors, 0u);
 }
 
 // For comparison (passes): a short suspend (300 frames) with physics holding 8 hits and the

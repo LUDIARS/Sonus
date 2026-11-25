@@ -4,7 +4,7 @@
 // Recording (game side, per registered thread):
 //   A producer owns Config.commands.arenasPerThread arenas. Each arena is
 //
-//     [ArenaHeader 64B][normal region arenaBytes][reserve region reserveBytes]
+//     [ArenaHeader 64B][normal region arenaBytes][reserve region reserveBytes + one lifecycle header]
 //
 //   Commands are appended as [CommandHeader][payload], 8-byte aligned, size a
 //   multiple of 8. Every command first goes to the normal region. When it is
@@ -27,6 +27,11 @@
 //   (SND_ERR_COMMAND_BUFFER_FULL / invalid handle). Losing a command is then
 //   impossible except for parameter values beyond overflowParamSlots, which
 //   is counted in stats.reserve_overflows (coalesced commands are not counted).
+//
+//   Suspend/Resume have an extra header beyond the ordinary reserve budget. After
+//   overflow the current arena keeps only their final state in its reserve tail.
+//   Their only effect is observed at the end of ApplyCommands, so this state also
+//   commutes with the compact fallback section. The wire encoding is unchanged.
 //
 // Applying (audio thread, ApplyCommands, block start):
 //   Producers are drained in registration order (2.1). Within an arena the

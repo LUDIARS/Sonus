@@ -310,10 +310,8 @@ SND_TEST(IndepStall, LongSuspendWithHitsAndSlidesResumes) {
   SND_CHECK_EQ(f.St().tracking_timeouts, 2u);
 }
 
-// Footsteps and play_at record while stalled (physics.h: "the game calls them itself"). A game
-// that keeps calling them every frame during a long suspend runs into the core limit of
-// request A-005. Record: (a) the resume is accepted, or (b) COMMAND_BUFFER_FULL (A-005); the
-// footsteps and play_at are recorded in both cases.
+// Footsteps and PlayAt may hit their own admission limits. Neither may prevent a
+// first-attempt resume or a fresh spatialized PlayAt once the old work has drained.
 SND_TEST(IndepStall, CoreA005_FootstepsAndPlayAtWhileSuspended) {
   Fx f;
   SND_REQUIRE(f.Ok());
@@ -331,17 +329,23 @@ SND_TEST(IndepStall, CoreA005_FootstepsAndPlayAtWhileSuspended) {
   const snd_physics_stats st = f.St();
   SND_CHECK_EQ(st.requested_footstep, 2000u);
   SND_CHECK_EQ(st.requested_play_at, 2000u);
-  snd_result rr = snd_resume(f.s.sys);
-  for (int i = 0; i < 100 && rr != SND_OK; ++i) {
-    snd_update(f.s.sys);
-    rr = snd_resume(f.s.sys);
+  SND_REQUIRE_EQ(snd_resume(f.s.sys), SND_OK);
+  for (int i = 0; i < 160; ++i) {
+    f.s.Advance(1);
+    SND_REQUIRE_EQ(f.Submit({}), SND_OK);
   }
-  const bool fixed = rr == SND_OK;
-  const bool known = rr == SND_ERR_COMMAND_BUFFER_FULL;
-  snd::test::Note("footsteps and play_at for 2000 suspended frames: %s (resume %d, api failures %llu)",
-                  fixed ? "(a) the resume is accepted" : known ? "(b) A-005: COMMAND_BUFFER_FULL" : "neither",
-                  static_cast<int>(rr), static_cast<unsigned long long>(st.api_failures));
-  SND_CHECK(fixed || known);
+  snd_stats before{}, after{};
+  SND_REQUIRE_EQ(snd_get_stats(f.s.sys, &before), SND_OK);
+  const auto from = f.s.Frames();
+  SND_REQUIRE_EQ(snd_physics_play_at(f.phys, kDc, &pos), SND_OK);
+  f.s.Advance(40);
+  SND_REQUIRE_EQ(snd_get_stats(f.s.sys, &after), SND_OK);
+  SND_CHECK(after.clock_sample > before.clock_sample);
+  double left = 0.0, right = 0.0;
+  Energy(f.s, from, f.s.Frames(), &left, &right);
+  SND_CHECK_EQ(left, 0.0);
+  SND_CHECK(right > 1.0);
+  SND_CHECK_EQ(f.s.advanceErrors, 0u);
 }
 
 // The new end-of-playback detection of sliding contacts (3956b9d): a slide whose event is
