@@ -46,7 +46,59 @@ float Doppler(const snd_config& cfg, Vec3 listenerVelocity, Vec3 emitterVelocity
   const double denominator = std::max(0.01 * c, c + factor * radial(emitterVelocity));
   return static_cast<float>(std::clamp(numerator / denominator, 0.25, 4.0));
 }
+struct EmitterSpatialFrame {
+  Vec3 position, velocity, forward, extent;
+  std::uint32_t shape;
+  Vec3 right, up;
+
+  EmitterSpatialFrame(Vec3 pos, Vec3 vel, Vec3 fwd, Vec3 halfExtents, std::uint32_t kind) noexcept
+      : position(pos), velocity(vel), forward(Normalize(fwd, Vec3{0, 0, 1})), extent(halfExtents), shape(kind),
+        right(Normalize(Cross(std::fabs(forward.y) < 0.9999f ? Vec3{0, 1, 0} : Vec3{0, 0, 1}, forward),
+                        Vec3{1, 0, 0})), up(Cross(forward, right)) {}
+};
+
+SpatialSample Sample(const Impl& im, const EmitterSpatialFrame& e, std::uint32_t l,
+                     Vec3& local, float& coneCos) noexcept {
+  const schema::Tables& t = im.tables;
+  Vec3 rel = Sub(e.position, SND_R(Listener_position)[l]);
+  float radius = 0;
+  if (e.shape != SND_EMITTER_SHAPE_POINT) {
+    const Vec3 towardListener = Mul(rel, -1);
+    rel = Add(rel, Mul(e.right, std::clamp(Dot(towardListener, e.right), -e.extent.x, e.extent.x)));
+    radius = e.extent.x;
+    if (e.shape >= SND_EMITTER_SHAPE_RECTANGLE) {
+      rel = Add(rel, Mul(e.forward, std::clamp(Dot(towardListener, e.forward), -e.extent.z, e.extent.z)));
+      radius = std::max(radius, e.extent.z);
+    }
+    if (e.shape == SND_EMITTER_SHAPE_BOX) {
+      rel = Add(rel, Mul(e.up, std::clamp(Dot(towardListener, e.up), -e.extent.y, e.extent.y)));
+      radius = std::max(radius, e.extent.y);
+    }
+  }
+  const float dist = std::sqrt(Dot(rel, rel));
+  const Vec3 fwd = Normalize(SND_R(Listener_forward)[l], Vec3{0, 0, 1});
+  const Vec3 up = Normalize(SND_R(Listener_up)[l], Vec3{0, 1, 0});
+  const Vec3 right = Normalize(Cross(up, fwd), Vec3{1, 0, 0});
+  const Vec3 dir = dist > 1e-6f ? Mul(rel, 1.0f / dist) : Vec3{0, 0, 1};
+  local = Vec3{Dot(dir, right), Dot(dir, up), Dot(dir, fwd)};
+  coneCos = dist > 1e-6f ? -Dot(e.forward, dir) : 1.0f;
+  constexpr float kPi = 3.14159265358979f;
+  return {dist, radius > 0 ? radius / (radius + dist) : 0,
+          dist > 1e-6f ? Doppler(im.config, SND_R(Listener_velocity)[l], e.velocity, dir) : 1.0f,
+          2.0f * std::acos(std::clamp(coneCos, -1.0f, 1.0f)) * 180.0f / kPi, std::atan2(local.x, local.z)};
+}
 }  // namespace
+
+bool SampleFrozenEmitter(const Impl& im, const PlaybackEmitter& emitter, std::uint32_t l,
+                         SpatialSample& sample) noexcept {
+  const schema::Tables& t = im.tables;
+  if (!base::rows::IsLive(t.Listener.rows, l) || SND_R(Listener_enabled)[l] == 0u) return false;
+  Vec3 direction{};
+  float coneCos = 0;
+  sample = Sample(im, EmitterSpatialFrame{emitter.position, Vec3{}, emitter.forward, emitter.halfExtents, emitter.shape},
+                  l, direction, coneCos);
+  return true;
+}
 
 void Compute3D(Impl& im) noexcept {
   schema::Tables& t = im.tables;
@@ -61,12 +113,8 @@ void Compute3D(Impl& im) noexcept {
     if (frames > im.cfg.extrapolateFrames) frames = im.cfg.extrapolateFrames;
     const Vec3 pos = Add(SND_R(Emitter_position)[d], Mul(SND_R(Emitter_velocity)[d], static_cast<float>(frames) / rate));
     SND_W(Emitter_renderPosition)[d] = pos;
-    const Vec3 efwd = Normalize(SND_R(Emitter_forward)[d], Vec3{0, 0, 1});
-    const auto shape = SND_R(Emitter_shapeKind)[d];
-    const Vec3 extent = SND_R(Emitter_halfExtents)[d];
-    const Vec3 rightAxis = Normalize(Cross(std::fabs(efwd.y) < 0.9999f ? Vec3{0, 1, 0} : Vec3{0, 0, 1}, efwd),
-                                     Vec3{1, 0, 0});
-    const Vec3 upAxis = Cross(efwd, rightAxis);
+    const EmitterSpatialFrame emitter{pos, SND_R(Emitter_velocity)[d], SND_R(Emitter_forward)[d],
+                                      SND_R(Emitter_halfExtents)[d], SND_R(Emitter_shapeKind)[d]};
     schema::TableRows& sr = SND_ROWS(Spatial);
     for (std::uint32_t l = 0; l < L; ++l) {
       const SlotIndex s = e * L + l;
@@ -76,33 +124,15 @@ void Compute3D(Impl& im) noexcept {
         SND_W(Spatial_valid)[s] = 0u;
         continue;
       }
-      Vec3 rel = Sub(pos, SND_R(Listener_position)[l]);
-      float radius = 0;
-      if (shape != SND_EMITTER_SHAPE_POINT) {
-        const Vec3 towardListener = Mul(rel, -1);
-        rel = Add(rel, Mul(rightAxis, std::clamp(Dot(towardListener, rightAxis), -extent.x, extent.x)));
-        radius = extent.x;
-        if (shape >= SND_EMITTER_SHAPE_RECTANGLE) {
-          rel = Add(rel, Mul(efwd, std::clamp(Dot(towardListener, efwd), -extent.z, extent.z)));
-          radius = std::max(radius, extent.z);
-        }
-        if (shape == SND_EMITTER_SHAPE_BOX) {
-          rel = Add(rel, Mul(upAxis, std::clamp(Dot(towardListener, upAxis), -extent.y, extent.y)));
-          radius = std::max(radius, extent.y);
-        }
-      }
-      const float dist = std::sqrt(Dot(rel, rel));
-      const Vec3 fwd = Normalize(SND_R(Listener_forward)[l], Vec3{0, 0, 1});
-      const Vec3 up = Normalize(SND_R(Listener_up)[l], Vec3{0, 1, 0});
-      const Vec3 right = Normalize(Cross(up, fwd), Vec3{1, 0, 0});
-      const Vec3 dir = dist > 1e-6f ? Mul(rel, 1.0f / dist) : Vec3{0, 0, 1};
+      Vec3 direction{};
+      float coneCos = 0;
+      const auto sample = Sample(im, emitter, l, direction, coneCos);
+      const float dist = sample.distance;
       SND_W(Spatial_distance)[s] = dist;
-      const Vec3 local{Dot(dir, right), Dot(dir, up), Dot(dir, fwd)};
-      SND_W(Spatial_direction)[s] = local;
-      SND_W(Spatial_azimuth)[s] = std::atan2(local.x, local.z);
-      SND_W(Spatial_shapeSpread)[s] = radius > 0 ? radius / (radius + dist) : 0;
-      SND_W(Spatial_dopplerRatio)[s] = dist > 1e-6f ? Doppler(im.config, SND_R(Listener_velocity)[l],
-                                                               SND_R(Emitter_velocity)[d], dir) : 1.0f;
+      SND_W(Spatial_direction)[s] = direction;
+      SND_W(Spatial_azimuth)[s] = sample.azimuth;
+      SND_W(Spatial_shapeSpread)[s] = sample.spread;
+      SND_W(Spatial_dopplerRatio)[s] = sample.ratio;
       const Id zoneBus = SND_R(Emitter_zoneBus)[d];
       if (zoneBus != SND_ID_NONE) {
         const float fade = SND_R(Emitter_zoneFade)[d];
@@ -110,10 +140,8 @@ void Compute3D(Impl& im) noexcept {
                              (dist < 1e-6f ? 1 : fade > 0 ? std::max(0.0f, 1 - dist / fade) : 0);
         if (amount > 0) InsertZone(im.dp.zones[l], ZoneSend{zoneBus, e, amount});
       }
-      const float coneCos = dist > 1e-6f ? -Dot(efwd, dir) : 1.0f;
       SND_W(Spatial_coneCos)[s] = coneCos;
-      constexpr float kPi = 3.14159265358979f;
-      SND_W(Spatial_coneAngle)[s] = 2.0f * std::acos(std::clamp(coneCos, -1.0f, 1.0f)) * 180.0f / kPi;
+      SND_W(Spatial_coneAngle)[s] = sample.coneAngle;
       SND_W(Spatial_valid)[s] = 1u;
     }
   }

@@ -299,6 +299,19 @@ struct LiveOverride {
   std::uint32_t value;
   std::uint32_t used;
 };
+// Playback-owned association, independent of a recycled emitter slot.
+struct PlaybackEmitter {
+  HandleRef live{};
+  Vec3 position{}, forward{}, halfExtents{};
+  Occlusion occlusion{};
+  std::uint32_t shape = 0;
+  bool frozen = false;
+};
+
+struct SpatialSample {
+  float distance, spread, ratio, coneAngle, azimuth;
+};
+
 struct ApplyPriv {
   ParamChain* emitterChain = nullptr;   // [maxEmitters]
   ParamChain* playbackChain = nullptr;  // [maxPlaybacks]
@@ -313,6 +326,7 @@ struct ApplyPriv {
   // created; written by ApplyCommands (kParamPlaybackVolume / Pitch), read by EvaluateDspParams.
   float* playbackVolume = nullptr;
   float* playbackPitch = nullptr;
+  PlaybackEmitter* playbackEmitter = nullptr;  // [maxPlaybacks], initialized on row creation
   std::uint32_t* implicitEmitter = nullptr;  // [maxPlaybacks] PlayAt emitter slot
   std::uint32_t* implicitOwnerGen = nullptr; // [maxEmitters] playback generation owning an implicit emitter, 0 none
   std::uint32_t* userBufferRefs = nullptr;   // [maxUserBuffers]
@@ -437,7 +451,7 @@ enum VoiceStaticFlags : std::uint32_t {
 // EvaluateDspParams, SelectVoices, BuildRenderList and Render (proposed schema
 // columns: Voice.clipGainDb, Voice.pitchCents, Voice.pan, Voice.channels ...).
 struct VoiceStatic {
-  std::uint32_t emitterGeneration = 0;  // keep a live voice detached after its emitter is released
+  std::uint32_t playbackGeneration = 0;  // guards the playback-owned emitter association
   std::uint32_t generation;  // Voice row generation
   std::uint32_t flags;       // VoiceStaticFlags
   std::uint32_t channels;    // source channels
@@ -573,7 +587,8 @@ struct ZoneSend {
   float amount;
 };
 struct ListenerContribution {
-  SlotIndex spatial;
+  std::uint32_t listener;
+  float azimuth;
   float weight;
   float spread;
   float blend;
@@ -960,6 +975,8 @@ ActionParentState ActionParentStatus(Impl& im, HandleRef parent, ClockSample at)
 void ApplyDueActions(Impl& im) noexcept;
 void RunEventLogic(Impl& im) noexcept;
 void Compute3D(Impl& im) noexcept;
+bool SampleFrozenEmitter(const Impl& im, const PlaybackEmitter& emitter, std::uint32_t listener,
+                         SpatialSample& sample) noexcept;
 void EvaluateDspParams(Impl& im) noexcept;
 void SelectVoices(Impl& im) noexcept;
 void BuildRenderList(Impl& im) noexcept;
