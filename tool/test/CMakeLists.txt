@@ -17,7 +17,7 @@ endfunction()
 foreach(_t model_test live_mixer_test live_profiler_test indep_sync_test core_host_test document_test
         event_editor_test mixer_editor_test curve_editor_test
         spatial_preview_test runtime_compare_test music_editor_test
-        material_editor_test patch_editor_test decisions_test model_fix_test)
+        material_editor_test patch_editor_test decisions_test model_fix_test model_fix3_test)
   _snd_tool_test(${_t} "${_tool_core_test_link}")
 endforeach()
 
@@ -125,7 +125,7 @@ endforeach()
 # replay and preview screens use the real replay service and preview engine (Sonus::tool_preview).
 set(_tool_ui_screen_link sonus_tool_ui_replay sonus_tool_preview ${_tool_test_link})
 foreach(_t ui_event_screen_test ui_buses_screen_test ui_params_screen_test ui_spatial_screen_test ui_music_screen_test ui_material_screen_test ui_patch_screen_test ui_live_screens_test ui_editor_limits_test ui_editor_input_test ui_editor_concurrency_test ui_editor_raster_test
-        ui_editor_fix_test ui_editor_fix2_test ui_editor_window_test)
+        ui_editor_fix_test ui_editor_fix2_test ui_editor_fix3_test ui_editor_window_test)
   _snd_tool_test(${_t} "${_tool_ui_screen_link}")
 endforeach()
 
