@@ -367,7 +367,10 @@ SND_API snd_result SND_CALL snd_get_position(const snd_system* sys, snd_playback
 SND_API snd_result SND_CALL snd_get_transport_position(const snd_system* sys,
                                                        snd_transport_handle transport,
                                                        snd_position* out);
-/* bus SND_ID_NONE = master. */
+/* bus SND_ID_NONE = master. Loudness (loudness_short / loudness_integrated) is measured for
+ * the output (master) and for buses with BUSS.flags kBusMeter (a fixed number of them, in
+ * the order of their bus rows); other buses report NaN there (not measured; measured
+ * silence reads -200 LUFS). Peak and RMS are measured for every bus. */
 SND_API snd_result SND_CALL snd_get_meter(const snd_system* sys, snd_id bus, snd_meter* out);
 SND_API snd_result SND_CALL snd_get_stats(const snd_system* sys, snd_stats* out);
 
@@ -418,6 +421,29 @@ SND_API snd_result SND_CALL snd_set_event_voice_effect(snd_system* sys, snd_id e
  * playback, dropped). */
 SND_API snd_result SND_CALL snd_set_playback_effect_param(snd_system* sys, snd_playback_handle playback,
                                                           uint32_t slot, uint32_t param_index, float value);
+
+/* Stage 3 additions                                                         */
+/* ========================================================================= */
+/* D-146: snd_play with a linear fade-in of the start over fade_in_seconds (rounded to
+ * milliseconds, at most 65.535 s; 0 = none, the same as snd_play). Stopping during the
+ * fade-in fades out from the level reached. NaN, infinite or negative fade: invalid handle.
+ * Thread: registered. */
+SND_API snd_playback_handle SND_CALL snd_play_fade(snd_system* sys, snd_id event,
+                                                   snd_emitter_handle emitter, const snd_when* when,
+                                                   float fade_in_seconds);
+/* D-148: spectrum of one channel of a bus as of the latest snd_update(): linear magnitudes
+ * of the last FFT-size frames (Hann window; a full-scale sine on a bin reads 1.0), bin k at
+ * k * sample_rate / fft_size Hz (fft_size: 1024 by default, CoreLimits.spectrumFftSize).
+ * Writes min(bin_count, fft_size / 2 + 1) bins and 0 to the rest of out_magnitudes.
+ * bus SND_ID_NONE (or the master's id) = the output; other buses need BUSS.flags
+ * kBusMeter (a fixed number of them is measured, 8 by default).
+ * Returns SND_OK; SND_ERR_INVALID_ARGUMENT (NULL sys / out, bin_count 0);
+ * SND_ERR_NOT_FOUND (unknown bus); SND_ERR_UNSUPPORTED (bus without a meter, or channel
+ * not below the bus's channels); SND_ERR_NOT_READY (no data yet: the spectrum is kept up to
+ * date only while it is read - the first call after ~1 s without one returns NOT_READY, and
+ * the data is there from the first snd_update() that follows a rendered block). Thread: any. */
+SND_API snd_result SND_CALL snd_get_spectrum(const snd_system* sys, snd_id bus, uint32_t channel,
+                                             float* out_magnitudes, uint32_t bin_count);
 
 SND_EXTERN_C_END
 
