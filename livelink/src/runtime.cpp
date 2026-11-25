@@ -2,6 +2,8 @@
 #include "snd/livelink/runtime.hpp"
 
 #include <cstring>
+
+#include "prepare_effect.hpp"
 #include <new>
 
 #include "snd/core/core.hpp"
@@ -50,12 +52,17 @@ void LiveRuntime::Destroy(LiveRuntime* rt) noexcept {
 
 LiveRuntime::~LiveRuntime() {
   if (alloc_ != nullptr) {
+    if (pluginPool_) {
+      pluginPool_->~LivePluginPool();
+      alloc_->Free(pluginPool_, MemTag::LiveLink);
+    }
     alloc_->Free(knownBanks_, MemTag::LiveLink);
     alloc_->Free(scratchBanks_, MemTag::LiveLink);
     if (chunks_ != nullptr) {
       for (std::uint32_t i = 0; i < chunkCount_; ++i) chunks_[i].~PendingChunk();
       alloc_->Free(chunks_, MemTag::LiveLink);
     }
+    alloc_->Free(rejectedStructs_, MemTag::LiveLink);
     alloc_->Free(chunkMemory_, MemTag::LiveLink);
     alloc_->Free(producerSession_, MemTag::LiveLink);
     alloc_->Free(revertOpen_, MemTag::LiveLink);
@@ -69,6 +76,11 @@ LiveRuntime::~LiveRuntime() {
 bool LiveRuntime::Init(const RuntimeDesc& d) noexcept {
   alloc_ = d.allocator;
   config_ = *d.config;
+  if (config_.plugins.effect_count) {
+    auto* mem = alloc_->Allocate(sizeof(core::LivePluginPool), 64, MemTag::LiveLink);
+    if (!mem) return false;
+    pluginPool_ = new (mem) core::LivePluginPool();
+  }
   caps_ = CapsOf(config_);
   maxVoices_ = d.maxVoices != 0u ? d.maxVoices : (config_.max_virtual_voices != 0u ? config_.max_virtual_voices : 1u);
   maxMeters_ = d.maxMeters != 0u ? d.maxMeters : 256u;
@@ -87,9 +99,12 @@ bool LiveRuntime::Init(const RuntimeDesc& d) noexcept {
   chunkCount_ = d.chunkSlots;
   chunkBytes_ = (d.chunkBytes + 63u) & ~63u;
   if (chunkCount_ != 0u) {
-    chunks_ = static_cast<PendingChunk*>(a.Allocate(sizeof(PendingChunk) * chunkCount_, 64, MemTag::LiveLink));
+    rejectedStructs_ = static_cast<const void**>(a.Allocate(sizeof(void*) * chunkCount_, 64, MemTag::LiveLink));
+    if (!rejectedStructs_) return false;
     chunkMemory_ = static_cast<std::uint8_t*>(a.Allocate(std::size_t{chunkBytes_} * chunkCount_, 64, MemTag::LiveLink));
-    if (chunks_ == nullptr || chunkMemory_ == nullptr) return false;
+    if (!chunkMemory_) return false;
+    chunks_ = static_cast<PendingChunk*>(a.Allocate(sizeof(PendingChunk) * chunkCount_, 64, MemTag::LiveLink));
+    if (!chunks_) return false;
     for (std::uint32_t i = 0; i < chunkCount_; ++i) {
       new (&chunks_[i]) PendingChunk();
       chunks_[i].data = chunkMemory_ + std::size_t{chunkBytes_} * i;
@@ -138,6 +153,13 @@ void LiveRuntime::Install(core::CoreDesc* d) noexcept {
     if (sys != nullptr) rt->OnCommand(*sys, t, p);
   };
   d->liveTap.user = this;
+  d->liveTap.arenaApplied = [](void* u, const core::LiveArenaView& a) noexcept {
+    auto* rt = Self(u);
+    if (rt->recording_.load(std::memory_order_relaxed) && !WriteArenaRecord(rt->records_, a, rt->caps_, rt->rejectedStructs_, rt->rejectedStructCount_)) {
+      Bump(rt->dropRecords_);
+      ++rt->recordDroppedSession_;
+    }
+  };
   d->liveTap.arena = [](void* u, const core::LiveArenaView& a) noexcept { Self(u)->OnArena(a); };
   d->liveTap.event = [](void* u, const notify::EventRecord& r) noexcept { Self(u)->OnEvent(r); };
   d->liveTap.ended = [](void* u, std::uint32_t s, std::uint32_t g, std::uint32_t r, std::uint32_t det) noexcept {
@@ -155,6 +177,12 @@ void LiveRuntime::SetProfiler(std::uint32_t mask, std::uint32_t meterHz) noexcep
   std::uint32_t every = (blocksPerSecond_ + meterHz / 2u) / meterHz;
   meterEvery_.store(every < 1u ? 1u : every, std::memory_order_relaxed);
   mask_.store(mask, std::memory_order_release);
+}
+
+snd_result LiveRuntime::PreparePlugin(PendingChunk& p) noexcept {
+  if (!pluginPool_ || structEditor_ != &CoreStructEditor()) return SND_OK;
+  auto* sys = system();
+  return sys ? PrepareExternalEffect(*pluginPool_, *alloc_, config_, sys, p, config_.dev_reserve.bytes) : SND_ERR_NOT_READY;
 }
 
 PendingChunk* LiveRuntime::AcquireChunk() noexcept {
@@ -400,17 +428,18 @@ void LiveRuntime::OnCommand(core::System& sys, cmd::CommandType type, const void
     for (std::uint32_t i = 0; i < chunkCount_ && !ours; ++i) ours = p == &chunks_[i];
     const std::uint32_t st = ours ? p->state.load(std::memory_order_acquire) : PendingChunk::kFree;
     // 1.1: a structural edit that is not applied gives its dev reserve back.
-    const bool structEdit = ours && p->fourcc == kStructEditTag;
+    const bool pending = st == PendingChunk::kQueued || st == PendingChunk::kCancelled;
+    const bool structEdit = pending && p->fourcc == kStructEditTag;
     const StructCost cost = structEdit ? StructCost{p->costBuses, p->costEffects, p->costBytes} : StructCost{};
     const std::uint32_t logPlace = structEdit ? p->structLogPlace : 0u;
     if (ours && StaleProducer() && (st == PendingChunk::kQueued || st == PendingChunk::kCancelled)) {
       Bump(dropStale_);  // D-87: not applied; the slot goes back to the pool
-      if (structEdit) ReleaseStruct(cost);
+      if (structEdit) { CancelPreparedEffect(*p); ReleaseStruct(cost); }
       if (logPlace != 0u) ReleaseStructLog();
       p->state.store(PendingChunk::kFree, std::memory_order_release);
       r.result = SND_ERR_INVALID_HANDLE;
     } else if (st == PendingChunk::kCancelled) {
-      if (structEdit) ReleaseStruct(cost);
+      if (structEdit) { CancelPreparedEffect(*p); ReleaseStruct(cost); }
       if (logPlace != 0u) ReleaseStructLog();
       p->state.store(PendingChunk::kFree, std::memory_order_release);  // its Server is gone
       r.result = SND_ERR_INVALID_HANDLE;
@@ -420,6 +449,8 @@ void LiveRuntime::OnCommand(core::System& sys, cmd::CommandType type, const void
       ApplyOutcome o;
       if (structEdit) {
         ApplyStruct(sys, *p, r.session, &r);
+        if (r.result != SND_OK) CancelPreparedEffect(*p);
+        else p->prepared = nullptr;  // the mixer/tail now owns this lease
         o.result = r.result;
         o.cells = r.cells;
       } else {
@@ -427,6 +458,7 @@ void LiveRuntime::OnCommand(core::System& sys, cmd::CommandType type, const void
       }
       r.result = o.result;
       r.cells = o.cells;
+      if (recording_.load(std::memory_order_relaxed) && (!structEdit || o.result == SND_OK)) WriteLiveData(c);
       p->result = o.result;
       p->cells = o.cells;
       std::uint32_t q = PendingChunk::kQueued;
@@ -434,6 +466,8 @@ void LiveRuntime::OnCommand(core::System& sys, cmd::CommandType type, const void
         p->state.store(PendingChunk::kFree, std::memory_order_release);  // cancelled while applying
       }
     }
+    if (structEdit && r.result != SND_OK && recording_.load(std::memory_order_relaxed) &&
+        rejectedStructCount_ < chunkCount_) rejectedStructs_[rejectedStructCount_++] = payload;
   } else {
     return;
   }
@@ -441,14 +475,12 @@ void LiveRuntime::OnCommand(core::System& sys, cmd::CommandType type, const void
 }
 
 void LiveRuntime::OnArena(const core::LiveArenaView& a) noexcept {
+  rejectedStructCount_ = 0;
   block_ = a.appliedBlock;
   currentProducer_ = a.producer;
-  ScanArena(a);  // 1.1: before the Arena record (RecordLiveData precedes it)
+  ScanArena(a);  // audition tracking before ApplyCommands
   if (a.normalBytes != 0u || a.reserveBytes != 0u || a.fallback != nullptr) ++arenasSeen_;
-  if (recording_.load(std::memory_order_relaxed) != 0u && !WriteArenaRecord(records_, a, caps_)) {
-    Bump(dropRecords_);
-    ++recordDroppedSession_;
-  }
+
   if ((mask_.load(std::memory_order_relaxed) & kProfEventLog) == 0u) return;
   auto scan = [&](const cmd::CommandHeader& h, const std::uint8_t* p) {
     switch (static_cast<cmd::CommandType>(h.type)) {
@@ -525,6 +557,20 @@ void LiveRuntime::UpdateBanks(core::System& sys) noexcept {
               scratchBanks_[i].handle.generation != knownBanks_[i].handle.generation;
   }
   if (!changed) return;
+  // A reload invalidates entries of the old bank generation, including the reservations.
+  std::uint32_t kept = 0;
+  for (std::uint32_t j = 0; j < structLogCount_; ++j) {
+    const auto& e = structLog_[j];
+    auto present = [&](std::uint64_t handle) {
+      if (!handle) return true;
+      for (std::uint32_t i = 0; i < n; ++i) if (scratchBanks_[i].handle.Value() == handle) return true;
+      return false;
+    };
+    if (present(e.bankHandle) && present(e.targetBankHandle)) structLog_[kept++] = e;
+    else ReleaseStruct(StructCost{e.buses, e.effects, e.bytes});
+  }
+  if (kept < structLogCount_) ReleaseStructLog(structLogCount_ - kept);
+  structLogCount_ = kept;
   if (recording_.load(std::memory_order_relaxed) != 0u) {
     for (std::uint32_t i = 0; i < n; ++i) {
       bool known = false;
@@ -642,7 +688,7 @@ void LiveRuntime::WriteLiveData(const cmd::LiveReplaceChunk& c) noexcept {
   PendingChunk* p = static_cast<PendingChunk*>(const_cast<void*>(c.prepared));
   bool ours = false;
   for (std::uint32_t i = 0; i < chunkCount_ && !ours; ++i) ours = p == &chunks_[i];
-  if (!ours || p->state.load(std::memory_order_acquire) != PendingChunk::kQueued || p->bytes > chunkBytes_) return;
+  if (!ours || p->bytes > chunkBytes_) return;
   const std::uint32_t bytes = static_cast<std::uint32_t>(p->bytes);
   const std::uint32_t padded = (bytes + 7u) & ~7u;
   const RecordLiveData h{kRecordLiveData, p->fourcc, static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(p)),
@@ -660,7 +706,6 @@ void LiveRuntime::WriteLiveData(const cmd::LiveReplaceChunk& c) noexcept {
 }
 
 void LiveRuntime::ScanArena(const core::LiveArenaView& a) noexcept {
-  const bool recording = recording_.load(std::memory_order_relaxed) != 0u;
   auto scan = [&](const cmd::CommandHeader& h, const std::uint8_t* p) {
     switch (static_cast<cmd::CommandType>(h.type)) {
       case cmd::CommandType::LiveAudition:
@@ -674,9 +719,6 @@ void LiveRuntime::ScanArena(const core::LiveArenaView& a) noexcept {
         }
         break;
       }
-      case cmd::CommandType::LiveReplaceChunk:
-        if (recording) WriteLiveData(Load<cmd::LiveReplaceChunk>(p));
-        break;
       default:
         break;
     }
@@ -697,16 +739,21 @@ void LiveRuntime::ApplyStruct(core::System& sys, PendingChunk& p, std::uint32_t 
   }
   std::memcpy(&h, p.data, sizeof(h));
   const std::uint64_t* args = reinterpret_cast<const std::uint64_t*>(p.data + sizeof(StructEdit));
-  const StructEditRequest q{static_cast<StructOp>(h.op), h.targetId, h.argCount, session, args};
+  const StructEditRequest q{static_cast<StructOp>(h.op), h.targetId, h.argCount, session, args, ++nextStructToken_, p.prepared};
+  const bool removing = q.op == StructOp::RemoveBus || q.op == StructOp::RemoveEffect;
+  const auto origin = removing && structEditor_ ? structEditor_->RemovalOrigin(sys, q) : ~std::uint64_t{0};
+  auto sameObject = [&](const StructLogEntry& e, StructOp op) {
+    return e.op == static_cast<std::uint32_t>(op) && e.targetId == q.targetId &&
+           (origin == ~std::uint64_t{0} || origin == e.token);
+  };
   // D-172: a remove accepted without a log place (the log was full) is applied only when it
   // cancels a live add (no place needed); otherwise it needs a place now, or it is refused
   // without asking the editor.
   if (logPlace == 0u && (q.op == StructOp::RemoveBus || q.op == StructOp::RemoveEffect)) {
-    const std::uint32_t addOp =
-        static_cast<std::uint32_t>(q.op == StructOp::RemoveBus ? StructOp::AddBus : StructOp::AddEffect);
+    const auto addOp = q.op == StructOp::RemoveBus ? StructOp::AddBus : StructOp::AddEffect;
     bool cancels = false;
     for (std::uint32_t i = 0; i < structLogCount_ && !cancels; ++i) {
-      cancels = structLog_[i].op == addOp && structLog_[i].targetId == q.targetId;
+      cancels = sameObject(structLog_[i], addOp);
     }
     if (!cancels) {
       if (!ReserveStructLog()) {
@@ -718,6 +765,7 @@ void LiveRuntime::ApplyStruct(core::System& sys, PendingChunk& p, std::uint32_t 
       logPlace = 1u;
     }
   }
+  const auto owner = structEditor_ ? structEditor_->OwnerBank(sys, q) : 0;
   const snd_result res = structEditor_ != nullptr ? structEditor_->Apply(sys, q) : SND_ERR_UNSUPPORTED;
   r->result = res;
   r->cells = res == SND_OK ? 1u : 0u;
@@ -734,8 +782,7 @@ void LiveRuntime::ApplyStruct(core::System& sys, PendingChunk& p, std::uint32_t 
     std::uint32_t found = ~0u;
     for (std::uint32_t i = structLogCount_; i-- > 0u && found == ~0u;) {
       const StructLogEntry& e = structLog_[i];
-      const bool match = removeBus ? (e.op == static_cast<std::uint32_t>(StructOp::AddBus) && e.targetId == q.targetId)
-                                   : (e.op == static_cast<std::uint32_t>(StructOp::AddEffect) && e.targetId == q.targetId);
+      const bool match = sameObject(e, removeBus ? StructOp::AddBus : StructOp::AddEffect);
       if (match) found = i;
     }
     if (found != ~0u) {
@@ -766,10 +813,14 @@ void LiveRuntime::ApplyStruct(core::System& sys, PendingChunk& p, std::uint32_t 
   StructLogEntry& e = structLog_[structLogCount_++];
   e = StructLogEntry{};
   e.used = 1u;
+  e.bankHandle = owner;
+  e.targetBankHandle = owner && q.op == StructOp::AddSend ? sys.LiveBusBank(static_cast<Id>(args[0])) : 0;
+  e.token = q.token;
   e.op = h.op;
   e.targetId = h.targetId;
   e.argCount = h.argCount;
   e.session = session;
+  e.producer = currentProducer_;
   e.buses = cost.buses;
   e.effects = cost.effects;
   e.bytes = cost.bytes;
@@ -783,9 +834,12 @@ void LiveRuntime::UndoStructs(core::System& sys, std::uint32_t session) noexcept
     StructLogEntry& e = structLog_[i];
     if (session != 0u && e.session > session) continue;
     const std::uint32_t logged = e.argCount < 4u ? e.argCount : 4u;
-    const StructEditRequest q{static_cast<StructOp>(e.op), e.targetId, logged, e.session, e.args};
+    const StructEditRequest q{static_cast<StructOp>(e.op), e.targetId, logged, e.session, e.args, e.token};
     const snd_result res = structEditor_ != nullptr ? structEditor_->Undo(sys, q) : SND_ERR_UNSUPPORTED;
-    if (res != SND_OK) Bump(dropStructUndo_);
+    if (res != SND_OK) {
+      Bump(dropStructUndo_);
+      continue;  // a newer session can still depend on this object; retry on its disconnect
+    }
     ReleaseStruct(StructCost{e.buses, e.effects, e.bytes});
     e.used = 0u;
   }
@@ -809,13 +863,65 @@ void LiveRuntime::PublishStreams(core::System& sys, std::uint64_t block) noexcep
   streams_.Publish();
 }
 
+// The retained AddBus/AddSend operations reconstruct a static routing topology by ID.
+// Encode them with ordinary 1.1 records, including ownership for later disconnect undo.
+void LiveRuntime::WriteInitialRoutes() noexcept {
+  for (std::uint32_t i = 0; i < structLogCount_; ++i) {
+    const auto& e = structLog_[i];
+    const auto bytes = static_cast<std::uint32_t>(sizeof(StructEdit) + 8u * e.argCount);
+    const auto key = static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(&e));
+    const RecordLiveData data{kRecordLiveData, kStructEditTag, key, 0, bytes};
+    if (!records_.Begin(sizeof(data) + bytes)) {
+      Bump(dropRecords_); ++recordDroppedSession_; return;
+    }
+    const StructEdit edit{e.op, e.targetId, e.argCount, 0};
+    records_.Put(&data, sizeof(data));
+    records_.Put(&edit, sizeof(edit));
+    records_.Put(e.args, e.argCount * 8u);
+    records_.Commit();
+    constexpr auto markSize = cmd::kWireSize<cmd::LiveSetValue>;
+    constexpr auto editSize = cmd::kWireSize<cmd::LiveReplaceChunk>;
+    struct Commands {
+      cmd::CommandHeader setHeader;
+      cmd::LiveSetValue set;
+      cmd::CommandHeader editHeader;
+      cmd::LiveReplaceChunk replace;
+      cmd::CommandHeader restoreHeader;
+      cmd::LiveSetValue restore;
+    };
+    static_assert(sizeof(Commands) == markSize * 2 + editSize);
+    const auto current = e.producer < producerCount_ ? producerSession_[e.producer] : 0u;
+    const auto marker = static_cast<std::uint16_t>(cmd::CommandType::LiveSetValue);
+    const Commands cmds{{marker, markSize, 0}, {0, kFieldSession, 0, 0, e.session},
+                        {static_cast<std::uint16_t>(cmd::CommandType::LiveReplaceChunk), editSize, 1},
+                        {0, kStructEditTag, &e}, {marker, markSize, 2}, {0, kFieldSession, 0, 0, current}};
+    core::LiveArenaView arena{};
+    arena.flags = kInitialRoutingArena;
+    arena.producer = e.producer;
+    arena.appliedBlock = block_;
+    arena.normal = reinterpret_cast<const std::uint8_t*>(&cmds);
+    arena.normalBytes = sizeof(cmds);
+    if (!WriteArenaRecord(records_, arena, caps_)) {
+      Bump(dropRecords_); ++recordDroppedSession_; return;
+    }
+  }
+}
+
 void LiveRuntime::RecordStartState(core::System& sys) noexcept {
   std::uint32_t edits = applier_.CopyEdits(sys, editScratch_, editScratchCap_);
-  std::uint32_t lost = 0;
+  bool routesOnly = structLogCount_ != 0 && structEditor_ == &CoreStructEditor() && edits == 0;
+  for (std::uint32_t i = 0; routesOnly && i < structLogCount_; ++i) {
+    const auto op = static_cast<StructOp>(structLog_[i].op);
+    routesOnly = op == StructOp::AddBus || op == StructOp::AddSend;
+  }
+  std::uint32_t lost = routesOnly ? 0u : structLogCount_;
   if (edits > editScratchCap_) {
     lost += edits - editScratchCap_;
     edits = editScratchCap_;
   }
+  std::uint32_t physicalEffects;
+  sys.LiveReserveLeft(nullptr, &physicalEffects, nullptr, nullptr);
+  if (physicalEffects < config_.dev_reserve.effects && lost == 0) ++lost;
   auto bankOf = [&](std::uint32_t slot, Id* id) {
     for (std::uint32_t k = 0; k < knownBankCount_; ++k) {
       if (knownBanks_[k].handle.slot == slot) {
@@ -854,6 +960,7 @@ void LiveRuntime::RecordStartState(core::System& sys) noexcept {
     const RecordOverride r{kRecordOverride, o.kind, o.id, o.value, o.target};
     PushRecord(&r, sizeof(r));
   }
+  if (routesOnly) WriteInitialRoutes();
 }
 
 }  // namespace snd::livelink

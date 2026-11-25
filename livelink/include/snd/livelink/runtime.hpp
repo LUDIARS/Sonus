@@ -47,6 +47,7 @@
 
 namespace snd::core {
 class System;
+class LivePluginPool;
 struct CoreDesc;
 struct LiveArenaView;
 struct LiveBankInfo;
@@ -223,6 +224,7 @@ class LiveRuntime {
   // `data` holds ChunkBytes(). Finish: Done -> Free after the result was read.
   // CancelAll (Server::Destroy): Queued -> Cancelled (the audio thread frees it without
   // applying), Done -> Free.
+  snd_result PreparePlugin(PendingChunk& p) noexcept;  // network thread, before queuing
   PendingChunk* AcquireChunk() noexcept;
   void FinishChunk(PendingChunk* c) noexcept;
   void CancelAllChunks() noexcept;
@@ -254,6 +256,7 @@ class LiveRuntime {
   // 1.1
   void ScanArena(const core::LiveArenaView& a) noexcept;           // auditions, stop markers, recorded chunk data
   void WriteLiveData(const cmd::LiveReplaceChunk& c) noexcept;
+  void WriteInitialRoutes() noexcept;
   void RecordStartState(core::System& sys) noexcept;
   void TrackAudition(HandleRef h) noexcept;
   void ApplyStruct(core::System& sys, PendingChunk& p, std::uint32_t session, ApplyResult* r) noexcept;
@@ -311,6 +314,7 @@ class LiveRuntime {
   std::uint32_t maxAuditions_ = 0;
   std::uint64_t* auditions_ = nullptr;  // [maxAuditions_] audio thread: tracked handle values (0 = empty)
   // 1.1 structural edits
+  core::LivePluginPool* pluginPool_ = nullptr;
   IStructEditor* structEditor_ = nullptr;
   std::atomic<std::uint32_t> usedBuses_{0}, usedEffects_{0};
   std::atomic<std::uint64_t> usedBytes_{0};
@@ -321,10 +325,13 @@ class LiveRuntime {
     std::uint32_t argCount;  // of the original edit (args beyond kLoggedArgs are not kept)
     std::uint32_t session;
     std::uint32_t buses, effects;  // cost (given back by the undo)
-    std::uint32_t reserved;
+    std::uint32_t producer;
     std::uint64_t bytes;
+    std::uint64_t bankHandle, targetBankHandle;
+    std::uint64_t token;
     std::uint64_t args[4];
   };
+  std::uint64_t nextStructToken_ = 0;
   StructLogEntry* structLog_ = nullptr;  // [structLogCap_] audio thread, oldest first
   std::atomic<std::uint32_t> structLogTaken_{0};  // places taken (accepted edits in flight + entries)
   std::uint32_t structLogCap_ = 0, structLogCount_ = 0;
@@ -340,6 +347,8 @@ class LiveRuntime {
   BlockIndex block_ = 0;      // block being processed (ApplyCommands .. end)
   ClockSample clock_ = 0;     // clock at the start of block_
   std::uint32_t blocksSinceMeters_ = 0, blocksSinceStats_ = 0, blocksPerSecond_ = 1;
+  const void** rejectedStructs_ = nullptr;  // payloads in current arena, bounded by queued slots
+  std::uint32_t rejectedStructCount_ = 0;
   PendingChunk* chunks_ = nullptr;  // [chunkCount_]
   std::uint8_t* chunkMemory_ = nullptr;
   std::uint32_t chunkCount_ = 0, chunkBytes_ = 0;
