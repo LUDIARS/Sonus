@@ -5,8 +5,6 @@
 #include <cmath>
 #include <cstdio>
 
-#include "snd/tool/curve_editor.hpp"
-#include "snd/tool/event_editor.hpp"
 #include "snd/tool/live_sync.hpp"
 #include "snd/tool/mixer_editor.hpp"
 #include "snd/tool/ui/layout_metrics.hpp"
@@ -172,11 +170,10 @@ void App::TrackDocument() {
   ProjectDocument* d = document();
   if (d == nullptr) return;
   if (knownRevision_ != d->revision()) {
-    // Changed elsewhere (a host, the live link, a reload): selections by position go when their
-    // arrays changed shape (D-186).
-    if (knownRevision_ != ~0ull && PositionShape() != knownShape_) ClearPositionSelections();
+    // Changed elsewhere (a host, the live link, a reload, a value only): selections by position go
+    // (D-186, judged by the revision, not by the arrays' shape).
+    if (knownRevision_ != ~0ull) ClearPositionSelections();
     knownRevision_ = d->revision();
-    knownShape_ = PositionShape();
   }
   if (d->revision() != seenDocRevision_) {
     seenDocRevision_ = d->revision();
@@ -531,35 +528,10 @@ bool App::Pointer(const tela::HostPointerEvent& event, std::uint64_t timeMs, boo
 
 void App::NoteOwnEdits() {
   // The screens' own edits come from the pointer and the keys (D-186): the revision they leave is
-  // known; another change of the document's revision drops the selections by position when the
-  // arrays they point into changed shape (a position then names another item).
+  // known; any other change of the document's revision (a host, the live link, a reload, even a
+  // value only) drops the selections by position.
   if (document() == nullptr) return;
   knownRevision_ = document()->revision();
-  knownShape_ = PositionShape();
-}
-
-std::string App::PositionShape() const {
-  const ProjectDocument* d = document();
-  if (d == nullptr) return std::string();
-  ProjectDocument* md = const_cast<ProjectDocument*>(d);  // the editors' readers only
-  std::string s;
-  if (!view_.event.event.empty() && d->Find(view_.event.event) != nullptr) {
-    EventEditor ed(*md, view_.event.event);
-    s += "e" + std::to_string(ed.TrackCount());
-    for (std::uint32_t t = 0; t < ed.TrackCount(); ++t) s += "," + std::to_string(ed.ClipCount(t)) + "/" + std::to_string(ed.ActionCount(t));
-  }
-  if (!view_.params.event.empty() && !view_.params.curve.empty() && d->Find(view_.params.event) != nullptr) {
-    s += "|c" + std::to_string(CurveEditor(*md, view_.params.event, view_.params.curve).Points().size());
-  }
-  auto count = [&](const std::string& g, const char* path) {
-    const DocObject* o = g.empty() ? nullptr : d->Find(g);
-    const json::Value* a = o != nullptr ? FindPath(o->doc, path) : nullptr;
-    return a != nullptr && a->IsArray() ? a->items.size() : std::size_t{0};
-  };
-  s += "|s" + std::to_string(count(view_.music.segment, "tempo")) + "," + std::to_string(count(view_.music.segment, "stems"));
-  s += "|p" + std::to_string(count(view_.music.playlist, "entries"));
-  s += "|r" + std::to_string(count(view_.music.event, "music.transitions"));
-  return s;
 }
 
 // --- ControlSink ---------------------------------------------------------------------------

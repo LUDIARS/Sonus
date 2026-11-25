@@ -170,7 +170,6 @@ class App final : public ControlSink, public Actions {
   void TrackDocument();
   bool KeyImpl(const KeyEvent& key);
   void NoteOwnEdits();
-  std::string PositionShape() const;
   void ClearPositionSelections();
   std::string MixerSignature(bool withValues) const;
   Session& session_;
@@ -187,7 +186,6 @@ class App final : public ControlSink, public Actions {
   std::optional<Picker> picker_;
   std::uint64_t seenDocRevision_ = ~0ull;
   std::uint64_t knownRevision_ = ~0ull;  // the document's revision after the screens' own edits
-  std::string knownShape_;               // PositionShape() then
   std::uint64_t problemsRevision_ = ~0ull;
   std::uint64_t problemsAtNs_ = 0;
   std::vector<DocIssue> problems_;
