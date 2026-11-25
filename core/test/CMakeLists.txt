@@ -73,6 +73,7 @@ set_tests_properties(indep_g2_impl_test PROPERTIES TIMEOUT 600)
 # Re-check 1 of group 2 (implementation 192bace).
 snd_add_test(indep_g2_recheck_test SOURCES indep_g2_recheck_test.cpp LINK ${_core_test_link})
 set_tests_properties(indep_g2_recheck_test PROPERTIES TIMEOUT 600)
+snd_add_test(indep_g2_plugin_budget_test SOURCES indep_g2_plugin_budget_test.cpp LINK ${_core_test_link})
 
 # Stage 3, session B group 4 (voice management, sequences, notifications, analysis).
 snd_add_test(core_g4_test SOURCES core_voice2_test.cpp core_sequence2_test.cpp core_notify2_test.cpp core_analysis_test.cpp
