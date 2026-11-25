@@ -275,6 +275,30 @@ void DestroyEmitter(Impl& im, SlotIndex slot) noexcept {
   schema::Tables& t = im.tables;
   if (!base::rows::IsLive(SND_ROWS(Emitter), slot)) return;
   const std::uint32_t gen = t.Emitter.rows.generation[slot];
+  // Snapshot the transform before removing the row, even during suspension or
+  // if the play has not created any voices yet. The association is generation-stamped.
+  if (im.ap.implicitOwnerGen[slot] == 0u) {
+    const auto d = base::rows::DenseOf(t.Emitter.rows, slot);
+    const auto& playbackRows = SND_ROWS(Playback);
+    for (std::uint32_t i = 0; i < playbackRows.count; ++i) {
+      auto& source = im.ap.playbackEmitter[base::rows::SlotAt(playbackRows, i)];
+      if (source.frozen || source.live.slot != slot || source.live.generation != gen) continue;
+      source.position = SND_R(Emitter_position)[d];
+      const Vec3 velocity = SND_R(Emitter_velocity)[d];
+      const BlockIndex last = SND_R(Emitter_lastUpdateBlock)[d];
+      const auto frames = std::min<std::uint64_t>((im.block > last ? im.block - last : 0u) * im.cfg.blockFrames,
+                                                  im.cfg.extrapolateFrames);
+      const float dt = static_cast<float>(frames) / static_cast<float>(im.cfg.sampleRate);
+      source.position.x += velocity.x * dt;
+      source.position.y += velocity.y * dt;
+      source.position.z += velocity.z * dt;
+      source.forward = SND_R(Emitter_forward)[d];
+      source.halfExtents = SND_R(Emitter_halfExtents)[d];
+      source.shape = SND_R(Emitter_shapeKind)[d];
+      if (SND_R(Emitter_createdBlock)[d] != im.block) source.occlusion = SND_R(Emitter_occlusion)[d];
+      source.frozen = true;
+    }
+  }
   DestroyEmitterParams(im, slot);
   RemoveEmitterRow(t, slot);
   im.ap.implicitOwnerGen[slot] = 0u;
@@ -345,6 +369,9 @@ void CreatePlayback(Impl& im, HandleRef h, HandleRef emitter, Id event, EventRef
   SND_W(Playback_eventRef)[d] = ref;
   im.ap.playCounter = im.ap.playCounter + 1u;
   SND_W(Playback_seed)[d] = base::MixU32(im.cfg.seed ^ (im.ap.playCounter * 0x9E3779B9u));
+  auto& source = im.ap.playbackEmitter[h.slot];
+  source = PlaybackEmitter{};
+  if (es != kNoSlot) source.live = HandleRef{es, t.Emitter.rows.generation[es]};
   SND_W(Playback_emitterSlot)[d] = es;
   SND_W(Playback_transportSlot)[d] = ts;
   SND_W(Playback_eventId)[d] = event;

@@ -441,7 +441,7 @@ bool CreateVoice(Ctx& c, StartContext& sc, SourceKind kind, const void* params, 
   VoiceStatic& vs = im.ev.vs[v];
   vs = VoiceStatic{};
   vs.generation = t.Voice.rows.generation[v];
-  if (base::rows::IsLive(t.Emitter.rows, sc.emitter)) vs.emitterGeneration = t.Emitter.rows.generation[sc.emitter];
+  vs.playbackGeneration = t.Playback.rows.generation[sc.playback];
   vs.flags = (sc.threeD && sc.emitter != kNoSlot ? kVs3D : 0u) | (music ? kVsMusic : 0u);
   const source::ISourceKind* k = im.kinds[static_cast<std::size_t>(kind)];
   if (!k->RendersAtOutputRate()) vs.flags |= kVsSourceRate;

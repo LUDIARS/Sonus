@@ -284,6 +284,7 @@ using F32 = float;
 // Owners implicitly read their own columns and are not listed.
 // ---------------------------------------------------------------------------
 #define SND_SCHEMA_READS(R)                                                    \
+  R(ApplyCommands, Emitter_occlusion, Previous)                                \
   /* 2 UpdateTransport: Transport, Reservation, owner playback state */        \
   R(UpdateTransport, Transport_ownerPlayback, Current)                         \
   R(UpdateTransport, Transport_lifetime, Current)                              \
@@ -365,6 +366,7 @@ using F32 = float;
   R(EvaluateDspParams, ParamPlayback_current, Current)                         \
   R(EvaluateDspParams, Listener_weight, Current) \
   R(EvaluateDspParams, Spatial_coneAngle, Current) \
+  R(EvaluateDspParams, Spatial_azimuth, Current) \
   R(EvaluateDspParams, Spatial_shapeSpread, Current) \
   R(EvaluateDspParams, Spatial_distance, Current)                              \
   R(EvaluateDspParams, Spatial_direction, Current)                             \
@@ -424,7 +426,6 @@ using F32 = float;
   R(Render, Voice_clipRef, Current)                                            \
   R(Render, RealVoice_voiceSlot, Current)                                      \
   R(Render, RealVoice_assign, Current)                                         \
-  R(Render, Spatial_azimuth, Current) \
   R(Render, Spatial_distance, Current)                                         \
   R(Render, Spatial_direction, Current)                                        \
   R(Render, Spatial_valid, Current)                                            \
