@@ -162,3 +162,94 @@ SND_TEST(ApiDevice, SuspendHoldsTheClock) {
   SND_CHECK_EQ(snd_get_stats(r.sys, &b), SND_OK);
   SND_CHECK(b.clock_sample > a.clock_sample);
 }
+
+namespace {
+snd_config LifecycleConfig() {
+  auto c = SmallConfig();
+  c.commands.arena_bytes = 256;
+  c.commands.reserve_bytes = 64;
+  c.commands.overflow_param_slots = 1;
+  c.commands.arenas_per_thread = 2;
+  return c;
+}
+
+// 32-byte SetParam packets: eight normal, two reserve, one fallback key.
+// The distinct twelfth key proves actual saturation before a lifecycle call.
+void FillLifecycleArena(snd_system* sys) {
+  for (snd_id i = 0; i < 11; ++i) {
+    SND_REQUIRE_EQ(snd_set_param_global(sys, 0x5000u + i, 1.0f), SND_OK);
+  }
+  SND_REQUIRE_EQ(snd_set_param_global(sys, 0x500bu, 1.0f), SND_ERR_COMMAND_BUFFER_FULL);
+}
+}  // namespace
+
+SND_TEST(ApiDevice, A005_FullArenaAlternatesSilenceAndAudio) {
+  static const float value = 0.25f;
+  Rig r(LifecycleConfig());
+  SND_REQUIRE_EQ(r.created, SND_OK);
+  SND_REQUIRE(PlayDc(r, &value).value != 0u);
+  r.Step(10);
+  for (int cycle = 0; cycle < 6; ++cycle) {
+    FillLifecycleArena(r.sys);
+    // These all belong to one render boundary. The final suspend must win.
+    for (int i = 0; i < 16; ++i) {
+      SND_REQUIRE_EQ(snd_suspend(r.sys), SND_OK);
+      SND_REQUIRE_EQ(snd_resume(r.sys), SND_OK);
+    }
+    SND_REQUIRE_EQ(snd_suspend(r.sys), SND_OK);
+    r.Step(12);
+    snd_stats a{}, b{};
+    SND_REQUIRE_EQ(snd_update(r.sys), SND_OK);
+    SND_REQUIRE_EQ(snd_get_stats(r.sys, &a), SND_OK);
+    for (int i = 0; i < 1000; ++i) SND_REQUIRE_EQ(snd_update(r.sys), SND_OK);
+    r.Step(8);
+    SND_REQUIRE_EQ(snd_update(r.sys), SND_OK);
+    SND_REQUIRE_EQ(snd_get_stats(r.sys, &b), SND_OK);
+    SND_CHECK_EQ(b.clock_sample, a.clock_sample);
+    SND_CHECK_EQ(Sample(r, r.Frames() - 1u, 0), 0.0f);
+
+    FillLifecycleArena(r.sys);
+    SND_REQUIRE_EQ(snd_suspend(r.sys), SND_OK);
+    SND_REQUIRE_EQ(snd_resume(r.sys), SND_OK);
+    r.Step(12);
+    SND_REQUIRE_EQ(snd_update(r.sys), SND_OK);
+    SND_REQUIRE_EQ(snd_get_stats(r.sys, &b), SND_OK);
+    SND_CHECK(b.clock_sample > a.clock_sample);
+    SND_CHECK_NEAR(Sample(r, r.Frames() - 1u, 0), value * kCenter, 1e-6f);
+  }
+  SND_CHECK_EQ(r.refillTimeouts, 0u);
+}
+
+SND_TEST(ApiDevice, A005_RetiringWorkerResumesStoppedDeviceAtSaturation) {
+  Rig r(LifecycleConfig());
+  SND_REQUIRE_EQ(r.created, SND_OK);
+  SND_REQUIRE_EQ(snd_suspend(r.sys), SND_OK);
+  r.Step(12);
+  SND_REQUIRE(r.WaitRefill());
+  SND_REQUIRE_EQ(snd_update(r.sys), SND_OK);
+  snd_stats before{}, after{};
+  SND_REQUIRE_EQ(snd_get_stats(r.sys, &before), SND_OK);
+  snd_device_event event{};
+  event.kind = SND_DEVICE_EVENT_SUSPENDED;
+  r.device.EmitEvent(event);
+  r.device.Stop();
+  std::thread worker([&] {
+    SND_REQUIRE_EQ(snd_resume(r.sys), SND_ERR_THREAD_NOT_REGISTERED);
+    SND_REQUIRE_EQ(snd_register_thread(r.sys), SND_OK);
+    SND_REQUIRE_EQ(snd_suspend(r.sys), SND_OK);
+    SND_REQUIRE_EQ(snd_flush(r.sys), SND_OK);  // one in flight, one still writable
+    FillLifecycleArena(r.sys);
+    const auto result = snd_resume(r.sys);
+    SND_CHECK_EQ(result, SND_OK);
+    SND_CHECK_EQ(snd_unregister_thread(r.sys), SND_OK);
+  });
+  worker.join();
+  SND_CHECK(!r.device.IsStarted());
+  SND_REQUIRE_EQ(snd_update(r.sys), SND_OK);
+  SND_REQUIRE(r.device.IsStarted());
+  r.Step(16);
+  SND_REQUIRE_EQ(snd_update(r.sys), SND_OK);
+  SND_REQUIRE_EQ(snd_get_stats(r.sys, &after), SND_OK);
+  SND_CHECK(after.clock_sample > before.clock_sample);
+  SND_CHECK_EQ(r.refillTimeouts, 0u);
+}

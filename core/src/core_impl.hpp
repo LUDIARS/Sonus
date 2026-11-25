@@ -92,6 +92,7 @@ struct Producer {
   std::atomic<std::uintptr_t> lastThread{0};
   base::ArenaCycle cycle;
   ArenaView* arenas = nullptr;  // [arenasPerThread]
+  bool lifecycleTail = false;   // current arena ends its reserve with an overflow Suspend/Resume
   std::uint32_t seq = 0;        // producer private
   std::uint64_t publishSeq = 0;
   std::uint32_t index = 0;
