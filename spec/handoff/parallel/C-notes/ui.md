@@ -273,6 +273,23 @@ UI 側で Tela に依存しないもの（プラグインでも使える、要�
 
 ## 回した構成と結果
 
+### 差し戻し 3 回目の後（8be8784。ASan の回は cf9a167 = 文書のコミットの前、コードは同じ）
+
+ビルドは `$S/ui/b-*`、-j2、1 つずつ（ログは `$S/ui/r3/*.log`、終わったら消した）。警告はどの構成も 0。
+
+| 構成 | 実行したテスト | 結果 |
+| --- | --- | --- |
+| 9: gcc Debug | 全部（434） | 全部通過。組 U の `Defect_*`（1〜5、N1〜N6、P1〜P5）と組 P の `Defect_*` も全部通過 |
+| 9 ＋ clang | `ctest -R tool`（216） | 全部通過 |
+| 9 ＋ ASan / UBSan ＋ `float-cast-overflow`（`-DSND_SANITIZE=address,undefined,float-cast-overflow`、`-fno-sanitize-recover=all`） | `ctest -R tool`（216） | 全部通過。報告 0（前回の 3 件 `music_editor.cpp:107`・`project.cpp:294`・`music_editor.cpp:254` も出ない。`tool_indep_s7_robust_test`・`tool_indep_model_test` 通過） |
+| 9 ＋ TSan | 並行性 5 本、`tool_ui_editor_concurrency`・`tool_indep_s7_ui_threads`・`tool_ui_concurrency`・`tool_indep_concurrency` を -j1 で 20 回 | 全部通過、報告なし |
+| 9 ＋ Release | `ctest -R tool`（216）、同じ 4 本を -j1 で 20 回 | 全部通過 |
+| 8: 核だけ | `ctest -R tool`（80） | 全部通過 |
+
+MinGW の構文検査: 今回変えたファイル 15 本（`tool/src` の document・music_editor・mixer・mixer_editor・project、`tool/ui/src` の app・
+patch_view・profiler_view・mixer_view・music_view、テスト 5 本）は全部通過。
+
+
 ### 差し戻しの後（fab42a9 = 組 P の差し戻し c/live を取り込んだ後）
 
 ビルドは `$S/ui/b-*`、-j2、1 つずつ（終わったら消した）。警告はどの構成も 0。
@@ -325,3 +342,7 @@ MinGW（`x86_64-w64-mingw32-g++ -std=c++20 -fsyntax-only -Werror -Wall -Wextra -
 - 差し戻し: Windows のホストで Esc が Tela に渡らずウィンドウが閉じないこと（コードと MinGW の構文検査だけ）。ミキサーの結び直しの
   質問のあとのゲームとツールのずれ（ライブで上書きを捨てた・書き戻した後に、ゲームの値がツールと同じになること）は確かめていない。
 - livelink の独立テスト 2 本の失敗が取り込んだ状態からのものであること（出発点 ce1aa3e で回し直してはいない。組 U の差分に livelink は無い）。
+- 差し戻し 3 回目: 最小の窓は宣言の位置（ヘッドレス）で確かめた。実際の OS の窓の最小の大きさ（Windows / macOS のホストに最小の
+  サイズを伝えること）は入れていない（窓が小さいと「too small」が出るだけ）。文字の幅（Pictor）でラベルが欄に収まるかは見ていない。
+  `FiniteText` は名前の語と数字の語を区別しないので、「inf」「nan」だけの語の名前は `Kit::Label` を通る所で「-」になる。
+  2 回目の差し戻し（N1〜N6）の時に回しかけた構成はコンテナの再起動で途中で止まり、結果は残っていない（3 回目の上の表で全部を回し直した）。
