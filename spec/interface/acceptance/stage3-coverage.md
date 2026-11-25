@@ -213,6 +213,7 @@
 | ダッキング | コンプレッサーのキー経路（比例ダッキングの DUCK ルールは組③） | `IndepG2Side.KeyBusDrivesTheGainReductionInTheSameBlockWhenItComesFirst`、`IndepG2Side.KeyBusAfterTheTargetActsOneBlockLater`、`IndepG2Side.SidechainIsTakenAfterTheKeyBusFader` |
 | 再生単位のフィルタ | 標準 LP・HP、距離 LP | `IndepG2VoiceFilter.ParameterCurveDrivesLowpassAndHighpass`、`IndepG2VoiceFilter.DistanceCurveLowpass` |
 | 再生単位のフィルタ | 重い処理の枠と仮想復帰 | `CoreFx.EveryStandardKindRunsAsAVoiceEffect`、`CoreFx.VoiceEffectPoolFullPlaysDryAndCounts`、`CoreFxRecheck.VoiceBackFromVirtualReadsTheEventSettingAsItIsNow`、`IndepG2Recheck.FirstBlockHasThePlaybackValuesOnEveryStage` |
+| 再生単位のフィルタ | プラグイン状態が枠を超えたときは全段ドライ。次の再生で枠を再利用 | `IndepG2PluginBudget.OneByteOverBudgetLeavesSlotForExactFit`、`IndepG2PluginBudget.SecondStageOverBudgetLeavesEntireChainDry` |
 | 空間化 | プラグインをボイスに挿入。方位などをプラグインに渡す経路は B-5 依頼 | `CoreFx.PluginAsVoiceEffectGetsTheVoiceChannelsAndPlayback` |
 | §2.5・§14 横断 | 決定論・確保・RT・128 実ボイス | `CoreFxDeterminism.SameScriptSameBitsSerialAndParallel`、`CoreFxMemory.NoAllocationAfterInitialisationOnTheNewPaths`、`CoreFxRt.NewPathsHaveNoRtViolations`、`CoreFxLoad.Real128VoicesWithTheVoiceEffectPoolFull` |
 
@@ -220,7 +221,7 @@
 
 ## 8. Cloud 復元版の機能テスト対応
 
-設計 §7 の各行について、G2 `ebaa5a6`、G4 `db0677b`、G1 `194ceea`、G3 `f4c16d9` の作業先頭にあるテスト宣言を照合した。表は機能ごとの代表例。各組の合否と構成別実行結果は report-B.md に記録する。現時点の正式マージは0組。
+設計 §7 の各行について、G2 `ebaa5a6`、G4 `db0677b`、G1 `194ceea`、G3 `f4c16d9` の作業先頭にあるテスト宣言を照合した。表は機能ごとの代表例。各組の合否と構成別実行結果は report-B.md に記録する。組②修正版は `48f01ee` で正式マージ済み。組④・①・③は受け入れ前。
 
 | 設計 §7 の行 | 機能テスト | 範囲・依頼 |
 | --- | --- | --- |
