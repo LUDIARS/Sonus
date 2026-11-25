@@ -1,0 +1,80 @@
+# Completion conditions of spec/handoff/parallel/README.md section 5:
+# the seven required configurations, warnings as errors, every test passing.
+name: ci
+
+on:
+  push:
+    branches: [main, 'int/**']
+  pull_request:
+    branches: [main, 'int/**']
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build-test:
+    name: ${{ matrix.name }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: gcc-debug
+            cc: gcc-14
+            cxx: g++-14
+            args: -DCMAKE_BUILD_TYPE=Debug
+          - name: clang-debug
+            cc: clang
+            cxx: clang++
+            args: -DCMAKE_BUILD_TYPE=Debug
+          - name: asan-ubsan
+            cc: gcc-14
+            cxx: g++-14
+            args: -DCMAKE_BUILD_TYPE=Debug -DSND_SANITIZE=address,undefined
+          - name: tsan
+            cc: gcc-14
+            cxx: g++-14
+            args: -DCMAKE_BUILD_TYPE=Debug -DSND_SANITIZE=thread
+          - name: release
+            cc: gcc-14
+            cxx: g++-14
+            args: -DCMAKE_BUILD_TYPE=Release
+          - name: release-no-tests
+            cc: gcc-14
+            cxx: g++-14
+            args: -DCMAKE_BUILD_TYPE=Release -DSND_BUILD_TESTS=OFF
+          - name: no-opus
+            cc: gcc-14
+            cxx: g++-14
+            args: -DCMAKE_BUILD_TYPE=Debug -DSND_CODEC_OPUS=OFF
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ninja-build gcc-14 g++-14 clang libasound2-dev
+
+      # TSan on the hosted runners aborts with high mmap ASLR entropy.
+      - name: Lower mmap ASLR entropy for TSan
+        if: matrix.name == 'tsan'
+        run: sudo sysctl vm.mmap_rnd_bits=28
+
+      - name: Configure
+        env:
+          CC: ${{ matrix.cc }}
+          CXX: ${{ matrix.cxx }}
+        run: cmake -S . -B build -G Ninja ${{ matrix.args }}
+
+      - name: Build
+        run: cmake --build build -j4
+
+      - name: Test
+        if: matrix.name != 'release-no-tests'
+        run: ctest --test-dir build -j4 --output-on-failure
