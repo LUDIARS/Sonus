@@ -2,7 +2,7 @@
 
 - ブランチ: `int/s7-tool`（出発点 `ff5df53`）。先頭のハッシュは末尾の「ブランチの先頭」に書く。
 - 決定: D-170〜D-189（D-181 は欠番）。正本は `spec/interface/CONTRACTS.md` の「段階 7-C」。
-- 進め方: 4 つの組（L = livelink、M = モデルと buildtool、P = ツール側のライブ機能、U = Tela の画面）に分け、組ごとに「実装（Opus）→ 独立テスト（別の Opus。実装を読む前に性質を書き出す）→ 欠陥と仕様の穴への決定 → 差し戻し → 再確認」を回した。受け入れ側（このセッション）は決定と取り込みと最終確認だけを行い、コードは書いていない。
+- 進め方: 4 つの組（L = livelink、M = モデルと buildtool、P = ツール側のライブ機能、U = Tela の画面）に分け、組ごとに「実装（Opus）→ 独立テスト（別の Opus。実装を読む前に性質を書き出す）→ 欠陥と仕様の穴への決定 → 差し戻し → 再確認」を回した。受け入れ側（このセッション）は決定と取り込みと最終確認を行った。受け入れ側が書いたコードは `buildtool/src/detail/file_io.hpp` の Windows 向けの分岐だけ（8 章）。
 - 組ごとの詳しい記録（作ったもの、決定の案、構成の結果、未検証）: `spec/handoff/parallel/C-notes/`（`livelink.md`、`model.md`、`live.md`、`ui.md` と、独立テスト担当の `*-indep.md`）。性質の一覧は各テストディレクトリの `indep_s7_*properties.md`。
 
 ## 1. 作ったもの
@@ -43,7 +43,7 @@
 
 ### テスト
 
-- 実装担当のテストと、独立テスト担当のテスト（`indep_s7_*`: livelink、tool のモデル、buildtool、ライブ、UI）。独立テストが見つけた欠陥は計 **48 件**（L 2、M 10、P 15、U 11 と、仕様の穴 40 件余り）で、すべて決定のうえ直し、`Defect_*` のテストは通る状態で残してある。
+- 実装担当のテストと、独立テスト担当のテスト（`indep_s7_*`: livelink、tool のモデル、buildtool、ライブ、UI）。独立テストが見つけた欠陥は計 **45 件**（L 2、M 10、P 15、U 18 と、仕様の穴 40 件余り）で、すべて決定のうえ直し、`Defect_*` のテストは通る状態で残してある。
 - ファズ（14 章）: 壊れたライブリンクのメッセージ（1.1 の全種別、両方向）、壊れた記録、壊れた XPCH、壊れたプロジェクトの JSON、壊れた不具合報告と設定のテキスト。ASan / UBSan で報告なし。
 
 ## 2. 決定（D-番号ごと）
@@ -185,7 +185,38 @@ Tela に依存しない UI の部品（`tool/ui` にあるが Tela を使って�
 
 ## 8. 構成ごとの結果
 
-（最終確認の結果。末尾に書く）
+最終確認は受け入れ側が、新しいビルドディレクトリ（リポジトリの外）から `-j2` で 1 構成ずつ回した。どれも警告ゼロ（`-Werror`）。`platform_device_play_test` は実デバイスが要るので SKIP（以前から）。
+
+| 構成 | 先頭 | テスト | 結果 |
+| --- | --- | --- | --- |
+| 1 gcc Debug | `ccebc87` | 全部（227） | すべて通過 |
+| 2 clang Debug | `ccebc87` | 全部（227） | すべて通過 |
+| 3 `-DSND_SANITIZE=address,undefined` | `ccebc87` | 全部（227） | すべて通過 |
+| 4 `-DSND_SANITIZE=thread` | `590eafe` | 全部（227） | すべて通過 |
+| 5 Release | `590eafe` | 全部（227） | すべて通過 |
+| 6 `-DSND_BUILD_TESTS=OFF -DCMAKE_BUILD_TYPE=Release` | `ccebc87` | — | ビルド成功 |
+| 7 `-DSND_CODEC_OPUS=OFF` | `ccebc87` | 全部（227） | すべて通過 |
+| 8 `-DSND_BUILD_TOOL_CORE=ON`（Tela なし） | `8254209` | 全部（298） | すべて通過 |
+| 9 `-DSND_BUILD_TOOL=ON`（Tela 入り）gcc Debug | `8254209` | 全部（443） | すべて通過 |
+| 9 ＋ clang Debug | `8254209` | 全部（443） | すべて通過 |
+| 9 ＋ ASan / UBSan | `8254209` | `tool\|livelink\|buildtool`（258） | すべて通過、サニタイザの報告なし |
+| 9 ＋ Release | `8254209` | 全部（443）と、並行性テスト 16 本を `-j1` で `--repeat until-fail:20` | すべて通過 |
+| 9 ＋ TSan | `8254209` | 全部（443）と、同じ 16 本を `-j1` で `--repeat until-fail:20` | すべて通過、TSan の報告なし |
+| 9 ＋ テストなし Release | `8254209` | — | ビルド成功 |
+
+- `590eafe` 以降、`tool/` と `spec/` 以外のソースは変わっていない（`git diff --stat 590eafe..8254209 -- . ':!tool' ':!spec'` が空）。構成 1〜7 は `tool/` をビルドしないので、上の結果は先頭でも同じ。
+- 並行性テストの 20 回は、名前が `stress|concurrency|threads|live_sync|live_mixer|recheck_Concurrent` に当たる 16 本（livelink の stress、tool の並行性、UI の並行性、独立テストのスレッドのテスト）。組ごとの担当も、それぞれの並行性テストを TSan と Release で 20 回通している（`C-notes/`）。
+- 範囲外の浮動小数→整数の変換（`-fsanitize=float-cast-overflow`）は、組 U の担当が Tela 入りの `tool` のテスト（225 件）で報告 0 を確かめた。
+- **MinGW の構文検査**（`x86_64-w64-mingw32-g++ -std=c++20 -fsyntax-only -Werror`）: 変えたソース（`livelink/src`、`tool/src`、`tool/ui/src`、`tool/preview/src`、`buildtool/src`）54 本すべて通過。新しいテストは組ごとの担当が検査済み。`buildtool/src/detail/file_io.hpp` は、Windows でパスを `fopen` に渡していた以前からの誤り（`build.cpp` と `project.cpp` の検査がここで止まっていた）を、受け入れ側が `_WIN32` の分岐（`_wfopen`）で直した（Linux の側のコードは同じ）。直したあと、構成 8 の `buildtool|build_pipeline|tool|integration` を回し直して通過を確かめた。
+- **CI（PR #6、`main` とマージした状態）**: gcc-debug、clang-debug、asan-ubsan、tsan、release、release-no-tests は成功。no-opus で `physics_api_test`（`PhysicsApi.AudioStallDetectionBoundaryAndDrops`）が 1 回失敗した。これは `main` 側（セッション A）のテストで、このブランチは physics・core・api・platform・jobs を変えていない。同じ実行の gcc-debug と release では通り、手元で `main` とマージした no-opus の構成で 61 回繰り返しても通った。
+
+独立テストの途中で見つけて直した、テストの待ち方の不備（実装の欠陥ではないもの）: 既存の `tool_live_mixer_test`（切断後に固定の 16 ブロックだけ待っていた。期待値は変えず、条件で待つ形に）、`tool_profiler_streams_test`（購読が効く前に鳴らしていた）、livelink と tool の stress のテスト 3 本（再接続の直後の送信）。
+
+既存のテストで期待を書き換えたもの（どれも決定と食い違うため。コメントに D-番号）:
+
+- `tests/integration` の livelink 3 か所（D-170、3 章）。
+- `tool/test` の `ToolUiDeclaration.NarrowWindowPagesTheStrips`（段階2）: 560×700 の窓を前提にしていた。最小の窓 1024×640（D-187）で「window too small」になるので、その期待に変え、ページ送りの確認は `ToolUiWindow.MixerPagesAtTheSmallestWindow` に移した。
+- `tool/test` の `MusicEditor.MinimumLookaheadAndTransitionPreview` の 2 行と、独立テスト `IndepS7Calc.F16_TransitionPreview`（D-184: 遷移の試聴はランタイムの規則が正）。
 
 ## 9. 未検証の箇所
 
@@ -199,8 +230,11 @@ Tela に依存しない UI の部品（`tool/ui` にあるが Tela を使って�
 - **文字の描画**（Pictor）と、画素の色の区分。画像のテストは図形の位置と大きさを画素で数えている。
 - **遷移の試聴**: 1 つの Segment の上の計算。プレイリストを進む場合、Segment をまたぐテンポ変化、ストール、割り込み中の要求は扱っていない。
 - **`DecideSync` の世代の照合と送信の間のごく短い隙間**（Client に世代つきで答える口が無い）。
+- **Windows の非 ASCII のパス**: `tool/src` の一部（`document.cpp`、`doc_build.cpp`、`project.cpp`、`recording_file.cpp`）は `fopen` に `std::string` のパスを渡している。構文検査は通るが、ANSI のコードページに無い文字を含むパスは開けない可能性がある。
+- **独立テストの最後の確認**: 組 U の 4 回目の修正（表示の 2 件）と、組 M・P の最後の修正のあとは、独立テスト担当による再確認を省き、`Defect_*` を含む全テストの通過と上の全構成で受け入れた。
 - 仮のもの: 強さのカーブの評価（C-11）、パッチの形式（C-10）、ストリームのプライムの既定 30 ms。
 
 ## 10. ブランチの先頭
 
-（末尾に書く）
+- コードの先頭: この報告のコミットの直前（`file_io.hpp` の修正のコミット）。最終確認の表は `8254209`（その後の変更は `file_io.hpp` の `_WIN32` の分岐と、この報告だけ）。
+- ブランチ `int/s7-tool` の先頭は、この報告を入れたコミット。ハッシュは PR #6（https://github.com/LUDIARS/Sonus/pull/6）の先頭を見る。
