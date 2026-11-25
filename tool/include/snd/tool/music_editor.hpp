@@ -294,6 +294,9 @@ class MusicEditor {
   bool RemoveStinger(std::uint32_t i);
   // --- derived ---------------------------------------------------------------------------
   std::vector<LookaheadEntry> MinimumLookahead(const MusicSettings& s) const;
+  // The longest request time a preview takes (D-187: a computation's input has a range). A request
+  // time that is not finite, negative or beyond it gives an invalid preview (valid false).
+  static constexpr double kMaxRequestSeconds = 1.0e6;
   TransitionPreview Preview(const std::string& from, const std::string& to, double requestSeconds,
                             const MusicSettings& s) const;
 

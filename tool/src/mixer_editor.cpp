@@ -432,9 +432,9 @@ std::vector<SnapshotValue> MixerEditor::SnapshotValues(const std::string& snap) 
     const DocObject* b = doc_.Resolve("bus", StringAt(v, "bus"));
     x.bus = b != nullptr ? b->guid : StringAt(v, "bus");
     x.value = NumberAt(v, "value", 0);
-    x.effect = static_cast<std::uint32_t>(NumberAt(v, "effect", 0));
-    x.param = static_cast<std::uint32_t>(NumberAt(v, "param", 0));
-    x.send = static_cast<std::uint32_t>(NumberAt(v, "send", 0));
+    x.effect = U32At(v, "effect", 0);
+    x.param = U32At(v, "param", 0);
+    x.send = U32At(v, "send", 0);
     out.push_back(x);
   }
   return out;

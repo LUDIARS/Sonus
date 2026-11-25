@@ -563,15 +563,18 @@ void RulesTab(Kit& kit, float width, float height) {
                   [mvp](const std::string& v) { mvp->from = v; }, 0, y, w * 0.2f, 40);
     kit.PickField("mu.pv.to", "To", mv.to, "To state", [d, ev] { return StateItems(*d, ev, false); },
                   [mvp](const std::string& v) { mvp->to = v; }, w * 0.2f + 4, y, w * 0.2f, 30);
-    NumberSpec req = Num(mv.requestSeconds, 0.05, 0, 1e6, 3, "s");
+    NumberSpec req = Num(mv.requestSeconds, 0.05, 0, MusicEditor::kMaxRequestSeconds, 3, "s");
     req.document = false;
     kit.NumberField("mu.pv.req", "at", req, [mvp](double v, std::uint32_t) {
+      // A screen value with a range (D-187): refused outside 0 .. kMaxRequestSeconds.
+      if (!std::isfinite(v) || v < 0.0 || v > MusicEditor::kMaxRequestSeconds) return false;
       mvp->requestSeconds = v;
       return true;
     }, w * 0.4f + 8, y, w * 0.2f, 24);
     NumberSpec prime = Num(mv.settings.streamPrimeMs, 5, 0, 1e5, 1, "ms prime");
     prime.document = false;
     kit.NumberField("mu.pv.prime", "", prime, [mvp](double v, std::uint32_t) {
+      if (!std::isfinite(v) || v < 0.0 || v > 1e5) return false;
       mvp->settings.streamPrimeMs = v;
       return true;
     }, w * 0.6f + 12, y, w * 0.2f);

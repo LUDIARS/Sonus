@@ -2,6 +2,7 @@
 // meter), category strips, the overrides list with undo / redo / revert, and
 // the parameter overrides.
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 
 #include "snd/tool/names.hpp"
@@ -26,6 +27,7 @@ tela::Color SyncColor(const CellSync& sync, std::int32_t cell, const Palette& p,
 std::string Short(const std::string& s, std::size_t n) { return s.size() <= n ? s : s.substr(0, n); }
 
 std::string FormatValue(float v, const std::string& unit) {
+  if (!std::isfinite(v)) return "-";  // D-189: a shown value is finite
   char b[32];
   if (unit == "Hz" && v >= 1000.0f) {
     std::snprintf(b, sizeof b, "%.1fk", static_cast<double>(v) / 1000.0);
@@ -231,7 +233,7 @@ void DeclareSide(tela::Document& doc, ViewContext& ctx, float x, float height) {
       const std::string base = "par." + pd.key;
       const KnobRange range{std::min(pd.minValue, pd.maxValue), std::max(pd.minValue, pd.maxValue), false, pd.isSwitch};
       char b[96];
-      std::snprintf(b, sizeof b, "%s %.3g%s", Short(pd.name, 16).c_str(), static_cast<double>(ps.value),
+      std::snprintf(b, sizeof b, "%s %s%s", Short(pd.name, 16).c_str(), FormatValue(ps.value, std::string()).c_str(),
                     ps.enabled ? " (override)" : "");
       Text(doc, base + ".name", b, 0, py + 4, w - 150, 22, 0.55f);
       KnobLook look;

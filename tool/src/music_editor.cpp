@@ -104,7 +104,8 @@ MusicalPosition TempoMap::Musical(double tick) const {
   double rest = std::floor(inBar - beat * bt + 0.5);
   if (rest < 0.0) rest = 0.0;
   if (rest >= kTicksPerQuarter) rest = kTicksPerQuarter - 1.0;
-  return MusicalPosition{static_cast<std::int32_t>(bar), static_cast<std::int32_t>(beat), static_cast<std::int32_t>(rest)};
+  // Checked before converting (D-187): a far or non-finite tick gives the saturated bar, not UB.
+  return MusicalPosition{ClampToI32(bar), ClampToI32(beat), ClampToI32(rest)};
 }
 bool TempoMap::MusicalIsApproximate(double tick) const { return BeatTicks(PointAt(tick)) > kTicksPerQuarter; }
 double TempoMap::TickOfMusical(const MusicalPosition& m) const {
@@ -251,10 +252,10 @@ std::vector<TempoPointDesc> SegmentEditor::Tempo() const {
   if (t == nullptr || !t->IsArray()) return out;
   for (const Value& p : t->items) {
     TempoPointDesc d;
-    d.tick = static_cast<std::uint64_t>(NumberAt(p, "tick", 0));
+    d.tick = U64At(p, "tick", 0);
     d.bpm = NumberAt(p, "bpm", 120);
-    d.beatsPerBar = static_cast<std::uint32_t>(NumberAt(p, "beatsPerBar", 4));
-    d.beatUnit = static_cast<std::uint32_t>(NumberAt(p, "beatUnit", 4));
+    d.beatsPerBar = U32At(p, "beatsPerBar", 4);
+    d.beatUnit = U32At(p, "beatUnit", 4);
     out.push_back(d);
   }
   return out;
@@ -347,7 +348,7 @@ std::vector<MarkerDesc> SegmentEditor::Markers() const {
   const Value* m = doc_.Find(guid_)->doc.Find("markers");
   if (m == nullptr || !m->IsArray()) return out;
   for (const Value& v : m->items) {
-    out.push_back(MarkerDesc{StringAt(v, "name"), static_cast<std::uint64_t>(NumberAt(v, "frame", 0)),
+    out.push_back(MarkerDesc{StringAt(v, "name"), U64At(v, "frame", 0),
                              ParseEnum<MarkerKind>(StringAt(v, "kind", "user"), kMarkerKinds, MarkerKind::User)});
   }
   return out;
@@ -578,7 +579,7 @@ std::vector<TransitionRule> MusicEditor::Rules() const {
     r.from = StringAt(v, "from", "*");
     r.to = StringAt(v, "to", "*");
     r.timing = ParseEnum<Timing>(StringAt(v, "timing", "nextBar"), kTimingNames, Timing::NextBar);
-    r.timingCount = static_cast<std::uint32_t>(NumberAt(v, "timingCount", 0));
+    r.timingCount = U32At(v, "timingCount", 0);
     r.fadeOutBeats = NumberAt(v, "fadeOutBeats", 0);
     r.fadeInBeats = NumberAt(v, "fadeInBeats", 0);
     const DocObject* b = doc_.Resolve("segment", StringAt(v, "bridge"));
@@ -864,6 +865,7 @@ std::vector<LookaheadEntry> MusicEditor::MinimumLookahead(const MusicSettings& s
 TransitionPreview MusicEditor::Preview(const std::string& from, const std::string& to, double requestSeconds,
                                        const MusicSettings& s) const {
   TransitionPreview p;
+  if (!std::isfinite(requestSeconds) || requestSeconds < 0.0 || requestSeconds > kMaxRequestSeconds) return p;  // D-187
   const std::vector<std::string> st = States();
   if (IndexOf(st, from) < 0 || IndexOf(st, to) < 0) return p;
   p.valid = true;
