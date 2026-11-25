@@ -305,3 +305,53 @@
 - N3 の未定義動作の値（-1、1e300 を整数に変えた結果）は処理系によって違う。テストは「文書が変わらず入力が開いたまま」だけを見る。
 - Esc はホストを通さず `App::Key` で確かめた（Windows のホストは動かしていない）。
 - `tool_profiler_streams_test` の 60 s の失敗が負荷によるものかは、構成を消した後なので確かめていない。
+
+## 再確認 2 回目（2 回目の差し戻しの後）
+
+実装担当の修正（0629b4a `AbortGroup` と `SpatialPreview` の範囲、2d8b692 N1〜N6 と選択の解除、テスト 1e7771d、先頭 f3c5d6d）の上。
+前回の新しい欠陥 N1〜N6 はすべて通過（直っている）。テストは `tool/test/indep_s7_ui_recheck2_test.cpp`（性質 M、1 件ずつ
+`tool_indep_s7_ui_recheck2_<名前>`）。
+
+### 決定に合わせて更新したテスト
+
+- `IndepS7UiDefects.Defect_TypedNumberOutsideTheFieldRangeIsClampedNotRefused`（後半）: 選んだクリップをホストが `MoveClip` で動かしてから
+  開始位置を打っていた。決定「位置で持つ選択は、自分の編集以外で文書が変わったら外す（ホストからの変更を含む）」では選択が外れるので、
+  先に動かしてから選ぶ順にした（期待は変えていない）。実装担当が「この Defect を通すために値だけの変更では外さない」としていた
+  理由はこれで無くなる。
+
+### 結果
+
+| 性質 | テスト | 結果 |
+| --- | --- | --- |
+| M1 `AbortGroup` | `AbortGroupRestoresEverything`、`RandomSequencesWithAbortsKeepTheHistory`（40 種 × 60 手） | 通過。入れ子（外のグループの中で内のグループを Abort）: 内の Abort の後に外のグループは閉じていて、外のグループの中の手も一緒に消える（記録。決定は入れ子を決めていない。画面は入れ子にしない） |
+| M2 画面の Esc（7 種 × 前に手／やり直しの手）、フェーダーとノブ | `EscOnEveryDragLeavesTheHistoryAsBefore`、`EscOnFaderAndKnobDragsLeavesTheLiveHistoryAsBefore` | 通過 |
+| M3 整数の欄 25 個 × 8 種類の値、Port | `IntegerFieldsRefuseBeforeConverting` | 通過 |
+| M4 小さい窓 | `Defect_BodyButtonsOutsideTheWindowAtSmallSizes`、`Defect_HeaderAndFooterButtonsOutsideSmallWindows` | **欠陥 P1・P2** |
+| M5 書き戻し | `WriteBackIsMatchedByObject` | 通過（置き換え: 新しい種類に書かず「discarded 1 live overrides without a place: Sfx snd.fx.lowpass CutoffHz」。削除: 作らない。並べ替え: 質問が出て、lowpass の値は捨てられ highpass に書かれない）。同じ種類の別のエフェクトは仕様の穴 |
+| M6 非有限の表示 | `Defect_NonFiniteTextAfterExtremeValues` | **欠陥 P3** |
+| M7 選択を外す範囲 | `OwnEditsKeepThePositionSelection`、`HostStructuralEditDropsThePositionSelection`、`WriteBackDropsThePositionSelection`（通過）、`Defect_HostValueEditKeepsThePositionSelection` | **欠陥 P4** |
+
+### 新しい欠陥（失敗のまま）
+
+- **P1 `Defect_BodyButtonsOutsideTheWindowAtSmallSizes`（中）**: 数値の欄のある画面の最小として決めた 800×500（DPI 1）で、本体の
+  ボタンが窓の外に出る: Material の組の表 16 セルと `ma.def0`、Segment の `mu.seg.grid.apply` と `mu.seg.grid.offset.inc`、Event の
+  `ev.clip.addsynth`。押せない。また 320×240 で Profiler のタブ（Streams、LOD、Event log: `prof.tab.3〜5`）が外に出て、Event log の
+  「too small」を見る手段も Ctrl+PageDown などのキーだけ。
+- **P2 `Defect_HeaderAndFooterButtonsOutsideSmallWindows`（低〜中）**: 320×240・640×400・799×499 で、ヘッダのタブ（Patch 以降）と
+  フッタの Undo / Redo / Save・問題の数が窓の外。Mixer・Profiler・Replay・Problems は 320×240 まで描くとしたが、ほかの画面へも
+  文書のボタンへもポインタでは行けない（キーだけ）。
+- **P3 `Defect_NonFiniteTextAfterExtremeValues`（低）**: Params でパラメータの max / default に ±1e308（有限の double、モデルが受け付ける）
+  を打つと、ミキサーのパラメータのノブの名前が「Speed inf」「Speed -inf」になる（float への変換）。決定「表示する値は必ず有限」。
+  検査から外したもの: 「(0=inf)」（凡例）、フェーダーの「-inf dB」（段階2 の約束: -144 dB より下は無音）。
+- **P4 `Defect_HostValueEditKeepsThePositionSelection`（中）**: ホストが選んだクリップを `MoveClip` で動かす、選んだカーブの点を
+  `MovePoint` で動かすと、選択が残る（`App::PositionShape` が配列の形が変わったときだけ外す）。決定は「ホストからの変更を含む」。
+
+### 残る仕様の穴
+
+- **同じ種類の別のエフェクト**: lowpass が 2 つあり 1 つ目に上書き、文書で 1 つ目を消すと、残った lowpass（元の 2 つ目）が同じ位置・
+  同じ種類なので、質問なしで上書きの値（500）がそれに乗る（「wrote 1 live values」）。エフェクトに GUID が無いので、決定の
+  「GUID・種類・パラメータ」の規則では区別できない。選択肢: 今のまま／エフェクトの数か並びが変わったら質問する。推奨: 質問する。
+- **入れ子の Abort**: `AbortGroup` は入れ子のどの段から呼んでも外まで閉じて全部を捨てる（M1 の記録）。画面は入れ子にしないので
+  今は問題にならない。決めておくなら「呼んだ段だけを捨てる」か「外まで捨てる」か。
+- **最小の窓の数**: 800×500 は DPI 1 でボタンがはみ出し（P1）、DPI 2 では出ない（同じ論理サイズで違う）。最小の論理サイズを
+  DPI によらず決めるかどうか。
