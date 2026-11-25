@@ -22,6 +22,7 @@ namespace snd::core {
 
 namespace {
 constexpr schema::SystemId kSys = schema::SystemId::EvaluateDspParams;
+constexpr float kPi = 3.14159265358979f;
 
 float Unit(float x) noexcept { return std::clamp(x, 0.0f, 1.0f); }
 
@@ -149,6 +150,34 @@ SpatialGain ListenerMix(const Impl& im, SlotIndex em, const bk::BankView* view, 
   return out;
 }
 
+// D-143: layer crossfade weight of clip `ci` of track `tr` at parameter value x. Each
+// clip has its range [layerMin, layerMax]: 0 outside, 1 where no other clip of the track
+// overlaps it, and where it overlaps another clip an equal-power crossfade from the low
+// end of the overlap to the high end (the clip whose range starts lower fades out with
+// cos, the other fades in with sin). Clips whose ranges only touch switch at the shared
+// value (the clip above takes it), smoothed by the caller (short fade, D-15).
+float LayerWeight(const bk::BankView& v, std::uint32_t tr, std::uint32_t ci, float x) noexcept {
+  const std::uint32_t cf = v.Column<bk::col::TRAK_clipFirst>()[tr];
+  const std::uint32_t cc = v.Column<bk::col::TRAK_clipCount>()[tr];
+  const float lo = v.Column<bk::col::CLIP_layerMin>()[ci];
+  const float hi = v.Column<bk::col::CLIP_layerMax>()[ci];
+  if (!(x >= lo) || !(x <= hi)) return 0.0f;
+  float w = 1.0f;
+  for (std::uint32_t k = cf; k < cf + cc; ++k) {
+    if (k == ci) continue;
+    const float lo2 = v.Column<bk::col::CLIP_layerMin>()[k];
+    const float hi2 = v.Column<bk::col::CLIP_layerMax>()[k];
+    const bool otherAbove = lo2 > lo || (lo2 == lo && k > ci);
+    if (x == hi && lo2 == hi && hi2 > hi) return 0.0f;  // touching ranges: the clip above takes the value
+    const float ol = lo > lo2 ? lo : lo2;
+    const float oh = hi < hi2 ? hi : hi2;
+    if (!(oh > ol) || x < ol || x > oh) continue;
+    const float u = (x - ol) / (oh - ol) * (kPi * 0.5f);
+    w *= otherAbove ? std::cos(u) : std::sin(u);
+  }
+  return w < 0.0f ? 0.0f : w;
+}
+
 }  // namespace
 
 void EvaluateDspParams(Impl& im) noexcept {
@@ -254,19 +283,24 @@ void EvaluateDspParams(Impl& im) noexcept {
           default: break;  // send / effect / spread / blend: stage 3 (Render reads spread & blend curves)
         }
       }
-      // Layer crossfade (4.2): weight by the track's layer parameter.
+      // Layer crossfade (4.2, D-143): equal-power weight by the track's layer parameter (its
+      // ramp makes it continuous); a jump of the weight is spread over the short fade (D-15).
       if (view->Column<bk::col::EVNT_sequenceKind>()[row] == static_cast<std::uint32_t>(bf::SequenceKind::LayerCrossfade) &&
           vs.trackRow < view->Rows(bf::chunk::TRAK) && vclip[d].clipIndex < view->Rows(bf::chunk::CLIP)) {
         const Id lp = view->Column<bk::col::TRAK_layerParam>()[vs.trackRow];
         if (lp != 0u) {
           const float x = ParamValueOf<kSys>(im, lp, pb, emitter);
-          const float lo = view->Column<bk::col::CLIP_layerMin>()[vclip[d].clipIndex];
-          const float hi = view->Column<bk::col::CLIP_layerMax>()[vclip[d].clipIndex];
-          const float w = (hi - lo) * 0.1f;
-          float g = 1.0f;
-          if (x < lo) g = w > 0.0f ? 1.0f - (lo - x) / w : 0.0f;
-          if (x > hi) g = w > 0.0f ? 1.0f - (x - hi) / w : 0.0f;
-          linear *= g < 0.0f ? 0.0f : g;
+          const float target = LayerWeight(*view, vs.trackRow, vclip[d].clipIndex, x);
+          float& lg = im.dp.layerGain[v];
+          if (vlc[d].state == static_cast<std::uint8_t>(VoiceStateId::Starting)) {
+            lg = target;
+          } else {
+            const float step = im.cfg.shortFadeFrames == 0u
+                                   ? 1.0f
+                                   : static_cast<float>(im.cfg.blockFrames) / static_cast<float>(im.cfg.shortFadeFrames);
+            lg = target > lg + step ? lg + step : (target < lg - step ? lg - step : target);
+          }
+          linear *= lg;
         }
       }
     }
@@ -358,7 +392,11 @@ void EvaluateDspParams(Impl& im) noexcept {
   float* sw = SND_W(Snapshot_weight);
   for (std::uint32_t d = 0; d < sr.count; ++d) {
     const SlotIndex s = base::rows::SlotAt(sr, d);
-    const float w = RampValue(SND_R(Snapshot_request)[d].weight, endClock);
+    float w = RampValue(SND_R(Snapshot_request)[d].weight, endClock);
+    // D-145: a snapshot action at the first frame of a play that started in this block.
+    for (std::uint32_t i = 0; i < im.ap.tentativeCount; ++i) {
+      if (im.ap.tentative[i].snapshot == s && im.ap.tentative[i].cancelled == 0u) w = im.ap.tentative[i].weight;
+    }
     sw[d] = w;
     if (w == 0.0f) continue;
     const SnapDef& def = im.snapDefs[s];

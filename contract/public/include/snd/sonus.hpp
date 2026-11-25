@@ -654,6 +654,16 @@ inline Result SetReverbZone(System* sys, EmitterHandle emitter, Id bus, float am
   return detail::R(snd_set_reverb_zone(sys, emitter.ToC(), bus, amount, fadeDistance));
 }
 
+// Stage 3 (D-146, D-148).
+inline PlaybackHandle PlayFade(System* sys, Id event, EmitterHandle emitter, const When& when,
+                               float fadeInSeconds) noexcept {
+  return PlaybackHandle::FromC(snd_play_fade(sys, event, emitter.ToC(), detail::W(when), fadeInSeconds));
+}
+inline Result GetSpectrum(const System* sys, Id bus, std::uint32_t channel, float* outMagnitudes,
+                          std::uint32_t binCount) noexcept {
+  return detail::R(snd_get_spectrum(sys, bus, channel, outMagnitudes, binCount));
+}
+
 }  // namespace snd
 
 #endif  // SND_SONUS_HPP

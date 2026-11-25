@@ -152,7 +152,8 @@ bool InitVoiceFx(Impl& im) noexcept {
   x.triedAssign = Arr<std::uint32_t>(im, g.realTotal, MemTag::Tables);
   if (x.slotCount != 0u && x.slotBytes != 0u) {
     if (im.allocationCount >= im.allocationCap) return false;
-    const std::size_t bytes = std::size_t{x.slotCount} * x.slotBytes;
+    std::size_t bytes = 0;
+    if (!base::CheckedMul(x.slotCount, x.slotBytes, &bytes)) return false;
     x.memory = static_cast<std::uint8_t*>(im.alloc->Allocate(bytes, 64, MemTag::DspPool));
     if (x.memory == nullptr) return false;
     im.allocations[im.allocationCount++] = Impl::Allocation{x.memory, MemTag::DspPool, bytes};
@@ -527,6 +528,22 @@ snd_result CreateImpl(Impl& im) noexcept {
   for (std::uint32_t r = 0; r < g.realTotal; ++r) rd.lastAssign[r] = 0xFFFFFFFFu;
   if (!InitVoiceFx(im)) return SND_ERR_OUT_OF_BUDGET;
   dsp::LoudnessMeterInit(*rd.loudness, g.outChannels, g.sampleRate);
+  // Stage 3 (group 4): D-143 layer weights, D-145 action children, D-146 fade-ins, analysis.
+  im.dp.layerGain = Arr<float>(im, g.maxVirtual, MemTag::Tables);
+  rd.voicePlayed = Arr<std::uint64_t>(im, g.maxVirtual, MemTag::Tables);
+  rd.voiceLookahead = Arr<double>(im, g.maxVirtual, MemTag::Tables);
+  if (rd.voicePlayed == nullptr || rd.voiceLookahead == nullptr) return SND_ERR_OUT_OF_BUDGET;
+  im.ap.playbackFadeIn = Arr<float>(im, g.maxPlaybacks, MemTag::Tables);
+  im.ap.actionChildCap = im.desc.limits.maxActionChildren;
+  im.ap.actionChildren = Arr<ApplyPriv::ActionChild>(im, im.ap.actionChildCap, MemTag::Tables);
+  im.ap.tentative = Arr<ApplyPriv::TentativeSnapshot>(im, im.ap.actionChildCap, MemTag::Tables);
+  im.ap.playbackStartClock = Arr<ClockSample>(im, g.maxPlaybacks, MemTag::Tables);
+  im.ev.pending = Arr<ActionPending>(im, im.ev.deferredCap, MemTag::Tables);
+  if (im.ap.tentative == nullptr || im.ap.playbackStartClock == nullptr || im.ev.pending == nullptr) return SND_ERR_OUT_OF_BUDGET;
+  if (im.dp.layerGain == nullptr || im.ap.playbackFadeIn == nullptr || im.ap.actionChildren == nullptr ||
+      !InitAnalysis(im)) {
+    return SND_ERR_OUT_OF_BUDGET;
+  }
   // RT workers (2.3).
   jobs::RtWorkerConfig rc;
   rc.workers = im.config.jobs.realtime_workers;

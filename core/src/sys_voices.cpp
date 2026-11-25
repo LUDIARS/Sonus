@@ -5,6 +5,11 @@
 // (Config.tuning.stealHysteresisDb). Demoted voices fade out over the short
 // fade (D-15) on a fade-reserve slot (Config.fadeReserveVoices); without a
 // free reserve the demotion waits. Held voices (D-43) keep their real slot.
+// Stage 3 (group 4), D-140: the virtual return mode of the voice (VoiceStatic.
+// virtualReturn): "continue" (default), "restart" (the promoted voice starts again at
+// its start frame: Devirtualize to it, and Render starts it there), "never" (a voice
+// that goes virtual - its demotion fade ended, or it is outside the top N and not
+// real - is marked for RunEventLogic to end; paused voices are not ended).
 #include <algorithm>
 #include <cmath>
 
@@ -90,6 +95,9 @@ void SelectVoices(Impl& im) noexcept {
       if (voiceLive) {
         realSlot[vd] = kNoSlot;
         control(v, source::ControlOp::Virtualize, playhead[vd].frame);
+        if (im.ev.vs[v].virtualReturn == 2u && (lc[vd].flags & kVoicePausedFlag) == 0u) {
+          im.ev.vs[v].flags |= kVsKillVirtual;  // D-140 "never"
+        }
       }
       base::rows::Remove(rr, r);
       sp.realFree.Push(r);
@@ -152,9 +160,21 @@ void SelectVoices(Impl& im) noexcept {
     sp.voiceGen[r] = vr.generation[c.voice];
     realSlot[c.dense] = r;
     ++activeReal;
-    if ((im.ev.vs[c.voice].flags & kVsVirtualized) != 0u) {
-      control(c.voice, source::ControlOp::Devirtualize, playhead[c.dense].frame);
+    VoiceStatic& pvs = im.ev.vs[c.voice];
+    const Playhead& ph = playhead[c.dense];
+    // D-140 "restart": a voice that advanced while virtual starts again at its start frame.
+    // (A voice created in this block has no playhead yet: firstClock is this block's clock.)
+    const bool restart = pvs.virtualReturn == 1u && pvs.firstClock != im.clock &&
+                         (ph.frame != pvs.startFrame || ph.loopCount != 0u || ph.fraction != 0u);
+    if (restart) pvs.flags |= kVsRestartReturn;
+    if ((pvs.flags & kVsVirtualized) != 0u) {
+      control(c.voice, source::ControlOp::Devirtualize, restart ? pvs.startFrame : ph.frame);
     }
+  }
+  // D-140 "never": voices outside the top N that are not real went virtual: they end.
+  for (std::uint32_t i = take; i < n; ++i) {
+    VoiceStatic& vs = im.ev.vs[cand[i].voice];
+    if (vs.virtualReturn == 2u && realSlot[cand[i].dense] == kNoSlot) vs.flags |= kVsKillVirtual;
   }
   for (std::size_t k = 0; k < static_cast<std::size_t>(SourceKind::Count) && nOps != 0u; ++k) {
     if (im.kinds[k] == nullptr) continue;
