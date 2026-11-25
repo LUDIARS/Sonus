@@ -75,6 +75,7 @@ bool BandType(float v, BiquadType* t) noexcept {
     case 5: *t = BiquadType::Highpass; return true;
     case 6: *t = BiquadType::Bandpass; return true;
     case 7: *t = BiquadType::Notch; return true;
+    case 8: *t = BiquadType::Allpass; return true;  // D-135 (stage 3): appended
     default: return false;
   }
 }

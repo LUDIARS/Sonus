@@ -438,6 +438,28 @@ snd_playback_handle System::Play(Id event, snd_emitter_handle emitter, const snd
   return snd_playback_handle{h.Value()};
 }
 
+// Stage 3 (group 4), D-146: Play with a fade-in, in Play.flags bits 16..31 (milliseconds,
+// rounded, 1..65535; 0 = none). NaN, infinite or negative: invalid handle.
+snd_playback_handle System::PlayFade(Id event, snd_emitter_handle emitter, const snd_when* when,
+                                     float fadeInSeconds) noexcept {
+  if (!(fadeInSeconds >= 0.0f) || !(fadeInSeconds < 1.0e9f)) return snd_playback_handle{0};
+  SND_PRODUCER_OR(snd_playback_handle{0})
+  if (!ValidWhen(when)) return snd_playback_handle{0};
+  const HandleRef h = im.playbackSlots.Acquire();
+  if (h.generation == 0u) return snd_playback_handle{0};
+  cmd::Play c{};
+  c.playback = h;
+  c.emitter = Ref(emitter.value);
+  c.event = event;
+  float ms = fadeInSeconds * 1000.0f + 0.5f;
+  ms = ms > 65535.0f ? 65535.0f : ms;
+  c.flags = static_cast<std::uint32_t>(ms) << cmd::kPlayFadeInMsShift;
+  c.when = WhenOf(when);
+  c.priorityHint = PriorityHint(im, event);
+  RecordPlay(im, *pr, c, event, false);
+  return snd_playback_handle{h.Value()};
+}
+
 snd_result System::PlayOneShot(Id event, snd_emitter_handle emitter, const snd_when* when) noexcept {
   SND_PRODUCER_OR(SND_ERR_THREAD_NOT_REGISTERED)
   if (!ValidWhen(when)) return SND_ERR_INVALID_ARGUMENT;
@@ -608,6 +630,18 @@ snd_result System::SetBusVolume(Id bus, float volume, float fadeSeconds) noexcep
   SND_PRODUCER_OR(SND_ERR_THREAD_NOT_REGISTERED)
   if (!std::isfinite(volume) || volume < 0.0f || !std::isfinite(fadeSeconds)) return SND_ERR_INVALID_ARGUMENT;
   return ResultOf(Record(im, *pr, cmd::SetBusVolume{bus, volume, fadeSeconds < 0 ? 0 : fadeSeconds, 0u}));
+}
+void System::SetFocusLost(bool lost) noexcept {
+  impl_->focusLost.store(lost, std::memory_order_relaxed);
+}
+snd_result System::SetCategorySolo(Id category, bool solo) noexcept {
+  SND_PRODUCER_OR(SND_ERR_THREAD_NOT_REGISTERED)
+  return ResultOf(Record(im, *pr, cmd::SetCategoryVolume{category, solo ? 1.0f : 0.0f, 0.0f, 1u}));
+}
+snd_result System::SetSnapshotActionTransition(Id snapshot, float seconds) noexcept {
+  SND_PRODUCER_OR(SND_ERR_THREAD_NOT_REGISTERED)
+  if (!std::isfinite(seconds) || seconds < 0.0f) return SND_ERR_INVALID_ARGUMENT;
+  return ResultOf(Record(im, *pr, cmd::ApplySnapshot{snapshot, 0.0f, seconds, 1u}));
 }
 snd_result System::ApplySnapshot(Id snapshot, float weight, float timeSeconds) noexcept {
   SND_PRODUCER_OR(SND_ERR_THREAD_NOT_REGISTERED)
@@ -811,6 +845,169 @@ snd_result System::RecordLive(cmd::CommandType type, const void* payload, std::u
   const Rec r = RecordRaw(im, *pr, type, info->wireSize, payload, payloadBytes, info->delivery);
   return r == Rec::Ok ? SND_OK : SND_ERR_COMMAND_BUFFER_FULL;
 }
+
+// ---------------------------------------------------------------------------
+// Stage 3 (coverage, group 2): effects at run time (D-130, D-132). Variant commands
+// (fx_control.hpp) are must-deliver but never go to the coalescing fallback, which
+// keeps no variant: when the reserve is full too they are refused (counted as
+// reserve overflows) and the call returns SND_ERR_COMMAND_BUFFER_FULL.
+// ---------------------------------------------------------------------------
+namespace {
+template <class P>
+Rec RecordVariant(Impl& im, Producer& pr, const P& payload) noexcept {
+  using T = cmd::CommandTraits<P>;
+  const Rec r = RecordRaw(im, pr, T::kType, T::kSize, &payload, sizeof(P), cmd::Delivery::MustDeliver);
+  if (r != Rec::Ok) im.reserveOverflows.fetch_add(1u, std::memory_order_relaxed);
+  return r;
+}
+// True when `bytes` more must-deliver bytes fit the producer's current arena, all in the
+// normal region or all in the reserve (RecordRaw then writes every one of them). Only the
+// owning thread appends to its producer's current arena, so the answer holds until it
+// records (other threads record into their own arenas).
+bool ArenaFits(const Impl& im, Producer& pr, std::uint32_t bytes) noexcept {
+  const ArenaView& av = pr.arenas[pr.cycle.Current()];
+  const cmd::ArenaHeader& h = *av.header;
+  if ((h.flags & cmd::kArenaHasFallback) != 0u) return false;
+  if (h.reserveBytes == 0u && h.normalBytes + bytes <= im.cfg.arenaBytes) return true;
+  return h.reserveBytes + bytes <= im.cfg.reserveBytes;
+}
+bool EffectKindKnown(const Impl& im, Id kind) noexcept {
+  for (std::uint32_t p = 0; p < im.config.plugins.effect_count; ++p) {
+    if (im.config.plugins.effects[p].effect_type == kind) return true;
+  }
+  return dsp::FindEffect(kind) != nullptr;
+}
+}  // namespace
+
+snd_result System::SetEffectParam(Id bus, std::uint32_t effectIndex, std::uint32_t paramIndex, float value,
+                                  float fadeSeconds) noexcept {
+  SND_PRODUCER_OR(SND_ERR_THREAD_NOT_REGISTERED)
+  if (effectIndex >= kMaxBusEffects || paramIndex >= dsp::kMaxEffectParams || !std::isfinite(value) ||
+      !std::isfinite(fadeSeconds)) {
+    return SND_ERR_INVALID_ARGUMENT;
+  }
+  const cmd::SetBusVolume c{bus, value, fadeSeconds < 0 ? 0 : fadeSeconds, BusEffectParamReserved(effectIndex, paramIndex)};
+  return ResultOf(RecordVariant(im, *pr, c));
+}
+
+snd_result System::SetEventVoiceEffect(Id event, std::uint32_t slot, Id effectKind, const float* params,
+                                       std::uint32_t paramCount) noexcept {
+  SND_PRODUCER_OR(SND_ERR_THREAD_NOT_REGISTERED)
+  if (event == 0u || slot >= im.vfx.chain || paramCount > dsp::kMaxEffectParams ||
+      (paramCount != 0u && params == nullptr)) {
+    return SND_ERR_INVALID_ARGUMENT;
+  }
+  for (std::uint32_t i = 0; i < paramCount; ++i) {
+    if (!std::isfinite(params[i])) return SND_ERR_INVALID_ARGUMENT;
+  }
+  if (effectKind != 0u && !EffectKindKnown(im, effectKind)) return SND_ERR_NOT_FOUND;
+  // All or nothing (the SetSwitch and its values): check the room for every command first.
+  const std::uint32_t values = effectKind != 0u ? paramCount : 0u;
+  const std::uint32_t bytes =
+      cmd::CommandTraits<cmd::SetSwitch>::kSize + values * cmd::CommandTraits<cmd::SetParam>::kSize;
+  if (!ArenaFits(im, *pr, bytes)) {
+    im.reserveOverflows.fetch_add(1u, std::memory_order_relaxed);
+    return SND_ERR_COMMAND_BUFFER_FULL;
+  }
+  cmd::SetSwitch sw{};
+  sw.scope = static_cast<std::uint8_t>(ParamScope::Global);
+  sw.reserved[0] = kSwitchVariantVoiceEffect;
+  sw.reserved[1] = static_cast<std::uint8_t>(slot);
+  sw.reserved[2] = static_cast<std::uint8_t>(effectKind != 0u ? paramCount : 0u);
+  sw.group = event;
+  sw.value = effectKind;
+  if (RecordVariant(im, *pr, sw) != Rec::Ok) return SND_ERR_COMMAND_BUFFER_FULL;
+  if (effectKind == 0u) return SND_OK;
+  for (std::uint32_t i = 0; i < paramCount; ++i) {
+    cmd::SetParam c{};
+    c.scope = static_cast<std::uint8_t>(ParamScope::Global);
+    c.reserved[0] = kParamVariantVoiceEffect;
+    c.reserved[1] = static_cast<std::uint8_t>(slot);
+    c.reserved[2] = static_cast<std::uint8_t>(i);
+    c.param = event;
+    c.value = params[i];
+    if (RecordVariant(im, *pr, c) != Rec::Ok) return SND_ERR_COMMAND_BUFFER_FULL;
+  }
+  return SND_OK;
+}
+
+snd_result System::SetPlaybackEffectParam(snd_playback_handle playback, std::uint32_t slot, std::uint32_t paramIndex,
+                                          float value) noexcept {
+  SND_PRODUCER_OR(SND_ERR_THREAD_NOT_REGISTERED)
+  const HandleRef h = Ref(playback.value);
+  if (!im.playbackSlots.IsCurrent(h)) return SND_ERR_INVALID_HANDLE;
+  if (slot >= im.vfx.chain || paramIndex >= dsp::kMaxEffectParams || !std::isfinite(value)) {
+    return SND_ERR_INVALID_ARGUMENT;
+  }
+  cmd::SetParam c{};
+  c.scope = static_cast<std::uint8_t>(ParamScope::Playback);
+  c.reserved[0] = kParamVariantVoiceEffect;
+  c.reserved[1] = static_cast<std::uint8_t>(slot);
+  c.reserved[2] = static_cast<std::uint8_t>(paramIndex);
+  c.target = h;
+  c.value = value;
+  return ResultOf(RecordVariant(im, *pr, c));
+}
+
+snd_result System::SetEmitterShape(snd_emitter_handle emitter, snd_emitter_shape kind, const snd_vec3* extent) noexcept {
+  SND_PRODUCER_OR(SND_ERR_THREAD_NOT_REGISTERED)
+  const HandleRef h = Ref(emitter.value);
+  if (!im.emitterSlots.IsCurrent(h)) return SND_ERR_INVALID_HANDLE;
+  if (kind > SND_EMITTER_SHAPE_BOX || (kind != SND_EMITTER_SHAPE_POINT && !extent)) return SND_ERR_INVALID_ARGUMENT;
+  const Vec3 e = extent ? *extent : Vec3{};
+  if (!std::isfinite(e.x) || !std::isfinite(e.y) || !std::isfinite(e.z) || e.x < 0 || e.y < 0 || e.z < 0)
+    return SND_ERR_INVALID_ARGUMENT;
+  cmd::SetParam c{};
+  c.scope = static_cast<std::uint8_t>(ParamScope::Emitter);
+  c.target = h;
+  c.reserved[0] = cmd::kParamVariantShape;
+  c.reserved[1] = static_cast<std::uint8_t>(kind);
+  c.param = std::bit_cast<Id>(e.y);
+  c.value = e.x;
+  c.reserved2 = std::bit_cast<std::uint32_t>(e.z);
+  return ResultOf(RecordVariant(im, *pr, c));
+}
+
+snd_result System::SetReverbZone(snd_emitter_handle emitter, Id bus, float amount, float fadeDistance) noexcept {
+  SND_PRODUCER_OR(SND_ERR_THREAD_NOT_REGISTERED)
+  const HandleRef h = Ref(emitter.value);
+  if (!im.emitterSlots.IsCurrent(h)) return SND_ERR_INVALID_HANDLE;
+  if (!std::isfinite(amount) || amount < 0 || amount > 1 || !std::isfinite(fadeDistance) || fadeDistance < 0)
+    return SND_ERR_INVALID_ARGUMENT;
+  const unsigned bytes = cmd::CommandTraits<cmd::SetSwitch>::kSize +
+                         (bus == SND_ID_NONE ? 0u : cmd::CommandTraits<cmd::SetParam>::kSize);
+  if (!ArenaFits(im, *pr, bytes)) {
+    im.reserveOverflows.fetch_add(1u, std::memory_order_relaxed);
+    return SND_ERR_COMMAND_BUFFER_FULL;
+  }
+  cmd::SetSwitch sw{};
+  sw.scope = static_cast<std::uint8_t>(ParamScope::Emitter);
+  sw.target = h;
+  sw.reserved[0] = cmd::kSwitchVariantZone;
+  sw.value = bus;
+  if (RecordVariant(im, *pr, sw) != Rec::Ok) return SND_ERR_COMMAND_BUFFER_FULL;
+  if (bus == SND_ID_NONE) return SND_OK;
+  cmd::SetParam c{};
+  c.scope = sw.scope;
+  c.target = h;
+  c.reserved[0] = cmd::kParamVariantZone;
+  c.value = amount;
+  c.reserved2 = std::bit_cast<std::uint32_t>(fadeDistance);
+  return ResultOf(RecordVariant(im, *pr, c));
+}
+
+System::VoiceFxStats System::GetVoiceFxStats() const noexcept {
+  const Impl& im = *impl_;
+  VoiceFxStats s;
+  s.acquired = im.vfx.acquired;
+  s.dry = im.vfx.dry;
+  s.dryTooLarge = im.vfx.dryTooLarge;
+  s.slots = im.vfx.slotCount;
+  for (std::uint32_t i = 0; i < im.vfx.slotCount; ++i) s.slotsInUse += im.vfx.slots[i].used != 0u ? 1u : 0u;
+  return s;
+}
+
+void System::SetLodLevelForTesting(std::uint32_t level) noexcept { impl_->rd.lod = level > 3u ? 3u : level; }
 
 #undef SND_PRODUCER_OR
 

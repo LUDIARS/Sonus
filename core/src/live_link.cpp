@@ -224,6 +224,8 @@ void Refresh(Impl& im, const BankRecord& r, std::uint32_t bankSlot, std::uint32_
       const std::uint32_t pc = pf == bf::kNone ? 0u : v.Column<bk::col::EFFX_paramCount>()[x];
       if (pf != bf::kNone && row >= pf && row - pf < pc && row - pf < r.effects[x].paramCount) {
         r.effects[x].params[row - pf] = f;
+        // D-130: the edited bank value is the new set value (from the next block).
+        if (r.effects[x].ctl != nullptr) SetEffectParam(im, r.effects[x], row - pf, f, 0.0f);
       }
     }
   }
@@ -427,8 +429,12 @@ snd_result WriteMixerCell(Impl& im, const BankRecord& bank, std::uint32_t row, s
     if (table == ch::EFPV && col == co::EFPV_value) {
       for (std::uint32_t i = 0; i < b.chainCount; ++i) {
         auto& e = *b.chain[i];
-        if (e.live && row > e.live->cell && row - e.live->cell <= e.paramCount)
-          return writeFloat(e.params[row - e.live->cell - 1]);
+        if (e.live && row > e.live->cell && row - e.live->cell <= e.paramCount) {
+          const auto param = row - e.live->cell - 1;
+          const auto result = writeFloat(e.params[param]);
+          if (result == SND_OK && apply) SetEffectParam(im, e, param, e.params[param], 0);
+          return result;
+        }
       }
     }
   }

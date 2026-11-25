@@ -186,6 +186,7 @@ snd_result System::Update() noexcept {
 
   // Event ring (beats, markers, logs, errors).
   base::notify::SwapFront(*im.triple);
+  AnalysisSwap(im);  // stage 3 (group 4), D-148: the spectrum rings of the same Update
   const base::notify::FrameHeader fh = [&] {
     base::notify::FrameHeader h{};
     base::notify::ReadFront(*im.triple, [&](const notify::SnapshotFrame& f) { h = base::notify::GetFrameHeader(f); });

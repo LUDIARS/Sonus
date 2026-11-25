@@ -57,6 +57,7 @@ void System::RenderBlock(float* interleaved) noexcept {
     return;
   }
   UpdateTransport(im);
+  ApplyDueActions(im);  // the block's pause/stop requests and fired stop reservations are now known
   EvaluateLogicParams(im);
   RunEventLogic(im);
   Compute3D(im);

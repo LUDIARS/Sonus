@@ -25,4 +25,7 @@ snd_add_module(core
     src/frame.cpp
     src/live_plugin_pool.cpp
     src/live_structure.cpp
-    src/live_link.cpp)
+    src/live_link.cpp
+    src/fx_control.cpp
+    src/voice_fx.cpp
+    src/analysis.cpp)

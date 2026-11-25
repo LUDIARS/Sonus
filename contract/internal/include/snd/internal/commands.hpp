@@ -108,6 +108,10 @@ enum PlayFlags : std::uint32_t {
   kPlayOneShot = 1u << 0,      // no handle returned; no on_end callback
   kPlayHasPosition = 1u << 1,  // PlayAt: use `position`, no emitter
 };
+// Stage 3 (D-146): Play.flags bits 16..31 = fade-in of the start in milliseconds (0 = none,
+// 1..65535), recorded by snd_play_fade. Bits 2..15 stay 0.
+inline constexpr std::uint32_t kPlayFadeInMsShift = 16;
+inline constexpr std::uint32_t kPlayFadeInMsMask = 0xFFFF0000u;
 struct Play {
   HandleRef playback;  // allocated by the game side (one-shots too)
   HandleRef emitter;
@@ -518,6 +522,44 @@ inline bool ForEachCommand(const std::uint8_t* begin, const std::uint8_t* end, F
   }
   return true;
 }
+
+// ---------------------------------------------------------------------------
+// Stage 3 (coverage, group 2; D-130, D-132): variants carried in reserved fields.
+// No new command type and no layout change. A variant of 0 is the command's original
+// meaning (bit for bit); appliers drop variants they do not know.
+//  - SetBusVolume.reserved: bits 0-7 = variant. Variant 1 (kBusVolumeVariantEffectParam)
+//    = bus effect parameter (snd_set_effect_param): bits 8-15 effect index in the bus's
+//    chain, bits 16-23 parameter index; `volume` = the value (any finite value, may be
+//    negative), `fadeSeconds` = the fade (>= 0). `bus` as for the volume (0 = master).
+//  - SetSwitch.reserved[0] = 1 (kSwitchVariantVoiceEffect): voice effect kind of an Event
+//    (snd_set_event_voice_effect): scope Global, `group` = event id, `value` = effect kind
+//    (0 = remove the stage), reserved[1] = stage, reserved[2] = number of SetParam
+//    variant-1 values recorded right after it.
+//  - SetParam.reserved[0] = 1 (kParamVariantVoiceEffect): voice effect parameter:
+//    reserved[1] = stage, reserved[2] = parameter index, `value` (finite). Scope Global:
+//    `param` = event id (the Event's configuration). Scope Playback: `target` = the playback
+//    (snd_set_playback_effect_param).
+// Variant commands never go to the coalescing fallback (it keeps no variant).
+// ---------------------------------------------------------------------------
+inline constexpr std::uint32_t kBusVolumeVariantMask = 0xFFu;
+inline constexpr std::uint32_t kBusVolumeVariantEffectParam = 1u;
+inline constexpr std::uint32_t kBusVolumeEffectIndexShift = 8u;
+inline constexpr std::uint32_t kBusVolumeParamIndexShift = 16u;
+inline constexpr std::uint32_t kBusVolumeIndexMask = 0xFFu;
+inline constexpr std::uint8_t kSwitchVariantVoiceEffect = 1u;
+inline constexpr std::uint8_t kParamVariantVoiceEffect = 1u;
+constexpr std::uint32_t BusEffectParamReserved(std::uint32_t effect, std::uint32_t param) noexcept {
+  return kBusVolumeVariantEffectParam | ((effect & kBusVolumeIndexMask) << kBusVolumeEffectIndexShift) |
+         ((param & kBusVolumeIndexMask) << kBusVolumeParamIndexShift);
+}
+
+// Emitter SetParam variant 2: kind in reserved[1], x/y/z float bits
+// in value/param/reserved2. Variant 3 holds zone amount/value and fade/reserved2.
+inline constexpr std::uint8_t kParamVariantShape = 2u;
+inline constexpr std::uint8_t kParamVariantZone = 3u;
+// Emitter SetSwitch variant 2: value = zone bus. Zero removes in one record;
+// a nonzero value is immediately followed by SetParam variant 3.
+inline constexpr std::uint8_t kSwitchVariantZone = 2u;
 
 }  // namespace snd::cmd
 

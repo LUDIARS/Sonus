@@ -105,6 +105,12 @@ struct CoreLimits {
   std::uint32_t maxVoicesPerPlay = 64;   // voices one Play may create (nested events included)
   std::uint32_t serviceQueueEntries = 1024;   // postJob / postIo queues
   std::uint32_t maxLiveOverrides = 32;
+  // Stage 3 (group 4), D-147 / D-148: buses with BUSS.flags kBusMeter that get loudness and
+  // spectrum (the output always has them), the spectrum's FFT size (power of two,
+  // 32..8192), and the actions applied in a play's first block (D-145).
+  std::uint32_t maxMeteredBuses = 8;
+  std::uint32_t spectrumFftSize = 1024;
+  std::uint32_t maxActionChildren = 64;
 };
 
 // Called on the audio thread (ApplyCommands) for live-link commands that core
@@ -195,6 +201,16 @@ struct CoreDesc {
   bool rtWorkerRealtimePriority = true;  // false in tests (no SCHED_FIFO)
   std::uint32_t rtDebugClaimDelayMicroseconds = 0;  // tests only (jobs A1-14)
   CoreLimits limits;
+  // Stage 3 (group 4): markers of effect clips (on_marker) until the bank format has a
+  // column for them (requested): called when a clip of the asset starts (audio thread,
+  // principle 1); the arrays must outlive the system. Null = none.
+  struct ClipMarkers {
+    const std::uint64_t* frames;  // asset frames
+    const Id* ids;                // the marker ids reported to on_marker
+    std::uint32_t count;
+  };
+  ClipMarkers (*clipMarkers)(void* user, Id assetId) noexcept = nullptr;
+  void* clipMarkersUser = nullptr;
 };
 
 // Timing of the last rendered block (audio thread; tests and the profiler).
@@ -238,6 +254,8 @@ class System {
   snd_playback_handle Play(Id event, snd_emitter_handle emitter, const snd_when* when) noexcept;
   snd_result PlayOneShot(Id event, snd_emitter_handle emitter, const snd_when* when) noexcept;
   snd_result PlayAt(Id event, const snd_vec3* position, const snd_when* when) noexcept;
+  // Stage 3 (group 4), D-146: Play with a linear fade-in of `fadeInSeconds` (Play.flags bits 16..31, ms).
+  snd_playback_handle PlayFade(Id event, snd_emitter_handle emitter, const snd_when* when, float fadeInSeconds) noexcept;
   snd_result Stop(snd_playback_handle playback, float fadeSeconds, const snd_when* when) noexcept;
   snd_result Pause(snd_playback_handle playback, float fadeSeconds) noexcept;
   snd_result ResumePlayback(snd_playback_handle playback, float fadeSeconds) noexcept;
@@ -246,6 +264,8 @@ class System {
   snd_result DestroyEmitter(snd_emitter_handle emitter) noexcept;
   snd_result SetTransform(snd_emitter_handle emitter, const snd_vec3* position, const snd_vec3* forward,
                           const snd_vec3* velocity) noexcept;
+  snd_result SetEmitterShape(snd_emitter_handle emitter, snd_emitter_shape kind, const snd_vec3* halfExtents) noexcept;
+  snd_result SetReverbZone(snd_emitter_handle emitter, snd_id bus, float amount, float fadeDistance) noexcept;
   snd_result SetListener(std::uint32_t index, const snd_listener_desc* listener) noexcept;
   snd_result SetParamGlobal(Id param, float value) noexcept;
   snd_result SetParamEmitter(snd_emitter_handle emitter, Id param, float value) noexcept;
@@ -254,6 +274,9 @@ class System {
   snd_result SetSwitchEmitter(snd_emitter_handle emitter, Id group, Id value) noexcept;
   snd_result SetSwitchPlayback(snd_playback_handle playback, Id group, Id value) noexcept;
   snd_result SetBusVolume(Id bus, float volume, float fadeSeconds) noexcept;
+  snd_result SetCategorySolo(Id category, bool solo) noexcept;
+  snd_result SetSnapshotActionTransition(Id snapshot, float seconds) noexcept;
+  void SetFocusLost(bool lost) noexcept;
   snd_result ApplySnapshot(Id snapshot, float weight, float timeSeconds) noexcept;
   snd_result SetCategoryVolume(Id category, float volume, float fadeSeconds) noexcept;
   snd_result PauseCategory(Id category, bool paused) noexcept;
@@ -291,6 +314,9 @@ class System {
   snd_result GetPosition(snd_playback_handle playback, snd_position* out) const noexcept;
   snd_result GetTransportPosition(snd_transport_handle transport, snd_position* out) const noexcept;
   snd_result GetMeter(Id bus, snd_meter* out) const noexcept;
+  // Stage 3 (group 4), D-148: spectrum of a metered bus (SND_ID_NONE = the output) as of
+  // the latest Update(); fills min(binCount, fftSize / 2 + 1) magnitudes (rest 0). Any thread.
+  snd_result GetSpectrum(Id bus, std::uint32_t channel, float* out, std::uint32_t binCount) const noexcept;
   snd_result GetStats(snd_stats* out) const noexcept;
   snd_bank_state GetBankState(snd_bank_handle bank) const noexcept;
   snd_result GetBankChunk(snd_bank_handle bank, std::uint32_t fourcc, const void** data,
@@ -356,6 +382,29 @@ class System {
   // Writing the value a non-editable cell already holds succeeds (no change).
   snd_result LiveWriteCell(const LiveCell& cell, std::uint32_t fourcc, std::uint32_t column, std::uint64_t bits,
                            std::uint64_t* previous, bool apply) noexcept;
+
+  // --- stage 3 (coverage, group 2): effects at run time ---------------------------------
+  // Recording (registered threads; semantics of snd/sonus.h snd_set_effect_param,
+  // snd_set_event_voice_effect, snd_set_playback_effect_param). D-130, D-132.
+  snd_result SetEffectParam(Id bus, std::uint32_t effectIndex, std::uint32_t paramIndex, float value,
+                            float fadeSeconds) noexcept;
+  snd_result SetEventVoiceEffect(Id event, std::uint32_t slot, Id effectKind, const float* params,
+                                 std::uint32_t paramCount) noexcept;
+  snd_result SetPlaybackEffectParam(snd_playback_handle playback, std::uint32_t slot, std::uint32_t paramIndex,
+                                    float value) noexcept;
+  // Voice-effect pool counters (D-133). Read on the audio thread or after it stopped (tests,
+  // tools); not part of snd_stats (the public struct is not extended).
+  struct VoiceFxStats {
+    std::uint64_t acquired = 0;     // real assignments that got a voice-effect slot
+    std::uint64_t dry = 0;          // real assignments that played dry (no slot, or too large)
+    std::uint64_t dryTooLarge = 0;  // of dry: the chain's state did not fit voice_effect_bytes
+    std::uint32_t slotsInUse = 0;
+    std::uint32_t slots = 0;
+  };
+  VoiceFxStats GetVoiceFxStats() const noexcept;
+  // Tests only (no audio thread inside RenderBlock): sets the load LOD level (2.4, 0..3).
+  // UpdateLod keeps moving it from the measured block times afterwards.
+  void SetLodLevelForTesting(std::uint32_t level) noexcept;
 
   struct Impl;
   Impl* impl() noexcept { return impl_; }

@@ -195,6 +195,25 @@ SND_TEST(CoreStructure, AddedBusCellsFollowTheGraphAndOldCellCannotAliasAReusedR
                SND_ERR_NOT_FOUND);
 }
 
+SND_TEST(CoreStructure, SessionBParameterRampControlsTheInsertedDspInstance) {
+  Fixture f;
+  f.Load(DevBank());
+  auto& sys = *f.sys;
+  sys.Play(HashId("Tone"), snd_emitter_handle{0}, nullptr);
+  f.Steps(4);
+  const float dry = f.LastLeft();
+  const float params[]{4, 0, 1, 0, 10};
+  SND_REQUIRE_EQ(sys.LiveAddEffect(sfx, HashId("snd.fx.echo"), 0, params, 5, 1), SND_OK);
+  SND_REQUIRE_EQ(sys.SetEffectParam(sfx, 0, 2, .25f, .01f), SND_OK);
+  f.Steps(40);
+  SND_CHECK_NEAR(f.LastLeft(), .25f * dry, 1e-5);
+  snd::core::LiveCell cell{};
+  SND_REQUIRE_EQ(sys.LiveFindCells(sfx, bf::chunk::EFPV, 2, &cell, 1), 1u);
+  SND_REQUIRE_EQ(sys.LiveWriteCell(cell, bf::chunk::EFPV, bf::col::EFPV_value, Bits(.5f), nullptr, true), SND_OK);
+  f.Steps(3);
+  SND_CHECK_NEAR(f.LastLeft(), .5f * dry, 1e-5);
+}
+
 SND_TEST(CoreStructure, CrossBankSendExpiresBeforeDestinationSlotReuse) {
   Session s(Config(), RealEditor());
   SND_REQUIRE(s.Ready());
@@ -216,6 +235,21 @@ SND_TEST(CoreStructure, CrossBankSendExpiresBeforeDestinationSlotReuse) {
   s.f.Load(other.Build(HashId("ReturnBank")), "return.sndb");
   s.f.Steps(3);
   SND_CHECK_NEAR(s.Level(), 1, 1e-5);
+}
+
+SND_TEST(CoreStructure, SessionBSnapshotKeepsItsAuthoredEffectWhenSameKindIsInserted) {
+  Fixture f;
+  f.Load(DevBank(kProjectHash, true, true));
+  auto& sys = *f.sys;
+  sys.Play(HashId("Tone"), snd_emitter_handle{0}, nullptr);
+  f.Steps(16);
+  const auto before = f.LastLeft();  // dry gain .25 on the authored echo
+  SND_REQUIRE(before > 0);
+  const float params[]{4, 0, .5f, 0, 10};
+  SND_REQUIRE_EQ(sys.LiveAddEffect(sfx, HashId("snd.fx.echo"), 0, params, 5, 1), SND_OK);
+  SND_REQUIRE_EQ(sys.ApplySnapshot(HashId("RaiseDry"), 1, 0), SND_OK);
+  f.Steps(16);
+  SND_CHECK_NEAR(f.LastLeft(), before, 1e-5);  // .5 * (.25 + .25)
 }
 
 SND_TEST(CoreStructure, FullReserveEditsAndTeardownReturnAllMixerAllocations) {

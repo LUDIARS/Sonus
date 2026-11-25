@@ -367,9 +367,96 @@ SND_API snd_result SND_CALL snd_get_position(const snd_system* sys, snd_playback
 SND_API snd_result SND_CALL snd_get_transport_position(const snd_system* sys,
                                                        snd_transport_handle transport,
                                                        snd_position* out);
-/* bus SND_ID_NONE = master. */
+/* bus SND_ID_NONE = master. Loudness (loudness_short / loudness_integrated) is measured for
+ * the output (master) and for buses with BUSS.flags kBusMeter (a fixed number of them, in
+ * the order of their bus rows); other buses report NaN there (not measured; measured
+ * silence reads -200 LUFS). Peak and RMS are measured for every bus. */
 SND_API snd_result SND_CALL snd_get_meter(const snd_system* sys, snd_id bus, snd_meter* out);
 SND_API snd_result SND_CALL snd_get_stats(const snd_system* sys, snd_stats* out);
+
+/* ========================================================================= */
+/* Effects at run time (stage 3, coverage). Thread: registered.               */
+/* ========================================================================= */
+/* D-130: parameter `param_index` of effect `effect_index` (0-based, in the bus's chain)
+ * of bus `bus` (SND_ID_NONE = master) moves to `value` linearly over `fade_seconds`
+ * (< 0 = 0; seconds -> frames truncated, as snd_set_bus_volume), from the next block;
+ * inside a block the dsp interpolates (D-26). The value is clamped to the parameter's
+ * range (standard effects). Recorded as SetBusVolume variant 1. SND_ERR_INVALID_ARGUMENT:
+ * effect_index >= 16, param_index >= 16, value or fade not finite. Reported when applied:
+ * an unknown bus / effect / parameter (warning SND_ERR_NOT_FOUND, object = bus id); an
+ * [init] parameter of a standard effect (read by its init only, e.g. MaxDelay; warning
+ * SND_ERR_INVALID_ARGUMENT, object = bus id, dropped). Values set at run time belong to
+ * the bus's effect instance: unloading the bank that defines the bus and loading it
+ * again starts from the bank's values. */
+SND_API snd_result SND_CALL snd_set_effect_param(snd_system* sys, snd_id bus, uint32_t effect_index,
+                                                 uint32_t param_index, float value, float fade_seconds);
+/* D-132: heavy voice effect `slot` (0 .. snd_config voice_effect_chain - 1) of the voices of
+ * `event` that take a voice-effect slot after this is applied (at their start, or when
+ * they come back from virtual); sounding voices keep what they have. A voice reads the
+ * kind and the values together at that moment; a stage removed meanwhile is absent (no
+ * warning). Voices of a nested Event use the nested Event's setting. effect_kind = a
+ * standard effect id ("snd.fx.*", snd/dsp effects) or a plugin effect type
+ * (Config.plugins); SND_ID_NONE removes the stage. params[0 .. param_count) override the
+ * kind's defaults ([init] parameters included: read when the slot is taken; param_count
+ * <= 16; params may be NULL when param_count is 0). The voice effects run per real voice
+ * after the standard lowpass / highpass and before the pan, in the voice-effect pool
+ * (D-133: without a free slot the voice plays dry; D-134: no tail past the voice's end).
+ * SND_ERR_INVALID_ARGUMENT: event SND_ID_NONE, slot out of range, param_count > 16, a
+ * non-finite value; SND_ERR_NOT_FOUND: unknown effect kind. Recorded as one SetSwitch
+ * (variant 1) and param_count SetParam (variant 1), all or none
+ * (SND_ERR_COMMAND_BUFFER_FULL records nothing). When applied with the Event setting
+ * table (snd_config voice_effect_settings) full: warning SND_ERR_LIMIT_REACHED
+ * (object = event id), dropped. */
+SND_API snd_result SND_CALL snd_set_event_voice_effect(snd_system* sys, snd_id event, uint32_t slot,
+                                                       snd_id effect_kind, const float* params,
+                                                       uint32_t param_count);
+/* D-132: parameter `param_index` of voice effect `slot` of the voices of `playback`: a
+ * sounding voice from the next block (interpolated inside the block), a voice that takes
+ * a slot later from its first block. Kept for the playback's life. SND_ERR_INVALID_HANDLE:
+ * 0 or stale; SND_ERR_INVALID_ARGUMENT: slot out of range, param_index >= 16, value not
+ * finite. Reported when applied: an [init] parameter of the kind the playback's Event
+ * has set now in that stage (warning SND_ERR_INVALID_ARGUMENT, object = playback, dropped;
+ * a sounding voice's slot also never takes [init] values of its own kind); the per-playback value table
+ * (snd_config voice_effect_settings) full (warning SND_ERR_LIMIT_REACHED, object =
+ * playback, dropped). */
+SND_API snd_result SND_CALL snd_set_playback_effect_param(snd_system* sys, snd_playback_handle playback,
+                                                          uint32_t slot, uint32_t param_index, float value);
+
+/* Nonnegative local half-extents in metres. Point accepts a null extent. */
+SND_API snd_result SND_CALL snd_set_emitter_shape(snd_system* sys, snd_emitter_handle emitter,
+                                                  snd_emitter_shape kind, const snd_vec3* half_extents);
+/* Four strongest listener zones. Amount [0,1], fade_distance >= 0 metres.
+ * SND_ID_NONE removes the zone. */
+SND_API snd_result SND_CALL snd_set_reverb_zone(snd_system* sys, snd_emitter_handle emitter, snd_id bus,
+                                                float amount, float fade_distance);
+
+/* Stage 3 additions                                                         */
+/* ========================================================================= */
+/* D-146: snd_play with a linear fade-in of the start over fade_in_seconds (rounded to
+ * milliseconds, at most 65.535 s; 0 = none, the same as snd_play). Stopping during the
+ * fade-in fades out from the level reached. NaN, infinite or negative fade: invalid handle.
+ * Thread: registered. */
+SND_API snd_playback_handle SND_CALL snd_play_fade(snd_system* sys, snd_id event,
+                                                   snd_emitter_handle emitter, const snd_when* when,
+                                                   float fade_in_seconds);
+/* D-148: spectrum of one channel of a bus as of the latest snd_update(): linear magnitudes
+ * of the last FFT-size frames (Hann window; a full-scale sine on a bin reads 1.0), bin k at
+ * k * sample_rate / fft_size Hz (fft_size: 1024 by default, CoreLimits.spectrumFftSize).
+ * Writes min(bin_count, fft_size / 2 + 1) bins and 0 to the rest of out_magnitudes.
+ * bus SND_ID_NONE (or the master's id) = the output; other buses need BUSS.flags
+ * kBusMeter (a fixed number of them is measured, 8 by default).
+ * Returns SND_OK; SND_ERR_INVALID_ARGUMENT (NULL sys / out, bin_count 0);
+ * SND_ERR_NOT_FOUND (unknown bus); SND_ERR_UNSUPPORTED (bus without a meter, or channel
+ * not below the bus's channels); SND_ERR_NOT_READY (no data yet: the spectrum is kept up to
+ * date only while it is read - the first call after ~1 s without one returns NOT_READY, and
+ * the data is there from the first snd_update() that follows a rendered block). Thread: any. */
+SND_API snd_result SND_CALL snd_get_spectrum(const snd_system* sys, snd_id bus, uint32_t channel,
+                                             float* out_magnitudes, uint32_t bin_count);
+
+/* Solo enables the union of the selected category subtrees. */
+SND_API snd_result SND_CALL snd_set_category_solo(snd_system* sys, snd_id category, int32_t solo);
+/* Transition length for subsequent ApplySnapshot event actions, in seconds. */
+SND_API snd_result SND_CALL snd_set_snapshot_action_transition(snd_system* sys, snd_id snapshot, float seconds);
 
 SND_EXTERN_C_END
 

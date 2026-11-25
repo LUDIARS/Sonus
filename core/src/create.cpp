@@ -1,5 +1,6 @@
 // System::Create / Destroy: every byte of the runtime is allocated here
 // (design 3.3). After Create the audio-thread path never allocates.
+#include <algorithm>
 #include <atomic>
 #include <cmath>
 #include <cstring>
@@ -63,7 +64,14 @@ snd_result Validate(const snd_config& c) noexcept {
   if (!std::isfinite(c.tuning.steal_hysteresis_db) || c.tuning.steal_hysteresis_db < 0.0f) {
     return SND_ERR_INVALID_ARGUMENT;
   }
+  if (!std::isfinite(c.doppler_factor) || c.doppler_factor < 0 || c.doppler_factor > 16 ||
+      !std::isfinite(c.speed_of_sound) || c.speed_of_sound < 1 || c.speed_of_sound > 100000) return SND_ERR_INVALID_ARGUMENT;
   if (c.listener_mode > SND_LISTENER_SPLIT) return SND_ERR_INVALID_ARGUMENT;
+  // Stage 3 (D-132): voice effects.
+  if (c.voice_effect_chain > kMaxVoiceEffectChain || c.voice_effect_bytes > (64u << 20) ||
+      c.voice_effect_settings == 0u || c.voice_effect_settings > 0xFFFFu) {
+    return SND_ERR_INVALID_ARGUMENT;
+  }
   return SND_OK;
 }
 
@@ -91,6 +99,8 @@ void ComputeCfg(const snd_config& c, const CoreLimits& lim, Cfg& g) noexcept {
   g.voicesPerChunk = c.jobs.voices_per_chunk;
   g.maxChunks = (g.realTotal + g.voicesPerChunk - 1u) / g.voicesPerChunk;
   g.busCap = lim.maxBuses + c.dev_reserve.buses;
+  // Dry path plus current sends and any old sends being ramped out this block.
+  g.segmentsPerChunk = 1u + std::min(g.busCap, g.voicesPerChunk * (1u + 2u * kMaxAuxSends) - 1u);
   g.catCap = lim.maxCategories + 1u;
   g.snapCap = lim.maxSnapshots;
   g.groupCap = lim.maxLimitGroups;
@@ -119,6 +129,46 @@ void ComputeCfg(const snd_config& c, const CoreLimits& lim, Cfg& g) noexcept {
       base::AlignUp(dsp::ResamplerStateBytes(dsp::ResamplerQuality::Sinc, c.max_voice_channels, c.max_pitch_ratio),
                     kBufferAlignment);
 }
+
+}  // namespace
+
+// Stage 3 (D-132): the voice-effect pool and its tables (create time only).
+bool InitVoiceFx(Impl& im) noexcept {
+  const Cfg& g = im.cfg;
+  const snd_config& c = im.config;
+  VoiceFxPriv& x = im.vfx;
+  x.chain = c.voice_effect_chain;
+  x.slotCount = c.max_voice_effects < g.realTotal ? c.max_voice_effects : g.realTotal;
+  x.slotBytes = (c.voice_effect_bytes + 63u) & ~63u;
+  x.settings = c.voice_effect_settings;
+  if (x.chain == 0u) {
+    x.slotCount = 0u;
+    return true;  // disabled: nothing configured, nothing allocated
+  }
+  x.events = Arr<VfxEventEntry>(im, x.settings, MemTag::Tables);
+  x.playbacks = Arr<VfxPlaybackEntry>(im, x.settings, MemTag::Tables);
+  x.slots = Arr<VfxSlot>(im, x.slotCount, MemTag::Tables);
+  x.ofReal = Arr<std::uint32_t>(im, g.realTotal, MemTag::Tables);
+  x.triedAssign = Arr<std::uint32_t>(im, g.realTotal, MemTag::Tables);
+  if (x.slotCount != 0u && x.slotBytes != 0u) {
+    if (im.allocationCount >= im.allocationCap) return false;
+    std::size_t bytes = 0;
+    if (!base::CheckedMul(x.slotCount, x.slotBytes, &bytes)) return false;
+    x.memory = static_cast<std::uint8_t*>(im.alloc->Allocate(bytes, 64, MemTag::DspPool));
+    if (x.memory == nullptr) return false;
+    im.allocations[im.allocationCount++] = Impl::Allocation{x.memory, MemTag::DspPool, bytes};
+  } else {
+    x.slotCount = 0u;
+  }
+  if (x.events == nullptr || x.playbacks == nullptr || x.slots == nullptr || x.ofReal == nullptr ||
+      x.triedAssign == nullptr) {
+    return false;
+  }
+  for (std::uint32_t r = 0; r < g.realTotal; ++r) x.triedAssign[r] = 0xFFFFFFFFu;
+  return true;
+}
+
+namespace {
 
 // DSP hooks for the bank manager (D-54).
 bool DspCompute(void* user, const snd_effect_desc* descs, std::uint32_t count, std::uint32_t sampleRate,
@@ -237,9 +287,11 @@ bool InitRenderSet(Impl& im, RenderSet& s) noexcept {
   s.items = Arr<source::RenderItem>(im, g.realTotal, MemTag::Tables);
   s.inputs = Arr<ItemInput>(im, g.realTotal, MemTag::Tables);
   s.chunks = Arr<ChunkInfo>(im, g.maxChunks, MemTag::Tables);
-  s.segs = Arr<ChunkSeg>(im, std::size_t{g.maxChunks} * g.voicesPerChunk, MemTag::Tables);
-  s.accum = Arr<float>(im, std::size_t{g.maxChunks} * g.voicesPerChunk * kMaxChannels * g.blockFrames,
-                       MemTag::Tables);
+  std::size_t segments, samples;
+  if (!base::CheckedMul(g.maxChunks, g.segmentsPerChunk, &segments) ||
+      !base::CheckedMul(segments, kMaxChannels * g.blockFrames, &samples)) return false;
+  s.segs = Arr<ChunkSeg>(im, segments, MemTag::Tables);
+  s.accum = Arr<float>(im, samples, MemTag::Tables);
   return s.items != nullptr && s.inputs != nullptr && s.chunks != nullptr && s.segs != nullptr &&
          s.accum != nullptr;
 }
@@ -426,18 +478,25 @@ snd_result CreateImpl(Impl& im) noexcept {
   // EvaluateDspParams, SelectVoices.
   im.dp.duckDb = Arr<float>(im, g.duckCap, MemTag::Tables);
   im.dp.catPlaying = Arr<std::uint32_t>(im, g.catCap, MemTag::Tables);
-  im.dp.catGainPrev = Arr<float>(im, g.catCap, MemTag::Tables);
+  im.dp.mix = Arr<VoiceSpatialMix>(im, g.maxVirtual, MemTag::Tables);
+  if (!im.dp.mix) return SND_ERR_OUT_OF_BUDGET;
+  im.dp.busGainDb = Arr<float>(im, g.busCap, MemTag::Tables);
   im.dp.pan = Arr<float>(im, g.maxVirtual, MemTag::Tables);
   if (im.dp.pan == nullptr) return SND_ERR_OUT_OF_BUDGET;
   im.sel.voiceGen = Arr<std::uint32_t>(im, g.realTotal, MemTag::Tables);
   im.sel.fadeRemaining = Arr<std::int32_t>(im, g.realTotal, MemTag::Tables);
-  if (im.dp.duckDb == nullptr || im.dp.catPlaying == nullptr || im.dp.catGainPrev == nullptr ||
+  if (im.dp.duckDb == nullptr || im.dp.catPlaying == nullptr || im.dp.busGainDb == nullptr ||
       im.sel.voiceGen == nullptr || im.sel.fadeRemaining == nullptr ||
       !im.sel.realFree.Init(a, g.realTotal, MemTag::Tables)) {
     return SND_ERR_OUT_OF_BUDGET;
   }
   // Render.
   RenderPriv& rd = im.rd;
+  rd.paths = Arr<PathHistory>(im, g.realTotal, MemTag::Tables);
+  std::size_t sendSamples;
+  if (!base::CheckedMul(g.realTotal, g.maxVoiceChannels * g.blockFrames, &sendSamples)) return SND_ERR_OUT_OF_BUDGET;
+  rd.sendInput = Arr<float>(im, sendSamples, MemTag::Tables);
+  if (!rd.paths || !rd.sendInput) return SND_ERR_OUT_OF_BUDGET;
   rd.resamplerPool = Arr<std::uint8_t>(im, im.cfg.resamplerSlotBytes * g.realTotal, MemTag::Tables);
   rd.lastAssign = Arr<std::uint32_t>(im, g.realTotal, MemTag::Tables);
   rd.stateChannels = Arr<std::uint32_t>(im, g.realTotal, MemTag::Tables);
@@ -484,7 +543,24 @@ snd_result CreateImpl(Impl& im) noexcept {
     return SND_ERR_OUT_OF_BUDGET;
   }
   for (std::uint32_t r = 0; r < g.realTotal; ++r) rd.lastAssign[r] = 0xFFFFFFFFu;
+  if (!InitVoiceFx(im)) return SND_ERR_OUT_OF_BUDGET;
   dsp::LoudnessMeterInit(*rd.loudness, g.outChannels, g.sampleRate);
+  // Stage 3 (group 4): D-143 layer weights, D-145 action children, D-146 fade-ins, analysis.
+  im.dp.layerGain = Arr<float>(im, g.maxVirtual, MemTag::Tables);
+  rd.voicePlayed = Arr<std::uint64_t>(im, g.maxVirtual, MemTag::Tables);
+  rd.voiceLookahead = Arr<double>(im, g.maxVirtual, MemTag::Tables);
+  if (rd.voicePlayed == nullptr || rd.voiceLookahead == nullptr) return SND_ERR_OUT_OF_BUDGET;
+  im.ap.playbackFadeIn = Arr<float>(im, g.maxPlaybacks, MemTag::Tables);
+  im.ap.actionChildCap = im.desc.limits.maxActionChildren;
+  im.ap.actionChildren = Arr<ApplyPriv::ActionChild>(im, im.ap.actionChildCap, MemTag::Tables);
+  im.ap.tentative = Arr<ApplyPriv::TentativeSnapshot>(im, im.ap.actionChildCap, MemTag::Tables);
+  im.ap.playbackStartClock = Arr<ClockSample>(im, g.maxPlaybacks, MemTag::Tables);
+  im.ev.pending = Arr<ActionPending>(im, im.ev.deferredCap, MemTag::Tables);
+  if (im.ap.tentative == nullptr || im.ap.playbackStartClock == nullptr || im.ev.pending == nullptr) return SND_ERR_OUT_OF_BUDGET;
+  if (im.dp.layerGain == nullptr || im.ap.playbackFadeIn == nullptr || im.ap.actionChildren == nullptr ||
+      !InitAnalysis(im)) {
+    return SND_ERR_OUT_OF_BUDGET;
+  }
   // RT workers (2.3).
   jobs::RtWorkerConfig rc;
   rc.workers = im.config.jobs.realtime_workers;

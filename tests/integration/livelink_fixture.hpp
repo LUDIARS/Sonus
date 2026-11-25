@@ -112,6 +112,17 @@ inline std::vector<std::uint8_t> DevBank(std::uint64_t projectHash = kProjectHas
     bu.U32(c::BUSS_effectCount, 0, 1);
     w.AddTable(fx);
     w.AddTable(pv);
+    bt::TableBuilder snap(bf::chunk::SNAP), values(bf::chunk::SNPV);
+    const auto preset = snap.AddRow(), value = values.AddRow();
+    snap.U32(c::SNAP_id, preset, snd::HashId("RaiseDry"));
+    snap.U32(c::SNAP_valueFirst, preset, 0);
+    snap.U32(c::SNAP_valueCount, preset, 1);
+    values.U32(c::SNPV_targetKind, value, 1);
+    values.U32(c::SNPV_targetRow, value, 0);
+    values.U32(c::SNPV_paramIndex, value, 2);
+    values.F32(c::SNPV_value, value, .25f);
+    w.AddTable(snap);
+    w.AddTable(values);
   }
   w.AddTable(bu);
   w.AddTable(as);

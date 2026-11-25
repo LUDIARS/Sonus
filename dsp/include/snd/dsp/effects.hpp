@@ -86,7 +86,9 @@
 //    0 CeilingDb -30..0 -0.3 | 1 ReleaseMs 1..1000 50 | 2 LookaheadMs 0..10 2 [init]
 //    3 InputGainDb 0..24 0
 //  snd.fx.parameq  (4 bands; band b uses params 4b..4b+3)
-//    4b+0 Type 0..7 (0 off, 1 peaking, 2 low shelf, 3 high shelf, 4 LP, 5 HP, 6 BP, 7 notch)
+//    4b+0 Type 0..8 (0 off, 1 peaking, 2 low shelf, 3 high shelf, 4 LP, 5 HP, 6 BP, 7 notch,
+//                    8 allpass: stage 3 D-135, appended)
+//    ("Various filters" of design 7 = the Lowpass / Highpass kinds and these band types, D-135.)
 //    4b+1 FreqHz 20..20000 (100, 500, 2000, 8000) | 4b+2 Q 0.1..20 0.707 | 4b+3 GainDb -24..24 0
 //    defaults: all bands peaking 0 dB (transparent)
 //  snd.fx.lowpass  / snd.fx.highpass (12 dB/oct; Unity Lowpass/Highpass Simple+Resonance)

@@ -14,6 +14,8 @@ constexpr schema::SystemId kSys = schema::SystemId::ApplyCommands;
 struct LiveEffect : EditSpan {
   EffectInstance effect{};
   float params[dsp::kMaxEffectParams]{};
+  EffectParamControl controls[dsp::kMaxEffectParams]{};
+  float start[dsp::kMaxEffectParams]{}, end[dsp::kMaxEffectParams]{};
 };
 constexpr std::size_t kStateOffset = (sizeof(LiveEffect) + 63u) & ~std::size_t{63};
 
@@ -379,6 +381,14 @@ snd_result System::LiveAddEffect(Id bus, Id type, std::uint32_t pos, const float
   e.paramCount = paramCount;
   if (info) dsp::EffectDefaultParams(info->kind, e.params);
   if (count) std::copy_n(params, count, e.params);
+  e.ctl = node->controls;
+  e.blockStart = node->start;
+  e.blockEnd = node->end;
+  for (std::uint32_t i = 0; i < e.paramCount; ++i) {
+    const auto v = ClampEffectParam(e, i, e.params[i]);
+    e.ctl[i] = EffectParamControl{TimedRamp{v, v, 0, 0, 0}, 0, v};
+    e.blockStart[i] = e.blockEnd[i] = v;
+  }
   BindChain(im, *r, s);
   Insert(im.busDefs[s], pos, &e);
   ++r->liveEffects;

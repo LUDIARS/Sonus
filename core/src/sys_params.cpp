@@ -59,6 +59,8 @@ void EvaluateLogicParams(Impl& im) noexcept {
   const float* cur = SND_W(ParamEmitter_current);
   for (std::uint32_t d = 0; d < t.ParamEmitter.rows.count; ++d) {
     if (ids[d] != kOcclusionParam && ids[d] != kObstructionParam) continue;
+    const auto def = im.paramDefMap.Find(ids[d]);
+    if (def != IdMap::kNotFound && (im.paramDefs[def].scopeMask & 2u) == 0u) continue;
     const std::uint32_t ed = base::rows::DenseOf(t.Emitter.rows, owner[d]);
     if (ed == kNoSlot) continue;
     const float v = cur[d] < 0.0f ? 0.0f : (cur[d] > 1.0f ? 1.0f : cur[d]);

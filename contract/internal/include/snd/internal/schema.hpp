@@ -174,6 +174,11 @@ using F32 = float;
   C(Emitter, lastUpdateBlock, BlockIndex, Hot, ApplyCommands)                  \
   C(Emitter, occlusion, Occlusion, Hot, EvaluateLogicParams)                   \
   C(Emitter, renderPosition, Vec3, Hot, Compute3D)                             \
+  C(Emitter, shapeKind, U32, Hot, ApplyCommands) \
+  C(Emitter, halfExtents, Vec3, Hot, ApplyCommands) \
+  C(Emitter, zoneBus, Id, Hot, ApplyCommands) \
+  C(Emitter, zoneAmount, F32, Hot, ApplyCommands) \
+  C(Emitter, zoneFade, F32, Hot, ApplyCommands) \
   C(Emitter, createdBlock, BlockIndex, Cold, ApplyCommands)
 
 #define SND_COLS_Listener(C)                                                   \
@@ -189,6 +194,9 @@ using F32 = float;
   C(Spatial, direction, Vec3, Hot, Compute3D)                                  \
   C(Spatial, dopplerRatio, F32, Hot, Compute3D)                                \
   C(Spatial, coneCos, F32, Hot, Compute3D)                                     \
+  C(Spatial, shapeSpread, F32, Hot, Compute3D) \
+  C(Spatial, coneAngle, F32, Hot, Compute3D) \
+  C(Spatial, azimuth, F32, Hot, Compute3D) \
   C(Spatial, valid, U32, Hot, Compute3D)
 
 #define SND_PARAM_COLS(C, T)                                                   \
@@ -331,6 +339,11 @@ using F32 = float;
   R(RunEventLogic, Stream_readPos, Async)                                      \
   R(RunEventLogic, Stream_ringWrite, Async)                                    \
   /* 5 Compute3D: Emitter (extrapolated/interpolated), Listener */             \
+  R(Compute3D, Emitter_shapeKind, Current) \
+  R(Compute3D, Emitter_halfExtents, Current) \
+  R(Compute3D, Emitter_zoneBus, Current) \
+  R(Compute3D, Emitter_zoneAmount, Current) \
+  R(Compute3D, Emitter_zoneFade, Current) \
   R(Compute3D, Emitter_position, Current)                                      \
   R(Compute3D, Emitter_velocity, Current)                                      \
   R(Compute3D, Emitter_forward, Current)                                       \
@@ -350,6 +363,9 @@ using F32 = float;
   R(EvaluateDspParams, ParamPlayback_paramId, Current)                         \
   R(EvaluateDspParams, ParamPlayback_nextSlot, Current)                        \
   R(EvaluateDspParams, ParamPlayback_current, Current)                         \
+  R(EvaluateDspParams, Listener_weight, Current) \
+  R(EvaluateDspParams, Spatial_coneAngle, Current) \
+  R(EvaluateDspParams, Spatial_shapeSpread, Current) \
   R(EvaluateDspParams, Spatial_distance, Current)                              \
   R(EvaluateDspParams, Spatial_direction, Current)                             \
   R(EvaluateDspParams, Spatial_dopplerRatio, Current)                          \
@@ -408,6 +424,7 @@ using F32 = float;
   R(Render, Voice_clipRef, Current)                                            \
   R(Render, RealVoice_voiceSlot, Current)                                      \
   R(Render, RealVoice_assign, Current)                                         \
+  R(Render, Spatial_azimuth, Current) \
   R(Render, Spatial_distance, Current)                                         \
   R(Render, Spatial_direction, Current)                                        \
   R(Render, Spatial_valid, Current)                                            \
@@ -420,6 +437,7 @@ using F32 = float;
   R(Render, Stream_control, Current)                                           \
   R(Render, Stream_ringRange, Current)                                         \
   R(Render, Stream_ringWrite, Async)                                           \
+  R(Render, Voice_playbackSlot, Current)  /* stage 3 D-132: voice effects */   \
   /* 10 Publish: everything that is published */                               \
   R(Publish, Playback_state, Current)                                          \
   R(Publish, Playback_schedule, Current)                                       \
@@ -437,7 +455,9 @@ using F32 = float;
   R(Publish, Transport_state, Current)                                         \
   R(Publish, Transport_signature, Current)                                     \
   R(Publish, Stream_control, Current)                                          \
-  R(Publish, Stream_stallCount, Current)
+  R(Publish, Stream_stallCount, Current)                                       \
+  /* Stage 3 group 4: the quietest steal mode reads the last audibility. */    \
+  R(RunEventLogic, Voice_audibility, Previous)
 
 // Per-block data that is not a table (owner = only writer).
 #define SND_SCHEMA_FRAME_DATA(F)                                                  \

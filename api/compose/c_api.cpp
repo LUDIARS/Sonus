@@ -550,4 +550,57 @@ snd_result snd_get_stats(const snd_system* sys, snd_stats* out) {
   return sys->core->GetStats(out);
 }
 
+// ---------------------------------------------------------------------------------------
+// Effects at run time (stage 3, coverage: D-130, D-132). Variant commands of SetBusVolume /
+// SetSwitch / SetParam: core checks the arguments (the live link's rule table does not know
+// the variants yet; see the stage-3 report).
+// ---------------------------------------------------------------------------------------
+snd_result snd_set_effect_param(snd_system* sys, snd_id bus, uint32_t effect_index, uint32_t param_index, float value,
+                                float fade_seconds) {
+  return sys ? sys->core->SetEffectParam(bus, effect_index, param_index, value, fade_seconds) : SND_ERR_INVALID_ARGUMENT;
+}
+snd_result snd_set_event_voice_effect(snd_system* sys, snd_id event, uint32_t slot, snd_id effect_kind,
+                                      const float* params, uint32_t param_count) {
+  return sys ? sys->core->SetEventVoiceEffect(event, slot, effect_kind, params, param_count) : SND_ERR_INVALID_ARGUMENT;
+}
+snd_result snd_set_playback_effect_param(snd_system* sys, snd_playback_handle playback, uint32_t slot,
+                                         uint32_t param_index, float value) {
+  if (sys == nullptr) return SND_ERR_INVALID_ARGUMENT;
+  if (playback.value == SND_HANDLE_INVALID_VALUE) return SND_ERR_INVALID_HANDLE;
+  return sys->core->SetPlaybackEffectParam(playback, slot, param_index, value);
+}
+
+}  // extern "C"
+
+extern "C" snd_result snd_set_emitter_shape(snd_system* sys, snd_emitter_handle emitter, snd_emitter_shape kind,
+                                            const snd_vec3* half_extents) {
+  return sys ? sys->core->SetEmitterShape(emitter, kind, half_extents) : SND_ERR_INVALID_ARGUMENT;
+}
+extern "C" snd_result snd_set_reverb_zone(snd_system* sys, snd_emitter_handle emitter, snd_id bus, float amount,
+                                          float fade_distance) {
+  return sys ? sys->core->SetReverbZone(emitter, bus, amount, fade_distance) : SND_ERR_INVALID_ARGUMENT;
+}
+
+// ---------------------------------------------------------------------------------------
+// Stage 3 additions (session B, group 4: D-146, D-148)
+// ---------------------------------------------------------------------------------------
+extern "C" {
+snd_playback_handle snd_play_fade(snd_system* sys, snd_id event, snd_emitter_handle emitter, const snd_when* when,
+                                  float fade_in_seconds) {
+  return sys ? sys->core->PlayFade(event, emitter, when, fade_in_seconds) : snd_playback_handle{0};
+}
+snd_result snd_get_spectrum(const snd_system* sys, snd_id bus, uint32_t channel, float* out_magnitudes,
+                            uint32_t bin_count) {
+  if (sys == nullptr || out_magnitudes == nullptr) return SND_ERR_INVALID_ARGUMENT;
+  return sys->core->GetSpectrum(bus, channel, out_magnitudes, bin_count);
+}
+}  // extern "C"
+
+extern "C" {
+snd_result snd_set_category_solo(snd_system* sys, snd_id category, int32_t solo) {
+  return sys ? sys->core->SetCategorySolo(category, solo != 0) : SND_ERR_INVALID_ARGUMENT;
+}
+snd_result snd_set_snapshot_action_transition(snd_system* sys, snd_id snapshot, float seconds) {
+  return sys ? sys->core->SetSnapshotActionTransition(snapshot, seconds) : SND_ERR_INVALID_ARGUMENT;
+}
 }  // extern "C"

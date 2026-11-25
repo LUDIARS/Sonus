@@ -36,6 +36,7 @@
 #include "snd/internal/notify.hpp"
 #include "snd/internal/schema.hpp"
 #include "snd/jobs/rt_workers.hpp"
+#include "fx_control.hpp"
 
 namespace snd::core {
 
@@ -62,7 +63,7 @@ struct Cfg {
   std::uint32_t maxPlaybacks, maxEmitters, maxListeners, maxTransports, maxReservations, maxStreams;
   std::uint32_t maxBanks, maxUserBuffers, maxGlobalParams, paramOverflowBlocks;
   std::uint32_t emitterParamRows, playbackParamRows;
-  std::uint32_t voicesPerChunk, maxChunks;
+  std::uint32_t voicesPerChunk, maxChunks, segmentsPerChunk;
   std::uint32_t busCap, catCap, snapCap, groupCap, paramDefCap, duckCap;
   std::uint32_t arenaBytes, reserveBytes, arenasPerThread, maxThreads;
   std::uint32_t criticalPriority, overflowParamSlots, eventRingCapacity;
@@ -166,6 +167,11 @@ struct EffectInstance {
   std::uint32_t channels = 0;
   std::uint32_t ok = 0;      // 1 when initialised
   std::uint32_t reserved = 0;
+  // D-130: runtime control ([kMaxEffectParams] each, bank record memory). `params` stays the
+  // bank value (base); the ParamBlock of a block is blockStart -> blockEnd (Render).
+  EffectParamControl* ctl = nullptr;
+  float* blockStart = nullptr;
+  float* blockEnd = nullptr;
 };
 
 struct EventState {  // RunEventLogic private, per EVNT row (4.2, 4.4)
@@ -176,6 +182,14 @@ struct EventState {  // RunEventLogic private, per EVNT row (4.2, 4.4)
   std::uint64_t shuffleMask;
   ClockSample lastStartClock;
   ClockSample comboClock;
+  // Stage 3 (group 4), D-141: shuffle without a clip limit. The order of a round is a
+  // permutation of the clips keyed by shuffleKey (drawn from the playback that starts
+  // the round); shufflePos = plays done in the round; shuffleRot = 1 when the round is
+  // rotated by one so that it does not start with the last clip of the previous round.
+  std::uint32_t shuffleKey;
+  std::uint32_t shufflePos;
+  std::uint32_t shuffleRot;
+  std::uint32_t shuffleLast;  // clip index (within the track) played last + 1, 0 = none
 };
 
 struct BankRecord {
@@ -205,6 +219,8 @@ struct BankRecord {
   std::uint32_t* snapSlot = nullptr;
   std::uint32_t* groupSlot = nullptr;
   std::uint32_t* duckSlot = nullptr;
+  float* previousSendContrib = nullptr;
+  float* sendContrib = nullptr;  // [SEND rows] snapshot offsets in dB
   std::uint32_t* busChannels = nullptr;  // resolved channel count per BUSS row (D-54 rule)
   // RunEventLogic per-event state.
   EventState* events = nullptr;
@@ -214,6 +230,12 @@ struct BankRecord {
   std::uint8_t* dspMemory = nullptr;
   std::uint64_t dspBytes = 0;
   void* memory = nullptr;  // one block for everything above except dspMemory
+  // D-131: previous-block output of the source bus of each DUCK row of kind 0 (sidechain),
+  // used when the source bus is mixed after the target bus. [duckCount] index into
+  // sidechainPrev (kNoSlot: not a sidechain row), [n * kMaxChannels * blockFrames], channels.
+  std::uint32_t* sidechainIndex = nullptr;
+  float* sidechainPrev = nullptr;
+  std::uint32_t* sidechainChannels = nullptr;
 };
 
 enum class BankAudioState : std::uint8_t { Free = 0, Registered = 1, Unloading = 2, AwaitEpoch = 3 };
@@ -261,6 +283,7 @@ struct CatDef {
   std::uint32_t parentSlot = kNoSlot;
   std::uint32_t flags = 0;
   float baseVolumeDb = 0;
+  bool solo = false;
 };
 struct SnapDef {
   Id id = 0;
@@ -268,6 +291,7 @@ struct SnapDef {
   std::uint16_t defBank = kNoBank;
   std::uint16_t reserved = 0;
   std::uint32_t defRow = 0;
+  std::uint32_t actionFadeFrames = 0;
 };
 struct GroupDef {
   Id id = 0;
@@ -348,6 +372,37 @@ struct ApplyPriv {
   std::uint32_t overrideCount = 0;
   std::uint32_t suspended = 0;
   std::uint32_t graphDirty = 0;
+  // Stage 3 (group 4).
+  // D-146: fade-in of the playback's start (seconds, 0 = none), from Play.flags; read by
+  // RunEventLogic when it initialises the row and by EvaluateDspParams.
+  float* playbackFadeIn = nullptr;  // [maxPlaybacks]
+  // D-145: child playbacks ApplyCommands created for the actions inside the first block of
+  // an immediate play (cancelled by RunEventLogic if the parent does not start). Per block.
+  struct ActionChild {
+    HandleRef parent;
+    HandleRef child;
+  };
+  ActionChild* actionChildren = nullptr;  // [actionChildCap]
+  std::uint32_t actionChildCount = 0, actionChildCap = 0;
+  std::uint32_t actionChildWarned = 0;    // a LIMIT_REACHED warning was posted this block
+  // D-145: snapshot actions at a play's very first frame (its start block): a weight that is
+  // in force only if the play starts. RunEventLogic cancels the entries of a play that did
+  // not start; EvaluateDspParams uses the others in this block; the next ApplyCommands
+  // writes them into Snapshot.request.
+  struct TentativeSnapshot {
+    SlotIndex snapshot;
+    float weight;
+    HandleRef parent;
+    std::uint32_t cancelled;
+    std::uint32_t snapshotGeneration;
+    ClockSample start;
+    std::uint32_t duration;
+  };
+  TentativeSnapshot* tentative = nullptr;  // [actionChildCap]
+  std::uint32_t tentativeCount = 0;
+  // D-145: the start clock a scheduled play (CLOCK_SAMPLE / DELAY_US) is expected to have,
+  // 0 = not known ahead (immediate, musical). RunEventLogic looks its actions ahead with it.
+  ClockSample* playbackStartClock = nullptr;  // [maxPlaybacks]
 };
 
 // ---------------------------------------------------------------------------
@@ -356,6 +411,8 @@ struct ApplyPriv {
 // Core-internal PlaybackRequest flag bits (above the contract's, D-17 request column).
 inline constexpr std::uint32_t kRequestRejectReservationFull = 1u << 16;  // no reservation slot: end REJECTED
 inline constexpr std::uint32_t kRequestBufferDestroyed = 1u << 17;  // D-97: its user buffer is being destroyed
+// D-145: ApplyCommands applied the actions of the playback's first block already.
+inline constexpr std::uint32_t kRequestActionsApplied = 1u << 18;
 
 enum PlaybackPrivFlags : std::uint32_t {
   kPbStarted = 1u << 0,
@@ -368,6 +425,9 @@ enum PlaybackPrivFlags : std::uint32_t {
   kPbPausedState = 1u << 7,  // currently in Paused state (voices paused)
   kPbSourceStarted = 1u << 8,  // a source accepted at least one voice (FlushSourceCalls)
   kPbTimedStop = 1u << 9,    // stopping by voice releases from a clock (sample accurate)
+  // Stage 3 (group 4).
+  kPbCancelled = 1u << 11,     // D-145: child of an action whose parent did not start
+  kPbActionStop = 1u << 12,    // D-145: a StopEvent action of a start block asks to stop
 };
 struct PlaybackPriv {
   std::uint32_t flags;
@@ -381,6 +441,15 @@ struct PlaybackPriv {
   ClockSample stopClock;   // scheduled stop from a fired reservation
   float stopFadeSeconds;
   std::uint32_t voiceListHead;  // first voice slot of the playback (linked through VoiceStatic.nextInPlayback)
+  // Stage 3 (group 4), D-145: the track time (frames the playback played, not counting
+  // pauses or the stop), the track time up to which its actions were taken, the start clock
+  // its actions were looked ahead with (scheduled plays), a StopEvent action's clock.
+  std::uint64_t actionHorizon;
+  std::uint32_t lastVoiceDetail;  // why the last contributing voice ended, before any steal fade tail
+  std::uint64_t actionOnlyEnd;  // exclusive track frame of the last effective action (zero for other events)
+  std::uint64_t trackTime;
+  ClockSample actionStart;
+  ClockSample actionStopClock;
 };
 
 enum VoiceStaticFlags : std::uint32_t {
@@ -397,11 +466,17 @@ enum VoiceStaticFlags : std::uint32_t {
   kVsCtlPending = 1u << 10,  // a pause / resume waits for the end of the hold (D-43)
   kVsWantPaused = 1u << 11,  // the state to send then
   kVsVirtualized = 1u << 12, // SelectVoices sent Virtualize; Devirtualize on the next promotion
+  // Stage 3 (group 4).
+  kVsRestartReturn = 1u << 13,  // D-140: promoted with "restart": Render starts it at startFrame (SelectVoices sets, Render clears)
+  kVsKillVirtual = 1u << 14,    // D-140: went virtual with "never": RunEventLogic ends it (SelectVoices sets)
+  kVsGroupStolen = 1u << 16,    // the group took this voice; only its release tail remains
+  kVsFadeInHold = 1u << 15,     // D-146: the play's fade-in does not advance (pausing / stopping; RunEventLogic)
 };
 // Static per-voice values set by RunEventLogic at creation; read by
 // EvaluateDspParams, SelectVoices, BuildRenderList and Render (proposed schema
 // columns: Voice.clipGainDb, Voice.pitchCents, Voice.pan, Voice.channels ...).
 struct VoiceStatic {
+  std::uint32_t emitterGeneration = 0;  // keep a live voice detached after its emitter is released
   std::uint32_t generation;  // Voice row generation
   std::uint32_t flags;       // VoiceStaticFlags
   std::uint32_t channels;    // source channels
@@ -429,6 +504,19 @@ struct VoiceStatic {
   HandleRef followTransport;
   double transportBeats;
   double transportBeatsPerSample;
+  // Stage 3 (group 4).
+  std::uint32_t virtualReturn;   // D-140: 0 continue, 1 restart, 2 never (Event value when the asset sets none)
+  std::uint32_t markerCount;     // markers of the clip (CoreDesc::clipMarkers until a bank column, markers.hpp)
+  // D-142 / CLIP.fadeOutMs: finite asset clips. playFrames = source frames from startFrame to
+  // the end (the asset end, or the end of the loop's last pass); 0 = endless (or not an asset).
+  std::uint64_t playFrames;
+  std::uint64_t loopStartFrame, loopEndFrame;  // loop region of a looping asset clip (loopEnd 0 = none)
+  float endFadeSeconds;          // CLIP.fadeOutMs: linear fade over the last part (source time)
+  float reserved4;
+  const std::uint64_t* markerFrames;  // [markerCount] source frames (bank memory)
+  const Id* markerIds;                // [markerCount]
+  std::uint32_t fadeInFrames;   // D-146: the play's fade-in (frames of played time from the voice's start), 0 none
+  std::uint32_t reserved5;
 };
 
 struct StartBatch {  // RunEventLogic: Start() requests per kind, issued once per block
@@ -453,6 +541,21 @@ struct Deferred {
 };
 inline constexpr std::uint32_t kVoicePausedFlag = 1u << 4;  // core-internal VoiceLifecycle.flags bit (paused)
 
+// D-145: actions taken ahead, waiting for their block (cancelled if the parent pauses,
+// stops or does not start before they happen). RunEventLogic private.
+enum class ActionPendingKind : std::uint32_t { Play, Stop, SetParam, Snapshot, Done };
+enum class ActionParentState { Running, Paused, Stopped };
+struct ActionPending {
+  ActionPendingKind kind;
+  Id target;
+  HandleRef parent;
+  HandleRef child;         // Play: the child playback
+  float value;
+  std::uint32_t reserved;
+  ClockSample clock;       // the action's clock
+  ClockSample due;         // SetParam / Snapshot: the block start it applies at
+};
+
 struct EventPriv {
   PlaybackPriv* pb = nullptr;      // [maxPlaybacks]
   VoiceStatic* vs = nullptr;       // [maxVirtual] (read by later systems, see above)
@@ -472,6 +575,10 @@ struct EventPriv {
   std::uint32_t deferredCount = 0, deferredCap = 0;
   std::uint32_t* releaseKind = nullptr;  // [maxVirtual]
   std::uint32_t releaseCount = 0;
+  // Stage 3 (group 4), D-145.
+  ActionPending* pending = nullptr;  // [deferredCap]
+  std::uint32_t pendingCount = 0;
+  std::uint32_t actionWarned = 0;    // a LIMIT_REACHED warning was posted this block
 };
 
 // ---------------------------------------------------------------------------
@@ -483,11 +590,54 @@ struct LogicPriv {  // EvaluateLogicParams: generation seen per row slot (new ro
   std::uint32_t* playbackGen = nullptr;
 };
 
+// Gather the active curve factors for one listener. A target with a factor
+// but no dedicated distance curve starts at the multiplicative identity.
+struct SpatialCurveProduct {
+  float value = 1.0f;
+  bool active = false;
+  void Add(float factor) noexcept { active = true; value *= factor; }
+  float Apply(float distanceValue, bool hasDistanceCurve) const noexcept {
+    return active ? (hasDistanceCurve ? distanceValue : 1.0f) * value : distanceValue;
+  }
+};
+struct SpatialCurveParams {
+  SpatialCurveProduct spread, blend, send;
+};
+
+inline constexpr unsigned kMaxZones = 4;
+inline constexpr unsigned kMaxAuxSends = 1 + kMaxZones;
+struct ZoneSend {
+  Id bus;
+  SlotIndex emitter;
+  float amount;
+};
+struct ListenerContribution {
+  SlotIndex spatial;
+  float weight;
+  float spread;
+  float blend;
+  float curveSend;
+};
+struct VoiceSpatialMix {
+  ListenerContribution listeners[SND_MAX_LISTENERS];
+  std::uint32_t count;
+  std::uint32_t dominant;
+  float curveSend;
+  float occlusion, obstruction;
+};
+
 struct DspPriv {
+  bool hadSnapshotOffsets = false;
+
+  ZoneSend zones[SND_MAX_LISTENERS][kMaxZones]{};
+  VoiceSpatialMix* mix = nullptr;  // [maxVirtual], EvaluateDspParams -> Render
+
   float* duckDb = nullptr;           // [duckCap] current reduction (dB, <= 0)
   std::uint32_t* catPlaying = nullptr;  // [catCap] voices playing per category this block
-  float* catGainPrev = nullptr;
+  float* busGainDb = nullptr;
   float* pan = nullptr;  // [maxVirtual] 2D pan of the voice this block (clip random + curves), read by Render
+  // Stage 3 (group 4), D-143: layer crossfade weight at the end of the last block, per voice.
+  float* layerGain = nullptr;  // [maxVirtual]
 };
 
 struct SelectPriv {
@@ -499,6 +649,17 @@ struct SelectPriv {
 };
 
 // Per-item render inputs (chunk-owned, written in Render's serial part).
+struct AuxRoute {
+  SlotIndex bus;
+  std::uint32_t segment, channels, generation;
+  PanMatrix pan;
+};
+struct PathHistory {
+  FilterState directFilter, sendFilter;
+  float directGain;
+  std::uint32_t sends;
+  AuxRoute previous[kMaxAuxSends];
+};
 struct ItemInput {
   std::uint32_t kind;        // SourceKind
   std::uint32_t flags;       // ItemFlags
@@ -521,6 +682,24 @@ struct ItemInput {
   // Outputs (chunk writes):
   float tail[kMaxChannels];  // last output frame per bus channel (late-chunk fade, D-15)
   VoiceRenderStatus status;
+  std::uint32_t sends;
+  std::uint32_t removedCount;
+  bool spatialFilter;
+  struct Removed { std::uint32_t previous, segment; } removed[kMaxAuxSends];
+  AuxRoute aux[kMaxAuxSends];
+  float directGain, directLp, sendLp;
+  std::uint32_t vfxSlot;     // D-132: voice-effect slot + 1 (0 = no heavy voice effect this block)
+
+  // Stage 3 (group 4), D-142 / CLIP.fadeOutMs: the clip's end inside this block (frameEnd
+  // is the cut; the chunk reports `ended`), and the linear fade toward it from endFadeFrom.
+  std::uint32_t clipEnds;
+  std::uint32_t endFadeActive;
+  std::uint32_t endFadeFrom;
+  float endFade0, endFadeDelta;
+  // D-146: the play's fade-in, per sample from fadeInFrom: min(1, fadeIn0 + fadeInDelta (f - from)).
+  std::uint32_t fadeInActive;
+  std::uint32_t fadeInFrom;
+  double fadeIn0, fadeInDelta;
 };
 enum ItemFlags : std::uint32_t {
   kItemSourceRate = 1u << 0,
@@ -552,6 +731,8 @@ struct RenderSet {
 };
 
 struct RenderPriv {
+  float* sendInput = nullptr;  // separate path LP, [realTotal * maxVoiceChannels * blockFrames]
+  PathHistory* paths = nullptr;  // indexed by real slot, chunk-owned
   std::uint8_t* resamplerPool = nullptr;  // [realTotal] slots of resamplerSlotBytes (D-44)
   std::uint32_t* lastAssign = nullptr;    // [realTotal] assignSeq seen at the last init
   std::uint32_t* stateChannels = nullptr; // [realTotal]
@@ -580,6 +761,16 @@ struct RenderPriv {
   float* outBuf = nullptr;                // [kMaxChannels * blockFrames] master output
   std::uint32_t lateTotal = 0;
   std::uint32_t lod = 0;
+  // Stage 3 (group 4), D-147 / D-148: loudness and spectrum of the output (meter 0) and of
+  // the buses with kBusMeter (meters 1..). analysis.cpp.
+  struct MeterSlot* meters = nullptr;      // [meterCount]
+  std::uint32_t meterCount = 0;            // CoreLimits.maxMeteredBuses + 1
+  std::uint32_t* busMeter = nullptr;       // [busCap] meter of the bus slot, kNoSlot none
+  struct AnalysisShared* analysis = nullptr;
+  // D-146: played frames of each voice (fade-in); markers / "continue": the resampler's
+  // look-ahead (source frames read ahead of the output) at the voice's last render.
+  std::uint64_t* voicePlayed = nullptr;   // [maxVirtual]
+  double* voiceLookahead = nullptr;       // [maxVirtual]
 };
 
 struct TransportPriv {  // core's UpdateTransport when no music system is present
@@ -735,6 +926,7 @@ struct System::Impl {
 
   // Statistics (audio thread).
   snd_stats stats{};
+  std::atomic<bool> focusLost{false};
   // IOutputDevice::OutputLatencySeconds; CoreDesc's value until System::SetOutputLatency.
   std::atomic<double> outputLatency{0.0};
   BlockProfile profile{};
@@ -746,6 +938,9 @@ struct System::Impl {
   // Render(out, frames) FIFO.
   float* fifo = nullptr;  // [blockFrames * outChannels]
   std::uint32_t fifoPos = 0, fifoFill = 0;
+
+  // Stage 3 group 2 (fx_control.hpp): voice effects (D-132..D-134).
+  VoiceFxPriv vfx;
 };
 
 // ---------------------------------------------------------------------------
@@ -795,10 +990,19 @@ inline float RampValue(const TimedRamp& r, ClockSample clock) noexcept {
   return r.from + (r.to - r.from) * t;
 }
 
+// Both the first block's tentative value and next block's committed request
+// use the same clock and duration. A rejected parent never changes the base.
+inline TimedRamp SnapshotActionRamp(const TimedRamp& previous, float weight, ClockSample start,
+                                    std::uint32_t frames) noexcept {
+  return TimedRamp{RampValue(previous, start), weight, start, frames, 0u};
+}
+
 // Systems (one per file, design 3.2 order).
 void ApplyCommands(Impl& im) noexcept;
 void UpdateTransport(Impl& im) noexcept;
 void EvaluateLogicParams(Impl& im) noexcept;
+ActionParentState ActionParentStatus(Impl& im, HandleRef parent, ClockSample at) noexcept;
+void ApplyDueActions(Impl& im) noexcept;
 void RunEventLogic(Impl& im) noexcept;
 void Compute3D(Impl& im) noexcept;
 void EvaluateDspParams(Impl& im) noexcept;
@@ -843,6 +1047,61 @@ base::rows::RemoveResult RemoveTransportRow(schema::Tables& t, SlotIndex slot) n
 base::rows::RemoveResult RemoveReservationRow(schema::Tables& t, SlotIndex slot) noexcept;
 base::rows::RemoveResult RemoveCategoryRow(schema::Tables& t, SlotIndex slot) noexcept;
 base::rows::RemoveResult RemoveSnapshotRow(schema::Tables& t, SlotIndex slot) noexcept;
+
+// ---------------------------------------------------------------------------
+// Stage 3 group 2: runtime effect control (fx_control.cpp, voice_fx.cpp)
+// ---------------------------------------------------------------------------
+// D-130. Audio thread, ApplyCommands or a later system of the same block before Render.
+// Effect instance `effectIndex` of the chain of bus `busSlot` (in its defining bank), or null.
+EffectInstance* BusEffectInstance(Impl& im, SlotIndex busSlot, std::uint32_t effectIndex,
+                                  bool authoredIndex = false) noexcept;
+// Sets the value parameter `param` heads to: from its current set value at the block start,
+// linearly over `fadeSeconds` (0: this block). Clamped to the parameter range (standard
+// effects); parameters past the instance's count are ignored. Contributions
+// (EffectParamControl::contrib) add on top.
+void SetEffectParam(Impl& im, EffectInstance& e, std::uint32_t param, float value, float fadeSeconds) noexcept;
+// True for a standard effect's [init] parameter (kParamInitOnly): not changeable at run time.
+bool EffectParamIsInitOnly(const snd_dsp_effect* plugin, Id type, std::uint32_t param) noexcept;
+// ApplyCommands: event id of a live playback (0 if none).
+Id PlaybackEventId(Impl& im, HandleRef playback) noexcept;
+// Clamps `v` to parameter `param`'s range (standard effects; plugins: unchanged).
+float ClampEffectParam(const EffectInstance& e, std::uint32_t param, float v) noexcept;
+// Render (MixBuses): this block's ParamBlock values of `e` from its controls; returns the mask.
+std::uint32_t StepEffectParams(Impl& im, EffectInstance& e) noexcept;
+// ApplyCommands: SetBusVolume variant 1 (bus effect parameter, D-130).
+void ApplyBusEffectParam(Impl& im, const cmd::SetBusVolume& c) noexcept;
+// D-131 (MixBuses): sidechain source of bus `s` (defining bank `rec`) for this block.
+struct SidechainSource {
+  const float* channels[kMaxChannels];
+  std::uint32_t count;
+  std::uint32_t prevRow;  // DUCK row whose previous-block buffer the source refreshes after its mix (kNoSlot: none)
+};
+bool FindSidechain(Impl& im, const BankRecord& rec, SlotIndex s, std::uint32_t orderIndex, SidechainSource* out) noexcept;
+// After bus `s` was mixed: refresh the previous-block buffers that take it as their source.
+void StoreSidechainSources(Impl& im, SlotIndex s, std::uint32_t orderIndex, const float* buf, std::uint32_t ch) noexcept;
+
+// D-132..D-134 (voice_fx.cpp).
+bool InitVoiceFx(Impl& im) noexcept;  // Create
+void ApplyVoiceFxSwitch(Impl& im, const cmd::SetSwitch& c) noexcept;  // SetSwitch variant 1
+void ApplyVoiceFxParam(Impl& im, const cmd::SetParam& c) noexcept;    // SetParam variant 1
+// Render, serial, before the items: frees the slots of voices that left their real assignment.
+void VfxReleaseStale(Impl& im) noexcept;
+// Render, serial, per item: binds / keeps a slot and writes this block's parameters (in.vfxSlot).
+void VfxPrepareItem(Impl& im, const source::RenderItem& it, ItemInput& in) noexcept;
+// Chunk: runs the voice's effect chain in place.
+void VfxProcess(Impl& im, std::uint32_t slot, float* const* voiceOut, std::uint32_t channels) noexcept;
+
+// --- Stage 3 (group 4) -------------------------------------------------------------------
+// Playback time (frames) of an action at ACTN.timeMs = `ms` (sys_event.cpp, D-145).
+std::uint64_t ActionFrame(const Impl& im, float ms) noexcept;
+// Analysis (analysis.cpp, D-147 / D-148): meters of the output and of kBusMeter buses.
+bool InitAnalysis(Impl& im) noexcept;                       // Create
+void AnalysisMixBus(Impl& im, SlotIndex bus, std::uint32_t d, const float* const* chans, std::uint32_t channels) noexcept;  // Render (MixBuses)
+void AnalysisMixOutput(Impl& im) noexcept;                  // Render (MixBuses, after the buses)
+void AnalysisMaintain(Impl& im) noexcept;                   // Render (MixBuses, before the buses)
+bool AnalysisLoudness(const Impl& im, SlotIndex bus, float* shortTerm, float* integrated) noexcept;  // Publish
+void AnalysisPublish(Impl& im) noexcept;                    // Publish
+void AnalysisSwap(Impl& im) noexcept;                       // Update (owner thread)
 
 }  // namespace snd::core
 

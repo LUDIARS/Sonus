@@ -116,6 +116,32 @@ typedef uint32_t snd_output_kind;
   X(file_system_root, fileSystemRoot, const char*, const char*, NULL)                             \
   X(output_kind, outputKind, snd_output_kind, ::snd::OutputKind, SND_OUTPUT_PLATFORM)
 
+/* Top level, added in stage 3 (coverage, D-132; contract minor, version not bumped yet).
+ * Stored at the END of snd_config (after the 1.2 host fields): a shorter struct gets the
+ * defaults. Heavy voice effects (7 "再生単位のフィルタ"): a fixed pool allocated at
+ * snd_create (MemTag::DspPool) of max_voice_effects slots of voice_effect_bytes each.
+ *  - max_voice_effects: real voices that can run heavy voice effects at once (clamped to
+ *    max_real_voices + fade_reserve_voices). A voice without a free slot plays dry.
+ *  - voice_effect_chain: stages per voice, 0..4 (above 4: SND_ERR_INVALID_ARGUMENT).
+ *    0 disables the configuration API (snd_set_event_voice_effect: INVALID_ARGUMENT).
+ *  - voice_effect_bytes: effect state per voice (all its stages, rounded up to 64 bytes),
+ *    0..64 MiB (above: SND_ERR_INVALID_ARGUMENT; 0 = no slot, every voice dry). The default
+ *    holds a 48 kHz reverb (about 132 KiB) and a filter.
+ *  - voice_effect_settings: entries of the Event setting table and of the per-playback
+ *    value table, 1..65535 (0 or above: SND_ERR_INVALID_ARGUMENT). A setting or value that
+ *    finds its table full is dropped when applied, with a warning SND_ERR_LIMIT_REACHED. */
+#define SND_CONFIG_TOP_S3_VOICE_FX(X)                                                             \
+  X(max_voice_effects, maxVoiceEffects, uint32_t, uint32_t, 4u)                                   \
+  X(voice_effect_chain, voiceEffectChain, uint32_t, uint32_t, 2u)                                 \
+  X(voice_effect_bytes, voiceEffectBytes, uint32_t, uint32_t, (160u << 10))                       \
+  X(voice_effect_settings, voiceEffectSettings, uint32_t, uint32_t, 64u)
+
+/* Spatial tuning (D-150). Factor [0,16], sound speed [1,100000] m/s.
+ * A zero factor disables the Doppler shift. The ratio stays in [0.25,4]. */
+#define SND_CONFIG_TOP_S3_SPATIAL(X) \
+  X(doppler_factor, dopplerFactor, float, float, 1.0f) \
+  X(speed_of_sound, speedOfSound, float, float, 343.0f)
+
 /* Memory budgets (3.3) ----------------------------------------------------- */
 #define SND_CONFIG_MEMORY(X)                                                                      \
   X(stream_pool_bytes, streamPoolBytes, uint64_t, uint64_t, (8ull << 20))                         \
@@ -248,6 +274,9 @@ typedef struct snd_config {
   SND_CONFIG_TOP_1_2(SND_CONFIG_C_FIELD)
   /* --- contract 1.2, host additions (D-102, D-103) --- */
   SND_CONFIG_TOP_1_2_HOST(SND_CONFIG_C_FIELD)
+  /* --- stage 3 (coverage): voice effects (D-132) --- */
+  SND_CONFIG_TOP_S3_VOICE_FX(SND_CONFIG_C_FIELD)
+  SND_CONFIG_TOP_S3_SPATIAL(SND_CONFIG_C_FIELD)
 } snd_config;
 
 /* Upper bound of max_pitch_ratio (= dsp kResamplerMaxRatio). */
@@ -269,6 +298,8 @@ static inline void snd_config_init(snd_config* cfg) {
   SND_CONFIG_TOP_1_1(SND_CONFIG_INIT_TOP)
   SND_CONFIG_TOP_1_2(SND_CONFIG_INIT_TOP)
   SND_CONFIG_TOP_1_2_HOST(SND_CONFIG_INIT_TOP)
+  SND_CONFIG_TOP_S3_VOICE_FX(SND_CONFIG_INIT_TOP)
+  SND_CONFIG_TOP_S3_SPATIAL(SND_CONFIG_INIT_TOP)
   SND_CONFIG_MEMORY(SND_CONFIG_INIT_MEMORY)
   SND_CONFIG_COMMANDS(SND_CONFIG_INIT_COMMANDS)
   SND_CONFIG_JOBS(SND_CONFIG_INIT_JOBS)
