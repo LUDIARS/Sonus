@@ -4,6 +4,7 @@
 #ifndef SND_BUILDTOOL_SRC_DETAIL_FILE_IO_HPP
 #define SND_BUILDTOOL_SRC_DETAIL_FILE_IO_HPP
 
+#include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <filesystem>
@@ -13,6 +14,20 @@
 
 namespace snd::buildtool::detail {
 
+// fopen for a std::filesystem::path. On Windows the native path is wide (and may hold
+// characters the ANSI code page cannot), so it goes through _wfopen.
+inline std::FILE* OpenFile(const std::filesystem::path& p, const char* mode) {
+#ifdef _WIN32
+  wchar_t wmode[8] = {};
+  for (std::size_t i = 0; i + 1 < sizeof(wmode) / sizeof(wmode[0]) && mode[i] != '\0'; ++i) {
+    wmode[i] = static_cast<wchar_t>(mode[i]);
+  }
+  return ::_wfopen(p.c_str(), wmode);
+#else
+  return std::fopen(p.c_str(), mode);
+#endif
+}
+
 // Whole regular file. false (and `why`) for missing files, directories and read errors.
 inline bool ReadFileBytes(const std::filesystem::path& p, std::vector<std::uint8_t>* out, std::string* why = nullptr) {
   std::error_code ec;
@@ -20,7 +35,7 @@ inline bool ReadFileBytes(const std::filesystem::path& p, std::vector<std::uint8
     if (why != nullptr) *why = std::filesystem::exists(p, ec) ? "not a regular file" : "no such file";
     return false;
   }
-  std::FILE* f = std::fopen(p.c_str(), "rb");
+  std::FILE* f = OpenFile(p, "rb");
   if (f == nullptr) {
     if (why != nullptr) *why = "cannot open";
     return false;
@@ -43,7 +58,7 @@ inline bool ReadFileBytes(const std::filesystem::path& p, std::vector<std::uint8
 
 // Writes (truncating) a file. false on any error.
 inline bool WriteFileBytes(const std::filesystem::path& p, const std::vector<std::uint8_t>& bytes) {
-  std::FILE* f = std::fopen(p.c_str(), "wb");
+  std::FILE* f = OpenFile(p, "wb");
   if (f == nullptr) return false;
   const bool ok = bytes.empty() || std::fwrite(bytes.data(), 1, bytes.size(), f) == bytes.size();
   return std::fclose(f) == 0 && ok;
