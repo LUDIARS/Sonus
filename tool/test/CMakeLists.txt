@@ -249,3 +249,12 @@ foreach(_r AbortGroupRestoresEverything RandomSequencesWithAbortsKeepTheHistory 
   add_test(NAME tool_indep_s7_ui_recheck2_${_r} COMMAND tool_indep_s7_ui_recheck2_test --filter ${_r})
   set_tests_properties(tool_indep_s7_ui_recheck2_${_r} PROPERTIES TIMEOUT 3600)
 endforeach()
+# Third re-check after the third return (indep_s7_ui_properties.md N).
+_snd_tool_test(indep_s7_ui_recheck3_test "${_tool_ui_screen_link}")
+set_tests_properties(tool_indep_s7_ui_recheck3_test PROPERTIES DISABLED TRUE)  # run per test below
+foreach(_r SmallestWindowEverywhere ResizingAcrossTheMinimumKeepsTheState SelectionsAcrossEditsOfEveryKind
+        NumbersThatDoNotFitTheBankAreRefused BrokenNumbersInFilesAreShownWithoutUndefinedConversions EffectChainChangesAsk
+        Defect_NamesThatReadInfOrNanAreShownAsADash)
+  add_test(NAME tool_indep_s7_ui_recheck3_${_r} COMMAND tool_indep_s7_ui_recheck3_test --filter ${_r})
+  set_tests_properties(tool_indep_s7_ui_recheck3_${_r} PROPERTIES TIMEOUT 3600)
+endforeach()
