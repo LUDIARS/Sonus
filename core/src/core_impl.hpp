@@ -62,7 +62,7 @@ struct Cfg {
   std::uint32_t maxPlaybacks, maxEmitters, maxListeners, maxTransports, maxReservations, maxStreams;
   std::uint32_t maxBanks, maxUserBuffers, maxGlobalParams, paramOverflowBlocks;
   std::uint32_t emitterParamRows, playbackParamRows;
-  std::uint32_t voicesPerChunk, maxChunks;
+  std::uint32_t voicesPerChunk, maxChunks, segmentsPerChunk;
   std::uint32_t busCap, catCap, snapCap, groupCap, paramDefCap, duckCap;
   std::uint32_t arenaBytes, reserveBytes, arenasPerThread, maxThreads;
   std::uint32_t criticalPriority, overflowParamSlots, eventRingCapacity;
@@ -431,6 +431,7 @@ enum VoiceStaticFlags : std::uint32_t {
 // EvaluateDspParams, SelectVoices, BuildRenderList and Render (proposed schema
 // columns: Voice.clipGainDb, Voice.pitchCents, Voice.pan, Voice.channels ...).
 struct VoiceStatic {
+  std::uint32_t emitterGeneration = 0;  // keep a live voice detached after its emitter is released
   std::uint32_t generation;  // Voice row generation
   std::uint32_t flags;       // VoiceStaticFlags
   std::uint32_t channels;    // source channels
@@ -544,7 +545,32 @@ struct LogicPriv {  // EvaluateLogicParams: generation seen per row slot (new ro
   std::uint32_t* playbackGen = nullptr;
 };
 
+inline constexpr unsigned kMaxZones = 4;
+inline constexpr unsigned kMaxAuxSends = 1 + kMaxZones;
+struct ZoneSend {
+  Id bus;
+  SlotIndex emitter;
+  float amount;
+};
+struct ListenerContribution {
+  SlotIndex spatial;
+  float weight;
+  float spread;
+  float blend;
+  float curveSend;
+};
+struct VoiceSpatialMix {
+  ListenerContribution listeners[SND_MAX_LISTENERS];
+  std::uint32_t count;
+  std::uint32_t dominant;
+  float curveSend;
+  float occlusion, obstruction;
+};
+
 struct DspPriv {
+  ZoneSend zones[SND_MAX_LISTENERS][kMaxZones]{};
+  VoiceSpatialMix* mix = nullptr;  // [maxVirtual], EvaluateDspParams -> Render
+
   float* duckDb = nullptr;           // [duckCap] current reduction (dB, <= 0)
   std::uint32_t* catPlaying = nullptr;  // [catCap] voices playing per category this block
   float* catGainPrev = nullptr;
@@ -562,6 +588,17 @@ struct SelectPriv {
 };
 
 // Per-item render inputs (chunk-owned, written in Render's serial part).
+struct AuxRoute {
+  SlotIndex bus;
+  std::uint32_t segment, channels, generation;
+  PanMatrix pan;
+};
+struct PathHistory {
+  FilterState directFilter, sendFilter;
+  float directGain;
+  std::uint32_t sends;
+  AuxRoute previous[kMaxAuxSends];
+};
 struct ItemInput {
   std::uint32_t kind;        // SourceKind
   std::uint32_t flags;       // ItemFlags
@@ -584,6 +621,12 @@ struct ItemInput {
   // Outputs (chunk writes):
   float tail[kMaxChannels];  // last output frame per bus channel (late-chunk fade, D-15)
   VoiceRenderStatus status;
+  std::uint32_t sends;
+  std::uint32_t removedCount;
+  bool spatialFilter;
+  struct Removed { std::uint32_t previous, segment; } removed[kMaxAuxSends];
+  AuxRoute aux[kMaxAuxSends];
+  float directGain, directLp, sendLp;
   std::uint32_t vfxSlot;     // D-132: voice-effect slot + 1 (0 = no heavy voice effect this block)
 
   // Stage 3 (group 4), D-142 / CLIP.fadeOutMs: the clip's end inside this block (frameEnd
@@ -627,6 +670,8 @@ struct RenderSet {
 };
 
 struct RenderPriv {
+  float* sendInput = nullptr;  // separate path LP, [realTotal * maxVoiceChannels * blockFrames]
+  PathHistory* paths = nullptr;  // indexed by real slot, chunk-owned
   std::uint8_t* resamplerPool = nullptr;  // [realTotal] slots of resamplerSlotBytes (D-44)
   std::uint32_t* lastAssign = nullptr;    // [realTotal] assignSeq seen at the last init
   std::uint32_t* stateChannels = nullptr; // [realTotal]

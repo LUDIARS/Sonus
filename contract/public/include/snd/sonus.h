@@ -422,6 +422,14 @@ SND_API snd_result SND_CALL snd_set_event_voice_effect(snd_system* sys, snd_id e
 SND_API snd_result SND_CALL snd_set_playback_effect_param(snd_system* sys, snd_playback_handle playback,
                                                           uint32_t slot, uint32_t param_index, float value);
 
+/* Nonnegative local half-extents in metres. Point accepts a null extent. */
+SND_API snd_result SND_CALL snd_set_emitter_shape(snd_system* sys, snd_emitter_handle emitter,
+                                                  snd_emitter_shape kind, const snd_vec3* half_extents);
+/* Four strongest listener zones. Amount [0,1], fade_distance >= 0 metres.
+ * SND_ID_NONE removes the zone. */
+SND_API snd_result SND_CALL snd_set_reverb_zone(snd_system* sys, snd_emitter_handle emitter, snd_id bus,
+                                                float amount, float fade_distance);
+
 /* Stage 3 additions                                                         */
 /* ========================================================================= */
 /* D-146: snd_play with a linear fade-in of the start over fade_in_seconds (rounded to
