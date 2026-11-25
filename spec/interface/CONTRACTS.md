@@ -448,6 +448,7 @@ bank / buildtool:
 | 版 | 日付 | 内容 |
 | --- | --- | --- |
 | 1.2（段階 7-A physics） | 2026-11-24 | D-110〜D-125: physics の本実装。**契約ヘッダ・版・コマンド種別・スキーマ・バンク形式の変更なし**。新しい公開ヘッダ `physics/include/snd/physics/physics.h` / `physics.hpp`（`snd_physics_*`、`snd::phys`）、凍結の `snd_phys_*` 4 関数の本実装、`physics_stub.cpp` の削除。`api/compose/c_api.cpp` は変えていない。依頼 A-001（バンク形式 2.1 の PHYS 拡張）、A-002（ハンドルを返す `PlayAt`）、A-003（代替の一覧のツール表示）、A-004（Emitter を同じ更新で作成・破棄すると位置を失う core の欠陥、`snd_play_at` の暗黙の Emitter、Emitter の破棄の後に始まる子の再生）、A-005（suspend 中に記録し続けると `snd_resume` が通らなくなる core の欠陥） |
+
 ## 段階 7-B（段階3 カバレッジ: core と dsp）
 
 セッション B（`int/s7-coverage`）の決定。番号は D-130〜D-169。契約の版は上げていない（統合のときに 1.3）。

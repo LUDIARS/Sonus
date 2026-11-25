@@ -420,7 +420,9 @@ snd_result CreateImpl(Impl& im) noexcept {
   ap.dynamic = Arr<DynamicDesc>(im, g.maxPlaybacks, MemTag::Tables);
   ap.playbackVolume = Arr<float>(im, g.maxPlaybacks, MemTag::Tables);
   ap.playbackPitch = Arr<float>(im, g.maxPlaybacks, MemTag::Tables);
-  if (ap.playbackVolume == nullptr || ap.playbackPitch == nullptr) return SND_ERR_OUT_OF_BUDGET;
+  ap.playbackEmitter = Arr<PlaybackEmitter>(im, g.maxPlaybacks, MemTag::Tables);
+  if (ap.playbackVolume == nullptr || ap.playbackPitch == nullptr || ap.playbackEmitter == nullptr)
+    return SND_ERR_OUT_OF_BUDGET;
   ap.implicitEmitter = Arr<std::uint32_t>(im, g.maxPlaybacks, MemTag::Tables);
   ap.implicitOwnerGen = Arr<std::uint32_t>(im, g.maxEmitters, MemTag::Tables);
   ap.userBufferRefs = Arr<std::uint32_t>(im, g.maxUserBuffers, MemTag::Tables);

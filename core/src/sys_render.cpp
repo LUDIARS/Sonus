@@ -87,7 +87,6 @@ void PanFor(const Impl& im, const VoiceStatic& vs, float pan, std::uint32_t outC
 
 void SpatialMatrix(const Impl& im, const VoiceStatic& vs, const VoiceSpatialMix& mix, float pan,
                    std::uint32_t channels, PanMatrix& matrix, PanMatrix* seatMatrices) noexcept {
-  const auto& t = im.tables;
   if (mix.count == 0) {
     PanFor(im, vs, pan, channels, nullptr, 0, 0, &matrix);
     return;
@@ -95,7 +94,7 @@ void SpatialMatrix(const Impl& im, const VoiceStatic& vs, const VoiceSpatialMix&
   for (unsigned i = 0; i < mix.count; ++i) {
     const ListenerContribution& item = mix.listeners[i];
     PanMatrix part{};
-    PanFor(im, vs, pan, channels, &SND_R(Spatial_azimuth)[item.spatial], item.spread, item.blend, &part);
+    PanFor(im, vs, pan, channels, &item.azimuth, item.spread, item.blend, &part);
     seatMatrices[i] = part;
     if (mix.count == 1) { matrix = part; return; }
     for (unsigned c = 0; c < vs.channels; ++c)
@@ -133,7 +132,7 @@ void ListenerZones(const Impl& im, const VoiceSpatialMix& mix, ZoneSend (&select
   for (unsigned l = 0; l < mix.count; ++l) {
     const auto& seat = mix.listeners[l];
     if (seat.weight <= 0) continue;
-    for (const auto& zone : im.dp.zones[seat.spatial % im.cfg.maxListeners]) {
+    for (const auto& zone : im.dp.zones[seat.listener]) {
       if (!zone.amount) break;
       unsigned at = 0;
       while (at < count && candidates[at].emitter != zone.emitter) ++at;
@@ -771,7 +770,7 @@ void Render(Impl& im) noexcept {
         if (zone.amount == 0) break;
         const SlotIndex target = im.busMap.Find(zone.bus);
         for (unsigned l = 0; l < mix.count; ++l) {
-          const unsigned seat = mix.listeners[l].spatial % im.cfg.maxListeners;
+          const unsigned seat = mix.listeners[l].listener;
           for (const auto& candidate : im.dp.zones[seat]) {
             if (candidate.amount == 0) break;
             if (candidate.emitter == zone.emitter) add(target, l, candidate.amount);
@@ -789,7 +788,7 @@ void Render(Impl& im) noexcept {
           const PanMatrix* matrix = &seatMatrices[l];
           if (route.channels != in.outChannels) {
             const auto& item = mix.listeners[l];
-            PanFor(im, vs, im.dp.pan[v], route.channels, &SND_R(Spatial_azimuth)[item.spatial],
+            PanFor(im, vs, im.dp.pan[v], route.channels, &item.azimuth,
                    item.spread, item.blend, &alternate);
             matrix = &alternate;
           }

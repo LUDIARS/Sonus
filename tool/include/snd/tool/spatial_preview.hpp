@@ -63,7 +63,7 @@ struct SpatialResult {
   float distanceGain = 1.0f;    // inverse distance factor (1 with a curve)
   float curveDb = 0.0f;         // parameter curves (volume target)
   float gainDb = 0.0f;          // distanceDb + curveDb + coneDb
-  float linearGain = 1.0f;      // DbToGain(gainDb) * distanceGain
+  float linearGain = 1.0f;      // output level after blending 2D and 3D gain
   float pitchCents = 0.0f;
   float lowpassHz = 0.0f;       // 0 = open
   float highpassHz = 0.0f;

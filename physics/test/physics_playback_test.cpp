@@ -342,6 +342,46 @@ void LevelsFrom(const World& w, std::uint64_t start, double* l, double* r) {
 }
 }  // namespace
 
+SND_TEST(PhysicsPlayback, DestroyedEmitterKeepsTransformAcrossSlotReuseAndListenerMotion) {
+  snd_config sc = SmallConfig();
+  sc.max_emitters = 1;
+  World w(sc);
+  SND_REQUIRE(w.ok);
+  w.sys.Advance(4);
+
+  const snd_emitter_handle original = snd_create_emitter(w.sys.sys);
+  SND_REQUIRE(original.value != 0u);
+  const snd_vec3 pos{2, 0, 0};
+  SND_REQUIRE_EQ(snd_set_transform(w.sys.sys, original, &pos, nullptr, nullptr), SND_OK);
+  SND_REQUIRE(snd_play(w.sys.sys, snd_hash_id("SE/Hit"), original, nullptr).value != 0u);
+  w.sys.Advance(4);
+  SND_REQUIRE_EQ(snd_destroy_emitter(w.sys.sys, original), SND_OK);
+  w.sys.Advance(4);
+  const snd_emitter_handle reused = snd_create_emitter(w.sys.sys);
+  SND_REQUIRE(reused.value != 0u && reused.value != original.value);
+  const snd_vec3 otherSide{-2, 0, 0};
+  SND_REQUIRE_EQ(snd_set_transform(w.sys.sys, reused, &otherSide, nullptr, nullptr), SND_OK);
+
+  std::uint64_t start = w.sys.Frames();
+  w.sys.Advance(8);
+  SND_CHECK_NEAR(w.Mean(0, start + 512, 1024), 0.0, 2e-3);
+  SND_CHECK_NEAR(w.Mean(1, start + 512, 1024), 0.25, 2e-3);
+
+  snd_listener_desc listener{};
+  listener.position = snd_vec3{4, 0, 0};
+  listener.forward = snd_vec3{0, 0, 1};
+  listener.up = snd_vec3{0, 1, 0};
+  listener.enabled = 1;
+  listener.weight = 1.0f;
+  SND_REQUIRE_EQ(snd_set_listener(w.sys.sys, 0, &listener), SND_OK);
+  start = w.sys.Frames();
+  w.sys.Advance(12);
+  // Drain the manual output queue and the pan ramp before measuring settled output.
+  SND_CHECK_NEAR(w.Mean(0, start + 6 * kBlock, 4 * kBlock), 0.25, 2e-3);
+  SND_CHECK_NEAR(w.Mean(1, start + 6 * kBlock, 4 * kBlock), 0.0, 2e-3);
+  SND_CHECK_EQ(snd_destroy_emitter(w.sys.sys, reused), SND_OK);
+}
+
 // The held emitter is released only once the system is seen to have applied the play: neither
 // sub-steps before one snd_update (a) nor many updates while the audio side does not advance
 // (b) lose the position.

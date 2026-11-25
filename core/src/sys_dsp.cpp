@@ -41,12 +41,10 @@ struct SpatialTarget {
   float send;
 };
 
-SpatialTarget SpatialAt(const Impl& im, SlotIndex spatial, const bk::BankView* view, std::uint32_t row,
+SpatialTarget SpatialAt(const Impl& im, const SpatialSample& spatial, const bk::BankView* view, std::uint32_t row,
                         SlotIndex playback, SlotIndex emitter) noexcept {
-  const schema::Tables& t = im.tables;
-  const float distance = SND_R(Spatial_distance)[spatial];
-  SpatialTarget result{0, 0, 1 / std::max(distance, 1.0f), 1, SND_R(Spatial_shapeSpread)[spatial],
-                       1.0e9f, SND_R(Spatial_dopplerRatio)[spatial], 0};
+  const float distance = spatial.distance;
+  SpatialTarget result{0, 0, 1 / std::max(distance, 1.0f), 1, spatial.spread, 1.0e9f, spatial.ratio, 0};
   if (!view) return result;
   const auto volume = view->Column<bk::col::EVNT_curveVolume>()[row];
   if (volume != bf::kNone) {
@@ -59,7 +57,7 @@ SpatialTarget SpatialAt(const Impl& im, SlotIndex spatial, const bk::BankView* v
   const float inner = view->Column<bk::col::EVNT_coneInnerDeg>()[row];
   const float outer = view->Column<bk::col::EVNT_coneOuterDeg>()[row];
   if (outer > 0 && outer >= inner) {
-    const float angle = SND_R(Spatial_coneAngle)[spatial];
+    const float angle = spatial.coneAngle;
     if (angle > inner) {
       const float f = angle >= outer ? 1.0f : (angle - inner) / std::max(outer - inner, 1e-6f);
       result.coneDb = view->Column<bk::col::EVNT_coneOuterDb>()[row] * f;
@@ -104,28 +102,36 @@ struct SpatialGain {
   float distanceDb = 0, coneDb = 0, linear = 1, filter = 1e9f, ratio = 1, distance = 0, blend = 1;
 };
 
-SpatialGain ListenerMix(const Impl& im, SlotIndex em, const bk::BankView* view, std::uint32_t row,
-                        SlotIndex playback, VoiceSpatialMix& mix) noexcept {
+SpatialGain ListenerMix(const Impl& im, SlotIndex em, const PlaybackEmitter* frozen, const bk::BankView* view,
+                        std::uint32_t row, SlotIndex playback, VoiceSpatialMix& mix) noexcept {
   const schema::Tables& t = im.tables;
   SpatialGain out{};
   mix = VoiceSpatialMix{};
-  if (em >= im.cfg.maxEmitters) return out;
+  if (!frozen && em >= im.cfg.maxEmitters) return out;
+  SpatialSample samples[SND_MAX_LISTENERS];
   SlotIndex nearest = kNoSlot;
   float nearestD = 0;
   bool hasWeight = false;
   for (unsigned l = 0; l < im.cfg.maxListeners; ++l) {
-    const SlotIndex s = em * im.cfg.maxListeners + l;
-    if (!base::rows::IsLive(t.Spatial.rows, s) || !SND_R(Spatial_valid)[s]) continue;
-    const float d = SND_R(Spatial_distance)[s];
-    if (nearest == kNoSlot || d < nearestD) { nearest = s; nearestD = d; }
+    auto& sample = samples[l];
+    if (frozen) {
+      if (!SampleFrozenEmitter(im, *frozen, l, sample)) continue;
+    } else {
+      const SlotIndex s = em * im.cfg.maxListeners + l;
+      if (!base::rows::IsLive(t.Spatial.rows, s) || !SND_R(Spatial_valid)[s]) continue;
+      sample = {SND_R(Spatial_distance)[s], SND_R(Spatial_shapeSpread)[s], SND_R(Spatial_dopplerRatio)[s],
+                SND_R(Spatial_coneAngle)[s], SND_R(Spatial_azimuth)[s]};
+    }
+    const float d = sample.distance;
+    if (nearest == kNoSlot || d < nearestD) { nearest = l; nearestD = d; }
     const float weight = im.cfg.listenerMode == SND_LISTENER_WEIGHTED ? SND_R(Listener_weight)[l] : 1;
-    mix.listeners[mix.count++] = ListenerContribution{s, std::max(0.0f, weight), 0, 1, 0};
+    mix.listeners[mix.count++] = ListenerContribution{l, sample.azimuth, std::max(0.0f, weight), 0, 1, 0};
     hasWeight |= weight > 0;
   }
   if (nearest == kNoSlot) return out;
   if (im.cfg.listenerMode == SND_LISTENER_NEAREST) {
     mix.count = 1;
-    mix.listeners[0] = ListenerContribution{nearest, 1, 0, 1, 0};
+    mix.listeners[0] = ListenerContribution{nearest, samples[nearest].azimuth, 1, 0, 1, 0};
   } else if (!hasWeight) {
     for (unsigned i = 0; i < mix.count; ++i) mix.listeners[i].weight = 1;
   }
@@ -133,7 +139,7 @@ SpatialGain ListenerMix(const Impl& im, SlotIndex em, const bk::BankView* view, 
   double contribution[SND_MAX_LISTENERS]{};
   for (unsigned i = 0; i < mix.count; ++i) {
     auto& item = mix.listeners[i];
-    const SpatialTarget target = SpatialAt(im, item.spatial, view, row, playback, em);
+    const SpatialTarget target = SpatialAt(im, samples[item.listener], view, row, playback, em);
     item.blend = target.blend;
     item.spread = target.spread;
     item.curveSend = target.send * target.blend;
@@ -144,10 +150,10 @@ SpatialGain ListenerMix(const Impl& im, SlotIndex em, const bk::BankView* view, 
     sumWeight += item.weight;
     if (contribution[i] > best) {
       best = contribution[i];
-      mix.dominant = item.spatial % im.cfg.maxListeners;
+      mix.dominant = item.listener;
       out.filter = target.filter;
       out.ratio = target.ratio;
-      out.distance = SND_R(Spatial_distance)[item.spatial];
+      out.distance = samples[item.listener].distance;
       out.blend = target.blend;
     }
     if (mix.count == 1) {
@@ -285,7 +291,6 @@ void EvaluateDspParams(Impl& im) noexcept {
   const schema::TableRows& vr = t.Voice.rows;
   const SlotIndex* vpb = SND_R(Voice_playbackSlot);
   const SlotIndex* vbus = SND_R(Voice_busSlot);
-  const SlotIndex* vem = SND_R(Voice_emitterSlot);
   const VoiceLifecycle* vlc = SND_R(Voice_lifecycle);
   const ClipRef* vclip = SND_R(Voice_clipRef);
   Ramp* vgain = SND_W(Voice_gain);
@@ -311,17 +316,21 @@ void EvaluateDspParams(Impl& im) noexcept {
     const BankRecord* br = RegisteredBank(im, vclip[d].bankSlot);
     const bk::BankView* view = br != nullptr ? br->view : nullptr;
     const bool event = view && vs.eventRow < view->Rows(bf::chunk::EVNT);
-    const bool emitterLive = base::rows::IsCurrent(t.Emitter.rows, HandleRef{vem[d], vs.emitterGeneration});
-    const SlotIndex em = (vs.flags & kVs3D) != 0u && emitterLive ? vem[d] : kNoSlot;
+    const bool currentPlayback = pd != kNoSlot && t.Playback.rows.generation[pb] == vs.playbackGeneration;
+    const auto* source = currentPlayback ? &im.ap.playbackEmitter[pb] : nullptr;
+    const bool emitterLive = source && !source->frozen && base::rows::IsCurrent(t.Emitter.rows, source->live);
+    const bool spatialVoice = (vs.flags & kVs3D) != 0u;
+    const auto* frozen = spatialVoice && source && source->frozen ? source : nullptr;
+    const SlotIndex em = spatialVoice && emitterLive ? source->live.slot : kNoSlot;
     VoiceSpatialMix& mix = im.dp.mix[v];
-    const SpatialGain spatial = ListenerMix(im, em, event ? view : nullptr, vs.eventRow, pb, mix);
+    const SpatialGain spatial = ListenerMix(im, em, frozen, event ? view : nullptr, vs.eventRow, pb, mix);
     const float distance = spatial.distance;
     if (view != nullptr && vs.eventRow < view->Rows(bf::chunk::EVNT)) {
       const std::uint32_t row = vs.eventRow;
       // Parameter curves (4.3): volume dB add, pitch cents add, lowpass min, highpass max, others multiply.
       const std::uint32_t cf = view->Column<bk::col::EVNT_curveFirst>()[row];
       const std::uint32_t cc = cf == bf::kNone ? 0u : view->Column<bk::col::EVNT_curveCount>()[row];
-      const SlotIndex emitter = pd != kNoSlot && emitterLive ? vem[d] : kNoSlot;
+      const SlotIndex emitter = emitterLive ? source->live.slot : kNoSlot;
       float panProduct = 1.0f;
       bool multiplyPan = false;
       for (std::uint32_t k = 0; k < cc; ++k) {
@@ -397,8 +406,7 @@ void EvaluateDspParams(Impl& im) noexcept {
       gainDb += spatial.coneDb;
       linear *= spatial.linear;
       lowpass = std::min(lowpass, spatial.filter);
-      const auto ed = base::rows::DenseOf(t.Emitter.rows, em);
-      const Occlusion occ = SND_R(Emitter_occlusion)[ed];
+      const Occlusion occ = frozen ? frozen->occlusion : SND_R(Emitter_occlusion)[base::rows::DenseOf(t.Emitter.rows, em)];
       if (occ.occlusion > 0) gainDb -= 12 * occ.occlusion;
       mix.occlusion = occ.occlusion;
       mix.obstruction = occ.obstruction;
