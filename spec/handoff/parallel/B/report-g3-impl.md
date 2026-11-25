@@ -29,3 +29,7 @@ D-161 は設計4.3の対象別規則を優先する。Pan の Multiply は列に
 組③実装側の一時統合試作 `9a1538e` で、GCC 14 Debug の indep_g3_control_test は7/7、indep_b_cross_test は5/5成功。初期アクションの親が受理された場合は開始時計・指定時の遷移時間を維持し、拒否時は先行遷移に戻った。空間化の3ターゲットは距離カーブの有無を変えて左右波形を照合した。横断台本で直列2回とRTワーカー2の音声・通知・スペクトルが一致し、128実声・4FXの確保0・RT違反0。CPU時間は直列1218.04 µs、ワーカー2で3594.06 µs（Debug）。正式な受け入れは各組の統合先取り込み後に行う。
 
 `bc49fbe` の Clang 19 Debug はセルフ5件と独立25件を含む3登録すべて成功し、コンパイル警告0。GCC 14 Release でこの3登録をそれぞれ20回反復し、60/60回成功した。
+
+`80a72f7` で長時間のアクション遷移を追試した。131072 Hz × 32768 秒は 2³² フレームに達するので、FadeFrames は uint32_t の最大フレーム数に飽和させる。CoreG3.LongSnapshotActionAtHighSampleRateKeepsFading で即時指定と長時間指定の出力を比較した。セルフ6件＋独立25件の3登録は Clang 19 Debug、ASan/UBSan（detect_leaks=0）、GCC Release・TSan 各20回が成功した。警告0。MinGW は単独の19ファイル、組①・④を使う横断用の2翻訳単位も検査を通過した。
+
+`80a72f7` と①④の結合候補 `82a5c3d` を合わせた。EvaluateDspParams の各リスナーで Spread・ReverbSend・Blend3D を距離曲線と掛け合わせる。ApplyDueActions、ApplyFirstBlockActions で親の初回アクションに開始時計・遷移時間・スナップショット世代を記録し、CommitTentativeSnapshots と EvaluateDspParams が同じ遷移を使う。拒否・取消時は先行していた重みを保つ。旧 Pan は格納順でクリップ値から加算し、共有バスの送り・FX 寄与とキーバスの世代照合も引き継いだ。同じレンダー・ミックス実装を持つ試作 `0fce174` の GCC Debug では、組②容量、組③セルフ・ミックス・制御、横断の計5登録が成功した。正式候補の実測は受け入れ側で行う。
