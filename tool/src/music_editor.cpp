@@ -40,9 +40,11 @@ TempoMap::TempoMap(std::vector<TempoPointDesc> points) : points_(std::move(point
   if (points_.empty()) points_.push_back(TempoPointDesc{});
   std::stable_sort(points_.begin(), points_.end(), [](const TempoPointDesc& a, const TempoPointDesc& b) { return a.tick < b.tick; });
   for (TempoPointDesc& p : points_) {
-    if (!(p.bpm > 0.0)) p.bpm = 120.0;
+    // A broken point (a file's bpm, beats per bar or unit outside what SegmentEditor accepts) is
+    // read as 120 BPM 4/4 for the positions; the build reports it (Problems).
+    if (!(p.bpm >= 1e-3 && p.bpm <= 1e5)) p.bpm = 120.0;
     if (p.beatsPerBar == 0u) p.beatsPerBar = 4;
-    if (p.beatUnit == 0u) p.beatUnit = 4;
+    if (!ValidUnit(p.beatUnit)) p.beatUnit = 4;
   }
   bars_.assign(points_.size(), 0.0);
   bars_[0] = static_cast<double>(points_[0].tick) / BarTicks(0);

@@ -2,6 +2,7 @@
 #include "snd/tool/doc_build.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <cstring>
 #include <filesystem>
 #include <map>
@@ -726,6 +727,49 @@ DocBuild BuildDocument(const ProjectDocument& doc, const DocBuildOptions& option
 }
 
 std::vector<DocIssue> CheckDocument(const ProjectDocument& doc) { return BuildDocument(doc).issues; }
+
+std::vector<DocIssue> ToolIssues(const ProjectDocument& doc) {
+  std::vector<DocIssue> out;
+  for (const DocObject& o : doc.objects()) {
+    if (o.kind() != "segment") continue;
+    const json::Value* tempo = o.doc.Find("tempo");
+    if (tempo == nullptr || !tempo->IsArray()) continue;
+    for (std::size_t i = 0; i < tempo->items.size(); ++i) {
+      const json::Value& p = tempo->items[i];
+      auto whole = [](double v, double lo, double hi) { return std::isfinite(v) && v == std::floor(v) && v >= lo && v <= hi; };
+      const double bpm = NumberAt(p, "bpm", 120.0), bpb = NumberAt(p, "beatsPerBar", 4.0);
+      const double unit = NumberAt(p, "beatUnit", 4.0), tick = NumberAt(p, "tick", 0.0);
+      const char* what = nullptr;
+      const char* member = nullptr;
+      if (!(bpm >= 1e-3 && bpm <= 1e5)) {
+        what = "bpm must be 0.001 .. 100000";
+        member = "bpm";
+      } else if (!whole(bpb, 1.0, 4294967295.0)) {
+        what = "beatsPerBar must be a whole number 1 .. 4294967295";
+        member = "beatsPerBar";
+      } else if (!(unit == 1.0 || unit == 2.0 || unit == 4.0 || unit == 8.0 || unit == 16.0 || unit == 32.0)) {
+        what = "beatUnit must be 1, 2, 4, 8, 16 or 32";
+        member = "beatUnit";
+      } else if (!whole(tick, 0.0, 18446744073709551615.0)) {
+        what = "tick must be a whole number >= 0";
+        member = "tick";
+      }
+      if (what == nullptr) continue;
+      DocIssue d;
+      d.error = true;
+      d.file = o.file;
+      d.guid = o.guid;
+      d.path = "tempo[" + std::to_string(i) + "]." + member;
+      const json::Value* at = p.Find(member);
+      d.line = at != nullptr ? at->line : p.line;
+      d.column = at != nullptr ? at->column : p.column;
+      d.message = "tempo point " + std::to_string(i) + ": " + what + " (the tool reads it as 120 BPM 4/4)";
+      d.text = d.file + ":" + std::to_string(d.line) + ":" + std::to_string(d.column) + ": error: " + d.message;
+      out.push_back(std::move(d));
+    }
+  }
+  return out;
+}
 
 std::vector<DocIssue> DistinctIssues(const std::vector<DocIssue>& issues) {
   std::vector<DocIssue> out;
