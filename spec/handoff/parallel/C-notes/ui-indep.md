@@ -405,7 +405,7 @@ a90c020 エフェクトの列が変わったら質問、先頭 68f3eaa）の上�
 | N1 大きさをまたぐ | `ResizingAcrossTheMinimumKeepsTheState` | 通過（ドラッグ中に縮めて離すとグループが閉じ手は高々 1、小さい間の Delete は何も消さない、入力は Esc で閉じて何も書かない） |
 | N2 選択 | `SelectionsAcrossEditsOfEveryKind` | 通過（自分のドラッグ・打った値で残る。ホストの値の変更・Undo・フッタの Redo・書き戻しで外れ、直後の Delete は何も消さない） |
 | N3 バンクに入らない数値 | `NumbersThatDoNotFitTheBankAreRefused` | 通過（FLT_MAX ちょうどを受け付け、次の double・±3.5e38・1e300 を拒否、ファイルの 1e300 はほかの編集で残る、`Modify` で持ち込む 1e300 は拒否） |
-| N4 壊れたファイル（7 種類の値 × 34 の項目） | `BrokenNumbersInFilesAreShownWithoutUndefinedConversions` | 通過（float-cast-overflow の構成は下の表） |
+| N4 壊れたファイル（7 種類の値 × 34 の項目） | `BrokenNumbersInFilesAreShownWithoutUndefinedConversions` | gcc Debug と Release で通過、float-cast-overflow の報告 0。UBSan の符号付きの桁あふれで失敗 → **欠陥 Q2** |
 | N5 エフェクトの列の質問（6 通り）と列が変わらない時 | `EffectChainChangesAsk` | 通過 |
 | N6 名前が inf / nan | `Defect_NamesThatReadInfOrNanAreShownAsADash` | **欠陥 Q1** |
 
@@ -416,7 +416,26 @@ a90c020 エフェクトの列が変わったら質問、先頭 68f3eaa）の上�
   「curve 0: - = 1.000 (default) -> pitch …」（パラメータ「inf」）。数値でない名前まで置き換えている（実装担当が未検証と書いた点）。
   直し方の例: 数値を文字にするところ（`ShownNumber` など）でだけ有限にし、ラベル全体は置き換えない。
 
+- **Q2 `Defect_SaturatedMusicalPositionOverflowsOnTheMusicScreen`（中: 未定義動作）**: 壊れたファイルのテンポ点（bpm・beatsPerBar・
+  beatUnit が 1e300 や 4294967296）で、遷移の試聴の拍の位置が `ClampToI32` で INT_MAX に飽和し、Music 画面が `bar + 1` / `beat + 1`
+  を int で足す（`music_view.cpp:601`、符号付きの桁あふれ）。UBSan が報告し（`BrokenNumbersInFilesAreShownWithoutUndefinedConversions`
+  が ASan / UBSan の構成で失敗）、Release では「bar -2147483648」「beat -2147483648」と出る。float-cast-overflow の報告は 0（変換は
+  直っている）。直し方の例: 表示の +1 を 64 ビットで行うか、飽和した位置は出さない。
+
 ほかに新しい欠陥は無い。
+
+### 再確認 3 回目で回した構成と結果
+
+ビルドは `$S/ui-indep/b-*`、-j2、1 つずつ（終わったら消した）。tool のターゲットだけをビルドし `ctest -R ^tool`。
+
+| 構成 | コミット | 結果 |
+| --- | --- | --- |
+| 9: Tela 入り、gcc Debug | 1e163f1 | 214 件のうち失敗 1 = Q1。組 U・組 P の前の `Defect_*` は全部通過 |
+| 9 ＋ ASan / UBSan ＋ float-cast-overflow | 1e163f1 | 失敗 2 = Q1 と `BrokenNumbersInFilesAreShownWithoutUndefinedConversions`（UBSan: `music_view.cpp:601` の符号付きの桁あふれ → Q2 として別の Defect に分けた）。ASan と float-cast-overflow の報告は 0 |
+| 9 ＋ Release | 1e163f1 | 失敗 1 = Q1。Q2 の Defect（後で足した）は Release で単独に実行して失敗（1e300、4294967296） |
+| MinGW の構文検査 | 1e163f1 | `indep_s7_ui_recheck3_test.cpp` 通過（Q2 の追加は同じ書き方） |
+
+回していない構成: TSan、clang、核だけ（今回の依頼の範囲外）。
 
 ### 残る仕様の穴
 

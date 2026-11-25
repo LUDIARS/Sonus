@@ -9,6 +9,7 @@
 #include <map>
 #include <set>
 
+#include "indep_isolate.hpp"
 #include "indep_s7_ui_fixture.hpp"
 #include "snd/test/test.hpp"
 #include "snd/tool/curve_editor.hpp"
@@ -422,4 +423,31 @@ SND_TEST(IndepS7UiRecheck3, Defect_NamesThatReadInfOrNanAreShownAsADash) {
     }
   }
   SND_CHECK_MSG(dashes.empty(), "%s", dashes.c_str());
+}
+
+// Found with UBSan (signed-integer-overflow) by BrokenNumbersInFilesAreShownWithoutUndefinedConversions:
+// a broken tempo point read from a file makes the transition preview's musical position saturate at
+// INT_MAX (TempoMap::Musical's ClampToI32), and the Music screen prints `bar + 1` / `beat + 1`
+// (music_view.cpp:601): signed overflow, undefined behaviour; without the sanitizer the line shows
+// "bar -2147483648". Expected: a defined, sane bar / beat text (or no musical position).
+SND_TEST(IndepS7UiRecheck3, Defect_SaturatedMusicalPositionOverflowsOnTheMusicScreen) {
+  std::string bad;
+  for (const char* v : {"-5", "-1e300", "1e300", "4294967296", "2.5", "-0.5", "0"}) {
+    const std::string n = v;
+    std::map<std::string, std::string> f = LargeFiles(2, 1, 4, 3, 12);
+    f["segments/Seg.json"] = "{\"type\": \"segment\", \"guid\": \"" + G(22) + "\", \"name\": \"Seg\", \"asset\": \"" + G(7) +
+                             "\", \"bars\": 1, \"tempo\": [{\"tick\": 0, \"bpm\": " + n + ", \"beatsPerBar\": " + n +
+                             ", \"beatUnit\": " + n + "}]}\n";
+    const int code = indep::Isolated([&] {
+      Rig r(f);
+      r.app->Navigate(G(24));
+      r.Frame();
+      const tela::PlacedElement* line = r.El("mu.pv.text");
+      const std::string l = line != nullptr ? line->element.label : std::string();
+      std::printf("%s: '%s'\n", n.c_str(), l.c_str());
+      return l.find("214748364") != std::string::npos ? 2 : 0;
+    });
+    if (code != 0 && code != indep::kNotIsolated) bad += " " + n + "(code " + std::to_string(code) + ")";
+  }
+  SND_CHECK_MSG(bad.empty(), "%s", bad.c_str());
 }
