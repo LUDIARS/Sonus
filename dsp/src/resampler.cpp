@@ -27,7 +27,11 @@ constexpr float kTableRatio[] = {1.0f, 1.1f, 1.2f, 1.35f, 1.5f, 1.7f, 2.0f, 2.4f
 constexpr std::uint32_t kTableCount = sizeof(kTableRatio) / sizeof(kTableRatio[0]);
 constexpr float kTableMaxRatio = 4.0f;  // tables up to here, ratio-scaled kernel above
 
-alignas(64) float gSinc[kTableCount][kSincPhases + 1][kSincTaps];
+struct alignas(64) SincPhase {
+  float taps[kSincTaps];
+  float delta[kSincTaps];  // float-rounded difference to the next row
+};
+SincPhase gSinc[kTableCount][kSincPhases];
 
 bool BuildSincTables() noexcept {
   const double i0b = detail::BesselI0(kKaiserBeta);
@@ -49,7 +53,9 @@ bool BuildSincTables() noexcept {
         sum += row[j];
       }
       for (std::uint32_t j = 0; j < kSincTaps; ++j) {
-        gSinc[t][p][j] = static_cast<float>(row[j] / sum);  // unity DC gain per phase
+        const float tap = static_cast<float>(row[j] / sum);  // unity DC gain per phase
+        if (p < kSincPhases) gSinc[t][p].taps[j] = tap;
+        if (p != 0u) gSinc[t][p - 1u].delta[j] = tap - gSinc[t][p - 1u].taps[j];
       }
     }
   }
@@ -347,7 +353,7 @@ std::uint32_t ResamplerProcess(void* state, float* const* in, std::uint32_t inFr
     }
     case ResamplerQuality::Sinc: {
       if (blk.maxRatio <= kTableMaxRatio) {
-        const float (*table)[kSincTaps] = gSinc[TableFor(blk.maxRatio)];
+        const SincPhase* table = gSinc[TableFor(blk.maxRatio)];
         constexpr std::uint32_t kShift = 32u - kSincPhaseBits;
         constexpr float kSubScale = 1.0f / static_cast<float>(1u << kShift);
         for (std::uint32_t k = 0; k < outFrames; ++k) {
@@ -355,13 +361,12 @@ std::uint32_t ResamplerProcess(void* state, float* const* in, std::uint32_t inFr
           const std::uint32_t frac = static_cast<std::uint32_t>(pos);
           const std::uint32_t p = frac >> kShift;
           const F32x4 t = F32x4::Set1(static_cast<float>(frac & ((1u << kShift) - 1u)) * kSubScale);
-          const float* r0 = table[p];
-          const float* r1 = table[p + 1];
+          const SincPhase& phase = table[p];
           F32x4 coef[kSincTaps / 4];
           for (std::uint32_t j = 0; j < kSincTaps / 4; ++j) {
-            const F32x4 a = F32x4::Load(r0 + 4 * j);
-            const F32x4 b = F32x4::Load(r1 + 4 * j);
-            coef[j] = a + (b - a) * t;
+            const F32x4 a = F32x4::Load(phase.taps + 4 * j);
+            const F32x4 delta = F32x4::Load(phase.delta + 4 * j);
+            coef[j] = a + delta * t;
           }
           const std::uint32_t base = i - (kSincHalf - 1u);
           for (std::uint32_t c = 0; c < channels; ++c) {
