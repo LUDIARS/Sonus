@@ -136,6 +136,12 @@ typedef uint32_t snd_output_kind;
   X(voice_effect_bytes, voiceEffectBytes, uint32_t, uint32_t, (160u << 10))                       \
   X(voice_effect_settings, voiceEffectSettings, uint32_t, uint32_t, 64u)
 
+/* Spatial tuning (D-150). Factor [0,16], sound speed [1,100000] m/s.
+ * A zero factor disables the Doppler shift. The ratio stays in [0.25,4]. */
+#define SND_CONFIG_TOP_S3_SPATIAL(X) \
+  X(doppler_factor, dopplerFactor, float, float, 1.0f) \
+  X(speed_of_sound, speedOfSound, float, float, 343.0f)
+
 /* Memory budgets (3.3) ----------------------------------------------------- */
 #define SND_CONFIG_MEMORY(X)                                                                      \
   X(stream_pool_bytes, streamPoolBytes, uint64_t, uint64_t, (8ull << 20))                         \
@@ -270,6 +276,7 @@ typedef struct snd_config {
   SND_CONFIG_TOP_1_2_HOST(SND_CONFIG_C_FIELD)
   /* --- stage 3 (coverage): voice effects (D-132) --- */
   SND_CONFIG_TOP_S3_VOICE_FX(SND_CONFIG_C_FIELD)
+  SND_CONFIG_TOP_S3_SPATIAL(SND_CONFIG_C_FIELD)
 } snd_config;
 
 /* Upper bound of max_pitch_ratio (= dsp kResamplerMaxRatio). */
@@ -292,6 +299,7 @@ static inline void snd_config_init(snd_config* cfg) {
   SND_CONFIG_TOP_1_2(SND_CONFIG_INIT_TOP)
   SND_CONFIG_TOP_1_2_HOST(SND_CONFIG_INIT_TOP)
   SND_CONFIG_TOP_S3_VOICE_FX(SND_CONFIG_INIT_TOP)
+  SND_CONFIG_TOP_S3_SPATIAL(SND_CONFIG_INIT_TOP)
   SND_CONFIG_MEMORY(SND_CONFIG_INIT_MEMORY)
   SND_CONFIG_COMMANDS(SND_CONFIG_INIT_COMMANDS)
   SND_CONFIG_JOBS(SND_CONFIG_INIT_JOBS)
