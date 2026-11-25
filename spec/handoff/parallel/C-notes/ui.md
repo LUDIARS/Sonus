@@ -122,6 +122,17 @@ Tela に渡さない）、`host_macos.mm`（キーコードと文字を `App::Ke
 - UI の公開の型: `ControlSink::ControlCancel`（`pointer_router.hpp`）、`App::WindowTooSmall` / `DeclareTooSmall`、`kit.hpp` の
   `WholeU16/U32/U64`・`ToF32`・`SatU32/U64/Int`・`ShownNumber`・`FiniteText`、`layout_metrics.hpp` の `kMinEditorWidth/Height`。
 
+## 差し戻し 4 回目（ui-indep.md「再確認 3 回目」の Q1・Q2 と決定 1〜4）で変えた点
+
+| 決定 | 欠陥 | 変えたこと | コミット |
+| --- | --- | --- | --- |
+| 1 | Q1 | `Kit::Label` から `FiniteText` を外し、`FiniteText` は消した。名前はどんな文字列でもそのまま出す。非有限の守りは数値を文字にする所だけ: `NumberText` / `ShownNumber`（前から「-」）、画面の書式は全部 `SnprintfFinite` / `VsnprintfFinite`（`kit.hpp`。書式を 1 つずつ読み、%f %e %g %a の非有限の値だけ「-」、%s %d %u %llu %.*f などはそのまま。GCC / clang では printf の形式の検査つき）、`FormatDb` は NaN / +inf で「- dB」（-144 dB 以下の「-inf dB」は段階2 の約束のまま） | 49d4d3e |
+| 2 | Q2 | 遷移の試聴の小節・拍は 64 ビットで +1、`ClampToI32` で飽和した位置（INT_MAX / INT_MIN）は「-」。`TempoMap` は範囲外の点（bpm が 1e-3〜1e5 の外、beatsPerBar 0、beatUnit が 1/2/4/8/16/32 以外）を 120 BPM 4/4 として読む。壊れたテンポ点は Problems に出す: ビルドの検査は bpm の範囲や 4294967296 を報告しない（ビルドは U64 で読んで 32 ビットに切る）ので、ツールの検査 `ToolIssues`（`doc_build.hpp`）を足し、`App::RefreshProblems` が `CheckDocument` の後ろに加える（`CheckDocument` はビルドと一語一語同じまま）。飽和した値への足し算・掛け算の見直し: `tool/src` の `ClampTo*` / `U32At` / `U64At` の使い道（スナップショットの番号は比較だけ、テンポ点は double で計算、マーカーの frame は double に、timingCount は `BarsAfter` / `NextGrid` の引数で double）と `tool/ui` の `SatU32` / `SatU64` / `SatInt` の使い道（Stem、Playlist の repeat、synth の channels、パッチの選択肢の番号は範囲の比較）に、整数の桁あふれは無かった | 12a3623 |
+| 3 | README | 最小の窓は `App::WindowTooSmall` のとおり書き直した: 物理画素の整数のビューポートを DPI で割った幅 < 1024、または DPI で割った高さ − insetTop < 640 で小さい（DPI 0.25 では論理の 4 画素単位） | 1ce6f34 |
+| 4 | テスト | `ui_editor_fix4_test`（名前「inf」「nan」「-inf」「NaN」がバスの画面・グラフの順・ミキサーにそのまま、`SnprintfFinite` と `FormatDb`、6 種類の壊れたテンポ点が Problems に出て Music 画面に「214748364」が出ない）。`ToolUiFix2.SpatialValuesStayFinite` の `FiniteText` の確認は `SnprintfFinite` の確認に替えた | 1ce6f34, 49d4d3e |
+
+決定と食い違う独立テスト: 無し。
+
 ## 差し戻し 3 回目（ui-indep.md「再確認 2 回目」の P1〜P5 と決定 1〜6）で変えた点
 
 | 決定 | 欠陥 | 変えたこと | コミット |
@@ -272,6 +283,19 @@ UI 側で Tela に依存しないもの（プラグインでも使える、要�
 `FaderDbToPos` などの `control_math`。
 
 ## 回した構成と結果
+
+### 差し戻し 4 回目の後（1ce6f34）
+
+ビルドは `$S/ui/b-*`、-j2、1 つずつ（ログは `$S/ui/r4/*.log`、終わったら消した）。警告はどの構成も 0。
+
+| 構成 | 実行したテスト | 結果 |
+| --- | --- | --- |
+| 9: gcc Debug | `ctest -R tool`（225） | 全部通過（Q1・Q2 の `Defect_*` を含め組 U・組 P の `Defect_*` 全部） |
+| 9 ＋ ASan / UBSan ＋ `float-cast-overflow`（`-fno-sanitize-recover=all`） | `ctest -R tool`（225） | 全部通過。報告 0（`BrokenNumbersInFilesAreShownWithoutUndefinedConversions` も通過） |
+| 9 ＋ Release | `ctest -R tool`（225）、並行性 4 本を -j1 で 20 回 | 全部通過 |
+| 8: 核だけ | `ctest -R tool`（80） | 全部通過 |
+
+MinGW の構文検査: efaed9a からの変更の .cpp 18 本は全部通過。
 
 ### 差し戻し 3 回目の後（8be8784。ASan の回は cf9a167 = 文書のコミットの前、コードは同じ）
 
