@@ -10,6 +10,7 @@
 #include <random>
 #include <set>
 
+#include "indep_isolate.hpp"
 #include "indep_s7_ui_fixture.hpp"
 #include "snd/test/test.hpp"
 #include "snd/tool/curve_editor.hpp"
@@ -634,4 +635,31 @@ SND_TEST(IndepS7UiRecheck2, Defect_HostValueEditKeepsThePositionSelection) {
   SND_REQUIRE(CurveEditor(r.doc, G(8), "curves[0]").MovePoint(1, 10.0, 600.0));
   r.Frame();
   SND_CHECK_MSG(r.app->view().params.point == -1, "point selection kept (%d)", r.app->view().params.point);
+}
+
+// Found with -fsanitize=float-cast-overflow: the music screen's transition preview takes any finite
+// request time ("at", a value of the screen, not the document); 1e308 s makes the preview's position
+// non-finite and TempoMap::Musical casts NaN to int (music_editor.cpp:107, undefined behaviour). On
+// the screen the preview line then shows a nonsense bar number. Decision: values shown are finite and
+// screen values get a range (as the 3D positions). Expected: 1e308 refused (the entry open) or a
+// sane line. Runs in a child process (a sanitizer build stops at the cast).
+SND_TEST(IndepS7UiRecheck2, Defect_HugeTransitionRequestTimeMakesNaNMusicalPositions) {
+  for (const char* text : {"1e308", "1e300", "-1e308"}) {
+    std::string where = text;
+    const int code = indep::Isolated([&] {
+      Rig r(Ints());
+      r.app->Navigate(G(24));
+      r.Frame();
+      if (!TypeInto(r, "mu.pv.req", where)) return 3;
+      const bool refused = r.app->text().active();
+      if (refused) r.Key(ui::kKeyEscape);
+      r.Frame();
+      const tela::PlacedElement* line = r.El("mu.pv.text");
+      const std::string l = line != nullptr ? line->element.label : std::string();
+      std::printf("%s: %s '%s'\n", where.c_str(), refused ? "refused" : "taken", l.c_str());
+      if (NonFiniteWord(l) || l.find("2147483648") != std::string::npos || l.find("2147483647") != std::string::npos) return 2;
+      return 0;
+    });
+    SND_CHECK_MSG(code == 0 || code == indep::kNotIsolated, "request %s: code %d", text, code);
+  }
 }
