@@ -42,14 +42,16 @@ SND_TEST(IndepS7UiDefects, Defect_TypedNumberOutsideTheFieldRangeIsClampedNotRef
   SND_CHECK(r.app->text().active());
   r.Key(ui::kKeyEscape);
   // The same with a clip's start (min 0 on the screen, the model refuses negative starts).
+  // (Second return: a host's edit drops the position selection, so the clip is moved first and
+  // selected after.)
+  SND_REQUIRE(ed.MoveClip(0, 0, 300.0));
+  r.Frame();
   SND_REQUIRE(r.ClickId("ev.t0.c0"));
   std::string start;
   for (const tela::PlacedElement* e : r.Prefixed("ev.clip.", ".n0")) {
     if (e->element.id.size() > 3 && e->element.id.compare(e->element.id.size() - 3, 3, ".n0") == 0) start = e->element.id;
   }
   SND_REQUIRE(!start.empty());
-  SND_REQUIRE(ed.MoveClip(0, 0, 300.0));
-  r.Frame();
   const std::size_t u = r.doc.UndoCount();
   SND_REQUIRE(TypeInto(r, start, "-20"));
   SND_CHECK_MSG(ed.ClipNumberOf(0, 0, ClipNumber::StartMs) == 300.0, "start became %g",
