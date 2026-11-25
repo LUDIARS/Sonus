@@ -346,6 +346,15 @@
 - **P4 `Defect_HostValueEditKeepsThePositionSelection`（中）**: ホストが選んだクリップを `MoveClip` で動かす、選んだカーブの点を
   `MovePoint` で動かすと、選択が残る（`App::PositionShape` が配列の形が変わったときだけ外す）。決定は「ホストからの変更を含む」。
 
+- **P5 `Defect_HugeTransitionRequestTimeMakesNaNMusicalPositions`（低、`-fsanitize=float-cast-overflow` で発見）**: Music の遷移の試聴の
+  要求時刻（`mu.pv.req`、画面の値で文書ではない）は有限なら何でも受け付け、1e308 や 1e300 で試聴の位置が非有限・巨大になり、
+  `TempoMap::Musical` が NaN / 5e299 を int に変換する（`music_editor.cpp:107`、未定義動作）。決定「表示する値は必ず有限」「範囲を
+  決めて拒否」（3D の位置と同じ扱い）。-1e308 は 0.5 s に収まる。
+
+`-fsanitize=float-cast-overflow` を足した構成では、組 U の外（モデル、組 M）でも報告があった（組 U の欠陥にはしていない）:
+`tool/src/project.cpp:294`（`channels` に -5 の書かれたファイルで `static_cast<std::uint32_t>`、`IndepToolProject.FuzzedProjectsNeverCrashTheModelsOrTheUi`）、
+`tool/src/music_editor.cpp:254`（`tempo[].tick` に -5、`IndepS7Robust.H1_WrongTypesEverywhere`）。ファイルから読んだ値の範囲外の変換。
+
 ### 残る仕様の穴
 
 - **同じ種類の別のエフェクト**: lowpass が 2 つあり 1 つ目に上書き、文書で 1 つ目を消すと、残った lowpass（元の 2 つ目）が同じ位置・
