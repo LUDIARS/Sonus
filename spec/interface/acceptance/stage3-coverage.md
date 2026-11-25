@@ -213,7 +213,43 @@
 | ダッキング | コンプレッサーのキー経路（比例ダッキングの DUCK ルールは組③） | `IndepG2Side.KeyBusDrivesTheGainReductionInTheSameBlockWhenItComesFirst`、`IndepG2Side.KeyBusAfterTheTargetActsOneBlockLater`、`IndepG2Side.SidechainIsTakenAfterTheKeyBusFader` |
 | 再生単位のフィルタ | 標準 LP・HP、距離 LP | `IndepG2VoiceFilter.ParameterCurveDrivesLowpassAndHighpass`、`IndepG2VoiceFilter.DistanceCurveLowpass` |
 | 再生単位のフィルタ | 重い処理の枠と仮想復帰 | `CoreFx.EveryStandardKindRunsAsAVoiceEffect`、`CoreFx.VoiceEffectPoolFullPlaysDryAndCounts`、`CoreFxRecheck.VoiceBackFromVirtualReadsTheEventSettingAsItIsNow`、`IndepG2Recheck.FirstBlockHasThePlaybackValuesOnEveryStage` |
+| 再生単位のフィルタ | プラグイン状態が枠を超えたときは全段ドライ。次の再生で枠を再利用 | `IndepG2PluginBudget.OneByteOverBudgetLeavesSlotForExactFit`、`IndepG2PluginBudget.SecondStageOverBudgetLeavesEntireChainDry` |
 | 空間化 | プラグインをボイスに挿入。方位などをプラグインに渡す経路は B-5 依頼 | `CoreFx.PluginAsVoiceEffectGetsTheVoiceChannelsAndPlayback` |
 | §2.5・§14 横断 | 決定論・確保・RT・128 実ボイス | `CoreFxDeterminism.SameScriptSameBitsSerialAndParallel`、`CoreFxMemory.NoAllocationAfterInitialisationOnTheNewPaths`、`CoreFxRt.NewPathsHaveNoRtViolations`、`CoreFxLoad.Real128VoicesWithTheVoiceEffectPoolFull` |
 
 コンボリューションは段階6（D）の担当。表中のテストは組②の経路を対象とし、組①・③・④との組み合わせは 4 組合流後に検証する。
+
+## 8. Cloud 復元版の機能テスト対応
+
+設計 §7 の各行について、G2 `ebaa5a6`、G4 `db0677b`、G1 `194ceea`、G3 `f4c16d9` の作業先頭にあるテスト宣言を照合した。表は機能ごとの代表例。各組の合否と構成別実行結果は report-B.md に記録する。組②修正版は `48f01ee` で正式マージ済み。組④・①・③は受け入れ前。
+
+| 設計 §7 の行 | 機能テスト | 範囲・依頼 |
+| --- | --- | --- |
+| 再生の単位（Event／Track／Clip） | `IndepG4Loop.PitchChangeCutsFiniteLoopAtMeasuredWrap`、`CoreBasic.EndsWhenTheSampleEndsExactlyOnce` | B |
+| ランダム・順送り | `IndepG4Seq.WeightedRandomFollowsTheWeights`、`IndepG4Seq.ShuffleOfThreeHundredClips`、`CoreSequence.ComboAdvancesOnlyInsideTheWindow` | B |
+| ランダム幅 | `IndepG4Rand.VolumeStaysInsideTheRange`、`IndepG4Rand.PitchStaysInsideTheRange`、`IndepG4Rand.PanStaysInsideTheRange`、`IndepG4Rand.StartPositionStaysInsideTheRange`、`IndepG2VoiceFilter.ClipRandomFilterVariesPerPlayAndIsDeterministic` | B |
+| 値による切替（スイッチ型 Event） | `CoreSequence.SwitchFollowsTheSwitchValue` | B |
+| 値によるパラメータ制御（Parameter 3 スコープ＋多点カーブ） | `IndepG3Param.AllowedScopesWinInPlaybackEmitterGlobalOrder`、`IndepG3Param.LegacyPanAddsCurvesToClipInStoredOrder`、`IndepG3Param.RampRateFollowsElapsedTimeRegardlessOfVoiceCount` | Send／EffectParam のカーブは宛先列を bank／buildtool に依頼（B-2）。 |
+| 他の再生の操作（アクショントラック、入れ子 Event） | `IndepG4Action.PlayEventStartsOnTheExactFrame`、`IndepG4Action.ScheduledStopCancelsAtItsFrame`、`IndepG4Nest.ChildLimitGroupFullRefusesTheSecondChild` | B |
+| 再生間クロスフェード | `IndepG4Layer.TwoLayersEqualPowerInTheOverlap`、`IndepG4Fade.FadeInRunsWhileVirtual` | 等パワーの保証は2枚の重なりまで。 |
+| ポーズ（Playback・カテゴリ・全体、ポーズ無視） | `IndepG3Pause.IgnoreFlagsSurviveGlobalPauseButIndividualPauseStillStops`、`CoreMix.PauseAndResumeKeepPosition` | B |
+| ミックス（Bus＋センド＋カテゴリタグ） | `IndepG3Snapshot.SendContributionsRespectPreAndPostFaderTaps`、`IndepG3Category.ParentAndLeafSolosCombineAndClear` | 独立したバス枝の RT 並列化は持ち越し。 |
+| 状態の切替（スナップショット、重み付き重ねがけ） | `IndepG3Snapshot.TwoWeightsReleaseIndependentlyToBusBase`、`IndepG3Snapshot.EffectContributionTracksChangingBaseAndReleases`、`IndepG3Action.RejectedInitialActionPreservesAlreadyRunningTransition` | B |
+| ダッキング（サイドチェーン＋ルール型） | `IndepG3Shared.SurvivingKeyRedrivesCompressorAfterOwnerUnload`、`IndepG3Ducking.LevelTracksDifferentOverThresholdInputsAndCaps`、`IndepG3Ducking.LastCategoryVoiceReleasesRule` | B |
+| 3D基本（距離減衰、ドップラー、コーン、spread） | `IndepG1Spatial.DopplerDistinguishesEmitterAndListenerVelocity`、`IndepG1Spatial.OuterConeAttenuatesAccordingToDecibels`、`IndepG1Spatial.WeightedListenersSwapChannelsAndSplitIsSymmetric` | B |
+| 距離カーブ（音量・フィルタ・リバーブ送り等） | `IndepG1Spatial.DistanceVolumeCurveInterpolatesDecibels`、`IndepG1Spatial.LowAndHighPassFollowDistanceInFrequencyDomain`、`IndepG1Routing.DistanceSendUsesFirstBusSendAndSaturatesWithZone` | B |
+| 範囲・空間構造（範囲音源、リバーブゾーン。ルーム／ポータルは段階6） | `IndepG1Spatial.LineRectangleAndBoxUseNearestPoint`、`IndepG1Routing.StrongestFourZonesKeepIndependentDestinations` | ルーム／ポータルは段階6。 |
+| エフェクト（標準 DSP 一式） | `IndepG2Kinds.ReverbDecayTimeIsTheRt60`、`IndepG2Kinds.ParamEqBandTypesFrequencyResponse`、`IndepG2Kinds.PitchShifterRatioAndLatency` | コンボリューションは段階6。 |
+| 再生単位のフィルタ（ボイスエフェクト） | `IndepG2PluginBudget.SecondStageOverBudgetLeavesEntireChainDry`、`VoiceFilterIndep.OpenIsBitExactPassThrough`、`IndepG2Vfx.NoAllocationAndNoRtViolation` | B |
+| 空間化（`IDspEffect` による空間化プラグイン） | `IndepG2Vfx.PluginVoiceEffect` | プラグインへの方向・距離の伝達は拡張契約に依頼（B-5）。 |
+| ボイス管理（リミットグループ、プライオリティ、仮想ボイス） | `IndepG4Steal.LowestPriorityNewcomerIsRejected`、`IndepG4Steal.StolenPlaybackEndReason`、`IndepG4Virtual.ContinueRestartAndNeverFromTheEvent` | B |
+| 時間制御（共通クロック＋音楽時間の予約、開始・終了の時刻指定） | `MusicTransport.QuantisedPlaysStartOnTheirGrid`、`IndepG4Action.MusicalReservationAnchorsTrackTime` | 音楽時間の実装は統合済み music。B は予約とアクションの接続を検査。 |
+| ストリーミング | `SourceEndToEnd.ResidentCompressedAndStreamThroughCore` | ストリーミング経路は source 担当。 |
+| 読み込み形式（6.2 の 4 形式） | `SourceSample.CompressedAdpcmAndOpusMatchTheCodec` | デコードと常駐素材の読み込みは source／codec 担当。 |
+| 動的生成・入力（Callback、UserBuffer、Input） | `ApiSynth.UserBuffersPlayTheGameMemory`、`ApiSynth.CppWrapperCallbackGetsTheContext` | Callback と UserBuffer の担当は source／api。Input は source／platform、Granular・Patch は D。 |
+| 再生中の通知（終了、マーカー、拍） | `IndepG4Marker.MarkerClockIsTheFrame`、`IndepG4Recheck.TwoGroupsStealingTheLastVoicesEndPlaybackOnce`、`MusicTransport.BeatsOfAStandaloneTransport` | 素材マーカーの永続化は bank／buildtool に依頼（B-2）。 |
+| 解析（バスごとのメータとスペクトル、ラウドネス） | `IndepG4Meter.LoudnessPerMeteredBus`、`IndepG4Spectrum.SineOnABinReadsItsAmplitude` | B |
+| ピッチ・速度 | `IndepPlaybackGain.PitchRatiosAndClamps`、`IndepG4Loop.NLoopsWithPitch` | タイムストレッチは D。 |
+| 多言語ボイス | `CoreBanks.LanguageSwitchKeepsPlayingVoicesAndResolvesTheNewLanguage` | 言語バンクの解決は統合済み bank／core の既存検査。 |
+| 出力先（出力バス） | `IndepG3Category.IndependentOutputIsAbsentFromMasterButPublishesItsOwnPeak` | バスの分離とメーターを検査。物理デバイス・振動への出力は platform／api（B-3）。 |
+| ライブ調整 | `LivelinkOverride.BusVolumeChangesTheLevelAndKeepsItAfterDisconnect` | ライブ調整は livelink／C。新しい variant の規則表は B-1。 |

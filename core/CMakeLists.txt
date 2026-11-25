@@ -25,4 +25,5 @@ snd_add_module(core
     src/frame.cpp
     src/live_link.cpp
     src/fx_control.cpp
-    src/voice_fx.cpp)
+    src/voice_fx.cpp
+    src/analysis.cpp)
