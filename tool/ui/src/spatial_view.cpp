@@ -139,21 +139,21 @@ void Values(Kit& kit, SpatialPreview* sp, float x, float y, float w, float h) {
   const SpatialResult r = sp->Compute(sv.outputs, 1, 0.0f);
   char b[200];
   std::vector<std::string> lines;
-  std::snprintf(b, sizeof b, "%s  distance %.3f m%s", r.is3D ? "3D" : "2D (not attenuated)", r.distance,
+  SnprintfFinite(b, sizeof b, "%s  distance %.3f m%s", r.is3D ? "3D" : "2D (not attenuated)", r.distance,
                 r.beyondMaxDistance ? "  beyond maxDistance" : "");
   lines.push_back(b);
-  std::snprintf(b, sizeof b, "azimuth %.1f deg  cone %.1f deg -> %+.2f dB", r.azimuthRad * 180.0f / 3.14159265f,
+  SnprintfFinite(b, sizeof b, "azimuth %.1f deg  cone %.1f deg -> %+.2f dB", r.azimuthRad * 180.0f / 3.14159265f,
                 r.coneAngleDeg, r.coneDb);
   lines.push_back(b);
-  std::snprintf(b, sizeof b, "%s %+.2f dB  x%.4f  curves %+.2f dB", r.volumeCurve ? "distance curve" : "inverse distance",
+  SnprintfFinite(b, sizeof b, "%s %+.2f dB  x%.4f  curves %+.2f dB", r.volumeCurve ? "distance curve" : "inverse distance",
                 r.distanceDb, r.distanceGain, r.curveDb);
   lines.push_back(b);
-  std::snprintf(b, sizeof b, "gain %+.2f dB = %.5f  pitch %+.1f ct", r.gainDb, r.linearGain, r.pitchCents);
+  SnprintfFinite(b, sizeof b, "gain %+.2f dB = %.5f  pitch %+.1f ct", r.gainDb, r.linearGain, r.pitchCents);
   lines.push_back(b);
-  std::snprintf(b, sizeof b, "lowpass %s  highpass %s", r.lowpassHz > 0 ? (FormatNumberText(r.lowpassHz, 1) + " Hz").c_str() : "open",
+  SnprintfFinite(b, sizeof b, "lowpass %s  highpass %s", r.lowpassHz > 0 ? (FormatNumberText(r.lowpassHz, 1) + " Hz").c_str() : "open",
                 r.highpassHz > 0 ? (FormatNumberText(r.highpassHz, 1) + " Hz").c_str() : "none");
   lines.push_back(b);
-  std::snprintf(b, sizeof b, "pan %+.3f  spread %.3f  3D blend %.3f  reverb %.3f", r.pan, r.spread, r.blend3D, r.reverbSend);
+  SnprintfFinite(b, sizeof b, "pan %+.3f  spread %.3f  3D blend %.3f  reverb %.3f", r.pan, r.spread, r.blend3D, r.reverbSend);
   lines.push_back(b);
   std::string out = "out";
   for (std::uint32_t c = 0; c < r.outputChannels && c < 8u; ++c) out += " " + FormatNumberText(r.outputGain[c], 4);

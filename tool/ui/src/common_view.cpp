@@ -162,7 +162,7 @@ void DeclareProblems(tela::Document& doc, ViewContext& ctx, float width, float h
     }
   }
   char b[128];
-  std::snprintf(b, sizeof b, "%u errors, %u warnings (build check)%s", errors, warnings,
+  SnprintfFinite(b, sizeof b, "%u errors, %u warnings (build check)%s", errors, warnings,
                 live != nullptr ? ", live problems and items that cannot go live below" : "");
   kit.Title("prob.title", b, 0, 0, width - 200);
   kit.Action("prob.refresh", "Check now", [app] { app->RefreshProblems(); }, width - 190, 0, 90);

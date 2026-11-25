@@ -22,7 +22,7 @@ constexpr float kRow = 18.0f;
 
 std::string Line(const char* fmt, double a, double b = 0, double c = 0) {
   char buf[128];
-  std::snprintf(buf, sizeof buf, fmt, a, b, c);
+  SnprintfFinite(buf, sizeof buf, fmt, a, b, c);
   return buf;
 }
 
@@ -80,8 +80,8 @@ void DeclareVoices(tela::Document& doc, ViewContext& ctx, float x, float y, floa
       const std::string id = "prof.voice." + std::to_string(r);
       const float yy = kRow * static_cast<float>(r + 1);
       char aud[24], gain[24];
-      std::snprintf(aud, sizeof aud, "%.3f", static_cast<double>(v.audibility));
-      std::snprintf(gain, sizeof gain, "%.3f", static_cast<double>(v.gain));
+      SnprintfFinite(aud, sizeof aud, "%.3f", static_cast<double>(v.audibility));
+      SnprintfFinite(gain, sizeof gain, "%.3f", static_cast<double>(v.gain));
       const std::string cells[] = {Hex32(v.eventId) + (v.isVirtual != 0u ? " (v)" : ""), PlaybackStateName(v.playbackState),
                                    BusName(project, v.busId), aud, gain, SourceKindName(v.sourceKind)};
       for (int c = 0; c < 6; ++c) {
@@ -104,7 +104,7 @@ void DeclareLog(tela::Document& doc, ViewContext& ctx, float x, float y, float w
     for (std::size_t r = 0; r < std::min(rows, log.size()); ++r) {
       const livelink::LogEntry& e = log[log.size() - 1 - r].entry;
       char b[160];
-      std::snprintf(b, sizeof b, "%10llu  %-18s id %s  slot %u  detail %u", static_cast<unsigned long long>(e.clockSample),
+      SnprintfFinite(b, sizeof b, "%10llu  %-18s id %s  slot %u  detail %u", static_cast<unsigned long long>(e.clockSample),
                     LogKindName(e.kind).c_str(), Hex32(e.id).c_str(), e.handleSlot, e.detail);
       Text(doc, "prof.log." + std::to_string(r), b, 0, kRow * static_cast<float>(r + 1), w, kRow, 0.5f);
     }
@@ -145,7 +145,7 @@ void DeclareBottom(tela::Document& doc, ViewContext& ctx, float y, float w) {
     std::string loaded = "loaded: none";
     if (!prof.loadedPath().empty()) {
       char b[160];
-      std::snprintf(b, sizeof b, "loaded: %u arenas, %u LOD, %u stalls, %u banks, blocks %llu..%llu%s", s.arenas, s.lods,
+      SnprintfFinite(b, sizeof b, "loaded: %u arenas, %u LOD, %u stalls, %u banks, blocks %llu..%llu%s", s.arenas, s.lods,
                     s.stalls, s.bankMaps, static_cast<unsigned long long>(s.firstBlock),
                     static_cast<unsigned long long>(s.lastBlock), s.valid ? "" : " (damaged)");
       loaded = b;
@@ -197,7 +197,7 @@ void CpuTab(Kit& kit, const ProfilerStreams& ps, float w, float h) {
   Canvas(kit.doc(), "prof.cpu.graph", DrawSeries(sl, kit.palette()), 0, 0, w, sl.height);
   kit.Label("prof.cpu.graph.title", "load = (logic + render) / budget; dashed: the budget", 4, 2, w - 8, 18, 0.5f);
   char b[200];
-  std::snprintf(b, sizeof b, "last %.0f %%  max %.0f %%  over budget %u of %u", ps.lastLoad() * 100.0, ps.maxLoad() * 100.0,
+  SnprintfFinite(b, sizeof b, "last %.0f %%  max %.0f %%  over budget %u of %u", ps.lastLoad() * 100.0, ps.maxLoad() * 100.0,
                 ps.overBudget(), static_cast<unsigned>(ps.cpu().size()));
   float y = sl.height + 4.0f;
   kit.Label("prof.cpu.sum", b, 0, y, w, 20, 0.55f);
@@ -211,7 +211,7 @@ void CpuTab(Kit& kit, const ProfilerStreams& ps, float w, float h) {
   const std::size_t rows = static_cast<std::size_t>(std::max(0.0f, (h - y) / 18.0f));
   for (std::size_t r = 0; r < rows && r < det.size(); ++r) {
     const livelink::BlockDetail& dd = det[det.size() - 1 - r].detail;
-    std::snprintf(b, sizeof b, "%-10llu %6.1f  %6.1f  %6.1f  %6.1f  %5u  %5u %4u %4u %3u %3u",
+    SnprintfFinite(b, sizeof b, "%-10llu %6.1f  %6.1f  %6.1f  %6.1f  %5u  %5u %4u %4u %3u %3u",
                   static_cast<unsigned long long>(dd.blockIndex), dd.totalMicroseconds, dd.logicMicroseconds,
                   dd.renderMicroseconds, dd.budgetMicroseconds, dd.renderedVoices, dd.chunks, dd.lateChunks, dd.heldVoices,
                   dd.parallel, dd.lodLevel);
@@ -252,7 +252,7 @@ void StreamsTab(Kit& kit, const ProfilerStreams& ps, ProfilerViewState* st, floa
   char b[128];
   for (std::uint32_t i = first; i < streams.size() && i < first + per; ++i) {
     const livelink::StreamInfo& s = streams[i];
-    std::snprintf(b, sizeof b, "%4u  %s  %-6s %6u", s.slot, Hex32(s.eventId).c_str(), s.state < 2u ? kState[s.state] : "?", s.stalls);
+    SnprintfFinite(b, sizeof b, "%4u  %s  %-6s %6u", s.slot, Hex32(s.eventId).c_str(), s.state < 2u ? kState[s.state] : "?", s.stalls);
     kit.Label("prof.st.row." + std::to_string(i - first), b, 0, y, w * 0.5f, 18, 0.5f);
     y += 18.0f;
   }
@@ -262,7 +262,7 @@ void StreamsTab(Kit& kit, const ProfilerStreams& ps, ProfilerViewState* st, floa
   y = 62.0f;
   for (std::size_t r = 0; r < stalls.size() && y < h - 18.0f; ++r) {
     const livelink::StreamStall& s = stalls[stalls.size() - 1 - r].stall;
-    std::snprintf(b, sizeof b, "%10llu  event %s  slot %u", static_cast<unsigned long long>(s.clockSample), Hex32(s.eventId).c_str(),
+    SnprintfFinite(b, sizeof b, "%10llu  event %s  slot %u", static_cast<unsigned long long>(s.clockSample), Hex32(s.eventId).c_str(),
                   s.streamSlot);
     kit.Label("prof.st.stall." + std::to_string(r), b, w * 0.52f, y, w * 0.48f, 18, 0.5f);
     y += 18.0f;
@@ -289,7 +289,7 @@ void LodTab(Kit& kit, const ProfilerStreams& ps, float w, float h) {
   char b[128];
   for (std::size_t r = 0; r < lods.size() && y < h - 18.0f; ++r) {
     const livelink::LodChange& c = lods[lods.size() - 1 - r].change;
-    std::snprintf(b, sizeof b, "block %llu: %u -> %u", static_cast<unsigned long long>(c.blockIndex), c.oldLevel, c.newLevel);
+    SnprintfFinite(b, sizeof b, "block %llu: %u -> %u", static_cast<unsigned long long>(c.blockIndex), c.oldLevel, c.newLevel);
     kit.Label("prof.lod.row." + std::to_string(r), b, 0, y, w, 18, 0.5f);
     y += 18.0f;
   }
@@ -325,7 +325,7 @@ void LogTab(Kit& kit, const ProfilerStreams& ps, ProfilerViewState* st, float w,
   char b[160];
   for (std::uint32_t i = first; i < rows.size() && i < first + per; ++i) {
     const livelink::LogEntry& e = rows[rows.size() - 1 - i].entry;
-    std::snprintf(b, sizeof b, "%10llu  %-20s id %s  slot %u  detail %u", static_cast<unsigned long long>(e.clockSample),
+    SnprintfFinite(b, sizeof b, "%10llu  %-20s id %s  slot %u  detail %u", static_cast<unsigned long long>(e.clockSample),
                   LogEntryKindName(e.kind).c_str(), Hex32(e.id).c_str(), e.handleSlot, e.detail);
     kit.Label("prof.log.row." + std::to_string(i - first), b, 0, y, w, 18, 0.5f);
     y += 18.0f;

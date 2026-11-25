@@ -1,6 +1,7 @@
 // Display names.
 #include "snd/tool/names.hpp"
 
+#include <cmath>
 #include <cstdio>
 
 #include "snd/internal/commands.hpp"
@@ -101,6 +102,7 @@ std::string FormatBytes(std::uint64_t b) {
 
 std::string FormatDb(float db) {
   if (db <= kFaderOffDb) return "-inf dB";
+  if (!std::isfinite(db)) return "- dB";  // NaN / +inf: no number to show (D-189)
   char buf[24];
   std::snprintf(buf, sizeof buf, "%+.1f dB", static_cast<double>(db));
   return buf;

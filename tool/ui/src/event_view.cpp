@@ -362,7 +362,7 @@ float Timeline(Kit& kit, const std::string& g, float x, float y, float w, float 
   }
   if (tracks == 0u) kit.Label("ev.notracks", "no tracks: + Track", x, y, w);
   char b[160];
-  std::snprintf(b, sizeof b, "length %s%s  clips %u  overlaps %u%s", tl.infinite ? "infinite / " : "",
+  SnprintfFinite(b, sizeof b, "length %s%s  clips %u  overlaps %u%s", tl.infinite ? "infinite / " : "",
                 (FormatNumberText(tl.lengthMs, 1) + " ms").c_str(), static_cast<unsigned>(tl.clips.size()),
                 static_cast<unsigned>(tl.overlaps.size()), tl.oneClipPerPlay ? "  (one clip per play)" : "");
   kit.Label("ev.info", std::string(b) + (ready ? "" : "   audition: " + why), x, below + 24.0f, w, 20, 0.55f);

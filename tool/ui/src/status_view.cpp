@@ -5,6 +5,7 @@
 #include "snd/tool/live_sync.hpp"
 #include "snd/tool/names.hpp"
 #include "snd/tool/ui/app.hpp"
+#include "snd/tool/ui/kit.hpp"
 #include "snd/tool/ui/layout_metrics.hpp"
 #include "snd/tool/ui/views.hpp"
 #include "snd/tool/ui/widgets.hpp"
@@ -99,7 +100,7 @@ void DeclareHeader(tela::Document& doc, ViewContext& ctx, float width) {
   std::string text = std::string(LinkStateName(st)) + "  " + conn.Target();
   if (st == LinkState::Online) {
     char b[96];
-    std::snprintf(b, sizeof b, "  %u Hz / %u  rtt %u us%s", conn.hello().sampleRate, conn.hello().blockSize,
+    SnprintfFinite(b, sizeof b, "  %u Hz / %u  rtt %u us%s", conn.hello().sampleRate, conn.hello().blockSize,
                   conn.roundTripUs(), conn.mismatch() ? "  build mismatch" : "");
     text += b;
   }
@@ -125,7 +126,7 @@ void DeclareFooter(tela::Document& doc, ViewContext& ctx, float width) {
   const auto& msgs = ctx.session.messages();
   const CellSync& sync = ctx.session.sync();
   char b[96];
-  std::snprintf(b, sizeof b, "pending %u  no answer %u  unsent %u  refused %u", sync.Count(CellState::Pending),
+  SnprintfFinite(b, sizeof b, "pending %u  no answer %u  unsent %u  refused %u", sync.Count(CellState::Pending),
                 sync.NoAnswer(ctx.nowNs), sync.Count(CellState::Unsent), sync.Count(CellState::Failed));
   App* app = ctx.app;
   const ProjectDocument* d = app != nullptr ? app->document() : nullptr;

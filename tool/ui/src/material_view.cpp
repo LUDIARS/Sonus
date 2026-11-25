@@ -171,7 +171,7 @@ void MaterialProps(Kit& kit, const std::string& g, float x, float y, float w, fl
                                             static_cast<float>(mv->speed));
   static const char* const kLayer[] = {"dropped", "weak", "medium", "strong"};
   char b[160];
-  std::snprintf(b, sizeof b, "-> %s  velocity %.3f  pitch %+.1f ct  volume %+.2f dB", kLayer[std::clamp(r.layer + 1, 0, 3)], r.velocity,
+  SnprintfFinite(b, sizeof b, "-> %s  velocity %.3f  pitch %+.1f ct  volume %+.2f dB", kLayer[std::clamp(r.layer + 1, 0, 3)], r.velocity,
                 r.pitchCents, r.volumeDb);
   kit.Label("ma.t.result", b, x, y, w, 20, 0.5f);
   y += 22.0f;

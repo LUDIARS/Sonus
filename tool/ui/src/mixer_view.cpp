@@ -7,6 +7,7 @@
 
 #include "snd/tool/names.hpp"
 #include "snd/tool/ui/app.hpp"
+#include "snd/tool/ui/kit.hpp"
 #include "snd/tool/ui/layout_metrics.hpp"
 #include "snd/tool/ui/views.hpp"
 #include "snd/tool/ui/widgets.hpp"
@@ -30,9 +31,9 @@ std::string FormatValue(float v, const std::string& unit) {
   if (!std::isfinite(v)) return "-";  // D-189: a shown value is finite
   char b[32];
   if (unit == "Hz" && v >= 1000.0f) {
-    std::snprintf(b, sizeof b, "%.1fk", static_cast<double>(v) / 1000.0);
+    SnprintfFinite(b, sizeof b, "%.1fk", static_cast<double>(v) / 1000.0);
   } else {
-    std::snprintf(b, sizeof b, "%.3g%s", static_cast<double>(v), unit.empty() ? "" : unit.c_str());
+    SnprintfFinite(b, sizeof b, "%.3g%s", static_cast<double>(v), unit.empty() ? "" : unit.c_str());
   }
   return b;
 }
@@ -233,7 +234,7 @@ void DeclareSide(tela::Document& doc, ViewContext& ctx, float x, float height) {
       const std::string base = "par." + pd.key;
       const KnobRange range{std::min(pd.minValue, pd.maxValue), std::max(pd.minValue, pd.maxValue), false, pd.isSwitch};
       char b[96];
-      std::snprintf(b, sizeof b, "%s %s%s", Short(pd.name, 16).c_str(), FormatValue(ps.value, std::string()).c_str(),
+      SnprintfFinite(b, sizeof b, "%s %s%s", Short(pd.name, 16).c_str(), FormatValue(ps.value, std::string()).c_str(),
                     ps.enabled ? " (override)" : "");
       Text(doc, base + ".name", b, 0, py + 4, w - 150, 22, 0.55f);
       KnobLook look;
@@ -271,7 +272,7 @@ void DeclareMixer(tela::Document& doc, ViewContext& ctx, float width, float heig
   const std::uint32_t page = std::min(ctx.state.mixerPage, pages - 1u);
   Panel(doc, "mixer", 0, 0, areaW, height, [&] {
     char b[64];
-    std::snprintf(b, sizeof b, "page %u / %u   %u buses  %u categories", page + 1u, pages,
+    SnprintfFinite(b, sizeof b, "page %u / %u   %u buses  %u categories", page + 1u, pages,
                   static_cast<unsigned>(project.buses().size()), static_cast<unsigned>(project.categories().size()));
     Button(doc, "mixer.prev", "<", [a] { a->OnPage(-1); }, 0, 2, 32, 24);
     Button(doc, "mixer.next", ">", [a] { a->OnPage(1); }, 36, 2, 32, 24);

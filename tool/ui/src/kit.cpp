@@ -3,7 +3,11 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdarg>
+#include <cstddef>
+#include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <limits>
 
 #include "snd/tool/ui/app.hpp"
@@ -71,39 +75,107 @@ std::string Clip(const std::string& s, std::size_t n) {
 
 Kit::Kit(tela::Document& doc, ViewContext& ctx) : doc_(doc), ctx_(ctx) {}
 
-std::string FiniteText(const std::string& text) {
-  // Tokens (between spaces and brackets) that printf made of a non-finite number: inf, nan, with a
-  // sign. Words such as "infinite" stay.
-  std::string out;
-  std::size_t i = 0;
-  while (i < text.size()) {
-    const char c = text[i];
-    const bool sep = c == ' ' || c == '(' || c == ')' || c == '=' || c == ',' || c == '/';
-    if (sep) {
-      out += c;
-      ++i;
+int VsnprintfFinite(char* out, std::size_t size, const char* fmt, std::va_list args) {
+  std::string r;
+  for (const char* p = fmt; *p != '\0';) {
+    if (*p != '%') {
+      r += *p++;
       continue;
     }
-    std::size_t j = i;
-    while (j < text.size() && !(text[j] == ' ' || text[j] == '(' || text[j] == ')' || text[j] == '=' || text[j] == ',' ||
-                                 text[j] == '/')) {
-      ++j;
+    // One conversion: % flags width .precision length conversion.
+    const char* start = p++;
+    if (*p == '%') {
+      r += '%';
+      ++p;
+      continue;
     }
-    std::string tok = text.substr(i, j - i);
-    std::string core = tok;
-    if (!core.empty() && (core[0] == '-' || core[0] == '+')) core = core.substr(1);
-    std::string lower;
-    for (char ch : core) lower += static_cast<char>(ch >= 'A' && ch <= 'Z' ? ch - 'A' + 'a' : ch);
-    const bool nonFinite = lower.rfind("inf", 0) == 0 ? (lower == "inf" || lower == "infinity" || lower == "inf%")
-                                                      : (lower.rfind("nan", 0) == 0 && (lower.size() == 3 || lower[3] == '%' || lower[3] == '('));
-    out += nonFinite ? std::string("-") : tok;
-    i = j;
+    int stars[2] = {0, 0};
+    int nstars = 0;
+    while (*p == '-' || *p == '+' || *p == ' ' || *p == '#' || *p == '0') ++p;
+    if (*p == '*') {
+      stars[nstars++] = va_arg(args, int);
+      ++p;
+    }
+    while (*p >= '0' && *p <= '9') ++p;
+    if (*p == '.') {
+      ++p;
+      if (*p == '*') {
+        stars[nstars++] = va_arg(args, int);
+        ++p;
+      }
+      while (*p >= '0' && *p <= '9') ++p;
+    }
+    std::string len;
+    while (*p == 'h' || *p == 'l' || *p == 'z' || *p == 'j' || *p == 't' || *p == 'L') len += *p++;
+    const char conv = *p;
+    if (conv == '\0') break;
+    ++p;
+    const std::string spec(start, static_cast<std::size_t>(p - start));
+    char b[512];
+    b[0] = '\0';
+    auto put = [&](auto v) {
+      if (nstars == 2) std::snprintf(b, sizeof b, spec.c_str(), stars[0], stars[1], v);
+      else if (nstars == 1) std::snprintf(b, sizeof b, spec.c_str(), stars[0], v);
+      else std::snprintf(b, sizeof b, spec.c_str(), v);
+    };
+#if defined(__GNUC__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wformat-nonliteral"
+#pragma GCC diagnostic ignored "-Wformat-security"
+#endif
+    switch (conv) {
+      case 'f': case 'F': case 'e': case 'E': case 'g': case 'G': case 'a': case 'A': {
+        const double v = len == "L" ? static_cast<double>(va_arg(args, long double)) : va_arg(args, double);
+        if (!std::isfinite(v)) {
+          r += '-';
+          continue;
+        }
+        if (len == "L") std::snprintf(b, sizeof b, "%g", v);
+        else put(v);
+        break;
+      }
+      case 's': put(va_arg(args, const char*)); break;
+      case 'c': put(va_arg(args, int)); break;
+      case 'p': put(va_arg(args, void*)); break;
+      case 'd': case 'i':
+        if (len == "ll") put(va_arg(args, long long));
+        else if (len == "l") put(va_arg(args, long));
+        else if (len == "z" || len == "t") put(va_arg(args, std::ptrdiff_t));
+        else if (len == "j") put(va_arg(args, std::intmax_t));
+        else put(va_arg(args, int));
+        break;
+      case 'u': case 'o': case 'x': case 'X':
+        if (len == "ll") put(va_arg(args, unsigned long long));
+        else if (len == "l") put(va_arg(args, unsigned long));
+        else if (len == "z" || len == "t") put(va_arg(args, std::size_t));
+        else if (len == "j") put(va_arg(args, std::uintmax_t));
+        else put(va_arg(args, unsigned));
+        break;
+      default: r += spec; break;  // not a conversion the tool uses: as written
+    }
+#if defined(__GNUC__)
+#pragma GCC diagnostic pop
+#endif
+    r += b;
   }
-  return out;
+  if (size > 0u) {
+    const std::size_t n = std::min(r.size(), size - 1u);
+    std::memcpy(out, r.data(), n);
+    out[n] = '\0';
+  }
+  return static_cast<int>(r.size());
+}
+
+int SnprintfFinite(char* out, std::size_t size, const char* fmt, ...) {
+  std::va_list args;
+  va_start(args, fmt);
+  const int n = VsnprintfFinite(out, size, fmt, args);
+  va_end(args);
+  return n;
 }
 
 void Kit::Label(const std::string& id, const std::string& text, float x, float y, float w, float h, float scale) {
-  Text(doc_, id, FiniteText(text), x, y, w, h, scale);  // D-189: every shown value is finite
+  Text(doc_, id, text, x, y, w, h, scale);  // names as they are; numbers are made finite where they become text
 }
 
 void Kit::Title(const std::string& id, const std::string& text, float x, float y, float w) {

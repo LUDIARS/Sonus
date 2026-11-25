@@ -411,14 +411,14 @@ void ComposePanel(Kit& kit, float x, float y, float w, float h) {
   y += kRow + 4.0f;
   const ComposeResult r = ComposeEvent(*d, ev, values, pv.distance);
   char b[256];
-  std::snprintf(b, sizeof b, "volume %+.2f dB  pitch %+.1f ct  pan %+.3f", r.volumeDb, r.pitchCents, r.pan);
+  SnprintfFinite(b, sizeof b, "volume %+.2f dB  pitch %+.1f ct  pan %+.3f", r.volumeDb, r.pitchCents, r.pan);
   kit.Label("pc.cmp.r0", b, x, y, w, 20, 0.55f);
   y += 20.0f;
-  std::snprintf(b, sizeof b, "lowpass %s  highpass %s", r.lowpassHz > 0 ? (FormatNumberText(r.lowpassHz, 1) + " Hz").c_str() : "open",
+  SnprintfFinite(b, sizeof b, "lowpass %s  highpass %s", r.lowpassHz > 0 ? (FormatNumberText(r.lowpassHz, 1) + " Hz").c_str() : "open",
                 r.highpassHz > 0 ? (FormatNumberText(r.highpassHz, 1) + " Hz").c_str() : "none");
   kit.Label("pc.cmp.r1", b, x, y, w, 20, 0.55f);
   y += 20.0f;
-  std::snprintf(b, sizeof b, "send %.3f  fx %.3f  spread %.3f  reverb %.3f  3D %.3f", r.send, r.effectParam, r.spread,
+  SnprintfFinite(b, sizeof b, "send %.3f  fx %.3f  spread %.3f  reverb %.3f  3D %.3f", r.send, r.effectParam, r.spread,
                 r.reverbSend, r.blend3D);
   kit.Label("pc.cmp.r2", b, x, y, w, 20, 0.5f);
   y += 24.0f;
@@ -428,7 +428,7 @@ void ComposePanel(Kit& kit, float x, float y, float w, float h) {
   for (std::uint32_t i = first; i < r.curves.size() && i < first + per; ++i) {
     const CurveContribution& c = r.curves[i];
     const std::string pname = c.parameter == "distance" ? std::string("distance") : RefName(*d, "parameter", c.parameter);
-    std::snprintf(b, sizeof b, "curve %u: %s = %.3f (%s) -> %s %s %.3f", c.curve, pname.c_str(), c.input, c.inputFrom,
+    SnprintfFinite(b, sizeof b, "curve %u: %s = %.3f (%s) -> %s %s %.3f", c.curve, pname.c_str(), c.input, c.inputFrom,
                   CurveTargetName(c.target), CurveComposeName(c.compose), c.output);
     kit.Label("pc.cmp.c." + std::to_string(i - first), b, x, y, w, 20, 0.5f);
     y += 20.0f;
