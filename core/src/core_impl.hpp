@@ -26,6 +26,7 @@
 #include "snd/base/sparse_set.hpp"
 #include "snd/base/spsc.hpp"
 #include "snd/core/core.hpp"
+#include "snd/core/live_plugin_pool.hpp"
 #include "snd/dsp/effects.hpp"
 #include "snd/dsp/filter.hpp"
 #include "snd/dsp/meter.hpp"
@@ -132,7 +133,32 @@ struct BankEvent {
 // Banks: core's record of a registered bank (prepared on the owner thread at
 // PopRegistration, read by the audio thread after the BankRegister command).
 // ---------------------------------------------------------------------------
+struct EditSpan {
+  PreparedLivePlugin* prepared = nullptr;
+  EditSpan* next = nullptr;  // sorted by address, in this bank's preallocated spare region
+  std::uint32_t table = 0;
+  std::uint32_t row = bf::kNone;  // physical reserve row, reusable on release
+  std::uint32_t cell = 0;         // stable address for value Undo, never reused in this generation
+  std::uint64_t bytes = 0;
+  std::uint64_t token = 0;
+};
+struct LiveSend : EditSpan {
+  LiveSend* nextSend = nullptr;
+  std::uint64_t targetBank = 0;
+  SlotIndex target = kNoSlot;
+  float gain = 1;
+  float db = 0;
+  bool pre = false;
+};
 struct EffectInstance {
+  EditSpan* live = nullptr;
+  std::uint64_t removed = 0;  // Undo token of a removed authored effect
+  std::uint32_t oldIndex = 0;
+  SlotIndex owner = kNoSlot;
+  SlotIndex tailBus = kNoSlot;
+  std::uint16_t tailBank = kNoBank;
+  bool parked = false;  // still owned by a temporarily removed authored bus
+  EffectInstance* nextTail = nullptr;
   Id type = 0;
   const snd_dsp_effect* plugin = nullptr;  // Config.plugins entry, or null (standard)
   void* state = nullptr;
@@ -167,6 +193,10 @@ struct EventState {  // RunEventLogic private, per EVNT row (4.2, 4.4)
 };
 
 struct BankRecord {
+  EditSpan* edits = nullptr;
+  std::uint32_t liveBuses = 0, liveEffects = 0;
+  std::uint64_t liveBytes = 0;
+  std::uint32_t nextCell = 0;
   HandleRef handle{};
   const bk::PreparedBank* prepared = nullptr;
   const bk::BankView* view = nullptr;
@@ -228,6 +258,15 @@ struct BankAudio {  // ApplyCommands private, per bank slot
 // registration / unregistration; read by later systems (definitions only).
 // ---------------------------------------------------------------------------
 struct BusDef {
+  EditSpan* live = nullptr;  // live addition
+  std::uint64_t removed = 0; // authored row held until Undo or bank retirement
+  SlotIndex savedParent = kNoSlot;
+  TimedRamp savedVolume{};
+  RangeU32 savedSends{}, savedEffects{};
+  LiveSend* sends = nullptr;
+  bool customChain = false;
+  std::uint32_t chainCount = 0;
+  EffectInstance* chain[kMaxBusEffects]{};
   Id id = 0;
   std::uint32_t refCount = 0;
   std::uint16_t defBank = kNoBank;
@@ -865,6 +904,12 @@ struct System::Impl {
   music::MusicFrame musicFrame{};
 
   // Shared definitions (A1-16), written by ApplyCommands.
+  std::atomic<std::uint64_t>* publishedBus = nullptr;  // {id, channels} for network-worker DSP preparation
+  std::uint32_t* graphScratch = nullptr;  // indegrees, ready min-heap and candidate order
+  SlotIndex* retiredRoutes = nullptr;  // old slot -> destination until RunEventLogic and Render consume it
+  bool routesPending = false;
+  EffectInstance* tails = nullptr;
+  float* tailScratch = nullptr;
   BusDef* busDefs = nullptr;
   CatDef* catDefs = nullptr;
   SnapDef* snapDefs = nullptr;
@@ -989,6 +1034,15 @@ bool PrepareBankRecord(Impl& im, const cmd::BankRegister& reg) noexcept;  // own
 void FreeBankRecord(Impl& im, std::uint32_t slot) noexcept;               // owner thread
 void ApplyBankRegister(Impl& im, const cmd::BankRegister& reg) noexcept;  // audio thread
 void UnregisterBank(Impl& im, std::uint32_t slot) noexcept;               // audio thread
+bool OrderBusGraph(Impl& im, SlotIndex from, SlotIndex to, bool strict) noexcept;
+bool AdoptAuthoredBus(Impl& im, SlotIndex slot, std::uint32_t oldBank) noexcept;
+void RestoreBusRow(Impl& im, SlotIndex slot) noexcept;
+void PrepareBusRetirement(Impl& im, BankRecord& bank) noexcept;
+void FinishEffectTail(Impl& im, EffectInstance& effect) noexcept;
+inline SlotIndex RoutedBus(const Impl& im, SlotIndex s) noexcept {
+  while (s != kNoSlot && im.busDefs[s].removed != 0) s = im.busDefs[s].savedParent;
+  return s;
+}
 void RebuildBusGraph(Impl& im) noexcept;                                  // audio thread
 
 // Game-side producer helpers.

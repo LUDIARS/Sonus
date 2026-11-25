@@ -49,8 +49,19 @@ std::uint32_t ArenaRecordBytes(const core::LiveArenaView& a, const FallbackCaps&
   return n > 0xFFFFFFF0u ? 0xFFFFFFF0u : static_cast<std::uint32_t>(n);
 }
 
-bool WriteArenaRecord(MessageRing& ring, const core::LiveArenaView& a, const FallbackCaps& caps) noexcept {
-  const std::uint32_t total = ArenaRecordBytes(a, caps);
+bool WriteArenaRecord(MessageRing& ring, const core::LiveArenaView& a, const FallbackCaps& caps,
+                      const void* const* rejected, std::uint32_t rejectedCount) noexcept {
+  // Pointers are captured from this arena, in application order (normal then reserve).
+  // A refused edit changed no state. Keep the block/fallback, omit only that command.
+  const auto normalEnd = reinterpret_cast<std::uintptr_t>(a.normal) + a.normalBytes;
+  std::uint32_t normalRejected = 0;
+  while (normalRejected < rejectedCount) {
+    auto address = reinterpret_cast<std::uintptr_t>(rejected[normalRejected]);
+    if (address < reinterpret_cast<std::uintptr_t>(a.normal) || address >= normalEnd) break;
+    ++normalRejected;
+  }
+  constexpr auto wireBytes = cmd::kWireSize<cmd::LiveReplaceChunk>;
+  const std::uint32_t total = ArenaRecordBytes(a, caps) - rejectedCount * wireBytes;
   if (!ring.Begin(total)) return false;
   const std::uint32_t fbBytes = a.fallback != nullptr ? FallbackBytes(*a.fallback, caps) : 0u;
   RecordArena h{};
@@ -60,11 +71,22 @@ bool WriteArenaRecord(MessageRing& ring, const core::LiveArenaView& a, const Fal
   h.bytes = total - static_cast<std::uint32_t>(sizeof(RecordArena));
   h.reserved = 0;
   ring.Put(&h, sizeof(h));
-  const ArenaSections s{a.normalBytes, a.reserveBytes, fbBytes,
+  const ArenaSections s{a.normalBytes - normalRejected * wireBytes,
+                        a.reserveBytes - (rejectedCount - normalRejected) * wireBytes, fbBytes,
                         a.fallback != nullptr ? (a.flags | cmd::kArenaHasFallback) : (a.flags & ~cmd::kArenaHasFallback)};
   ring.Put(&s, sizeof(s));
-  if (a.normalBytes != 0u) ring.Put(a.normal, a.normalBytes);
-  if (a.reserveBytes != 0u) ring.Put(a.reserve, a.reserveBytes);
+  auto putRegion = [&](const std::uint8_t* data, std::uint32_t bytes, std::uint32_t first, std::uint32_t end) {
+    if (!bytes) return;
+    const auto* cursor = data;
+    for (auto i = first; i < end; ++i) {
+      const auto* header = static_cast<const std::uint8_t*>(rejected[i]) - sizeof(cmd::CommandHeader);
+      if (header != cursor) ring.Put(cursor, static_cast<std::uint32_t>(header - cursor));
+      cursor = header + wireBytes;
+    }
+    if (cursor != data + bytes) ring.Put(cursor, static_cast<std::uint32_t>(data + bytes - cursor));
+  };
+  putRegion(a.normal, a.normalBytes, 0, normalRejected);
+  putRegion(a.reserve, a.reserveBytes, normalRejected, rejectedCount);
   if (a.fallback != nullptr) {
     const cmd::OverflowFallback& fb = *a.fallback;
     const FallbackHeader fh{caps.playbacks, caps.emitters, caps.transports, caps.userBuffers, caps.banks,

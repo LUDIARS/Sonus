@@ -257,7 +257,9 @@ std::uint32_t System::LiveVoices(livelink::VoiceInfo* out, std::uint32_t capacit
       o.playbackState = pd != kNoSlot ? static_cast<std::uint32_t>(pst[pd]) : 0u;
       o.audibility = vaud[d];
       o.isVirtual = vreal[d] == kNoSlot ? 1u : 0u;
-      o.busId = vbus[d] != kNoSlot && vbus[d] < im.cfg.busCap ? im.busDefs[vbus[d]].id : 0u;
+      const auto previous = vbus[d];
+      const auto bus = RoutedBus(im, im.routesPending && previous != kNoSlot ? im.retiredRoutes[previous] : previous);
+      o.busId = bus != kNoSlot ? im.busDefs[bus].id : 0u;
       o.gain = vgain[d].end;
       o.sourceKind = static_cast<std::uint32_t>(vkind[d]);
     }
@@ -356,6 +358,86 @@ void System::LiveStats(snd_stats* out) const noexcept {
   out->fallback_commands += im.fallbackCommands.load(std::memory_order_relaxed);
 }
 
+namespace {
+std::uint32_t MixerCell(const Impl& im, const BankRecord& bank, Id id, std::uint32_t table,
+                        std::uint32_t index) noexcept {
+  const auto s = im.busMap.Find(id);
+  if (s == kNoSlot) return ResolveRow(*bank.view, id, table, index);
+  const auto& b = im.busDefs[s];
+  if (b.removed) return bf::kNone;
+  if (b.defBank != bank.handle.slot) return ResolveRow(*bank.view, id, table, index);
+  if (table == ch::BUSS && b.live) return index == 0 ? b.live->cell : bf::kNone;
+  if ((table == ch::EFPV || table == ch::EFFX) && b.customChain) {
+    const auto position = table == ch::EFFX ? index : index >> 16;
+    if (position >= b.chainCount) return bf::kNone;
+    const auto& e = *b.chain[position];
+    const auto param = index & 0xffffu;
+    if (e.live) {
+      if (table == ch::EFFX) return e.live->cell;
+      return param < e.paramCount ? e.live->cell + 1u + param : bf::kNone;
+    }
+    const auto row = static_cast<std::uint32_t>(&e - bank.effects);
+    return table == ch::EFFX ? row : InRange(*bank.view, ch::EFFX, row, co::EFFX_paramFirst, co::EFFX_paramCount, param);
+  }
+  if (table == ch::SEND && b.sends) {
+    const auto dense = base::rows::DenseOf(im.tables.Bus.rows, s);
+    const auto base = DiagRead<schema::ColumnId::Bus_sendRange>(im.tables)[dense];
+    if (index < base.count) return base.first + index;
+    auto* send = b.sends;
+    for (index -= base.count; send && index; --index) send = send->nextSend;
+    return send ? send->cell : bf::kNone;
+  }
+  return ResolveRow(*bank.view, id, table, index);
+}
+
+snd_result WriteMixerCell(Impl& im, const BankRecord& bank, std::uint32_t row, std::uint32_t table,
+                          std::uint32_t col, std::uint64_t bits, std::uint64_t* old, bool apply) noexcept {
+  auto writeFloat = [&](float& x) {
+    std::uint32_t before;
+    std::memcpy(&before, &x, sizeof(before));
+    if (old) *old = before;
+    if (bits > 0xffffffffu || !std::isfinite(BitsF32(bits))) return SND_ERR_INVALID_ARGUMENT;
+    if (apply) x = BitsF32(bits);
+    return SND_OK;
+  };
+  for (SlotIndex s = 0; s < im.cfg.busCap; ++s) {
+    auto& b = im.busDefs[s];
+    if (b.defBank != bank.handle.slot || !b.refCount) continue;
+    if (table == ch::BUSS && b.live && b.live->cell == row && col == co::BUSS_volumeDb) {
+      if (!std::isfinite(DbToGain(BitsF32(bits)))) return SND_ERR_INVALID_ARGUMENT;
+      const auto res = writeFloat(b.baseVolumeDb);
+      if (res == SND_OK && apply) bank.view->MutableColumn<bk::col::BUSS_volumeDb>()[b.defRow] = b.baseVolumeDb;
+      return res;
+    }
+    if (table == ch::SEND) {
+      for (auto* send = b.sends; send; send = send->nextSend) {
+        if (send->cell != row) continue;
+        if (col == co::SEND_levelDb) {
+          if (!std::isfinite(DbToGain(BitsF32(bits)))) return SND_ERR_INVALID_ARGUMENT;
+          const auto res = writeFloat(send->db);
+          if (res == SND_OK && apply) send->gain = DbToGain(send->db);
+          return res;
+        }
+        if (col == co::SEND_preFader) {
+          if (old) *old = send->pre;
+          if (bits > 1) return SND_ERR_INVALID_ARGUMENT;
+          if (apply) send->pre = bits != 0;
+          return SND_OK;
+        }
+      }
+    }
+    if (table == ch::EFPV && col == co::EFPV_value) {
+      for (std::uint32_t i = 0; i < b.chainCount; ++i) {
+        auto& e = *b.chain[i];
+        if (e.live && row > e.live->cell && row - e.live->cell <= e.paramCount)
+          return writeFloat(e.params[row - e.live->cell - 1]);
+      }
+    }
+  }
+  return SND_ERR_NOT_FOUND;
+}
+}  // namespace
+
 std::uint32_t System::LiveFindCells(Id objectId, std::uint32_t fourcc, std::uint32_t index, LiveCell* out,
                                     std::uint32_t capacity) const noexcept {
   const Impl& im = *impl_;
@@ -363,7 +445,8 @@ std::uint32_t System::LiveFindCells(Id objectId, std::uint32_t fourcc, std::uint
   for (std::uint32_t s = 0; s < im.cfg.maxBanks; ++s) {
     const BankRecord* r = LiveBank(im, s);
     if (r == nullptr) continue;
-    const std::uint32_t row = ResolveRow(*r->view, objectId, fourcc, index);
+    const bool mixer = fourcc == ch::BUSS || fourcc == ch::SEND || fourcc == ch::EFFX || fourcc == ch::EFPV;
+    const auto row = mixer ? MixerCell(im, *r, objectId, fourcc, index) : ResolveRow(*r->view, objectId, fourcc, index);
     if (row == bf::kNone) continue;
     if (out != nullptr && n < capacity) out[n] = LiveCell{s, row};
     ++n;
@@ -396,6 +479,9 @@ snd_result System::LiveWriteCell(const LiveCell& cell, std::uint32_t fourcc, std
   if (r == nullptr) return SND_ERR_NOT_FOUND;
   const bf::ColumnInfo* info = bf::check::FindColumnInfo(fourcc, column);
   if (info == nullptr || column > 0xFFFFu) return SND_ERR_NOT_FOUND;
+  if (cell.row >= r->view->Rows(fourcc) && r->view->writable()) {
+    return WriteMixerCell(im, *r, cell.row, fourcc, column, bits, previous, apply);
+  }
   bk::WritableColumn wc;
   const snd_result found = bk::FindWritableColumn(*r->prepared, fourcc, static_cast<std::uint16_t>(column), &wc);
   if (found != SND_OK) return found;
