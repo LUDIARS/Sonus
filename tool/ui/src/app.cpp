@@ -7,6 +7,7 @@
 
 #include "snd/tool/live_sync.hpp"
 #include "snd/tool/mixer_editor.hpp"
+#include "snd/tool/ui/kit.hpp"
 #include "snd/tool/ui/layout_metrics.hpp"
 #include "snd/tool/ui/safe_drawing.hpp"
 
@@ -64,7 +65,7 @@ bool App::WindowTooSmall() const {
 
 void App::DeclareTooSmall(tela::Document& doc, const std::string& id, float w, float h) {
   char b[96];
-  std::snprintf(b, sizeof b, "window too small: the tool needs %.0f x %.0f", static_cast<double>(kMinEditorWidth),
+  SnprintfFinite(b, sizeof b, "window too small: the tool needs %.0f x %.0f", static_cast<double>(kMinEditorWidth),
                 static_cast<double>(kMinEditorHeight));
   Text(doc, id, b, 0, 0, std::max(1.0f, w), std::min(std::max(1.0f, h), 22.0f), 0.6f);
 }
@@ -206,7 +207,9 @@ void App::TrackDocument() {
 void App::RefreshProblems() {
   const ProjectDocument* d = document();
   if (d == nullptr) return;
-  problems_ = DistinctIssues(CheckDocument(*d));  // D-189: each problem once
+  std::vector<DocIssue> all = CheckDocument(*d);
+  for (DocIssue& i : ToolIssues(*d)) all.push_back(std::move(i));  // the tool's own checks (broken tempo points)
+  problems_ = DistinctIssues(all);  // D-189: each problem once
   std::stable_sort(problems_.begin(), problems_.end(), [](const DocIssue& a, const DocIssue& b) {
     return a.error && !b.error;
   });

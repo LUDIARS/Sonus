@@ -6,6 +6,7 @@
 // lookahead, and the stingers. Edits through SegmentEditor / PlaylistEditor / MusicEditor.
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <cstdio>
 
 #include "editor_util.hpp"
@@ -99,7 +100,7 @@ void SegmentLine(Kit& kit, const std::string& g, float x, float y, float w, floa
   }
   Canvas(kit.doc(), "mu.seg.line", DrawMarks(look, kit.palette()), x, y, w, h);
   char b[160];
-  std::snprintf(b, sizeof b, "%.3f s  %s  rate %s  frames %s  exit tick %.0f", seconds, "(bars: lines, beats: short)",
+  SnprintfFinite(b, sizeof b, "%.3f s  %s  rate %s  frames %s  exit tick %.0f", seconds, "(bars: lines, beats: short)",
                 rate > 0 ? FormatNumberText(rate, 0).c_str() : "?", FormatNumberText(se.Frames(), 0).c_str(), exitTick);
   kit.Label("mu.seg.line.info", b, x, y + h, w, 18, 0.45f);
 }
@@ -598,13 +599,19 @@ void RulesTab(Kit& kit, float width, float height) {
       kit.Label("mu.pv.text", "choose two states", 0, y, w, 18, 0.5f);
       return;
     }
-    std::snprintf(b, sizeof b, "row %s  fires at %.3f s (bar %d beat %d)%s%s  lookahead %.1f ms  fade out %.3f s in %.3f s",
-                  p.rule < 0 ? "default" : std::to_string(p.rule + 1).c_str(), p.fireSeconds, p.fireAt.bar + 1,
-                  p.fireAt.beat + 1, p.lateApplied ? " (late rule)" : "", p.cancelled ? " CANCELLED" : "", p.lookaheadMs,
-                  p.fadeOutSeconds, p.fadeInSeconds);
+    // Shown 1-based in 64 bits (D-189: no signed overflow in display arithmetic); a position the model
+    // saturated (a broken tempo point far away) has no number to show.
+    auto oneBased = [](std::int32_t v) {
+      if (v == std::numeric_limits<std::int32_t>::max() || v == std::numeric_limits<std::int32_t>::min()) return std::string("-");
+      return std::to_string(static_cast<long long>(v) + 1);
+    };
+    SnprintfFinite(b, sizeof b, "row %s  fires at %.3f s (bar %s beat %s)%s%s  lookahead %.1f ms  fade out %.3f s in %.3f s",
+                  p.rule < 0 ? "default" : std::to_string(static_cast<long long>(p.rule) + 1).c_str(), p.fireSeconds,
+                  oneBased(p.fireAt.bar).c_str(), oneBased(p.fireAt.beat).c_str(), p.lateApplied ? " (late rule)" : "",
+                  p.cancelled ? " CANCELLED" : "", p.lookaheadMs, p.fadeOutSeconds, p.fadeInSeconds);
     kit.Label("mu.pv.text", b, 0, y, w, 18, 0.5f);
     y += 18.0f;
-    std::snprintf(b, sizeof b, "bridge %s (%.3f s)  target %s heard at %.3f s from tick %.0f", RefName(*d, "segment", p.bridge, "none").c_str(),
+    SnprintfFinite(b, sizeof b, "bridge %s (%.3f s)  target %s heard at %.3f s from tick %.0f", RefName(*d, "segment", p.bridge, "none").c_str(),
                   p.bridgeSeconds, RefName(*d, "segment", p.targetSegment).c_str(), p.targetStartSeconds, p.targetStartTick);
     kit.Label("mu.pv.text2", b, 0, y, w, 18, 0.5f);
     y += 20.0f;
@@ -633,7 +640,7 @@ void RulesTab(Kit& kit, float width, float height) {
     y += 20.0f;
     for (std::uint32_t i = lfirst; i < la.size() && i < lfirst + lper; ++i) {
       const LookaheadEntry& e = la[i];
-      std::snprintf(b, sizeof b, "%s %s: %s  prime %.1f ms  lookahead %.1f ms", e.kind.c_str(), e.name.c_str(), e.reason.c_str(),
+      SnprintfFinite(b, sizeof b, "%s %s: %s  prime %.1f ms  lookahead %.1f ms", e.kind.c_str(), e.name.c_str(), e.reason.c_str(),
                     e.primeMs, e.lookaheadMs);
       kit.Label("mu.la." + std::to_string(i - lfirst), b, 0, y, w, 18, 0.5f);
       y += 18.0f;
