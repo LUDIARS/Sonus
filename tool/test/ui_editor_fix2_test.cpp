@@ -163,9 +163,10 @@ SND_TEST(ToolUiFix2, EditorsAskForTheirSmallestWindow) {
   Editor t(ui::Screen::Event, 640, 400);
   SND_CHECK(t.Has("body.small"));
   SND_CHECK(!t.Has("ev.f.n0"));
-  t.app.OnScreen(ui::Screen::Mixer);  // the mixer has no number fields: it draws
+  t.app.OnScreen(ui::Screen::Mixer);  // one smallest window for every screen (third round)
   t.Frame();
-  SND_CHECK(!t.Has("body.small"));
+  SND_CHECK(t.Has("body.small"));
+  SND_CHECK(!t.Has("tab.mixer") && !t.Has("footer.problems") && !t.Has("footer.msg"));
   const int w = static_cast<int>(ui::kMinEditorWidth), h = static_cast<int>(ui::kMinEditorHeight);
   for (ui::Screen sc : {ui::Screen::Buses, ui::Screen::Event, ui::Screen::Params, ui::Screen::Spatial,
                         ui::Screen::Music, ui::Screen::Material, ui::Screen::Patch, ui::Screen::Link}) {

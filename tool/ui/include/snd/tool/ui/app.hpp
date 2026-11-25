@@ -73,8 +73,8 @@ class App final : public ControlSink, public Actions {
   // Headless viewport (physical pixels). Ignored when the host owns the viewport.
   void SetViewport(int width, int height, float dpiScale);
   void SetInsetTop(float logicalPixels);
-  // The window (logical, below the inset) is under kMinEditorWidth x kMinEditorHeight: the screens
-  // with number fields show only "window too small" (layout_metrics.hpp).
+  // The window (logical, below the inset) is under kMinEditorWidth x kMinEditorHeight: the tool
+  // declares only "window too small" (layout_metrics.hpp).
   bool WindowTooSmall() const;
   // Declares that text in a body of `w` x `h`.
   static void DeclareTooSmall(tela::Document& doc, const std::string& id, float w, float h);

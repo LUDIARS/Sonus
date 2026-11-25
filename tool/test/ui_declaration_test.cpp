@@ -1,6 +1,7 @@
 // The Tela declaration of the tool's screens: what is declared, stable ids
 // across frames and value changes, buttons wired to the models, paging.
 #include "snd/test/test.hpp"
+#include "snd/tool/ui/layout_metrics.hpp"
 #include "ui_helpers.hpp"
 
 using namespace snd::tool;
@@ -147,21 +148,15 @@ SND_TEST(ToolUiDeclaration, ButtonsDriveTheModels) {
 }
 
 SND_TEST(ToolUiDeclaration, NarrowWindowPagesTheStrips) {
-  Offline t(560, 700);  // strips area: 560 - 12 - 310 - 6 = 232 px -> 2 strips per page
+  // D-187 (third round): the tool takes windows from kMinEditorWidth x kMinEditorHeight up; the
+  // 560 px window this test used to page the strips now shows only "window too small". The paging
+  // itself is checked with more strips at the smallest window (ToolUiWindow.MixerPagesAtTheSmallestWindow).
+  Offline small(560, 700);
+  SND_CHECK(Find(small.app.runtime(), "body.small") != nullptr);
+  SND_CHECK(Find(small.app.runtime(), small.Bus("Master")) == nullptr);
+  SND_CHECK(Find(small.app.runtime(), "mixer.next") == nullptr);
+  Offline t(static_cast<int>(ui::kMinEditorWidth), static_cast<int>(ui::kMinEditorHeight));
   SND_CHECK(Find(t.app.runtime(), t.Bus("Master")) != nullptr);
   SND_CHECK(Find(t.app.runtime(), t.Bus("Music")) != nullptr);
-  SND_CHECK(Find(t.app.runtime(), t.Bus("Sfx")) == nullptr);
-  Pointer ptr(t.app);
-  tela::Point c = Center(Find(t.app.runtime(), "mixer.next"));
-  ptr.Click(c.x, c.y);
-  t.app.Frame(tooltest::Now());
-  SND_CHECK(Find(t.app.runtime(), t.Bus("Sfx")) != nullptr);
-  SND_CHECK(Find(t.app.runtime(), ui::CategoryId(snd::HashId("SE"))) != nullptr);
-  ptr.Click(c.x, c.y);  // past the last page: stays
-  t.app.Frame(tooltest::Now());
-  SND_CHECK_EQ(t.app.view().mixerPage, 1u);
-  c = Center(Find(t.app.runtime(), "mixer.prev"));
-  ptr.Click(c.x, c.y);
-  t.app.Frame(tooltest::Now());
-  SND_CHECK(Find(t.app.runtime(), t.Bus("Master")) != nullptr);
+  SND_CHECK(Find(t.app.runtime(), t.Bus("Sfx")) != nullptr);  // all strips on one page
 }

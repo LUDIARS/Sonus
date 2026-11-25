@@ -357,10 +357,7 @@ void DeclareProfiler(tela::Document& doc, ViewContext& ctx, float width, float h
       case 2: MemoryTab(kit, ps, width, h); break;
       case 3: StreamsTab(kit, ps, st, width, h); break;
       case 4: LodTab(kit, ps, width, h); break;
-      case 5:
-        if (app->WindowTooSmall()) App::DeclareTooSmall(doc, "prof.log.small", width, h);
-        else LogTab(kit, ps, st, width, h);
-        break;
+      case 5: LogTab(kit, ps, st, width, h); break;
       default: DeclareOverview(doc, ctx, width, h); break;
     }
   });
