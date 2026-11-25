@@ -375,9 +375,10 @@ SND_TEST(PhysicsPlayback, DestroyedEmitterKeepsTransformAcrossSlotReuseAndListen
   listener.weight = 1.0f;
   SND_REQUIRE_EQ(snd_set_listener(w.sys.sys, 0, &listener), SND_OK);
   start = w.sys.Frames();
-  w.sys.Advance(8);
-  SND_CHECK_NEAR(w.Mean(0, start + 512, 1024), 0.25, 2e-3);
-  SND_CHECK_NEAR(w.Mean(1, start + 512, 1024), 0.0, 2e-3);
+  w.sys.Advance(12);
+  // Drain the manual output queue and the pan ramp before measuring settled output.
+  SND_CHECK_NEAR(w.Mean(0, start + 6 * kBlock, 4 * kBlock), 0.25, 2e-3);
+  SND_CHECK_NEAR(w.Mean(1, start + 6 * kBlock, 4 * kBlock), 0.0, 2e-3);
   SND_CHECK_EQ(snd_destroy_emitter(w.sys.sys, reused), SND_OK);
 }
 
