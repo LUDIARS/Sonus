@@ -189,6 +189,8 @@ struct BankRecord {
   std::uint32_t* snapSlot = nullptr;
   std::uint32_t* groupSlot = nullptr;
   std::uint32_t* duckSlot = nullptr;
+  float* previousSendContrib = nullptr;
+  float* sendContrib = nullptr;  // [SEND rows] snapshot offsets in dB
   std::uint32_t* busChannels = nullptr;  // resolved channel count per BUSS row (D-54 rule)
   // RunEventLogic per-event state.
   EventState* events = nullptr;
@@ -242,6 +244,7 @@ struct CatDef {
   std::uint32_t parentSlot = kNoSlot;
   std::uint32_t flags = 0;
   float baseVolumeDb = 0;
+  bool solo = false;
 };
 struct SnapDef {
   Id id = 0;
@@ -249,6 +252,7 @@ struct SnapDef {
   std::uint16_t defBank = kNoBank;
   std::uint16_t reserved = 0;
   std::uint32_t defRow = 0;
+  std::uint32_t actionFadeFrames = 0;
 };
 struct GroupDef {
   Id id = 0;
@@ -351,7 +355,9 @@ struct ApplyPriv {
     float weight;
     HandleRef parent;
     std::uint32_t cancelled;
-    std::uint32_t reserved;
+    std::uint32_t snapshotGeneration;
+    ClockSample start;
+    std::uint32_t duration;
   };
   TentativeSnapshot* tentative = nullptr;  // [actionChildCap]
   std::uint32_t tentativeCount = 0;
@@ -545,6 +551,20 @@ struct LogicPriv {  // EvaluateLogicParams: generation seen per row slot (new ro
   std::uint32_t* playbackGen = nullptr;
 };
 
+// Gather the active curve factors for one listener. A target with a factor
+// but no dedicated distance curve starts at the multiplicative identity.
+struct SpatialCurveProduct {
+  float value = 1.0f;
+  bool active = false;
+  void Add(float factor) noexcept { active = true; value *= factor; }
+  float Apply(float distanceValue, bool hasDistanceCurve) const noexcept {
+    return active ? (hasDistanceCurve ? distanceValue : 1.0f) * value : distanceValue;
+  }
+};
+struct SpatialCurveParams {
+  SpatialCurveProduct spread, blend, send;
+};
+
 inline constexpr unsigned kMaxZones = 4;
 inline constexpr unsigned kMaxAuxSends = 1 + kMaxZones;
 struct ZoneSend {
@@ -568,12 +588,14 @@ struct VoiceSpatialMix {
 };
 
 struct DspPriv {
+  bool hadSnapshotOffsets = false;
+
   ZoneSend zones[SND_MAX_LISTENERS][kMaxZones]{};
   VoiceSpatialMix* mix = nullptr;  // [maxVirtual], EvaluateDspParams -> Render
 
   float* duckDb = nullptr;           // [duckCap] current reduction (dB, <= 0)
   std::uint32_t* catPlaying = nullptr;  // [catCap] voices playing per category this block
-  float* catGainPrev = nullptr;
+  float* busGainDb = nullptr;
   float* pan = nullptr;  // [maxVirtual] 2D pan of the voice this block (clip random + curves), read by Render
   // Stage 3 (group 4), D-143: layer crossfade weight at the end of the last block, per voice.
   float* layerGain = nullptr;  // [maxVirtual]
@@ -859,6 +881,7 @@ struct System::Impl {
 
   // Statistics (audio thread).
   snd_stats stats{};
+  std::atomic<bool> focusLost{false};
   // IOutputDevice::OutputLatencySeconds; CoreDesc's value until System::SetOutputLatency.
   std::atomic<double> outputLatency{0.0};
   BlockProfile profile{};
@@ -920,6 +943,13 @@ inline float RampValue(const TimedRamp& r, ClockSample clock) noexcept {
   if (clock <= r.startClock) return r.from;
   const float t = static_cast<float>(clock - r.startClock) / static_cast<float>(r.durationSamples);
   return r.from + (r.to - r.from) * t;
+}
+
+// Both the first block's tentative value and next block's committed request
+// use the same clock and duration. A rejected parent never changes the base.
+inline TimedRamp SnapshotActionRamp(const TimedRamp& previous, float weight, ClockSample start,
+                                    std::uint32_t frames) noexcept {
+  return TimedRamp{RampValue(previous, start), weight, start, frames, 0u};
 }
 
 // Systems (one per file, design 3.2 order).

@@ -80,6 +80,7 @@ struct TParam {
   snd::Id id = 0;
   std::uint32_t kind = 0;
   float minValue = 0, maxValue = 1, defaultValue = 0, rampRate = 0;
+  std::uint32_t scopeMask = 7;
 };
 struct TCategory {
   snd::Id id = 0;
@@ -290,6 +291,7 @@ struct TestBank {
       const std::uint32_t r = pa.AddRow();
       pa.U32(c::PARM_id, r, p.id);
       pa.U32(c::PARM_kind, r, p.kind);
+      if (p.scopeMask != 7u) pa.U32(c::PARM_scopeMask, r, p.scopeMask);
       pa.F32(c::PARM_minValue, r, p.minValue);
       pa.F32(c::PARM_maxValue, r, p.maxValue);
       pa.F32(c::PARM_defaultValue, r, p.defaultValue);
