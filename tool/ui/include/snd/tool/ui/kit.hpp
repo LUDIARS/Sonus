@@ -23,6 +23,7 @@
 #ifndef SND_TOOL_UI_KIT_HPP
 #define SND_TOOL_UI_KIT_HPP
 
+#include <cstdarg>
 #include <cstdint>
 #include <functional>
 #include <limits>
@@ -122,9 +123,14 @@ int SatInt(double v, int def = 0);
 // A number for display: "-" when not finite (D-189: every shown value is finite).
 std::string ShownNumber(double v, int decimals, const std::string& unit = {});
 
-// A label's text with every non-finite number ("inf", "-nan" as printf writes them) shown as "-".
-// Kit::Label passes every label through it.
-std::string FiniteText(const std::string& text);
+// snprintf for shown text (D-189): every floating conversion (%f %e %g %a) of a non-finite value is
+// written as "-"; the other conversions (names with %s ...) are written as they are. The guard is
+// where numbers become text, never on a whole label: a name "inf" or "nan" is shown as it is.
+#if defined(__GNUC__) && !defined(__MINGW32__)
+__attribute__((format(printf, 3, 4)))
+#endif
+int SnprintfFinite(char* out, std::size_t size, const char* fmt, ...);
+int VsnprintfFinite(char* out, std::size_t size, const char* fmt, std::va_list args);
 
 // Display text of a number with its unit.
 std::string NumberText(double v, int decimals, const std::string& unit);

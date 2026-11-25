@@ -236,7 +236,9 @@ SND_TEST(ToolUiFix2, SpatialValuesStayFinite) {
   SND_CHECK(AllTextFinite(t));
   SND_CHECK(!sp->PlaceEmitter(std::nan(""), 0.0));
   SND_CHECK(!sp->TurnListener(INFINITY));
-  SND_CHECK_EQ(ui::FiniteText("x inf y -nan z"), std::string("x - y - z"));
+  char b[64];
+  ui::SnprintfFinite(b, sizeof b, "%s %.2f %g %s", "inf", static_cast<double>(INFINITY), std::nan(""), "nan");
+  SND_CHECK_EQ(std::string(b), std::string("inf - - nan"));  // names as they are, numbers finite
 }
 
 // Decision 6 (third round): any change that does not come from the screens drops the selections by

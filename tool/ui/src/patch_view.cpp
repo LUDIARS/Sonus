@@ -208,7 +208,7 @@ void Side(Kit& kit, const std::string& g, float x, float y, float w, float h) {
   for (const PatchNode& n : nodes) found = found || n.id == pv->node;
   if (!found) pv->node.clear();
   char b[160];
-  std::snprintf(b, sizeof b, "nodes %u / %u   output %s", static_cast<unsigned>(nodes.size()), pt::kMaxNodes,
+  SnprintfFinite(b, sizeof b, "nodes %u / %u   output %s", static_cast<unsigned>(nodes.size()), pt::kMaxNodes,
                 pe.OutputNode().empty() ? "(none)" : pe.OutputNode().c_str());
   kit.Label("pa.count", b, x, y, w, 20, 0.55f);
   y += 22.0f;

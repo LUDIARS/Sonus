@@ -51,7 +51,7 @@ const char* StructOpName(livelink::StructOp op) {
 
 std::string Hash(std::uint64_t h) {
   char b[24];
-  std::snprintf(b, sizeof b, "%016llx", static_cast<unsigned long long>(h));
+  SnprintfFinite(b, sizeof b, "%016llx", static_cast<unsigned long long>(h));
   return b;
 }
 
@@ -95,7 +95,7 @@ void Matching(Kit& kit, float w, float h) {
   y += kRow + 4.0f;
   const Connection& c = s->connection();
   char b[256];
-  std::snprintf(b, sizeof b, "%s %s  live: %s", LinkStateName(c.state()), c.Target().c_str(),
+  SnprintfFinite(b, sizeof b, "%s %s  live: %s", LinkStateName(c.state()), c.Target().c_str(),
                 live != nullptr ? LivePhaseName(live->phase()) : "(no document)");
   kit.Label("ln.state", b, 0, y, w, 22, 0.6f);
   y += 24.0f;
@@ -125,7 +125,7 @@ void Matching(Kit& kit, float w, float h) {
     kit.Label("ln.check", "not connected", 0, y, w, 20, 0.55f);
     y += 20.0f;
   } else if (chk.valid) {
-    std::snprintf(b, sizeof b, "protocol %u.%u  tool build %s  game build %s%s", chk.peerMajor, chk.peerMinor,
+    SnprintfFinite(b, sizeof b, "protocol %u.%u  tool build %s  game build %s%s", chk.peerMajor, chk.peerMinor,
                   Hash(chk.toolBuildHash).c_str(), Hash(chk.gameBuildHash).c_str(),
                   chk.toolBuildHash == chk.gameBuildHash ? "  (match)" : "  (mismatch)");
     kit.Label("ln.check", b, 0, y, w, 20, 0.55f);
@@ -147,7 +147,7 @@ void Matching(Kit& kit, float w, float h) {
   y += 18.0f;
   for (std::size_t i = 0; i < chk.banks.size() && i < 8u; ++i) {
     const BankMatch& m = chk.banks[i];
-    std::snprintf(b, sizeof b, "%-18s  %-16s  %s %s  %s  %s", m.file.empty() ? Hex32(m.bankId).c_str() : m.file.c_str(),
+    SnprintfFinite(b, sizeof b, "%-18s  %-16s  %s %s  %s  %s", m.file.empty() ? Hex32(m.bankId).c_str() : m.file.c_str(),
                   VerdictName(m.verdict), Hash(m.toolContentHash).c_str(), Hash(m.gameContentHash).c_str(),
                   m.writable ? "yes" : "no ", m.knownBase ? "yes" : "no");
     kit.Label("ln.bank." + std::to_string(i), b, 0, y, w, 18, 0.5f);
@@ -177,7 +177,7 @@ void Matching(Kit& kit, float w, float h) {
   for (std::size_t r = 0; r < reloads.size() && r < 4u; ++r) {
     const ReloadProgress& p = reloads[reloads.size() - 1 - r];
     const float frac = p.finished ? 1.0f : p.phase == livelink::ReloadPhase::Loading ? 0.66f : 0.33f;
-    std::snprintf(b, sizeof b, "%s  %s%s%s", p.bank.c_str(), ReloadPhaseText(p.phase), p.detached ? "  DETACHED in the game" : "",
+    SnprintfFinite(b, sizeof b, "%s  %s%s%s", p.bank.c_str(), ReloadPhaseText(p.phase), p.detached ? "  DETACHED in the game" : "",
                   p.reason.empty() ? "" : ("  " + p.reason).c_str());
     kit.Label("ln.reload." + std::to_string(r), Clip(b, 100), 0, y, w * 0.6f, 20, 0.5f);
     Canvas(kit.doc(), "ln.reload." + std::to_string(r) + ".bar", DrawUsageBar(w * 0.36f, 8, frac, kit.palette(), kit.ctx().dpi),
@@ -196,7 +196,7 @@ void Matching(Kit& kit, float w, float h) {
   kit.Label("ln.reserve.title", "development reserve in use", 0, y, w, 20, 0.6f);
   y += 22.0f;
   for (int i = 0; i < 3; ++i) {
-    std::snprintf(b, sizeof b, "%s %.0f / %.0f", bars[i].name, bars[i].used, bars[i].limit);
+    SnprintfFinite(b, sizeof b, "%s %.0f / %.0f", bars[i].name, bars[i].used, bars[i].limit);
     kit.Label("ln.reserve." + std::to_string(i), b, 0, y, w * 0.35f, 20, 0.5f);
     const float frac = bars[i].limit > 0.0 ? static_cast<float>(bars[i].used / bars[i].limit) : 0.0f;
     Canvas(kit.doc(), "ln.reserve." + std::to_string(i) + ".bar", DrawUsageBar(w * 0.6f, 8, frac, kit.palette(), kit.ctx().dpi),
@@ -206,7 +206,7 @@ void Matching(Kit& kit, float w, float h) {
   const auto& se = live->structEdits();
   for (std::size_t i = 0; i < se.size() && y < h - 50.0f; ++i) {
     const StructEditInfo& e = se[i];
-    std::snprintf(b, sizeof b, "%s %s target %s%s%s", e.bank.c_str(), StructOpName(e.op), Hex32(e.target).c_str(),
+    SnprintfFinite(b, sizeof b, "%s %s target %s%s%s", e.bank.c_str(), StructOpName(e.op), Hex32(e.target).c_str(),
                   e.applied ? "" : "  (not applied)", e.undone ? "  undone" : "");
     kit.Label("ln.struct." + std::to_string(i), b, 0, y, w - 70, 20, 0.5f);
     if (e.applied && !e.undone) {
@@ -216,7 +216,7 @@ void Matching(Kit& kit, float w, float h) {
   }
   // Counters and the manual controls.
   const LiveSyncStats& st = live->stats();
-  std::snprintf(b, sizeof b, "builds %llu  sent %llu  acked %llu  resent %llu  failed %llu  values %llu  chunks %llu  reloads %llu  "
+  SnprintfFinite(b, sizeof b, "builds %llu  sent %llu  acked %llu  resent %llu  failed %llu  values %llu  chunks %llu  reloads %llu  "
                              "queued %u  in flight %u",
                 static_cast<unsigned long long>(st.builds), static_cast<unsigned long long>(st.sent),
                 static_cast<unsigned long long>(st.acked), static_cast<unsigned long long>(st.resent),
@@ -241,7 +241,7 @@ void Items(Kit& kit, float w, float h) {
   char b[256];
   for (std::uint32_t i = first; i < items.size() && i < first + per; ++i) {
     const LiveItem& it = items[i];
-    std::snprintf(b, sizeof b, "%-10s %-20s %-28s %-12s %-12s %s", it.kind.c_str(), it.name.c_str(), it.member.c_str(),
+    SnprintfFinite(b, sizeof b, "%-10s %-20s %-28s %-12s %-12s %s", it.kind.c_str(), it.name.c_str(), it.member.c_str(),
                   LiveRouteName(it.route), LiveStateName(it.state), it.reason.c_str());
     kit.Label("ln.item." + std::to_string(i - first), Clip(b, 160), 0, y, w - 50, 20, 0.5f);
     if (!it.guid.empty() && app->document() != nullptr && app->document()->Find(it.guid) != nullptr) {
