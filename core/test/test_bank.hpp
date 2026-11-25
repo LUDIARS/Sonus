@@ -5,6 +5,7 @@
 #ifndef SND_CORE_TEST_TEST_BANK_HPP
 #define SND_CORE_TEST_TEST_BANK_HPP
 
+#include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <vector>
@@ -25,6 +26,7 @@ struct TClip {
   float volumeDb = 0, pitchCents = 0, randVolumeDb = 0, randPitchCents = 0, randPan = 0, randStartMs = 0;
   float randFilterHz = 0, layerMin = 0, layerMax = 0, fadeInMs = 0, weight = 1, startMs = 0;
   std::uint32_t switchValue = 0, loopCount = 1;
+  float fadeOutMs = 0;  // stage 3 (group 4)
 };
 struct TAction {
   float timeMs = 0;
@@ -45,6 +47,7 @@ struct TEvent {
   std::uint32_t curveVolume = kNone, curveLowpass = kNone, curveSpread = kNone, curveBlend = kNone;
   std::vector<std::uint32_t> curves;  // CURV rows (must be contiguous)
   std::vector<TTrack> tracks;
+  std::uint32_t virtualReturn = 0;  // stage 3 (group 4): EVNT.virtualReturn
 };
 struct TBus {
   snd::Id id = 0;
@@ -63,6 +66,7 @@ struct TAsset {
   std::uint32_t channels = 1, rate = 48000;
   std::vector<float> data;  // interleaved PCMF
   std::uint64_t loopStart = 0, loopEnd = 0;
+  std::uint32_t flags = 0;  // stage 3 (group 4): ASST.flags
 };
 struct TSynth {
   std::uint32_t kind = 0, waveform = 0, channels = 1;
@@ -144,6 +148,7 @@ struct TestBank {
       ev.F32(c::EVNT_coneOuterDb, r, e.coneOuterDb);
       ev.F32(c::EVNT_fadeOutMs, r, e.fadeOutMs);
       ev.F32(c::EVNT_comboWindowMs, r, e.comboWindowMs);
+      if (e.virtualReturn != 0u) ev.U32(c::EVNT_virtualReturn, r, e.virtualReturn);
       if (!e.curves.empty()) {
         ev.U32(c::EVNT_curveFirst, r, e.curves.front());
         ev.U32(c::EVNT_curveCount, r, static_cast<std::uint32_t>(e.curves.size()));
@@ -184,6 +189,7 @@ struct TestBank {
           cl.F32(c::CLIP_layerMax, cr, k.layerMax);
           cl.F32(c::CLIP_fadeInMs, cr, k.fadeInMs);
           cl.U32(c::CLIP_loopCount, cr, k.loopCount);
+          if (k.fadeOutMs != 0.0f) cl.F32(c::CLIP_fadeOutMs, cr, k.fadeOutMs);
         }
       }
     }
@@ -250,6 +256,7 @@ struct TestBank {
       as.U64(c::ASST_dataBytes, r, bytes);
       as.U64(c::ASST_loopStart, r, a.loopStart);
       as.U64(c::ASST_loopEnd, r, a.loopEnd);
+      if (a.flags != 0u) as.U32(c::ASST_flags, r, a.flags);
     }
     w.AddTable(as);
     if (!wave.empty()) w.AddBlob(bf::chunk::WAVE, wave);
