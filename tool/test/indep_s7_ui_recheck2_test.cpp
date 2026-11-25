@@ -539,8 +539,10 @@ SND_TEST(IndepS7UiRecheck2, WriteBackIsMatchedByObject) {
 
 // ============================================================================================
 // M6: no "inf" / "nan" in any text after extreme values are typed into every number field.
+// Decision: "表示する値は必ず有限". Found: the Params screen takes a parameter's max / default of
+// +-1e308 (finite doubles); the mixer's parameter knob shows it as a float: "Speed inf" / "Speed -inf".
 // ============================================================================================
-SND_TEST(IndepS7UiRecheck2, NoNonFiniteTextAfterExtremeValues) {
+SND_TEST(IndepS7UiRecheck2, Defect_NonFiniteTextAfterExtremeValues) {
   std::string bad;
   for (const View& v : kViews) {
     for (const char* text : {"1e308", "-1e308", "1e-308", "1e30", "-1e30"}) {
