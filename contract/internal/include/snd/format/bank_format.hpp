@@ -28,7 +28,7 @@ namespace snd::bank_format {
 // ---------------------------------------------------------------------------
 inline constexpr std::uint32_t kMagic = Fourcc('S', 'N', 'D', 'B');
 inline constexpr std::uint16_t kFormatMajor = 2;  // incompatible change (2.0: header checksum over [0,128))
-inline constexpr std::uint16_t kFormatMinor = 0;  // additive change (new chunk / column / enum value)
+inline constexpr std::uint16_t kFormatMinor = 1;  // additive change (new chunk / column / enum value); 2.1: SYNP 9-16, grain CurveTargets, AddLinear
 inline constexpr std::uint8_t kLittleEndian = 1;
 inline constexpr std::uint8_t kAlignLog2 = 6;  // 64 bytes
 inline constexpr std::uint32_t kAlignment = 1u << kAlignLog2;
