@@ -26,6 +26,7 @@ struct History {
   T* items = nullptr;
   std::uint32_t capacity = 0;
   std::uint64_t written = 0;
+  T old{};  // the entry the last Push overwrote
   bool Init(IAllocator& a, std::uint32_t cap) noexcept {
     capacity = cap < 1u ? 1u : cap;
     items = static_cast<T*>(a.Allocate(sizeof(T) * capacity, 64, MemTag::LiveLink));
@@ -35,7 +36,15 @@ struct History {
     a.Free(items, MemTag::LiveLink);
     items = nullptr;
   }
-  void Push(const T& v) noexcept { items[written++ % capacity] = v; }
+  // Returns the entry it overwrote (nullptr while not full); valid until the next Push.
+  const T* Push(const T& v) noexcept {
+    T* slot = &items[written % capacity];
+    const bool full = written >= capacity;
+    if (full) old = *slot;
+    *slot = v;
+    ++written;
+    return full ? &old : nullptr;
+  }
   std::uint32_t Size() const noexcept {
     return written < capacity ? static_cast<std::uint32_t>(written) : capacity;
   }
@@ -143,11 +152,13 @@ struct Client::Impl final : FrameReader::Handler {
     bankList = static_cast<BankEntry*>(alloc->Allocate(sizeof(BankEntry) * (desc.maxBanks + 1u), 64, MemTag::LiveLink));
     streams = static_cast<StreamInfo*>(alloc->Allocate(sizeof(StreamInfo) * (desc.maxStreams + 1u), 64, MemTag::LiveLink));
     return recvBuf != nullptr && voices != nullptr && lastMeters != nullptr && record != nullptr &&
-           bankList != nullptr && streams != nullptr && cells.Init(*alloc, 256) && reloads.Init(*alloc, 64) &&
-           details.Init(*alloc, secs * 120u) &&
-           acks.Init(*alloc, 1024) && errors.Init(*alloc, 256) && timings.Init(*alloc, secs * 120u) &&
-           meters.Init(*alloc, secs * 60u * (desc.maxMeterBuses < 1u ? 1u : desc.maxMeterBuses)) &&
-           log.Init(*alloc, secs * 2000u) && stalls.Init(*alloc, 1024) && lods.Init(*alloc, 1024) &&
+           bankList != nullptr && streams != nullptr && cells.Init(*alloc, kClientCellsKept) &&
+           reloads.Init(*alloc, kClientReloadStatusKept) && details.Init(*alloc, secs * kClientTimingsPerSecond) &&
+           acks.Init(*alloc, kClientAcksKept) && errors.Init(*alloc, kClientErrorsKept) &&
+           timings.Init(*alloc, secs * kClientTimingsPerSecond) &&
+           meters.Init(*alloc, secs * kClientMeterSnapshotsPerSecond * (desc.maxMeterBuses < 1u ? 1u : desc.maxMeterBuses)) &&
+           log.Init(*alloc, secs * kClientLogEntriesPerSecond) && stalls.Init(*alloc, kClientStallsKept) &&
+           lods.Init(*alloc, kClientLodsKept) &&
            reader.Init(*alloc, desc.maxReceivePayloadBytes) && sender.Init(*alloc, 64u << 10, desc.sendBufferBytes);
   }
 
@@ -268,14 +279,14 @@ struct Client::Impl final : FrameReader::Handler {
       }
       case MessageType::Ack: {
         const Ack a = ReadFixed<Ack>(p, n);
-        acks.Push(AckRec{a.seq, a.result, 1u});
+        if (const AckRec* o = acks.Push(AckRec{a.seq, a.result, 1u}); o != nullptr && o->used != 0u) ++stats.acksLost;
         ++seqs.acks;
         return;
       }
       case MessageType::Error: {
         Error e = ReadFixed<Error>(p, n);
         e.message[sizeof(e.message) - 1] = '\0';
-        errors.Push(e);
+        if (errors.Push(e) != nullptr) ++stats.errorsLost;
         ++stats.errorsReceived;
         ++seqs.errors;
         return;
@@ -289,7 +300,7 @@ struct Client::Impl final : FrameReader::Handler {
         ++seqs.voiceLists;
         return;
       case MessageType::BlockTiming:
-        timings.Push(TimingSample{now, ReadFixed<BlockTiming>(p, n)});
+        if (timings.Push(TimingSample{now, ReadFixed<BlockTiming>(p, n)}) != nullptr) ++stats.timingsLost;
         seqs.timings = timings.written;
         return;
       case MessageType::MemoryUsage:
@@ -298,15 +309,17 @@ struct Client::Impl final : FrameReader::Handler {
         ++seqs.memory;
         return;
       case MessageType::StreamStall:
-        stalls.Push(StallSample{now, ReadFixed<StreamStall>(p, n)});
+        if (stalls.Push(StallSample{now, ReadFixed<StreamStall>(p, n)}) != nullptr) ++stats.stallsLost;
         seqs.stalls = stalls.written;
         return;
       case MessageType::LodChange:
-        lods.Push(LodSample{now, ReadFixed<LodChange>(p, n)});
+        if (lods.Push(LodSample{now, ReadFixed<LodChange>(p, n)}) != nullptr) ++stats.lodsLost;
         seqs.lods = lods.written;
         return;
       case MessageType::EventLog:
-        List<LogEntry>(p, n, 1u << 20, [&](const LogEntry& e, std::uint32_t, std::uint32_t) { log.Push(LogSample{now, e}); });
+        List<LogEntry>(p, n, 1u << 20, [&](const LogEntry& e, std::uint32_t, std::uint32_t) {
+          if (log.Push(LogSample{now, e}) != nullptr) ++stats.eventLogLost;
+        });
         seqs.eventLog = log.written;
         return;
       case MessageType::BusMeters:
@@ -315,7 +328,7 @@ struct Client::Impl final : FrameReader::Handler {
         List<MeterEntry>(p, n, 1u << 16, [&](const MeterEntry& m, std::uint32_t, std::uint32_t) {
           if (meterCount < d.maxMeterBuses) {
             lastMeters[meterCount++] = m;
-            meters.Push(MeterSample{now, m});
+            if (meters.Push(MeterSample{now, m}) != nullptr) ++stats.meterEntriesLost;
           }
         });
         seqs.meterEntries = meters.written;
@@ -323,7 +336,9 @@ struct Client::Impl final : FrameReader::Handler {
         return;
       // 1.1
       case MessageType::CellValue:
-        cells.Push(CellRec{ReadFixed<CellValue>(p, n), 1u, 0u});
+        if (const CellRec* o = cells.Push(CellRec{ReadFixed<CellValue>(p, n), 1u, 0u}); o != nullptr && o->used != 0u) {
+          ++stats.cellsLost;
+        }
         ++seqs.cells;
         return;
       case MessageType::BankList:
@@ -343,11 +358,11 @@ struct Client::Impl final : FrameReader::Handler {
         ++seqs.streamLists;
         return;
       case MessageType::BlockDetail:
-        details.Push(BlockDetailSample{now, ReadFixed<BlockDetail>(p, n)});
+        if (details.Push(BlockDetailSample{now, ReadFixed<BlockDetail>(p, n)}) != nullptr) ++stats.detailsLost;
         seqs.details = details.written;
         return;
       case MessageType::ReloadStatus:
-        reloads.Push(ReadFixed<ReloadStatus>(p, n));
+        if (reloads.Push(ReadFixed<ReloadStatus>(p, n)) != nullptr) ++stats.reloadStatusLost;
         ++seqs.reloadStatus;
         return;
       case MessageType::RecordData: {

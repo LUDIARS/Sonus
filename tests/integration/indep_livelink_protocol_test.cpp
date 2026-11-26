@@ -243,7 +243,7 @@ SND_TEST(IndepLivelinkProtocol, HandshakeOrderAndVersions) {
     const auto hr = ll::ReadFixed<ll::HelloReply>(r->payload.data(), static_cast<std::uint32_t>(r->payload.size()));
     SND_CHECK_EQ(hr.status, static_cast<std::uint32_t>(ll::HelloStatus::Accepted));
     SND_CHECK_EQ(hr.protocolMajor, 1u);
-    SND_CHECK_EQ(hr.protocolMinor, 0u);
+    SND_CHECK_EQ(hr.protocolMinor, ll::kProtocolMinor);  // D-170（プロトコル 1.1）: ゲームは自分の minor（1）を名乗る
     SND_CHECK_EQ(hr.blockSize, g.f.cfg_.block_size);
     SND_CHECK_EQ(hr.sampleRate, g.f.cfg_.sample_rate);
     SND_CHECK_EQ(hr.runtimeBuildHash, lltest::kProjectHash);

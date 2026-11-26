@@ -12,6 +12,7 @@
 #define SND_TOOL_SESSION_HPP
 
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -19,14 +20,22 @@
 #include "snd/tool/connection.hpp"
 #include "snd/tool/mixer.hpp"
 #include "snd/tool/profiler.hpp"
+#include "snd/tool/profiler_streams.hpp"
 #include "snd/tool/project.hpp"
 
 namespace snd::tool {
 
+// Group P (live_sync.hpp, which needs the build tool's headers: a host that attaches a document
+// includes it; this header stays usable with Sonus::tool_core alone, D-101).
+class LiveSync;
+struct LiveSyncOptions;
+class ProjectDocument;
+
 class Session {
  public:
-  Session() = default;
-  explicit Session(const Profiler::Desc& profiler) : profiler_(profiler) {}
+  Session();
+  explicit Session(const Profiler::Desc& profiler);
+  ~Session();
   Session(const Session&) = delete;
   Session& operator=(const Session&) = delete;
 
@@ -65,6 +74,29 @@ class Session {
   bool SaveRecording(const std::string& path);
   bool LoadRecording(const std::string& path);
 
+  // 1.1 (group P): item revert. Revert(item) / RevertOnly(target) on the mixer, then the cells
+  // the item is sent through go back with RevertValue (a 1.0 game: SetValue of the bank value,
+  // as before). One undo step on the mixer; Undo sends the value again.
+  bool RevertItem(const OverrideItem& item);
+  bool RevertOnly(const Target& target);
+  // Reads every mixer cell back from the game (CellSync::RequestReadBack; 1.1 only).
+  bool ReadBack();
+
+  // --- group P ------------------------------------------------------------------------------
+  // Live reflection of an editable document (live_sync.hpp): Connect prepares the connection
+  // with it (Hello hash, deferred decision) and Tick ticks it with the connection's events. The
+  // mixer's monitoring values win over the document for the cells the mixer overrides (unless
+  // options.heldByMixer is given). nullptr detaches. The document must outlive the Session.
+  void AttachDocument(const ProjectDocument* doc);
+  void AttachDocument(const ProjectDocument* doc, LiveSyncOptions options);
+  LiveSync* live() { return live_.get(); }
+  const LiveSync* live() const { return live_.get(); }
+  // The detail profiler (profiler_streams.hpp), polled by Tick once enabled. Its subscription
+  // keeps the stage-2 views (voices, meters, timing, memory, event log) on.
+  void EnableProfilerStreams(std::uint32_t views = kViewAll);
+  ProfilerStreams& streams() { return streams_; }
+  const ProfilerStreams& streams() const { return streams_; }
+
   // Status messages for the UI (newest last, at most 64).
   const std::vector<std::string>& messages() const { return messages_; }
   void Message(std::string text);
@@ -79,6 +111,10 @@ class Session {
   std::vector<std::string> messages_;
   std::uint64_t refusedSeen_ = 0;
   std::uint64_t ticks_ = 0;
+  std::unique_ptr<LiveSync> live_;
+  ProfilerStreams streams_;
+  bool streamsOn_ = false;
+  std::size_t problemsSeen_ = 0;
 };
 
 }  // namespace snd::tool

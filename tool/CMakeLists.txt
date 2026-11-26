@@ -20,12 +20,31 @@ snd_add_module(tool
     src/profiler.cpp
     src/recording_file.cpp
     src/names.cpp
-    src/session.cpp)
+    src/session.cpp
+    src/document.cpp
+    src/doc_build.cpp
+    src/event_editor.cpp
+    src/mixer_editor.cpp
+    src/curve_editor.cpp
+    src/spatial_preview.cpp
+    src/music_editor.cpp
+    src/material_editor.cpp
+    src/patch_editor.cpp
+    src/profiler_streams.cpp
+    src/recording_report.cpp
+    src/preview.cpp
+    src/live_sync.cpp)
 # The public headers use C++20 (defaulted operator== in edit_history / project /
 # recording_file.hpp): a C++17 host gets cxx_std_20 for the files that include them.
 target_compile_features(sonus_tool INTERFACE cxx_std_20)
 add_library(sonus::tool_core ALIAS sonus_tool)
 add_library(Sonus::tool_core ALIAS sonus_tool)
+# recording_report.hpp names livelink types (ReplayInfo, ReplayDecision): a host that includes it
+# needs the live link's headers (contract types only; nothing to link).
+target_include_directories(sonus_tool INTERFACE ${PROJECT_SOURCE_DIR}/livelink/include)
+
+# Group P: the preview engine and the replay host (a runtime inside the tool, no Tela).
+add_subdirectory(preview)
 
 if(NOT SND_BUILD_TOOL)
   return()

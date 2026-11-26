@@ -1,6 +1,7 @@
 #include "project.hpp"
 
 #include "detail/file_io.hpp"
+#include "snd/buildtool/schema.hpp"
 
 #include <algorithm>
 #include <cstdio>
@@ -14,7 +15,7 @@ namespace {
 
 const char* const kKindNames[] = {"project", "bank",  "bus",     "category", "parameter",
                                   "snapshot", "voiceLimitGroup", "ducking", "asset", "event",
-                                  "segment",  "playlist", "materialTable"};
+                                  "segment",  "playlist", "materialTable", "patch"};
 static_assert(sizeof(kKindNames) / sizeof(kKindNames[0]) == static_cast<std::size_t>(Kind::Count));
 
 // Members each kind understands, at every level (project-format.md §1:
@@ -63,7 +64,7 @@ SND_FIELDS(kRandomF, {"volumeDb", nullptr}, {"pitchCents", nullptr}, {"pan", nul
            {"filterHz", nullptr})
 constexpr Schema kRandom{kRandomF, false, nullptr};
 SND_FIELDS(kSynthF, {"kind", nullptr}, {"waveform", nullptr}, {"frequencyHz", nullptr}, {"duty", nullptr},
-           {"noiseColor", nullptr}, {"asset", nullptr}, {"channels", nullptr})
+           {"noiseColor", nullptr}, {"asset", nullptr}, {"channels", nullptr}, {"patch", nullptr})
 constexpr Schema kSynth{kSynthF, false, nullptr};
 SND_FIELDS(kClipF, {"asset", nullptr}, {"event", nullptr}, {"synth", &kSynth}, {"startMs", nullptr}, {"weight", nullptr},
            {"volumeDb", nullptr}, {"pitchCents", nullptr}, {"random", &kRandom}, {"switchValue", nullptr},
@@ -110,6 +111,11 @@ SND_FIELDS(kPhysCurveF, {"impulseToVelocity", nullptr}, {"massToPitchCents", nul
 constexpr Schema kPhysCurve{kPhysCurveF, false, nullptr};
 constexpr Schema kPerMaterialCurve{kNoFields, true, &kPhysCurve};
 
+SND_FIELDS(kPatchNodeF, {"id", nullptr}, {"kind", nullptr}, {"params", &kFreeScalars}, {"position", nullptr})
+constexpr Schema kPatchNode{kPatchNodeF, false, nullptr};
+SND_FIELDS(kPatchConnF, {"from", nullptr}, {"to", nullptr}, {"input", nullptr})
+constexpr Schema kPatchConn{kPatchConnF, false, nullptr};
+
 #define SND_COMMON \
   {"type", nullptr}, {"guid", nullptr}, {"name", nullptr}, {"aliases", nullptr}, {"bank", nullptr}, {"notes", nullptr}
 SND_FIELDS(kProjectF, SND_COMMON, {"formatVersion", nullptr}, {"languages", nullptr}, {"platforms", &kPlatforms})
@@ -138,6 +144,7 @@ SND_FIELDS(kSegmentF, SND_COMMON, {"asset", nullptr}, {"bars", nullptr}, {"tempo
 SND_FIELDS(kPlaylistF, SND_COMMON, {"mode", nullptr}, {"loopCount", nullptr}, {"entries", &kEntry})
 SND_FIELDS(kMaterialF, SND_COMMON, {"materials", nullptr}, {"single", &kPerMaterialContact}, {"pairs", &kPair},
            {"footsteps", &kFreeScalars}, {"defaults", &kContact}, {"curves", &kPerMaterialCurve})
+SND_FIELDS(kPatchF, SND_COMMON, {"nodes", &kPatchNode}, {"connections", &kPatchConn}, {"output", nullptr})
 #undef SND_COMMON
 #undef SND_FIELDS
 
@@ -146,7 +153,7 @@ constexpr Schema kKindSchemas[] = {
     {kCategoryF, false, nullptr}, {kParameterF, false, nullptr}, {kSnapshotF, false, nullptr},
     {kGroupF, false, nullptr},    {kDuckingF, false, nullptr},   {kAssetF, false, nullptr},
     {kEventF, false, nullptr},    {kSegmentF, false, nullptr},   {kPlaylistF, false, nullptr},
-    {kMaterialF, false, nullptr},
+    {kMaterialF, false, nullptr}, {kPatchF, false, nullptr},
 };
 static_assert(sizeof(kKindSchemas) / sizeof(kKindSchemas[0]) == static_cast<std::size_t>(Kind::Count));
 
@@ -176,13 +183,6 @@ void CheckMembers(const std::string& file, const json::Value& v, const Schema* s
   }
 }
 
-bool ReadFile(const fs::path& p, std::string* out) {
-  std::vector<std::uint8_t> b;
-  if (!ReadFileBytes(p, &b)) return false;
-  out->assign(b.begin(), b.end());
-  return true;
-}
-
 int HexDigit(char c) {
   if (c >= '0' && c <= '9') return c - '0';
   if (c >= 'a' && c <= 'f') return c - 'a' + 10;
@@ -194,7 +194,61 @@ std::string Describe(const json::Value& v) {
   return v.IsString() ? "'" + v.text + "'" : std::string("(non-string)");
 }
 
+// Members whose value is an array (of objects or scalars) in the schema.
+bool IsArrayKey(const std::string& k) {
+  static const char* const kArrays[] = {"tracks", "clips", "actions", "curves", "sends", "effects", "values", "states",
+                                        "transitions", "stingers", "tempo", "markers", "stems", "entries", "pairs",
+                                        "nodes", "connections", "aliases", "dependsOn", "languagesList", "params",
+                                        "points", "layer", "materials", "scope", "position"};
+  for (const char* a : kArrays) {
+    if (k == a) return true;
+  }
+  return false;
+}
+
+void Walk(const Schema* s, const std::string& prefix, bool topLevel, std::vector<std::string>* out) {
+  if (s == nullptr) return;
+  if (s->freeKeys) {
+    const std::string p = prefix.empty() ? "*" : prefix + ".*";
+    out->push_back(p);
+    Walk(s->freeChild, p, false, out);
+    return;
+  }
+  for (const Field* f = s->fields; f->key != nullptr; ++f) {
+    std::string key = f->key;
+    std::string p = prefix.empty() ? key : prefix + "." + key;
+    // "languages" is an array of names in project, a free-key object in asset; "params" an
+    // array in effects, an object in patch nodes: decided by the child schema.
+    const bool array = IsArrayKey(key) && !(key == "params" && f->child != nullptr) && !(key == "languages" && f->child != nullptr);
+    if (key == "languages" && topLevel && f->child == nullptr) {
+      out->push_back(p);
+      out->push_back(p + "[]");
+      continue;
+    }
+    out->push_back(p);
+    if (array) {
+      p += "[]";
+      out->push_back(p);
+    }
+    Walk(f->child, p, false, out);
+  }
+}
+
 }  // namespace
+
+std::vector<std::string> SchemaKindList() {
+  std::vector<std::string> out;
+  for (int i = 0; i < static_cast<int>(Kind::Count); ++i) out.push_back(kKindNames[i]);
+  return out;
+}
+
+std::vector<std::string> SchemaMemberList(const std::string& kind) {
+  std::vector<std::string> out;
+  for (int i = 0; i < static_cast<int>(Kind::Count); ++i) {
+    if (kind == kKindNames[i]) Walk(&kKindSchemas[i], std::string(), true, &out);
+  }
+  return out;
+}
 
 const char* KindName(Kind k) { return kKindNames[static_cast<int>(k)]; }
 
@@ -266,15 +320,41 @@ bool Project::Load(const std::string& root, const std::vector<std::string>& skip
     }
     if (p.extension() == ".json") files.push_back(fs::relative(p, root_, ec).generic_string());
   }
+  source_ = nullptr;
+  return LoadFiles(files, diag);
+}
+
+bool Project::Load(const ProjectSource& source, const std::string& name, Diagnostics& diag) {
+  root_ = name;
+  source_ = &source;
+  std::vector<std::string> files;
+  source.ListObjectFiles(&files);
+  std::vector<std::string> json;
+  for (const std::string& f : files) {
+    if (f.size() > 5 && f.compare(f.size() - 5, 5, ".json") == 0) json.push_back(f);
+  }
+  return LoadFiles(json, diag);
+}
+
+bool Project::ReadProjectFile(const std::string& rel, std::vector<std::uint8_t>* out) const {
+  if (source_ != nullptr) return source_->ReadFile(rel, out);
+  return ReadFileBytes(fs::path(root_) / rel, out);
+}
+
+bool Project::LoadFiles(const std::vector<std::string>& unsorted, Diagnostics& diag) {
+  std::vector<std::string> files = unsorted;
   std::sort(files.begin(), files.end());
+  files.erase(std::unique(files.begin(), files.end()), files.end());
   objects_.clear();
   objects_.reserve(files.size());
   for (const std::string& rel : files) {
     std::string text;
-    if (!ReadFile(fs::path(root_) / rel, &text)) {
+    std::vector<std::uint8_t> bytes;
+    if (!ReadProjectFile(rel, &bytes)) {
       diag.Error(rel, 0, 0, "cannot read file");
       continue;
     }
+    text.assign(bytes.begin(), bytes.end());
     Object o;
     o.file = rel;
     json::ParseError pe;
@@ -478,3 +558,8 @@ std::uint32_t Project::Enum(const Object& o, const json::Value& parent, const ch
 }
 
 }  // namespace snd::buildtool::detail
+
+namespace snd::buildtool {
+std::vector<std::string> SchemaKinds() { return detail::SchemaKindList(); }
+std::vector<std::string> SchemaMembers(const std::string& kind) { return detail::SchemaMemberList(kind); }
+}  // namespace snd::buildtool

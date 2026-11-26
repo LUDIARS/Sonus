@@ -185,6 +185,10 @@ SND_TEST(ToolLiveMixer, StateSurvivesDisconnectAndReconnect) {
   t.s.mixer().Set(Target{Control::BusMute, Bus(t.tool.project, "Music"), 0, 0}, 1.0f);
   t.s.Tick(tooltest::Now());
   SND_CHECK_EQ(t.s.sync().Count(CellState::Unsent), 2u);
+  // The game notices the disconnect on its live link thread, which then records the revert:
+  // wait for that condition (bounded), not for a number of blocks. On a loaded machine (one
+  // core, parallel ctest) 16 blocks render before the live link thread runs at all.
+  t.rig.Run(t.s, [&] { return !t.rig.f.server->Connected() && std::fabs(t.Rel() - 1.0) <= 1e-5; });
   t.rig.Settle(t.s, 16);
   SND_CHECK_NEAR(t.Rel(), 1.0, 1e-5);  // reverted by the game while the tool is away
   SND_REQUIRE_EQ(t.s.Connect(t.rig.Conn(t.tool.project.buildHash())), SND_OK);

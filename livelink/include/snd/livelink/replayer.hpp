@@ -42,7 +42,17 @@
 // stalls (core has no way to force them, request C-05); it reports them
 // (Info().conditions: kReplayLodRecorded / kReplayStallRecorded) and counts LOD changes
 // and stalls of the replaying System itself (kReplayLodInReplay / kReplayStallInReplay).
-// BitExactExpected() is true when none of the conditions that break 2.5 holds.
+// D-175, two predicates:
+//   BitExactExpected()       two replays of this recording are expected to render the same
+//                            bits (the conditions of 2.5 hold: none of kReplayBreaksBitExact).
+//   ReproducesRecordedRun()  in addition, a replay is expected to render what the recorded
+//                            run rendered: the recording starts from creation, or mid-run with
+//                            its whole starting state in it (lostState 0: the override cells,
+//                            the live overrides, and no playback alive in core at the start).
+//                            False for a 1.0 recording (no Begin). Core state that is not
+//                            detectable at the start (parameter values, emitters, transports,
+//                            listeners set before it; C-04) is assumed at its defaults.
+//   kReplayMidRun is information only (in conditions).
 //
 // Comparing replays: the Replayer logs the decisions it can see (decision log:
 // Play / LiveAudition / Stop commands applied, playback ends with their reason,
@@ -103,10 +113,11 @@ enum ReplayCondition : std::uint32_t {
 };
 // Conditions under which 2.5 promises no bit identity (and, for the first ones, no
 // identical decisions either).
-inline constexpr std::uint32_t kReplayBreaksBitExact = kReplayLodRecorded | kReplayStallRecorded | kReplayStateLost |
-                                                       kReplaySkipped | kReplayStructEdits | kReplayBankChanges |
-                                                       kReplayLodInReplay | kReplayStallInReplay |
-                                                       kReplayStartStateFailed;
+inline constexpr std::uint32_t kReplayBreaksBitExact = kReplayLodRecorded | kReplayStallRecorded | kReplaySkipped |
+                                                       kReplayStructEdits | kReplayBankChanges | kReplayLodInReplay |
+                                                       kReplayStallInReplay | kReplayStartStateFailed;
+// D-175: conditions under which a replay does not reproduce the recorded run.
+inline constexpr std::uint32_t kReplayBreaksRecordedRun = kReplayBreaksBitExact | kReplayStateLost | kReplayNoBegin;
 
 // 1.1: one entry of the decision log (block = replay-relative block number).
 struct ReplayDecision {
@@ -176,6 +187,8 @@ class Replayer {
   void Bind(core::System* sys) noexcept { system_.store(sys, std::memory_order_release); }
   // Arms the replay: the next block of the bound System is the first recorded block.
   void Start() noexcept { armed_.store(1u, std::memory_order_release); }
+  // D-175: true once the last recorded block was rendered, i.e. right after the Blocks()-th
+  // block (lead blocks included) after Start returned from RenderBlock.
   bool Finished() const noexcept { return finished_.load(std::memory_order_acquire) != 0u; }
   // Blocks the replay spans (last - first + 1, plus the lead blocks); render at least this
   // many after Start.
@@ -183,8 +196,10 @@ class Replayer {
     return (info_.arenas == 0u ? 0u : info_.lastBlock - info_.firstBlock + 1u) + info_.leadBlocks;
   }
   ReplayInfo Info() const noexcept;
-  // 1.1: the 2.5 conditions hold (no kReplayBreaksBitExact condition, so far).
+  // D-175 (see the top of this file): replays agree bit for bit / a replay reproduces the
+  // recorded run. "So far": the conditions seen during the replay (LOD, stalls) count too.
   bool BitExactExpected() const noexcept { return (Info().conditions & kReplayBreaksBitExact) == 0u; }
+  bool ReproducesRecordedRun() const noexcept { return (Info().conditions & kReplayBreaksRecordedRun) == 0u; }
   // 1.1: decision log (oldest first). Read it after the replay (Finished) or from the
   // thread that renders; returns the number copied.
   std::uint32_t CopyDecisions(ReplayDecision* out, std::uint32_t capacity) const noexcept;
@@ -217,6 +232,7 @@ class Replayer {
   void Log(std::uint32_t kind, std::uint32_t id, std::uint32_t slot, std::uint32_t detail) noexcept;
   void ApplyStartState(core::System& sys) noexcept;
   void LogArena(const Arena& a) noexcept;
+  void LogVoices(core::System& sys) noexcept;
 
   IAllocator* alloc_ = nullptr;
   snd_config config_{};
@@ -247,6 +263,7 @@ class Replayer {
   std::uint32_t voiceCap_ = 0;
   std::uint32_t lastVoiceDigest_ = 0, lastVoiceCount_ = 0xFFFFFFFFu;
   std::uint64_t rel_ = 0;  // audio thread: replay-relative block being rendered
+  std::uint64_t block_ = 0;  // audio thread: block of the last Next
   ReplayInfo info_{};
   std::atomic<core::System*> system_{nullptr};
   std::atomic<std::uint32_t> armed_{0};

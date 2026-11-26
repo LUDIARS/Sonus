@@ -71,6 +71,25 @@
     再生の相対ブロック付きで残す。範囲は記録の最初から最後のブロックまで。Clip と遷移は C-07。
 14. **Client の更新番号**: 流れごとに受け取った数。履歴の流れは項目の番号で `Copy*Since` し、取りこぼしは `first - after - 1`。
 
+### 差し戻し（受け入れ側の決定 D-170〜D-175）で決まったことと変えた点
+
+| D | 採った案 | 差し戻しで変えた点（コミット） |
+| --- | --- | --- |
+| D-170 プロトコル 1.1 | 1・2・14 | Client の保持数を `client.hpp` に定数で書き（Ack 1024、CellValue 256、Error 256、ReloadStatus 64、Stall / LOD 1024、履歴は秒あたりの数）、押し出した数を `ClientStats::*Lost` に流れごとに出す（d8e5291）。同じ `LiveRuntime` に 2 つ目の Server は Start できない（SND_ERR_LIMIT_REACHED。SND_ERR_INVALID_STATE は無いので「空きが無い」の LIMIT_REACHED にした。先の Server を Stop / 破棄すれば Start できる）（6a4377e） |
+| D-171 Revert・読み返し・全停止 | 3・4 | 文書だけ: 存在しない Event の試聴の Ack は記録の結果（OK）で枠は戻る（§8.6）、SetValue は全部か無しか（リリースバンクが同じオブジェクトを持つと UNSUPPORTED、§5）（201b601） |
+| D-172 構造の変更と予備容量 | 5 | 戻しの記録の枠を受け付けで確保（`LiveRuntime::ReserveStructLog`）、入らない編集は LIMIT_REACHED で予備容量も編集器も使わない。枠は適用されなかった・打ち消された・戻した分をオーディオスレッドが返す。`RuntimeDrops::structLog` は「起きたら不具合」の数に。ライブで足したバスを外すと、その上のライブのエフェクトとそのバスから出るライブのセンドも一緒に記録から外して費用を全部返し、Undo を渡さない（6a4377e）。Remove は対応する Add の費用を全部返すと §8.4 に明記（201b601） |
+| D-173 差し替えとホットリロード | 6・7 | ReloadBank で読んだバンクの bankId か言語が違えば、それを外して Failed（SND_ERR_INVALID_ARGUMENT、Error の文あり）。要求したバンクは外れたまま。外す前のヘッダの確認はしていない（ライブリンクのスレッドがゲームのファイルシステムを読むと IO スケジューラと IoToken を取り合うため。§8.5 に理由）（10d36af）。列 0 本の ReplaceChunk を表に（201b601） |
+| D-174 プロファイラと budget | 8 | 変更なし |
+| D-175 記録 1.1 と再生 | 9〜13 | 述語を 2 つに: `BitExactExpected()`（再生どうし、`kReplayStateLost` は外した）と `ReproducesRecordedRun()`（`kReplayBreaksRecordedRun` = それ ＋ StateLost ＋ NoBegin）。開始時に core で生きていた再生の数を `lostState` に足す（見分けられない core の状態は既定値と見なす、とヘッダに）。`Finished()` は最後の記録ブロックを描いた時点（ブロックの終わりのフック）（483e6e4） |
+
+差し戻し 2 回目（D-172・D-173 への追記）:
+- D-173: 失敗したリロードが外すのは、そのリロードが新しく作った登録だけ。`LoadBankAsync` が読み込みの前からあった登録（同じパスの
+  ゲーム自身のバンク）を返したときは外さない（`Reload::preexisting`）。読み込み中で一覧にまだ無いゲームのバンクは見分けられない（未検証）。
+- D-172: Remove は記録が一杯でも受け付ける。打ち消しなら枠なしで適用、バンクのものを外すならオーディオスレッドが適用時に枠を取り、
+  取れなければ編集器を呼ばずに LIMIT_REACHED。枠を取るのは受け付けか適用のどちらか一方、返すのはオーディオスレッドだけ。
+
+決定の番号を CONTRACTS.md の段階 7-C の節に書くのは、持ち場の外（`spec/interface/CONTRACTS.md`）なので、この組ではしていない。
+
 ## 契約の変更点（`contract/internal/include/snd/format/livelink_protocol.hpp` への追加だけ）
 
 - `kProtocolMinor` 0 → 1（major は 1 のまま）。
@@ -126,8 +145,73 @@ UI に依存しない livelink の API はそのまま使える: `Client` の 1.
 
 ## 回した構成と結果
 
-（最後の節に記録する）
+すべて -j2、ビルドは $S/livelink/b-*（終わったら消した）。「既知の 3 件」= C-09 の 3 件
+（`integration_livelink_override_test`、`integration_indep_livelink_protocol_test`、`integration_indep_livelink_profile_record_test`。
+1.1 の決めた振る舞いとアサーションが食い違う。直していない）。それ以外の失敗は無し、警告 0。
+
+| 構成 | コミット | ctest | 結果 |
+| --- | --- | --- | --- |
+| 1+8 gcc Debug + `SND_BUILD_TOOL_CORE=ON` | 7cc7d14 | 全部（221） | 既知の 3 件だけ失敗（platform_device_play_test は Skipped） |
+| 2 clang Debug | 7cc7d14 | `livelink\|api\|tool`（54） | 既知の 3 件だけ失敗 |
+| 3 ASan/UBSan | 7cc7d14 | `livelink\|api_`（49） | 既知の 3 件だけ失敗。ファズ（livelink_v11_fuzz_test）は SND_FUZZ_ITERATIONS=60000 でも通過（91378fe） |
+| 4 TSan | 7cc7d14 | `livelink`（26） | 既知の 3 件だけ失敗。並行性（livelink_v11_stress / livelink_v11_live / integration_livelink_stress）を -j1 で `--repeat until-fail:20`: 全通過 |
+| 5 Release | 8871931（コードは 7cc7d14 と同じ） | `livelink\|api_`（49） | 既知の 3 件だけ失敗。並行性 3 本を `--repeat until-fail:20`: 全通過 |
+| 6 テストなし Release | 8871931 | — | ビルド成功、警告 0 |
+| 7 Opus なし | 8871931 | `livelink`（26） | 既知の 3 件だけ失敗 |
+| 9 ツール入り（Tela） | 7cc7d14 | `livelink\|tool`（50） | 既知の 3 件だけ失敗。既存の tool/test は全通過 |
+| MinGW 構文検査 | 7cc7d14 | — | livelink/src の全 .cpp と新しいテスト 5 本、変えたヘッダ、`livelink_protocol.hpp` を `-Werror -Wall -Wextra -Wpedantic -Wshadow …` で通過（MinGW は apt で入れた。テストの std::thread を含めて通った） |
+
+途中で見つけて直したもの: UBSan（テストの空ベクタの memcpy、91378fe）、Release の `-Wstringop-overflow` の誤検知（テストの補助、d51b8df）、
+Release で 7/20 落ちたホットリロードのテスト（ReloadStatus Done を新しい登録の公開前に送っていた → サーバを直した。テスト側の再接続の
+競合も直した、7cc7d14）、再生中の LOD のテストが機械の速さに依存（単体テストで固定、7cc7d14）。
+gcc Debug の全件を d51b8df で回したとき `api_indep_runtime_test`（IndepRuntime.EndsFromConcurrentProducersAreExactlyOnce）が 1 回失敗し、
+単独で 10 回回すと全通過。livelink を使わないテストで、7cc7d14 の全件では通過（負荷による揺れと見ている。未解明）。
+
+### 差し戻しの後（6d3c2cd）
+
+| 構成 | ctest | 結果 |
+| --- | --- | --- |
+| 1+8 gcc Debug + TOOL_CORE | 全件（227） | 失敗は決定と食い違う独立テスト 2 件だけ（`IndepS7Replay.LostStateIsReported`、`IndepS7Impl.Defect_RemoveOfLiveBusAddedWithFullStructLogKeepsReserve`）。ほかの indep_s7（live 31、record 8、fuzz 7、stress 2）と既存の全テストは通過 |
+| 3 ASan/UBSan | `livelink\|api_`（55） | 同じ 2 件だけ失敗 |
+| 4 TSan | `livelink`（32）、並行性 4 本（v11_stress、v11_live、indep_s7_stress、integration_livelink_stress）を -j1 で 20 回 | 同じ 2 件だけ失敗。20 回: 全通過 |
+| 5 Release | `livelink\|api_`（55）、同じ 4 本を 20 回 | 同じ 2 件だけ失敗。20 回: 全通過 |
+| clang Debug | `livelink\|tool`（37） | 同じ 2 件だけ失敗 |
+| MinGW 構文検査 | — | 変えた runtime.cpp / server.cpp / client.cpp / replayer.cpp、v11 のテスト 5 本、変えたヘッダ 6 本: 通過 |
+
+途中の gcc Debug の `ctest -R 'livelink|tool'`（483e6e4）で `tool_live_mixer_test`（StateSurvivesDisconnectAndReconnect: 切断後 16 ブロックで戻しが
+まだ届いていない）が 1 回失敗し、単独で 10 回回すと全通過、6d3c2cd の全件でも通過（負荷による時間の揺れと見ている。未解明）。
+回していない構成（差し戻しの後）: 6（テストなし Release）、7（Opus なし）、9（ツール入り）。
+
+### 差し戻し 2 回目の後（d399b0b）
+
+直した内容: D-173（失敗したリロードはゲーム自身の登録を外さない）と D-172（記録が一杯でも Remove は受け付ける）。上の「差し戻し 2 回目」の節。
+`IndepS7Recheck.Defect_FailedReloadUnloadsTheGamesOwnOtherBank` は通過。
+
+決定（D-172 の追記）と食い違って落ちる独立テスト（変えていない）:
+- `IndepS7Impl.StructEditBeyondTheLogIsRefusedAtAcceptance`（indep_s7_impl_test.cpp:79-80: 記録が一杯でライブのバス B1 の RemoveBus を LIMIT_REACHED と期待。今は打ち消しとして OK）
+- `IndepS7Recheck.StructLogAndReserveFollowTheModel`（模型が「Remove も受け付けで枠を取る」前提: indep_s7_recheck_test.cpp の RemoveBus live の分岐）
+
+| 構成 | ctest | 結果 |
+| --- | --- | --- |
+| 1+8 gcc Debug + TOOL_CORE | 全件（228） | 失敗は上の 2 件だけ。indep_s7 のほか（unit 15、live 31、record 8、fuzz 7、stress 2、recheck の残り 9、impl の残り 8）と既存の全テストは通過 |
+| MinGW 構文検査 | runtime.cpp、server.cpp、livelink_v11_live_test.cpp、struct_edit.hpp、runtime.hpp | 通過 |
+| 3 ASan/UBSan | `livelink\|api_`（56） | 上の 2 件だけ失敗 |
+| 4 TSan | `livelink`（33）、並行性 4 本（v11_stress、v11_live、indep_s7_stress、integration_livelink_stress）を -j1 で 20 回 | 上の 2 件だけ失敗。20 回: 全通過 |
+| 5 Release | `livelink\|api_`（56）、同じ 4 本を 20 回 | 上の 2 件だけ失敗。20 回: 全通過 |
+| clang Debug | `livelink\|tool`（38） | 上の 2 件だけ失敗 |
+| 6 テストなし Release | — | ビルド成功 |
+| 7 Opus なし | `livelink`（33） | 上の 2 件だけ失敗 |
+| 9 ツール入り（Tela） | `livelink\|tool`（57） | 上の 2 件だけ失敗。tool/test は全通過 |
+
+警告はどの構成も 0。recheck の繰り返し（ConcurrentStartsNeverOverlap など）を `--filter` で 20 回ずつ回すことはしていない（ctest の 20 回の対象は上の 4 本）。
 
 ## 未検証の箇所
 
-（最後の節に記録する）
+- 構造の変更が core に実際に反映されること（C-01 まで偽の編集器でしか確かめていない）。
+- ストリームを読む再生での StreamList（Active、ストールの数）。テストの資産は常駐なので Idle だけを見た。ストールの数は core の stall タップ経由で数えるが、本物のストールでは確かめていない。
+- TCP での 1.1（テストはメモリの転送路だけ。1.0 の TCP テストは通っている）。
+- 試聴の全停止で、試聴の上限（maxAuditions）を超えて追跡できなかった試聴（`RuntimeDrops::auditions`）が出る場合（予約で防ぐので起きない想定）。
+- ホットリロードで、依存元があって外せないバンク（BANK_IN_USE）と、言語バンク（languageId != 0）。
+- 途中からの記録でセルが記録用リングに入りきらない場合（lostState）、LiveData が入りきらない場合（大きなチャンク × 記録中）。
+- 1.1 の Client と 1.0 の本物のゲーム（テストは手で書いた 1.0 のゲーム側で確かめた）。
+- Windows / macOS での実行（MinGW は構文検査だけ）。

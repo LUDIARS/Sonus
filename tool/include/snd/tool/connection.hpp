@@ -51,6 +51,11 @@ struct ConnectionDesc {
   std::uint32_t historySeconds = 10;
   std::uint32_t profilerMask = 0x7Fu;  // every ProfilerMask bit
   std::uint32_t meterHz = 30;
+  // 1.1 (group P): on BuildMismatch stay in Handshake (awaitingSync()) until DecideSync is
+  // called (livelink ClientDesc::deferSyncDecision); `policy` is then not used. The game waits
+  // for the answer for its handshake timeout (5 s by default), then drops the connection; the
+  // client reconnects and asks again.
+  bool deferSyncDecision = false;
 };
 
 struct ConnectionEvents {
@@ -80,6 +85,12 @@ class Connection {
   const ConnectionDesc& desc() const { return desc_; }
   std::string Target() const;  // "127.0.0.1:27460" or "in-process"
   std::uint32_t roundTripUs() const { return roundTripUs_; }
+  // 1.1 (group P): the game's protocol minor of the last handshake (0 = a 1.0 game, or none yet).
+  std::uint16_t peerMinor() const { return hello_.protocolMinor; }
+  // deferSyncDecision: true while a BuildMismatch waits for DecideSync (state Handshake).
+  bool awaitingSync() const;
+  // Answers the waiting BuildMismatch: SendDiffs -> Online (mismatch() true), Refuse -> Rejected.
+  bool DecideSync(MismatchPolicy answer);
 
   livelink::Client* client() { return client_; }
   const livelink::Client* client() const { return client_; }

@@ -33,6 +33,7 @@ int Connection::Open(const ConnectionDesc& desc) {
   d.autoReconnect = desc.autoReconnect;
   d.reconnectDelayMs = desc.reconnectDelayMs;
   d.timeoutMs = desc.timeoutMs;
+  d.deferSyncDecision = desc.deferSyncDecision;
   livelink::Client* c = nullptr;
   int r = livelink::Client::Create(d, &c);
   if (r != SND_OK) return r;
@@ -92,12 +93,24 @@ ConnectionEvents Connection::Poll() {
     hello_ = client_->LastHelloReply();
     mismatch_ = hello_.status == static_cast<std::uint32_t>(livelink::HelloStatus::BuildMismatch);
   }
+  if (state_ == LinkState::Handshake && client_->AwaitingSync()) {
+    hello_ = client_->LastHelloReply();  // the mismatch the tool is asked about
+    mismatch_ = true;
+  }
   if (state_ == LinkState::Rejected) {
     hello_ = client_->LastHelloReply();
     mismatch_ = hello_.status == static_cast<std::uint32_t>(livelink::HelloStatus::BuildMismatch);
   }
   roundTripUs_ = st.lastRoundTripUs;
   return ev;
+}
+
+bool Connection::awaitingSync() const { return client_ != nullptr && client_->AwaitingSync(); }
+
+bool Connection::DecideSync(MismatchPolicy answer) {
+  if (client_ == nullptr) return false;
+  return client_->DecideSync(answer == MismatchPolicy::Refuse ? livelink::SyncMode::Disconnect
+                                                             : livelink::SyncMode::SendDiffs);
 }
 
 std::string Connection::Target() const {
