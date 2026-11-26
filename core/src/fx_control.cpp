@@ -41,7 +41,7 @@ float* BusBufferOf(Impl& im, SlotIndex s) noexcept {
 }
 }  // namespace
 
-EffectInstance* BusEffectInstance(Impl& im, SlotIndex busSlot, std::uint32_t effectIndex) noexcept {
+EffectInstance* BusEffectInstance(Impl& im, SlotIndex busSlot, std::uint32_t effectIndex, bool authoredIndex) noexcept {
   // Bus.effectRange is written by ApplyCommands and read by Render; the definition
   // (BusDef) tells the bank. Reading the range here does not go through the schema
   // macros because callers belong to several systems: use the bank view instead.
@@ -49,6 +49,10 @@ EffectInstance* BusEffectInstance(Impl& im, SlotIndex busSlot, std::uint32_t eff
     return nullptr;
   }
   const BusDef& def = im.busDefs[busSlot];
+  if (def.customChain && !authoredIndex) {
+    auto* e = effectIndex < def.chainCount ? def.chain[effectIndex] : nullptr;
+    return e && e->ok && e->ctl ? e : nullptr;
+  }
   const BankRecord* rec = RegisteredBank(im, def.defBank);
   if (rec == nullptr || def.defRow >= rec->busCount) return nullptr;
   const bk::BankView& v = *rec->view;
@@ -57,7 +61,7 @@ EffectInstance* BusEffectInstance(Impl& im, SlotIndex busSlot, std::uint32_t eff
   const std::uint32_t count = v.Column<bk::col::BUSS_effectCount>()[def.defRow];
   if (effectIndex >= count || effectIndex >= kMaxBusEffects || first + effectIndex >= rec->effectCount) return nullptr;
   EffectInstance& e = rec->effects[first + effectIndex];
-  return e.ok != 0u && e.ctl != nullptr ? &e : nullptr;
+  return !e.removed && e.ok != 0u && e.ctl != nullptr ? &e : nullptr;
 }
 
 float ClampEffectParam(const EffectInstance& e, std::uint32_t param, float v) noexcept {

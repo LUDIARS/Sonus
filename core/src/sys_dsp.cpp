@@ -192,7 +192,7 @@ void ApplySnapshotOffset(Impl& im, const BankRecord& rec, std::uint32_t kind, st
     const auto* owner = RegisteredBank(im, def.defBank);
     if (owner == nullptr) continue;
     if (fx) {
-      auto* e = BusEffectInstance(im, rec.busSlot[b], row - first);
+      auto* e = BusEffectInstance(im, rec.busSlot[b], row - first, true);
       if (e && e->type == v.Column<bk::col::EFFX_effectType>()[row] && param < e->paramCount &&
           !EffectParamIsInitOnly(e->plugin, e->type, param)) e->ctl[param].contrib += offset;
     } else {

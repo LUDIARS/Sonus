@@ -1070,7 +1070,8 @@ base::rows::RemoveResult RemoveSnapshotRow(schema::Tables& t, SlotIndex slot) no
 // ---------------------------------------------------------------------------
 // D-130. Audio thread, ApplyCommands or a later system of the same block before Render.
 // Effect instance `effectIndex` of the chain of bus `busSlot` (in its defining bank), or null.
-EffectInstance* BusEffectInstance(Impl& im, SlotIndex busSlot, std::uint32_t effectIndex) noexcept;
+EffectInstance* BusEffectInstance(Impl& im, SlotIndex busSlot, std::uint32_t effectIndex,
+                                  bool authoredIndex = false) noexcept;
 // Sets the value parameter `param` heads to: from its current set value at the block start,
 // linearly over `fadeSeconds` (0: this block). Clamped to the parameter range (standard
 // effects); parameters past the instance's count are ignored. Contributions

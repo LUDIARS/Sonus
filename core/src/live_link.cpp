@@ -429,8 +429,12 @@ snd_result WriteMixerCell(Impl& im, const BankRecord& bank, std::uint32_t row, s
     if (table == ch::EFPV && col == co::EFPV_value) {
       for (std::uint32_t i = 0; i < b.chainCount; ++i) {
         auto& e = *b.chain[i];
-        if (e.live && row > e.live->cell && row - e.live->cell <= e.paramCount)
-          return writeFloat(e.params[row - e.live->cell - 1]);
+        if (e.live && row > e.live->cell && row - e.live->cell <= e.paramCount) {
+          const auto param = row - e.live->cell - 1;
+          const auto result = writeFloat(e.params[param]);
+          if (result == SND_OK && apply) SetEffectParam(im, e, param, e.params[param], 0);
+          return result;
+        }
       }
     }
   }

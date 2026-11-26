@@ -172,13 +172,13 @@ SND_TEST(IndepToolMixer, FaderRangeEffectParametersAndInitOnly) {
   SND_CHECK(t.m.Set(t.F("B"), 0.0f));
   SND_CHECK(t.m.Set(t.F("B"), NAN));
   SND_CHECK_EQ(t.m.Get(t.F("B")), -144.0f);
-  // parameq: Type1 is an integer 0..7, Freq1 20..20000 Hz.
+  // parameq: Type1 is an integer 0..8 (Allpass), Freq1 20..20000 Hz.
   const Target type1{Control::EffectParam, t.B("B"), 0, 0};
   const Target freq1{Control::EffectParam, t.B("B"), 0, 1};
   SND_CHECK(t.m.Set(type1, 2.6f));
   SND_CHECK_EQ(t.m.Get(type1), 3.0f);
   SND_CHECK(t.m.Set(type1, 99.0f));
-  SND_CHECK_EQ(t.m.Get(type1), 7.0f);
+  SND_CHECK_EQ(t.m.Get(type1), 8.0f);
   SND_CHECK(t.m.Set(freq1, 1.0f));
   SND_CHECK_EQ(t.m.Get(freq1), 20.0f);
   const EffectDesc& eq = t.project.buses()[static_cast<std::size_t>(t.B("B"))].effects[0];
