@@ -894,4 +894,3 @@ SND_TEST(IndepS7UiRecheck, ProblemsOnceOnScreenAndFooterCheckDocumentAsTheBuild)
   }
   SND_CHECK_EQ(j, once.size());
 }
-
