@@ -417,9 +417,17 @@ SND_TEST(IndepInput, ThreadedWriterExactAccounting) {
   constexpr std::uint64_t kTotal = 400000;
   std::vector<std::pair<std::uint64_t, std::uint64_t>> accepted;  // [first, last] values, writer thread
   accepted.reserve(kTotal);
+  std::atomic<bool> primed{false};
   std::atomic<bool> done{false};
+  const std::uint32_t capacity = port.Capacity();
+  std::uint32_t initiallyAccepted = 0;
   std::thread writer([&] {
-    std::uint64_t at = 0;
+    // Produce a real overrun before the reader starts. The random phase still
+    // runs concurrently, but no scheduler timing is needed to observe a drop.
+    std::uint64_t at = static_cast<std::uint64_t>(capacity) + 1u;
+    initiallyAccepted = WriteSeq(port, 0, capacity + 1u);
+    if (initiallyAccepted != 0u) accepted.emplace_back(1u, initiallyAccepted);
+    primed.store(true, std::memory_order_release);
     std::uint32_t r = 99;
     while (at < kTotal) {
       r = r * 1664525u + 1013904223u;
@@ -436,6 +444,7 @@ SND_TEST(IndepInput, ThreadedWriterExactAccounting) {
   heard.reserve(kTotal);
   std::uint32_t r = 5;
   std::uint64_t torn = 0;
+  while (!primed.load(std::memory_order_acquire)) std::this_thread::yield();
   while (!done.load(std::memory_order_acquire) || port.Buffered() != 0u) {
     r = r * 22695477u + 1u;
     d.Block({&v}, Driver::Mod{}, 1u + (r >> 24) % 128u);
@@ -448,6 +457,7 @@ SND_TEST(IndepInput, ThreadedWriterExactAccounting) {
     v.out[1].clear();
   }
   writer.join();
+  SND_CHECK_EQ(initiallyAccepted, capacity);
   SND_CHECK_EQ(torn, std::uint64_t{0});
   std::uint64_t acceptedFrames = 0;
   for (const auto& a : accepted) acceptedFrames += a.second - a.first + 1;
