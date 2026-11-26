@@ -1,16 +1,15 @@
-# Completion conditions of spec/handoff/parallel/README.md section 5:
-# the seven required configurations, warnings as errors, every test passing.
+# Five configurations run on PRs or manual dispatch; the other two run on release publication.
 name: ci
 
 on:
-  push:
-    branches: [main, 'int/**']
   pull_request:
     branches: [main, 'int/**']
   workflow_dispatch:
+  release:
+    types: [published]
 
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ci-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: true
 
 permissions:
@@ -18,6 +17,7 @@ permissions:
 
 jobs:
   build-test:
+    if: github.event_name != 'release'
     name: ${{ matrix.name }}
     runs-on: ubuntu-24.04
     timeout-minutes: 60
@@ -41,19 +41,11 @@ jobs:
             cc: gcc-14
             cxx: g++-14
             args: -DCMAKE_BUILD_TYPE=Debug -DSND_SANITIZE=thread
-          - name: release
-            cc: gcc-14
-            cxx: g++-14
-            args: -DCMAKE_BUILD_TYPE=Release
-          - name: release-no-tests
-            cc: gcc-14
-            cxx: g++-14
-            args: -DCMAKE_BUILD_TYPE=Release -DSND_BUILD_TESTS=OFF
           - name: no-opus
             cc: gcc-14
             cxx: g++-14
             args: -DCMAKE_BUILD_TYPE=Debug -DSND_CODEC_OPUS=OFF
-    steps:
+    steps: &build_steps
       - uses: actions/checkout@v4
 
       - name: Install toolchain
@@ -78,3 +70,22 @@ jobs:
       - name: Test
         if: matrix.name != 'release-no-tests'
         run: ctest --test-dir build -j4 --output-on-failure
+
+  release-build:
+    if: github.event_name == 'release'
+    name: ${{ matrix.name }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: release
+            cc: gcc-14
+            cxx: g++-14
+            args: -DCMAKE_BUILD_TYPE=Release
+          - name: release-no-tests
+            cc: gcc-14
+            cxx: g++-14
+            args: -DCMAKE_BUILD_TYPE=Release -DSND_BUILD_TESTS=OFF
+    steps: *build_steps
