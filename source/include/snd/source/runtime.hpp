@@ -1,6 +1,8 @@
-// Sample, Stream, Callback and UserBuffer source kinds (design.md 5, 6; source_if.hpp).
-// Callback (callback_kind.hpp) and UserBuffer (user_buffer_kind.hpp) were added at the
-// api stage (contract 1.2, D-94).
+// Sample, Stream, Callback, UserBuffer, Oscillator, Noise and Input source kinds
+// (design.md 5, 6; source_if.hpp). Callback (callback_kind.hpp) and UserBuffer
+// (user_buffer_kind.hpp) were added at the api stage (contract 1.2, D-94);
+// Oscillator (oscillator_kind.hpp), Noise (noise_kind.hpp) and Input
+// (input_kind.hpp, snd/source/input_port.hpp) at stage 7-D (D-190 .. D-195).
 //
 // snd::source::Runtime owns the source module's ISourceKind objects and the
 // state they share (the decoder pool, D-14). The composition root
@@ -93,6 +95,7 @@
 
 #include "snd/ext/allocator.hpp"
 #include "snd/internal/source_if.hpp"
+#include "snd/source/input_port.hpp"
 
 namespace snd::io {
 class IoScheduler;
@@ -117,6 +120,18 @@ struct RuntimeDesc {
   // (snd_play_user_buffer). Both need no IO.
   bool enableCallback = true;
   bool enableUserBuffer = true;
+  // Stage 7-D (D-190 .. D-195): synthesised kinds (no IO, no jobs) and the input ports.
+  bool enableOscillator = true;
+  bool enableNoise = true;
+  bool enableInput = true;  // needs inputPorts > 0
+  // Input ports (snd/source/input_port.hpp), allocated by Init: inputPorts rings of
+  // NextPow2(inputPortFrames) frames x inputPortChannels (1..8) floats. Defaults:
+  // 4 x 8192 x 2 x 4 bytes = 256 KiB (about 170 ms per port at 48 kHz).
+  std::uint32_t inputPorts = 4;
+  std::uint32_t inputPortFrames = 8192;
+  std::uint32_t inputPortChannels = 2;
+  bool enableGranular = true;
+  bool enablePatch = true;
 };
 
 // Counters (relaxed snapshot).
@@ -153,6 +168,13 @@ struct RuntimeStats {
   std::uint64_t callbackRejected = 0;    // Buffered start without a free ring
   std::uint32_t userBufferInstances = 0;
   std::uint64_t userBufferUnderruns = 0; // Stream buffer had nothing written in time
+  // Oscillator / Noise / Input kinds (stage 7-D).
+  std::uint32_t oscillatorInstances = 0;
+  std::uint32_t noiseInstances = 0;
+  std::uint32_t inputInstances = 0;
+  std::uint64_t inputUnderruns = 0;      // beginnings of shortages after a fully supplied block
+  std::uint32_t granularInstances = 0;
+  std::uint32_t patchInstances = 0;
 };
 
 class Runtime {
@@ -175,6 +197,11 @@ class Runtime {
   // Any thread (D-97): a synth callback of the playback `handle` may still be called (a
   // render-ahead job is posted or running). The api holds on_end back meanwhile.
   bool CallbackBusy(std::uint64_t handle) const noexcept;
+  // Input port `index` (snd_input_desc::device_index), nullptr when out of range or the
+  // Runtime is not initialised. Valid until Destroy. The port is written from any thread
+  // (one writer per port, InputPort::Write); the Runtime itself is not modified.
+  InputPort* InputPortOf(std::uint32_t index) const noexcept;
+  std::uint32_t InputPortCount() const noexcept;
 
   struct Impl;  // source/src
 

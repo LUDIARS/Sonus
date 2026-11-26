@@ -1,0 +1,362 @@
+# セッション D: Codex に渡す指示書（ソース組 2、dsp 組の再確認）
+
+本社で Codex に貼る指示をまとめたもの。作業の中身（範囲、実装の条件、受け入れテストの条件）は `D-hq-codex.md` にあり、この文書はそれを Codex のセッションごとの指示に切り分けたもの。
+0〜5 章がソース組 2（`int/s7-ext-src2`）、6 章が dsp 組の再確認と受け入れ（`int/s7-ext-dsp2`）。2 つは同時に進めてよい。
+
+## 0. 使い方
+
+セッションは 3 つに分ける。**実装と独立テストを同じセッションにしない**（独立テストは、実装の会話を知らないことに意味がある）。
+
+| 順 | セッション | 貼る指示 | 終わりの成果 |
+| --- | --- | --- | --- |
+| 1 | 実装 | 1 章 | `int/s7-ext-src2` にコード、決定 D-200〜D-207、依頼 D-06 以降、報告 |
+| 2 | 独立テスト（新しいセッション） | 2 章 | `source/test/indep_*` のテスト、欠陥と仕様の穴の報告 |
+| 3 | 受け入れ（人、または 3 つ目のセッション） | 5 章 | 欠陥と仕様の穴への決定 |
+| 4 | 実装（1 のセッションを再開） | 3 章 | 修正、落ちる独立テストの一覧 |
+| 5 | 独立テスト（2 のセッションを再開） | 4 章 | テストの更新、再確認の報告 |
+| 6 | 受け入れ | 5 章 | 全構成の結果、`report-D-src2.md` |
+
+- 4 と 5 は、新しい欠陥が出なくなるまで繰り返す。ソース組 1 では 1 往復で済んだ。
+- 始める前に、ブランチを作る。
+  ```
+  git fetch origin int/s7-ext
+  git checkout -b int/s7-ext-src2 origin/int/s7-ext
+  git push -u origin int/s7-ext-src2
+  ```
+- Codex には `AGENTS.md` を作らせない（LUDIARS の運用ファイルは後で別に作る決まり）。指示は、この文書の該当する章をそのまま貼る。
+- `<...>` の所は、貼る前に埋める。
+
+### 0.1 最初に貼る指示（受け入れ側のセッション）
+
+全体を進める受け入れ側のセッションに、最初に貼る。実装と独立テストのセッションには、このあとの章の指示を貼る。
+
+```
+LUDIARS/Sonus（C++20 のゲーム用サウンドライブラリ）のセッション D（段階6 拡張）の残りを引き継いでください。クラウドのセッションが途中で止めた作業で、出発点は int/s7-ext ブランチの先頭です。
+
+最初に、次をこの順で全部読んでください。読み終えるまで、コードの変更もビルドもしません。
+1. spec/handoff/parallel/README.md（共通の決まり）
+2. spec/handoff/parallel/D-extensions.md（セッション D の指示書）
+3. spec/handoff/parallel/D-hq-codex.md（引き継ぎ。1 章が分担、8 章が dsp、9 章が確認済みの結果、10 章ができていないことの一覧）
+4. spec/handoff/parallel/D-codex-brief.md（セッションごとに貼る指示）
+
+あなたの役割は受け入れ側です。
+- 実装と独立テストは、あなたとは別のセッション（またはエージェント）に任せます。実装の担当と独立テストの担当も、互いに別にします。独立テストの担当は、実装の会話を知らない状態で始めます。
+- あなたは、作業の割り振り、欠陥と仕様の穴への決定、全構成での受け入れ、報告をします。実装のコードとテストを自分で書き換えません。
+- 別のセッションを自分で立てられない場合は、どの章の指示をどのブランチで新しいセッションに貼るかを、人に伝えて待ちます。
+
+作業は 2 本あり、同時に進めてかまいません。持ち場は重なりません。
+A. ソース側（H1〜H5）: ブランチ int/s7-ext-src2。D-200 の仕上げ、Granular、Patch、配線と依頼、独立テスト、差し戻し、再確認、受け入れ。指示は D-codex-brief.md の 1〜5 章。
+B. dsp 側（H6）: ブランチ int/s7-ext-dsp2。差し戻し済みのタイムストレッチとコンボリューションの、独立テストの再確認から受け入れまで。指示は D-codex-brief.md の 6 章。先に D-hq-codex.md の 8.2 の未判定の 4 点を読みます。
+
+進め方:
+1. 2 本のブランチを int/s7-ext の先頭から切って push します（コマンドは D-codex-brief.md の 0 章と 6 章）。
+2. A は実装（1 章）から、B は独立テストの再確認（6.1）から始めます。
+3. 報告が戻るたびに、欠陥と仕様の穴の 1 件ずつに決定を下します（判断の順は D-codex-brief.md の 5.1）。決定は spec/interface/CONTRACTS.md の「段階 7-D」の該当する小節に書かせます。番号は、ソース側が D-200〜D-207、dsp 側は D-217〜D-219 に項を足します。
+4. 差し戻しと再確認を、新しい欠陥が出なくなるまで繰り返します。
+5. 再確認が済んだら、あなた自身が新しいビルドディレクトリから全構成を回します（ソース側は D-hq-codex.md の 6.1、dsp 側は 8.4）。実装の担当と独立テストの担当が報告した数字を、受け入れの結果として使いません。
+6. spec/handoff/parallel/report-D-src2.md と report-D-dsp2.md を書いて push します。
+
+守ること:
+- push してよいのは int/s7-ext-src2 と int/s7-ext-dsp2 だけです。main、int/s2-integration、int/s7-ext には push しません。強制 push と履歴の書き換えをしません。プルリクエストは作りません（統合担当が取り込みます）。
+- 持ち場の外を変えません。ソース側は source/、contract/ への追加、api/compose/c_api.cpp の末尾、dsp 側は dsp/ のうちセッション D が足したファイルです。tests/framework、tests/mocks、ルートの CMakeLists.txt、cmake/ は変えません。持ち場の外に要ることは spec/handoff/parallel/requests/ に依頼として書きます。
+- 契約は追加だけで、版の数字を上げません。コマンドの種別を増やしません。
+- 既存のテストの検査（Defect_ を含む）を、通すために書き換えません。テストを飛ばす、無効にする、許容差をただ緩める、をしません。
+- 例外と RTTI なし、警告ゼロ（-Werror）、サードパーティ依存なし。初期化のあとに確保しません。
+- AGENTS.md、CLAUDE.md、spec/domains、CI の設定など、運用のファイルは作らず、変えません。
+- ビルドは -j2 まで、同時に 2 つまで、ビルドディレクトリはリポジトリの外に置き、終わったら消します。
+- コミットの題と本文は日本語で、論点ごとに分けます。
+- 確かめていないことを、確かめたように書きません。報告には、未検証の箇所とその理由を書きます。
+
+いまの int/s7-ext は全件通過ではありません。落ちるのは、dsp の独立テストの実行ファイル 3 本（うち 2 本は SegFault）と、ソース側の独立テスト 7 件です。理由と一覧は D-hq-codex.md の 8.1 と 9 章にあります。ソース側の 7 件のうち 4 件は原因を確かめておらず、書きかけの実装の欠陥かもしれません。
+
+終わりの条件: A は D-hq-codex.md の 6.6、B は 8.4 がすべてそろうこと。そろわないまま終えるときは、何が残ったかを report に書きます。
+
+読み終えたら、まず次の 3 つを短く報告してから始めてください。
+- 引き継ぎの内容で、食い違いや分からない点
+- A と B をどの順で、どのセッションに割り振るか
+- D-hq-codex.md の 8.2 の 4 点への、あなたの決定の案
+```
+
+## 1. 実装のセッションに貼る指示
+
+```
+C++ のサウンドライブラリ Sonus（LUDIARS/sonus）の、セッション D・ソース組 2 の実装を担当してください。
+ブランチは int/s7-ext-src2 です。ここにだけコミットして push します。main、int/s2-integration、int/s7-ext には push しません。
+
+最初に、次を順に全部読んでください。読み終えるまでコードを書かないでください。
+1. spec/handoff/parallel/README.md（共通の決まり）
+2. spec/handoff/parallel/D-extensions.md（セッション D の指示書。2.1 と 3 章）
+3. spec/handoff/parallel/D-hq-codex.md（今回の作業。2〜5 章があなたの範囲。6 章は受け入れの条件で、あなたのテストの目安にもなる）
+4. spec/handoff/README.md の 3 章
+5. spec/architecture/design.md の 2.5、3.3、3.4、5 章、11.1、12 章、14 章
+6. spec/interface/CONTRACTS.md の、source と core⇄source に関する決定（D-43、D-44、D-91、D-94）と、末尾の「段階 7-D」の「ソース組 1」の小節（D-190〜D-199）
+7. contract/internal/include/snd/internal/source_if.hpp（冒頭のコメントを全部）、common.hpp、contract/internal/include/snd/format/bank_format.hpp の SYNP と PTCH
+8. source/ の既存の実装。特に oscillator_kind.*、noise_kind.*、input_kind.*、runtime.*、sample_kind.*、pcm_cache.*、テストの補助 source/test/synth_driver.hpp
+9. core が各種別をどう起動しているか: core/src/sys_event.cpp の SYNP の分岐、core/src/bank_registry.cpp。buildtool/src/build.cpp の synth の所。core と buildtool は読むだけで、変えません。
+
+やること（D-hq-codex.md の 4 章。この順で）:
+- H1: 決定 D-200 の仕上げ。書きかけのコミット 3 つ（0adf38e、d5d09d1、de01480）が入っています。読んで、使うか書き直すかを決めてください。
+- H2: Granular の種別。
+- H3: Patch の種別と PTCH の形式、組み立てと検証の API。
+- H4: Runtime への配線、公開 API の検討、他の持ち場への依頼（requests/D-06 以降）。
+
+守ること:
+- 書いてよいのは、source/、contract/ への追加だけの変更、api/compose/c_api.cpp の末尾への追記、CONTRACTS.md の「段階 7-D」の自分の小節、spec/handoff/parallel/requests/ だけです。それ以外（core、dsp、buildtool、bank、tests、ルートの CMakeLists.txt、cmake、bank-format.md など）は変えません。持ち場の外に変更が要るときは、変えずに依頼のファイルに書きます。
+- source/test/indep_* は独立テストの担当のものです。書き換えません。あなたの変更で落ちるものがあれば、どのテストがなぜ落ちるかを報告に書きます。
+- 既存のテストのアサーションは書き換えません。
+- 契約は追加だけです。新しいコマンド種別は足しません。版の数字は上げません。
+- 例外と RTTI を使いません。警告ゼロ（-Werror）。サードパーティの依存を足しません。source は dsp に依存できません。
+- RT で安全に（RenderBatch などでロック、確保、IO をしない）。初期化のあとに確保しません。
+- AGENTS.md、CLAUDE.md、CI の設定などの運用ファイルは作りません。
+- 最小の縦切りで止めません。D-hq-codex.md の 4 章に書いた項目を全部、配線とテストまで入れます。
+
+仕様に無いことを決めたら、CONTRACTS.md の「段階 7-D」に決定として書きます。番号は D-201〜D-207（D-200 は H1 用）。書く場所と書き方は D-hq-codex.md の 5.3 です。
+
+テスト: source/test/ に新しいファイルを足します（CMake は末尾に追記）。解析的に期待値が分かる検査にします。何を確かめるかは D-hq-codex.md の 6.2〜6.5 を目安にしてください。独立テストの担当が別に付くので、網羅よりも、決めた仕様が動いていることの確認を優先してかまいません。
+
+完了条件: D-hq-codex.md の 6.1 の 7 構成で、警告ゼロ・全件通過（D-200 で落ちる indep_* と、dsp の Defect_ の実行ファイルは除く）。並行性のあるテストは TSan と Release で 20 回の繰り返し。新しいファイルと変えたファイルを MinGW の構文チェックに通す。ビルドディレクトリはリポジトリの外に作ります。
+
+コミットは区切りごとに。メッセージは日本語で、末尾にあなたのツールが求める署名を付けます。書きかけでも、題に「書きかけ」と書いて push してかまいません。
+
+終わったら、次を報告してください。
+- 作ったファイルと設計の要点（種別ごと。PTCH の形式の要約）
+- 下した決定（D-番号ごと）
+- 契約、公開ヘッダ、c_api.cpp の変更点の一覧
+- 他の持ち場への依頼（ファイル名と要旨）
+- 構成ごとの結果（回していない構成は「未実行」と書く）
+- 処理時間（Release、128 本のステレオ、256 フレームあたり。仮想からの一斉復帰のブロックも）
+- 落ちる indep_* のテストの一覧と理由
+- 未検証の箇所、自信の無い箇所、仕様の穴だと思った点（隠さずに）
+- ブランチの先頭のハッシュ
+```
+
+## 2. 独立テストのセッションに貼る指示
+
+実装のセッションが終わって push されてから、**新しいセッション**に貼る。
+
+```
+C++ のサウンドライブラリ Sonus（LUDIARS/sonus）の、セッション D・ソース組 2 の独立テストを担当してください。
+実装（決定 D-200 の仕上げ、Granular と Patch の 2 つのソース種別）は別の担当が済ませています。あなたは実装者とは独立に、仕様から性質を導いて検査し、欠陥を見つけます。実装は直しません。
+ブランチは int/s7-ext-src2 です。ここにだけコミットして push します。
+
+手順（この順を守ってください）:
+
+1. 実装を読む前に、次だけを読んで、満たすべき性質を箇条書きに書き出します。書き出したものは最後の報告に入れます。
+   - spec/handoff/parallel/README.md、D-extensions.md（2.1 と 3 章）、D-hq-codex.md（3 章、4 章、6 章）
+   - spec/architecture/design.md の 2.5、3.3、5 章、7 章の「動的生成・入力」の行、14 章
+   - spec/interface/CONTRACTS.md の末尾の「段階 7-D」のうち、D-200 と「ソース組 2」の小節（D-201〜D-207）。実装者が下した決定は仕様として扱います。ただし、決定そのものが設計書や指示書と食い違う、不合理、危険だと思えば、「決定への異議」として報告します。
+   - 公開ヘッダと契約: contract/internal/include/snd/internal/source_if.hpp（冒頭のコメントを全部）、common.hpp、source/include/snd/source/ のヘッダ（runtime.hpp、パッチの組み立てのヘッダなど）
+   - spec/handoff/parallel/requests/ の D-06 以降（実装者が「持ち場の外なので出来ていない」とした範囲。ここは欠陥ではなく依頼として扱います）
+   この段階では、source/src/ の実装と、実装者のテスト（source/test/source_*）を開かないでください。
+
+2. そのあとで実装と実装者のテストを読み、実装者のテストが見ていない性質、甘い許容差、机上で見つかる欠陥を探します。並行部分（遅れたチャンク D-43 の規則、Start / Release と描画の関係、素材の PCM の寿命）は、コードを読んで机上でも検証します。
+
+3. source/test/ に新しいテストファイルだけを足します。名前は indep_ で始めます（indep_granular_test.cpp、indep_patch_test.cpp など）。CMake は source/test/CMakeLists.txt の末尾に追記します。期待値の計算は自分で持ち、実装の関数を期待値に使いません。ゴールデン音声に頼らず、解析的に期待値が分かる検査にします。確かめる性質は D-hq-codex.md の 6.2〜6.5 が最低限で、あなたが 1 で書き出した性質を足します。
+
+4. D-200 で落ちている既存の独立テスト（IndepOsc.ExtremeFrequenciesAndRatiosStayFinite、ZeroFrequencyIsSilentAndKeepsThePhase、IndepInput.ThreadedWriterExactAccounting など。実装者の報告に一覧があります）は、あなたが直します。落ちる理由が決定の変更なのか実装の誤りなのかを、1 件ずつ確かめてください。決定の変更なら決定どおりの検査に書き直し、実装の誤りなら直さずに欠陥として残します。
+
+欠陥と仕様の穴の扱い:
+- 欠陥を見つけたら、失敗するテストを Defect_ で始まる名前で残し、直さずに報告します。Defect_ のテストは source/test/indep_defects_src2_test.cpp（別の実行ファイル）にまとめ、他の indep_ のテストは全部通る状態にします。
+- 仕様が曖昧で、どちらが正しいとも言えないものは、「仕様の穴」として欠陥と分けて報告します。選択肢と、あなたの推奨を付けます。
+- 実装、実装者のテスト、既存のテスト、契約、core など、自分の新しいテストファイルと CMake の末尾への追記以外は変更しません（4 の、ソース組 1 の独立テストの更新は例外です）。
+
+回す構成: gcc Debug、-DSND_SANITIZE=address,undefined、-DSND_SANITIZE=thread、Release。ふだんは ctest -R で source と自分のテストに絞り、最後に gcc Debug で全体を 1 回。並行性のテストは TSan（-j1）と Release で ctest --repeat until-fail:20。自分の新しいファイルを MinGW の構文チェック（x86_64-w64-mingw32-g++ -std=c++20 -fsyntax-only -Werror）に通します。警告ゼロ（-Werror）。ビルドディレクトリはリポジトリの外に作ります。
+
+コミットは区切りごとに。メッセージは日本語で、末尾にあなたのツールが求める署名を付けます。
+
+終わったら、次を報告してください。
+- 実装を読む前に書き出した性質
+- 足したテストファイルと件数
+- 欠陥の一覧（番号、症状、再現する Defect_ のテスト名、原因の見立て（ファイルと行）、重さ）
+- 仕様の穴と決定への異議の一覧（選択肢と推奨）
+- 机上で検証した並行部分の結論
+- 構成ごとの結果、処理時間の測定値
+- 検査できなかった性質とその理由
+- ブランチの先頭のハッシュ
+```
+
+## 3. 差し戻しの指示（実装のセッションを再開して貼る）
+
+受け入れ側が 5.1 で決定を下してから貼る。
+
+```
+ソース組 2 の差し戻しです。独立テストで、欠陥が <件数> 件、仕様の穴が <件数> 件出ました。下の決定どおりに、実装と決定の文書を直してください。
+ブランチ int/s7-ext-src2 の先頭は <ハッシュ> です（あなたの実装に、独立テストの担当のテスト source/test/indep_* が加わっています）。
+
+欠陥（Defect_ のテストは source/test/indep_defects_src2_test.cpp）:
+<番号、症状、テスト名、原因の見立てを 1 件ずつ>
+
+決定:
+<D-番号ごとに、どう振る舞うべきかを 1 件ずつ。数値は具体的に>
+
+やること:
+- 上の欠陥を直し、決定を実装します。CONTRACTS.md の「ソース組 2」の小節に決定を書き足し、食い違う既存の記述も直します。
+- あなた自身のテスト（source/test/source_*）で、決定と食い違うものは直してかまいません。
+- 独立テストの担当のテスト（source/test/indep_*）は書き換えません。Defect_ のテストは、直ったら通るはずです。決定の変更で落ちる indep_* のテストは、どれがなぜ落ちるかを一覧にして報告します。
+- gcc Debug（全体）、address,undefined、thread、Release で source 関係のテストを回します。警告ゼロ。変えたファイルを MinGW の構文チェックに通します。
+
+報告: 変えた点、通るようになった Defect_ のテスト、落ちる indep_* のテストの一覧と理由、測り直した時間（変えたなら）、構成ごとの結果、ブランチの先頭のハッシュ。
+```
+
+## 4. 再確認の指示（独立テストのセッションを再開して貼る）
+
+```
+ソース組 2 の再確認をお願いします。受け入れ側があなたの報告に決定を下し、実装の担当が直しました。ブランチ int/s7-ext-src2 の先頭は <ハッシュ> です。
+
+決定（全文は CONTRACTS.md の「段階 7-D」の「ソース組 2」の小節。実装を読む前に、まず決定の文面を読んでください）:
+<D-番号ごとの要約>
+
+実装の担当の報告で、決定の変更で落ちるとされたあなたのテスト:
+<テスト名と理由の一覧>
+
+やること:
+1. 決定と食い違うあなたのテストを直します。落ちる理由が本当に決定の変更なのかを、1 件ずつ確かめてください。実装の誤りだと分かったものは、直さずに Defect_ として残します。仕様の穴の記録として書いたテストは、決定どおりの挙動を確かめる普通のテストに書き直します。許容差は、ただ緩めるのではなく、解析的に導ける上限で検査します。
+2. 修正が新しい欠陥を持ち込んでいないかを確かめます。差分は git diff <差し戻し前のハッシュ>..<今のハッシュ> -- source/ contract/ api/ です。直した箇所の境界の条件と、並行部分を、机上とテストの両方で見ます。
+3. 新しい決定の各項目に、対応するテストが少なくとも 1 件あることを確かめ、無ければ足します。
+4. 直った Defect_ のテストは、名前から Defect_ を外して普通のテストのファイルへ移します。
+5. 新しい欠陥は Defect_ のテストとして残し、直さずに報告します。実装と実装者のテストは変更しません。
+6. gcc Debug（最後に全体を 1 回）、address,undefined、thread、Release で回します。並行性のテストは TSan（-j1）と Release で 20 回の繰り返し。
+
+報告: 直したテストの一覧、新しい欠陥（あれば）、机上の検証の結論、測り直した時間、構成ごとの結果、ブランチの先頭のハッシュ。
+```
+
+## 5. 受け入れ側がやること
+
+### 5.1 決定を下す（独立テストの報告のあと）
+
+- 欠陥: 直させる。仕様どおりに直すだけなら決定番号は要らない。直し方に選択があるときだけ決定にする。
+- 仕様の穴と決定への異議: 1 件ずつ、どう振る舞うかを決める。迷ったら、次の順で判断する。
+  1. 設計書と指示書に書いてあることに合わせる。
+  2. RT での費用に上限があること（一斉に起きても予算を超えない）。
+  3. ゲームの作り手が驚かないこと（クリックが出ない、フルスケールを超えない、無音が挟まらない）。
+  4. 持ち場の中で済むこと。済まないものは依頼にする。
+- 記述だけの食い違い（実測と合わない数値など）は、実装を変えずに決定の文面を直させる。
+- 決定は `CONTRACTS.md` に書かせる。受け入れ側が自分で書いてもよい。
+
+参考: ソース組 1 で受け入れ側が下した決定は D-197〜D-200。同じ種類の論点（仮想からの復帰の費用、NaN の入力、開始直後の統計の数え方、利得とヘッドルーム）が Granular と Patch でも出る見込みが高い。
+
+### 5.2 全構成を回す（再確認が済んだあと）
+
+実装と独立テストの報告の数字をそのまま信じず、**新しいビルドディレクトリから**自分で回す。
+
+```
+#!/bin/sh
+# usage: sh accept.sh <repo> <work dir outside the repo>
+REPO=$1; OUT=$2; J=${J:-2}
+run() {  # name, cmake args...
+  name=$1; shift
+  B=$OUT/$name
+  rm -rf "$B"
+  echo "== $name HEAD $(git -C "$REPO" rev-parse --short HEAD) args: $*"
+  cmake -S "$REPO" -B "$B" -G Ninja "$@" >"$OUT/$name.cfg.log" 2>&1 || { echo "configure failed"; return; }
+  cmake --build "$B" -j"$J" >"$OUT/$name.build.log" 2>&1; echo "build rc=$? warnings=$(grep -c 'warning:' "$OUT/$name.build.log")"
+  [ "$name" = notests ] || { ctest --test-dir "$B" -j"$J" --output-on-failure >"$OUT/$name.test.log" 2>&1; tail -n 8 "$OUT/$name.test.log"; }
+  [ -n "$KEEP" ] || rm -rf "$B"
+}
+run gcc-debug
+run clang-debug -DCMAKE_CXX_COMPILER=clang++ -DCMAKE_C_COMPILER=clang
+run asan -DSND_SANITIZE=address,undefined
+run tsan -DSND_SANITIZE=thread
+run release -DCMAKE_BUILD_TYPE=Release
+run notests -DSND_BUILD_TESTS=OFF -DCMAKE_BUILD_TYPE=Release
+run noopus -DSND_CODEC_OPUS=OFF
+```
+
+- 並行性のテストの繰り返しは、TSan と Release のビルドディレクトリを残して（`KEEP=1`）回す。TSan は `-j1`。
+  ```
+  ctest --test-dir <dir> --repeat until-fail:20 -R 'source_input|indep_input|indep_src1_(core|load|api)|<ソース組 2 の並行性のテスト>'
+  ```
+- 失敗してよいのは、dsp の独立テストの実行ファイル 3 本（`dsp_indep_s7d_test`、`dsp_indep_s7d_test_scalar`、`dsp_indep_defects_dsp_test`）だけ（6 章の再確認が統合されるまで）。`platform_device_play_test` は SKIP になる。
+- MinGW の構文チェックを、`git diff --name-only origin/int/s7-ext..HEAD -- '*.cpp' '*.hpp' '*.h'` の全ファイルに掛ける。
+- 持ち場の外が変わっていないことを確かめる。次の出力が空であること。
+  ```
+  git diff --name-only origin/int/s7-ext..HEAD | grep -v -E '^(source/|contract/|api/compose/c_api\.cpp$|spec/interface/CONTRACTS\.md$|spec/handoff/parallel/)'
+  ```
+- 契約の変更が追加だけであることを、`git diff origin/int/s7-ext..HEAD -- contract/ api/compose/c_api.cpp` を読んで確かめる（削除された行と、変えられた既存の行が無いこと。`version.h` が変わっていないこと）。
+- 要所のコードを読む。少なくとも、`RenderBatch` の中に確保とロックが無いこと、プログラムの検証が範囲外を読まないこと、グレインのプールが尽きたときの分岐。
+
+### 5.3 判定と報告
+
+`D-hq-codex.md` の 6.6 の 6 項目がそろったら受け入れる。`spec/handoff/parallel/report-D-src2.md` を書かせて（または書いて）push し、統合担当に知らせる。
+
+## 6. dsp 組の再確認と受け入れ（H6）
+
+クラウドのセッションが止めた所から引き取る分。状態、未判定の点、受け入れの条件は `D-hq-codex.md` の 8 章。ソース組 2（1〜5 章）と同時に進めてよい。
+
+始める前に、ブランチを作る。
+
+```
+git fetch origin int/s7-ext
+git checkout -b int/s7-ext-dsp2 origin/int/s7-ext
+git push -u origin int/s7-ext-dsp2
+```
+
+### 6.1 独立テストのセッションに貼る指示（新しいセッション）
+
+```
+あなたは Sonus（C++20 のゲーム用サウンドライブラリ）のセッション D・dsp 組の、独立テストの担当です。実装者とは別の立場で、差し戻しのあとの再確認をします。前任のテスト担当が書いたテストとメモを引き継ぎます。前任の会話は残っていません。
+
+ブランチは int/s7-ext-dsp2 です。push してよいのはこのブランチだけです。main、int/s2-integration、int/s7-ext、int/s7-ext-src2 には push しません。
+
+最初に、次をこの順で全部読んでください。実装のコード（dsp/src、dsp/include）は、3 まで読み終えて性質を書き出すまで読みません。
+1. spec/handoff/parallel/README.md と D-extensions.md（共通の決まりと、セッション D の指示）
+2. spec/handoff/parallel/D-hq-codex.md の 3 章、5.4、5.5、8 章
+3. spec/interface/CONTRACTS.md の「段階 7-D」の「dsp 組（D-208〜D-219）」の小節。ここから、確かめる性質を箇条書きにします
+4. spec/handoff/parallel/notes/D-dsp-indep-test-notes.md（前任のメモ）と notes/D-dsp-fix-notes.md（実装の担当の差し戻しのメモ）
+5. dsp/test/indep_fft_test.cpp、indep_time_stretch_test.cpp、indep_convolution_test.cpp、indep_defects_dsp_test.cpp
+
+やること:
+1. D-hq-codex.md の 8.1 の表の 9 件を、1 件ずつ確かめます。落ちる理由が本当に決定の変更（D-217〜D-219）なら、テストを決定に合わせて直します。許容差は、ただ緩めるのではなく、解析的に導ける上限で検査します。実装の誤りだと分かったものは、直さずに Defect_ のテストとして残します。
+   - IndepConvolution.RegistryConcurrency は範囲外を読んで SegFault になります。番号を添字にしない形に直します。
+   - IndepConvolution.Registry は、ほかのテストが登録を残していても通る形にします（表はプロセスに 1 つです）。
+2. Defect_ のテスト 4 件のうち、通るようになった 3 件は、名前から Defect_ を外して普通のテストのファイルへ移します。
+3. Defect_ConvolutionIrSwitchLagsOnePartition は、D-218 のクロスフェードを確かめるテストに書き直します。フェードの区間は決定の重みどおり、フェードのあとは新しい IR を最初から使った場合と一致、を見ます。
+4. D-218 のフェードの長さは、呼び出しが分割 B の倍数でないと B より短くなります。切り替えが周期の f フレーム目に来る場合を f = 0、B/2、B − 8、B − 1 で作り、切り替えの前後の出力の段差（隣り合うフレームの差の最大）を測って報告します。合否は付けず、数値を報告します（受け入れ側が判定します）。
+5. 差し戻しが新しい欠陥を持ち込んでいないかを確かめます。差分は git diff 3758bfc..885f344 -- dsp/ です。少なくとも次を、机上とテストの両方で見ます。
+   - 世代つきの登録番号: 古い番号、外した番号、枠が再利用されたあとの古い番号、別の世代の番号での Unregister、表が満杯のとき、登録と解決と解除の同時実行（TSan）
+   - 切り替え: フェードの途中の次の切り替え、IR なしとの行き来、休んでいるインスタンス、登録を外した直後に IR のメモリを書きつぶしても安全なこと
+   - IrSlot: max_frames より長い呼び出しで途中の番号を引かないこと
+   - 有限でない IR の拒否（配列と SCIR のブロブの両方）
+   - タイムストレッチ: チャンネルごとの相関の和（逆相、片チャンネル無音、全チャンネル無音、8 チャンネル）、探索 ±12 ms での 50〜220 Hz の残差、ランプの端点の ±Inf と NaN、1 回の呼び出しの上限
+6. D-217〜D-219 の項目の 1 つずつに、対応するテストが少なくとも 1 件あることを確かめ、無ければ足します。
+7. 新しい欠陥は Defect_ のテストとして残し、直さずに報告します。実装（dsp/src、dsp/include）と実装者のテスト（dsp/test のうち indep_ で始まらないもの）は変更しません。tests/framework、tests/mocks、ルートの CMakeLists.txt、cmake/ も変更しません。
+8. gcc Debug（最後に全体を 1 回）、address,undefined、thread、Release、-DSND_SIMD_SCALAR=ON、-DCMAKE_CXX_FLAGS="-mavx2 -mfma" で回します。警告ゼロ。並行性のテストは TSan（-j1）と Release で ctest --repeat until-fail:20。ビルドは -j2、ビルドディレクトリはリポジトリの外、1 度に 1 構成、終わったら消します。
+
+合否に数えない失敗: platform_device_play_test の SKIP と、ソース側の indep_osc_test、indep_input_test（別の組が直しています）。
+
+コミットは日本語の題で、ファイルごとか論点ごとに分けます。AGENTS.md や運用のファイルは作りません。
+
+報告: 直したテストの一覧と、1 件ずつの「決定の変更だった / 実装の誤りだった」の判定、移した Defect_、新しい欠陥（あれば、症状と再現するテスト名と原因の見立て）、4 の測定値、机上の検証の結論、仕様の穴、構成ごとの結果、検査できなかった性質、ブランチの先頭のハッシュ。
+```
+
+### 6.2 差し戻しの指示（実装のセッション。新しい欠陥か、直しが要るときだけ）
+
+クラウドの実装の担当の会話は残っていないので、新しいセッションで始める。先に `README.md`、`D-extensions.md`、`D-hq-codex.md` の 3 章と 8 章、`CONTRACTS.md` の「dsp 組」の小節、`notes/D-dsp-fix-notes.md` を読ませてから、3 章の差し戻しの指示を次のように読み替えて貼る。
+
+- 「ソース組 2」→「dsp 組」、`int/s7-ext-src2` → `int/s7-ext-dsp2`、`source/test/` → `dsp/test/`、`indep_defects_src2_test.cpp` → `indep_defects_dsp_test.cpp`、`CONTRACTS.md` の小節 →「dsp 組」。
+- 決定は D-217〜D-219 に項を足して書く（番号は使い切っている。`D-hq-codex.md` の 8.2 の 4）。
+- 既存の dsp のファイルは、セッション D が足した行のほかは変えない。変えたいことは依頼 D-12 に足す。
+- 回す構成に `-DSND_SIMD_SCALAR=ON` と `-DCMAKE_CXX_FLAGS="-mavx2 -mfma"` を足す。
+
+再確認は、6.1 のセッションを再開して 4 章の指示を同じ読み替えで貼る。
+
+### 6.3 受け入れ側がやること
+
+- 決定: `D-hq-codex.md` の 8.2 の 4 点（フェードの長さ、`Defect_` の書き直し、番号の一巡、決定の番号）と、6.1 の報告で出た欠陥・仕様の穴。判断の順は 5.1 と同じ。
+- 全構成: 5.2 の `accept.sh` の末尾に次の 2 行を足して回す。
+  ```
+  run scalar -DSND_SIMD_SCALAR=ON
+  run avx2 "-DCMAKE_CXX_FLAGS=-mavx2 -mfma"
+  ```
+- 繰り返し（TSan は `-j1`、Release も）:
+  ```
+  ctest --test-dir <dir> --repeat until-fail:20 -R 'dsp_indep_s7d_test|dsp_test'
+  ```
+- MinGW の構文チェックを、`git diff --name-only origin/int/s7-ext..HEAD -- 'dsp/*.cpp' 'dsp/*.hpp'` の全ファイルに掛ける。
+- 持ち場の外が変わっていないこと。次の出力が空であること。
+  ```
+  git diff --name-only origin/int/s7-ext..HEAD | grep -v -E '^(dsp/|spec/interface/CONTRACTS\.md$|spec/handoff/parallel/)'
+  ```
+- 既存の dsp のファイルで、セッション D が足した行のほかが変わっていないことを、`git diff origin/int/s2-integration..HEAD -- dsp/src/effects.cpp dsp/include/snd/dsp/effects.hpp dsp/src/fx_common.hpp` を読んで確かめる（削除された行が無いこと）。
+- 要所のコードを読む。少なくとも、`ConvolutionProcess` と `TimeStretchProcess` に確保とロックが無いこと、切り替えを見たあとに古い IR のポインタを読む経路が無いこと、登録表の読みが「番号 → IR → 番号」の順であること。
+- 判定は `D-hq-codex.md` の 8.4。`spec/handoff/parallel/report-D-dsp2.md` を書かせて（または書いて）push し、統合担当に知らせる。

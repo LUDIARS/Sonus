@@ -6,6 +6,11 @@
 #include "detail.hpp"
 #include "snd/io/io_scheduler.hpp"
 #include "callback_kind.hpp"
+#include "input_kind.hpp"
+#include "granular_kind.hpp"
+#include "patch_kind.hpp"
+#include "noise_kind.hpp"
+#include "oscillator_kind.hpp"
 #include "sample_kind.hpp"
 #include "stream_kind.hpp"
 #include "user_buffer_kind.hpp"
@@ -18,6 +23,15 @@ struct Runtime::Impl {
   detail::StreamKind stream{shared};
   detail::CallbackKind callback;
   detail::UserBufferKind userBuffer;
+  detail::OscillatorKind oscillator;
+  detail::NoiseKind noise;
+  detail::InputKind input;
+  detail::GranularKind granular;
+  detail::PatchKind patch;
+  // Input ports (D-194): the port objects and their sample memory.
+  InputPort* ports = nullptr;
+  float* portData = nullptr;
+  std::uint32_t portCount = 0;
 };
 
 bool Runtime::Init(const RuntimeDesc& desc) noexcept {
@@ -43,6 +57,31 @@ bool Runtime::Init(const RuntimeDesc& desc) noexcept {
   }
   impl_->shared.maxVoiceChannels =
       desc.maxVoiceChannels == 0u || desc.maxVoiceChannels > kMaxChannels ? kMaxChannels : desc.maxVoiceChannels;
+  if (desc.enableInput && desc.inputPorts != 0u) {
+    const std::uint32_t n = desc.inputPorts;
+    const std::uint32_t ch = desc.inputPortChannels == 0u || desc.inputPortChannels > kMaxChannels
+                                 ? 2u
+                                 : desc.inputPortChannels;
+    const std::uint32_t frames = detail::NextPow2(desc.inputPortFrames < 64u ? 64u : desc.inputPortFrames);
+    void* pm = desc.allocator->Allocate(sizeof(InputPort) * n, 64, MemTag::Misc);
+    void* dm = pm != nullptr ? desc.allocator->Allocate(sizeof(float) * std::size_t{n} * ch * frames, 64, MemTag::Misc)
+                             : nullptr;
+    if (pm == nullptr || dm == nullptr) {
+      if (pm != nullptr) desc.allocator->Free(pm, MemTag::Misc);
+      Destroy();
+      return false;
+    }
+    impl_->ports = static_cast<InputPort*>(pm);
+    impl_->portData = static_cast<float*>(dm);
+    impl_->portCount = n;
+    for (std::uint32_t i = 0; i < n; ++i) {
+      InputPort* port = new (&impl_->ports[i]) InputPort();
+      float* data = impl_->portData + std::size_t{i} * ch * frames;
+      for (std::size_t k = 0; k < std::size_t{ch} * frames; ++k) data[k] = 0.0f;
+      port->Bind(data, ch, frames);
+    }
+    impl_->input.BindPorts(impl_->ports, n);
+  }
   kinds_ = SourceKindSet{};
   if (desc.enableSample) kinds_.kinds[static_cast<std::size_t>(SourceKind::Sample)] = &impl_->sample;
   if (desc.enableStream && desc.io != nullptr && desc.streamPool != nullptr) {
@@ -50,12 +89,22 @@ bool Runtime::Init(const RuntimeDesc& desc) noexcept {
   }
   if (desc.enableCallback) kinds_.kinds[static_cast<std::size_t>(SourceKind::Callback)] = &impl_->callback;
   if (desc.enableUserBuffer) kinds_.kinds[static_cast<std::size_t>(SourceKind::UserBuffer)] = &impl_->userBuffer;
+  if (desc.enableGranular) kinds_.kinds[static_cast<std::size_t>(SourceKind::Granular)] = &impl_->granular;
+  if (desc.enablePatch) kinds_.kinds[static_cast<std::size_t>(SourceKind::Patch)] = &impl_->patch;
+  if (desc.enableOscillator) kinds_.kinds[static_cast<std::size_t>(SourceKind::Oscillator)] = &impl_->oscillator;
+  if (desc.enableNoise) kinds_.kinds[static_cast<std::size_t>(SourceKind::Noise)] = &impl_->noise;
+  if (impl_->portCount != 0u) kinds_.kinds[static_cast<std::size_t>(SourceKind::Input)] = &impl_->input;
   return true;
 }
 
 void Runtime::Destroy() noexcept {
   if (impl_ == nullptr) return;
   if (impl_->shared.bankEpochs != nullptr) alloc_->Free(impl_->shared.bankEpochs, MemTag::Misc);
+  if (impl_->ports != nullptr) {
+    for (std::uint32_t i = 0; i < impl_->portCount; ++i) impl_->ports[i].~InputPort();
+    alloc_->Free(impl_->ports, MemTag::Misc);
+  }
+  if (impl_->portData != nullptr) alloc_->Free(impl_->portData, MemTag::Misc);
   impl_->~Impl();
   alloc_->Free(impl_, MemTag::Misc);
   impl_ = nullptr;
@@ -76,6 +125,12 @@ void Runtime::BankUnregistered(void* runtime, std::uint16_t bankSlot) noexcept {
 bool Runtime::CallbackBusy(std::uint64_t handle) const noexcept {
   return impl_ != nullptr && impl_->callback.PlaybackBusy(handle);
 }
+
+InputPort* Runtime::InputPortOf(std::uint32_t index) const noexcept {
+  return impl_ != nullptr && index < impl_->portCount ? &impl_->ports[index] : nullptr;
+}
+
+std::uint32_t Runtime::InputPortCount() const noexcept { return impl_ != nullptr ? impl_->portCount : 0u; }
 
 RuntimeStats Runtime::Stats() const noexcept {
   RuntimeStats s;
@@ -117,6 +172,12 @@ RuntimeStats Runtime::Stats() const noexcept {
   s.callbackRejected = cb.rejected;
   s.userBufferInstances = impl_->userBuffer.LiveInstances();
   s.userBufferUnderruns = impl_->userBuffer.Underruns();
+  s.oscillatorInstances = impl_->oscillator.LiveInstances();
+  s.noiseInstances = impl_->noise.LiveInstances();
+  s.inputInstances = impl_->input.LiveInstances();
+  s.inputUnderruns = impl_->input.Underruns();
+  s.granularInstances = impl_->granular.LiveInstances();
+  s.patchInstances = impl_->patch.LiveInstances();
   return s;
 }
 
