@@ -31,6 +31,22 @@ snd_result CreateWith(snd_system* sys, const snd_physics_config& c) {
   return r;
 }
 
+// Manual output can consume a queued period before the audio thread publishes
+// another block. Wait for the same observable D-125 uses, without submitting
+// contacts: all checks still run on the first physics call after audio resumes.
+bool AdvanceToPublishedBlock(Sys& sys) {
+  snd_stats before{};
+  if (snd_get_stats(sys.sys, &before) != SND_OK) return false;
+  const auto errors = sys.advanceErrors;
+  for (int i = 0; i < 16; ++i) {
+    sys.Advance(1);
+    snd_stats after{};
+    if (sys.advanceErrors != errors || snd_get_stats(sys.sys, &after) != SND_OK) return false;
+    if (after.block_index != before.block_index) return true;
+  }
+  return false;
+}
+
 }  // namespace
 
 SND_TEST(PhysicsApi, ConfigVersionsAndRanges) {
@@ -477,7 +493,7 @@ SND_TEST(PhysicsApi, AudioStallDetectionBoundaryAndDrops) {
   SND_CHECK_EQ(snd_physics_play_at(p, 5u, &pos), SND_OK);
   SND_CHECK_EQ(Stats(p).requested_play_at, 1u);
   // The system moves: the stall ends at the next call and hits play again.
-  sys.Advance(1);
+  SND_REQUIRE(AdvanceToPublishedBlock(sys));
   hit();
   s = Stats(p);
   SND_CHECK_EQ(s.audio_stalled_calls, 11u);
@@ -526,21 +542,6 @@ SND_TEST(PhysicsApi, AudioStallHoldsSlidesAndCatchesUp) {
   cv[0].speed_to_volume = Linear({{0.0f, 0.0f}, {10.0f, 1.0f}});
   d.curves = cv.data();
   SND_REQUIRE_EQ(snd_physics_set_table(p, &d), SND_OK);
-  // Manual output can consume a queued period before the audio thread publishes
-  // another block. Wait for the same observable D-125 uses, without submitting
-  // contacts: all checks still run on the first physics call after audio resumes.
-  auto advanceToPublishedBlock = [&] {
-    snd_stats before{};
-    if (snd_get_stats(sys.sys, &before) != SND_OK) return false;
-    const auto errors = sys.advanceErrors;
-    for (int i = 0; i < 16; ++i) {
-      sys.Advance(1);
-      snd_stats after{};
-      if (sys.advanceErrors != errors || snd_get_stats(sys.sys, &after) != SND_OK) return false;
-      if (after.block_index != before.block_index) return true;
-    }
-    return false;
-  };
   auto slide = [](std::uint64_t a, float speed, float x) {
     return Contact(SND_CONTACT_SLIDE, a, a + 1, 0, 0, x, 0, 0, 0.0f, speed);
   };
@@ -573,7 +574,7 @@ SND_TEST(PhysicsApi, AudioStallHoldsSlidesAndCatchesUp) {
   SND_CHECK_EQ(Stats(p).tracking_timeouts, 1u);
   SND_CHECK_EQ(rec.Count(SND_PHYSICS_RECORD_STOP), 0u);
   // The system moves: the first call times A out (its last report is 100 ms old).
-  SND_REQUIRE(advanceToPublishedBlock());
+  SND_REQUIRE(AdvanceToPublishedBlock(sys));
   SND_CHECK_EQ(snd_phys_submit_contacts(p, nullptr, 0, 0.02f), SND_OK);
   SND_CHECK_EQ(Stats(p).tracking_timeouts, 2u);
   SND_REQUIRE_EQ(rec.Count(SND_PHYSICS_RECORD_STOP), 1u);
@@ -595,7 +596,7 @@ SND_TEST(PhysicsApi, AudioStallHoldsSlidesAndCatchesUp) {
     SND_CHECK_EQ(snd_phys_submit_contacts(p, &a, 1, 0.0f), SND_OK);  // still stalled
   }
   SND_CHECK_EQ(rec.recs.size(), 0u);
-  SND_REQUIRE(advanceToPublishedBlock());
+  SND_REQUIRE(AdvanceToPublishedBlock(sys));
   {
     const snd_contact a = slide(1, 8.0f, 3.0f);
     SND_CHECK_EQ(snd_phys_submit_contacts(p, &a, 1, 0.0f), SND_OK);
