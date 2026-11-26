@@ -10,6 +10,7 @@
 #include "snd/buildtool/build.hpp"
 #include "snd/buildtool/patch.hpp"
 #include "snd/format/bank_format.hpp"
+#include "snd/format/patch_program.hpp"
 #include "snd/id.hpp"
 #include "snd/test/test.hpp"
 #include "snd/tool/doc_build.hpp"
@@ -368,7 +369,11 @@ SND_TEST(IndepS7Build, G6_PatchProgramLinkedToSynthRow) {
   SND_CHECK_EQ(progs[0].id, snd::HashId("Patch/Laser"));
   SND_REQUIRE(links[0].synpRow < p->Rows(bf::chunk::SYNP));
   SND_CHECK_EQ(p->U32(bf::chunk::SYNP, bf::col::SYNP_kind, links[0].synpRow), 3u);
-  SND_CHECK_EQ(p->U32(bf::chunk::SYNP, bf::col::SYNP_programBytes, links[0].synpRow), 0u);
+  const auto offset = p->U32(bf::chunk::SYNP, bf::col::SYNP_programOffset, links[0].synpRow);
+  const auto size = p->U32(bf::chunk::SYNP, bf::col::SYNP_programBytes, links[0].synpRow);
+  const auto* runtime = p->Chunk(bf::chunk::PTCH, &bytes);
+  SND_REQUIRE(runtime && offset <= bytes && size <= bytes - offset);
+  SND_CHECK(bf::patch::ValidatePatchProgram(runtime + offset, size));
   // The clip of SE/Laser points at that SYNP row.
   const std::uint32_t c = ClipRow(*p, "SE/Laser", 0, 0);
   SND_CHECK_EQ(p->U32(bf::chunk::CLIP, bf::col::CLIP_kind, c), 2u);

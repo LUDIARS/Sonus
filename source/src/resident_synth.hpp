@@ -18,14 +18,14 @@ inline double Modulation(Ramp ramp, double position) noexcept {
 template <class Derived, class Voice>
 class ResidentSynth : public ISourceKind {
  public:
-  std::size_t PoolBytes(const SourceLimits& limits) const noexcept final {
+  std::size_t PoolBytes(const SourceLimits& limits) const noexcept override {
     Carver measure{};
     measure.Take<Voice>(limits.maxVoices);
     measure.Take<SlotIndex>(limits.maxVoices);
     return measure.used;
   }
   bool Init(void* pool, std::size_t bytes, const SourceLimits& limits,
-            const SourceServices&) noexcept final {
+            const SourceServices&) noexcept override {
     if (!pool || bytes < PoolBytes(limits)) return false;
     Carver carve{static_cast<std::uint8_t*>(pool), 0, bytes};
     voices_ = carve.Take<Voice>(limits.maxVoices);

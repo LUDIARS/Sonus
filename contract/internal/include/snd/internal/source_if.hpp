@@ -278,6 +278,7 @@ struct RenderItem {
   Ramp grainLengthMsOffset{};
   Ramp grainPositionOffset{};
   Ramp grainPitchJitterCentsOffset{};
+  bool grainResampled{};  // core owns fractional phase and supplies the next PCM read position
 };
 
 struct RenderBatch {
@@ -292,12 +293,18 @@ struct RenderBatch {
   std::uint32_t chunkGeneration;
 };
 
+struct GrainOffsets {
+  Ramp density{}, lengthMs{}, position{}, pitchJitterCents{};
+};
+
 struct AdvanceItem {  // virtual voice: advance without rendering (4.4)
   SlotIndex voiceSlot;
   SlotIndex sourceSlot;
   std::uint32_t outputFrames;
   float pitch;
   Playhead* playhead;
+  // Non-null: core has advanced playhead to the exact resampler target. Serial call only.
+  const GrainOffsets* grain = nullptr;
 };
 
 // RT-safe requests to non-RT threads.
@@ -344,6 +351,8 @@ struct SourceLimits {
   std::uint32_t blockFrames;
   std::uint32_t sampleRate;
   std::uint32_t streamTargetAheadMs;
+  std::uint32_t grainHistoryFrames{};    // maximum resampler lookahead plus one; owner-sized
+  std::uint32_t grainHistoryChannels{};  // maximum rendered voice channels
 };
 
 class ISourceKind {

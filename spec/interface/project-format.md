@@ -131,7 +131,12 @@
 `startMs`, `weight`, `volumeDb`, `pitchCents`, `random: {volumeDb, pitchCents, pan, startMs, filterHz}`, `switchValue`（名前 → `snd_hash_id`、または整数）,
 `layer: [min, max]`, `fadeInMs`, `fadeOutMs`, `loopCount`（0 = 無限）。
 `synth`: `{kind: oscillator|noise|granular|patch|wavetable, waveform: sine|saw|square|triangle|pulse, frequencyHz, duty, noiseColor: white|pink|brown, asset, channels, patch}`
-（`patch`: `kind` が `patch` のときのパッチの参照（必須。無ければエラー）。バンクへの出力は仮の任意チャンク `XPCH`、bank-format.md §9）。
+Granular の `asset` は常駐 PCMF / PC16。追加属性は `density`（0..384000 粒/秒、素材レートで飽和）、
+`lengthMs`（0..1000）、`position`, `positionJitter`（0..1）、`pitchCents`（±4800）、
+`pitchJitterCents`（0..4800）、`window`（hann / triangle / rectangle または 0..2）。省略時は SYNP の既定値。
+イベント曲線 `grainDensity`, `grainLengthMs`, `grainPosition`, `grainPitchJitterCents` は同じ単位の加算。
+Patch では名前付きグラフの `patch` 参照か、[D-06](../handoff/parallel/requests/D-06-patch-format.md) の `nodes` と
+`output` を指定する。`gateFrames` は内部レートでのノート長（既定 0）。
 
 **action**: `{timeMs, action: play|stop|setParameter|applySnapshot, target（Event / parameter / snapshot の参照）, value}`。
 
@@ -184,7 +189,7 @@ event の `music`:
 
 材質番号は `materials` の順。組の上書きは `table[min(a,b) * N + max(a,b)]`。Event は ID（`snd_hash_id`）で入る。
 
-### patch → `XPCH`（仮、bank-format.md §9。設計書 5、5.1）
+### 名前付き patch と PTCH v1（bank-format.md §6.2、§9）
 
 ツールで組む小さな合成グラフ。ノードの種類・入力・パラメータの表は `buildtool/include/snd/buildtool/patch.hpp`（ビルドツールと
 ツールのパッチエディタが共有する）。
@@ -222,7 +227,9 @@ event の `music`:
 
 - 出力ノードに届かないノードは警告し、プログラムに入れない。ビルドは依存順の配列（同順位はファイルでの順）に変換する（5.1）。
 - パッチは共有オブジェクト。それを使う Event のバンクに入る（ID 表の種類名は `patch`）。
-- ランタイムの Patch ソースはまだ無い（セッション D）。バンクには仮の `XPCH` で入り、鳴らない。
+- 名前付きグラフは XPCH に保存し、同時に再生用の PTCH を書く。oscillator（固定周波数）、white noise（既定 seed）、
+  amp、mix、ADSR、output を変換できる。変換後の上限は 16 ノード。未対応の組み合わせはゲーム向けビルドでエラーになる。エディタの開発プレビューは警告を出し、該当行を XPCH のみに保持する。
+- インライン形式は D-06 の全 11 命令に対応する。
 
 ### ツールが書くときの決まり（オーサリングツール、段階5）
 

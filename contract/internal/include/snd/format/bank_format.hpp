@@ -366,6 +366,14 @@ inline constexpr ChunkInfo kChunks[] = {
   COL(SYNP, programOffset, 6, U32, 0, 0) /* within PTCH */                        \
   COL(SYNP, programBytes, 7, U32, 0, 0)                                           \
   COL(SYNP, channels, 8, U32, 0, 1)                                               \
+  COL(SYNP, density, 9, F32, 0, 20)                                               \
+  COL(SYNP, lengthMs, 10, F32, 0, 100)                                            \
+  COL(SYNP, position, 11, F32, 0, 0)                                              \
+  COL(SYNP, pitchJitterCents, 12, F32, 0, 0)                                      \
+  COL(SYNP, window, 13, U32, 0, 0)                                                \
+  COL(SYNP, positionJitter, 14, F32, 0, 0)                                        \
+  COL(SYNP, pitchCents, 15, F32, 0, 0)                                            \
+  COL(SYNP, gateFrames, 16, U64, 0, 0)                                            \
   /* Music ------------------------------------------------------------------ */ \
   COL(MSEG, id, 0, U32, 1, 0)                                                     \
   COL(MSEG, asset, 1, U32, 1, 0)       /* ASST row (interleaved stems recommended, 8.4) */ \
@@ -506,9 +514,10 @@ enum CategoryFlags : std::uint32_t {
 };
 enum class CurveTarget : std::uint32_t {
   Volume = 0, Pitch = 1, Lowpass = 2, Highpass = 3, Pan = 4, Send = 5, EffectParam = 6, Spread = 7,
-  ReverbSend = 8, Blend3D = 9,
+  ReverbSend = 8, Blend3D = 9,  // 10 and 11 reserved for D-01
+  GrainDensity = 12, GrainLengthMs = 13, GrainPosition = 14, GrainPitchJitterCents = 15,
 };
-enum class CurveCompose : std::uint32_t { AddDb = 0, AddCents = 1, Min = 2, Max = 3, Multiply = 4 };
+enum class CurveCompose : std::uint32_t { AddDb = 0, AddCents = 1, Min = 2, Max = 3, Multiply = 4, AddLinear = 5 };
 inline constexpr std::uint32_t kInputDistance = 0xFFFFFFFEu;  // CURV.input special value
 
 enum class LoadForm : std::uint32_t {  // 6.2

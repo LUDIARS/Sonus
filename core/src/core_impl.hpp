@@ -211,6 +211,8 @@ struct BankRecord {
   source::SourceAsset* assets = nullptr;
   std::uint32_t synthCount = 0;
   source::OscillatorParams* osc = nullptr;
+  source::GranularParams* granular = nullptr;
+  source::PatchParams* patch = nullptr;
   source::NoiseParams* noise = nullptr;
   // Mappings bank row -> core slot (filled by ApplyCommands at registration).
   std::uint32_t busCount = 0, catCount = 0, snapCount = 0, groupCount = 0, duckCount = 0;
@@ -502,6 +504,7 @@ struct VoiceStatic {
   float pan;                 // random pan [-1, 1]
   float lowpassHz;           // random filter (lowpass target), 0 = none
   float linearGain;          // synth / user buffer volume
+  source::GrainOffsets grain{};  // DSP parameter endpoints, copied into the render list
   float sourceRate;          // source-rate kinds: frames per second of the source
   float musicGain;           // music SetGain target (1 default)
   float musicGainStep;       // per block, until musicGainTarget

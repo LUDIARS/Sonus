@@ -108,6 +108,11 @@ bool ResamplerFitsInline(ResamplerQuality q, std::uint32_t channels,
 // Initialises (silent history, phase 0).
 void ResamplerInit(void* state, ResamplerQuality q, std::uint32_t channels,
                    float maxRatio = kResamplerMaxRatio) noexcept;
+// Restore the sub-frame phase after virtual playback, immediately after Init.
+void ResamplerSetFraction(void* state, std::uint32_t fraction) noexcept;
+// Q32 source-frame displacement for this output block, using Process's exact pitch ramp.
+std::uint64_t ResamplerAdvanceQ32(std::uint32_t frames, float ratioStart, float ratioEnd,
+                                  float maxRatio) noexcept;
 // Same as a fresh Init with the same quality, channels and maxRatio.
 void ResamplerReset(void* state) noexcept;
 ResamplerQuality ResamplerGetQuality(const void* state) noexcept;
