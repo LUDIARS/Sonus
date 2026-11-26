@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "harness.hpp"
+#include "snd/dsp/convolution.hpp"
 #include "snd/dsp/effects.hpp"
 #include "snd/test/rt_guard.hpp"
 
@@ -669,10 +670,35 @@ SND_TEST(CoreFx, EveryStandardKindRunsAsAVoiceEffect) {
   using snd::dsp::EffectKind;
   for (std::uint32_t k = 0; k < static_cast<std::uint32_t>(EffectKind::Count); ++k) {
     const snd::dsp::EffectInfo& info = snd::dsp::GetEffectInfo(static_cast<EffectKind>(k));
-    Harness h(VfxConfig());
-    h.Load("b", VfxBank().Build(HashId("B")));
+    // Keep the prepared IR alive until after the harness (and its audio thread) is gone.
+    struct VoiceIr {
+      alignas(64) unsigned char storage[32768];
+      std::uint32_t slot = 0;
+      ~VoiceIr() {
+        if (slot != 0u) snd::dsp::ConvolutionUnregisterIr(slot);
+      }
+    } ir;
     float params[16];
     snd::dsp::EffectDefaultParams(info.kind, params);
+    if (info.kind == EffectKind::Convolution) {
+      // The default 2 s IR capacity exceeds a normal voice slot. Use a short real
+      // IR, not a dry mix, so this checks convolution through the voice path.
+      constexpr std::uint32_t partition = 256u;
+      const float tap = 0.5f;
+      const float* const channels[] = {&tap};
+      const snd::dsp::ConvolutionIrDesc desc{channels, 1u, 1u, 48000u, 1.0f};
+      const std::size_t bytes = snd::dsp::ConvolutionIrBytes(desc, 48000u, partition);
+      SND_REQUIRE(bytes != 0u && bytes <= sizeof(ir.storage));
+      const auto* prepared = snd::dsp::ConvolutionPrepareIr(ir.storage, bytes, desc, 48000u, partition);
+      SND_REQUIRE(prepared != nullptr);
+      ir.slot = snd::dsp::ConvolutionRegisterIr(prepared);
+      SND_REQUIRE(ir.slot != 0u);
+      params[snd::dsp::kConvIrSlot] = static_cast<float>(ir.slot);
+      params[snd::dsp::kConvPartitionFrames] = static_cast<float>(partition);
+      params[snd::dsp::kConvMaxIrMs] = 10.0f;
+    }
+    Harness h(VfxConfig());
+    h.Load("b", VfxBank().Build(HashId("B")));
     // Delay lines sized for 1 s do not fit the default slot (160 KiB): 100 ms here.
     if (info.kind == EffectKind::Echo) params[4] = 100.0f, params[0] = 50.0f;
     if (info.kind == EffectKind::Delay) params[6] = 100.0f, params[0] = 50.0f;
@@ -691,6 +717,9 @@ SND_TEST(CoreFx, EveryStandardKindRunsAsAVoiceEffect) {
       e += double(h.At(f, 0)) * h.At(f, 0);
     }
     SND_CHECK_MSG(finite && e > 1.0, "%s: output energy %g", info.name, e);
+    if (info.kind == EffectKind::Convolution) {
+      SND_CHECK_NEAR(Amp(h, 2048, 2048, 8000.0), 0.5 * 0.3 * kCenter, 0.01);
+    }
   }
 }
 

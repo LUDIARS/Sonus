@@ -154,11 +154,6 @@ std::int64_t Requirement(const TsState& s, std::uint32_t outFrames, float s0, fl
   return req;
 }
 
-// Reads frame `abs` of channel c from the call's buffer (base = absolute index of in[c][0]).
-inline float X(float* const* in, std::uint32_t c, std::int64_t base, std::int64_t abs) noexcept {
-  return in[c][abs - base];
-}
-
 // Best segment start in [lo, hi] for the target x[natural + j], j < hop (D-217):
 // score = C |C| / E with C = sum over channels of the correlation of each channel
 // with its own target and E = sum over channels of the candidate energy. Channels in
