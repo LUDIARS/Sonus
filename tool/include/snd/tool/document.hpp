@@ -77,6 +77,15 @@ const json::Value* FindPath(const json::Value& root, std::string_view path);
 double NumberAt(const json::Value& root, std::string_view path, double def);
 std::string StringAt(const json::Value& root, std::string_view path, const std::string& def = std::string());
 bool BoolAt(const json::Value& root, std::string_view path, bool def);
+// A number as an integer of the type, checked before converting (D-187: no float-to-integer
+// conversion out of range): NaN gives 0, the rest is truncated toward zero and saturated to the
+// type's range (a broken file's -5 or 1e300 becomes 0 or the maximum, never undefined behaviour).
+std::uint32_t ClampToU32(double v);
+std::uint64_t ClampToU64(double v);
+std::int32_t ClampToI32(double v);
+// NumberAt converted with the functions above.
+std::uint32_t U32At(const json::Value& root, std::string_view path, std::uint32_t def);
+std::uint64_t U64At(const json::Value& root, std::string_view path, std::uint64_t def);
 // The member order of project-format.md for the object at `path` of a `kind` object
 // (nullptr-terminated; nullptr if the tool has no order for it: new members go last).
 const char* const* SpecMemberOrder(std::string_view kind, std::string_view path);
@@ -181,7 +190,8 @@ class ProjectDocument {
   // (D-177b; compared by meaning: numbers by value, so the text stays as written; in the editors'
   // setters an explicit default equals an absent member, and a move to the same place is success).
   // false only for a refused edit: no object, bad path, a non-finite number (Number()
-  // of NaN / Inf, D-176c), or a rule of the object. The same holds for every editor's setters.
+  // of NaN / Inf, D-176c), a number no column of a bank holds (beyond the largest finite float,
+  // D-187; Create, Set, SetDefaulted, Insert, and Modify when it brings one in), or a rule of the object. The same holds for every editor's setters.
   bool Set(std::string_view guid, std::string_view path, json::Value value, std::uint32_t mergeKey = 0);
   bool SetNumber(std::string_view guid, std::string_view path, double v, std::uint32_t mergeKey = 0) {
     return Set(guid, path, Number(v), mergeKey);
@@ -202,6 +212,12 @@ class ProjectDocument {
 
   void BeginGroup();
   void EndGroup();
+  // D-186: discards the open group: the objects it touched go back to their state at BeginGroup, no
+  // step is filed and the undo / redo lists stay as they were (an Esc during a drag). Nested groups:
+  // called at any depth, it discards the OUTERMOST group with everything in it (the inner and the
+  // outer levels' changes alike) and closes every level; the matching EndGroup calls that follow do
+  // nothing. Nothing happens without an open group.
+  void AbortGroup();
   bool InGroup() const { return groupDepth_ != 0u; }
   bool Undo();
   bool Redo();

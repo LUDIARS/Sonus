@@ -3,6 +3,8 @@
 
 #include <algorithm>
 #include <cinttypes>
+#include <cmath>
+#include <limits>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -29,22 +31,42 @@ std::string Hex(std::uint64_t v) {
   return b;
 }
 
+// D-185: digits only (decimal, or hexadecimal after 0x): no sign, no spaces, and the value must
+// fit in 64 bits (no wrap-around, no saturation).
 bool ParseU64(const std::string& s, std::uint64_t* out) {
-  if (s.empty()) return false;
-  char* end = nullptr;
   const bool hex = s.size() > 2 && s[0] == '0' && (s[1] == 'x' || s[1] == 'X');
-  const unsigned long long v = std::strtoull(s.c_str() + (hex ? 2 : 0), &end, hex ? 16 : 10);
-  if (end == nullptr || *end != '\0') return false;
-  *out = static_cast<std::uint64_t>(v);
+  const std::size_t from = hex ? 2u : 0u;
+  if (s.size() <= from || s.size() - from > (hex ? 16u : 20u)) return false;
+  std::uint64_t v = 0;
+  for (std::size_t i = from; i < s.size(); ++i) {
+    const char c = s[i];
+    std::uint64_t d = 0;
+    if (c >= '0' && c <= '9') {
+      d = static_cast<std::uint64_t>(c - '0');
+    } else if (hex && c >= 'a' && c <= 'f') {
+      d = static_cast<std::uint64_t>(c - 'a' + 10);
+    } else if (hex && c >= 'A' && c <= 'F') {
+      d = static_cast<std::uint64_t>(c - 'A' + 10);
+    } else {
+      return false;
+    }
+    const std::uint64_t base = hex ? 16u : 10u;
+    if (v > (UINT64_MAX - d) / base) return false;  // would not fit
+    v = v * base + d;
+  }
+  *out = v;
   return true;
 }
 
+// A finite float written as text (no trailing characters; the value fits a float).
 bool ParseF32(const std::string& s, float* out) {
-  if (s.empty()) return false;
+  if (s.empty() || s[0] == ' ') return false;
   char* end = nullptr;
-  const float v = std::strtof(s.c_str(), &end);
-  if (end == nullptr || *end != '\0') return false;
-  *out = v;
+  const double v = std::strtod(s.c_str(), &end);
+  if (end == nullptr || *end != '\0' || !std::isfinite(v) || v > 3.4028234663852886e38 || v < -3.4028234663852886e38) {
+    return false;
+  }
+  *out = static_cast<float>(v);
   return true;
 }
 
@@ -99,6 +121,7 @@ bool SetField(const std::string& value, T* field) {
   } else {
     std::uint64_t u = 0;
     if (!ParseU64(value, &u)) return false;
+    if (u > static_cast<std::uint64_t>(std::numeric_limits<T>::max())) return false;  // D-185: no truncation
     *field = static_cast<T>(u);
     return true;
   }
@@ -461,8 +484,13 @@ bool DecodeExpectation(const std::string& text, ReplayExpectation* out, std::str
     } else {
       if (!haveCount) return fail("decision before the count");
       std::istringstream ls(line);
-      unsigned long long b = 0, k = 0, i = 0, s = 0, d = 0;
-      if (!(ls >> b >> k >> i >> s >> d)) return fail("bad decision line: " + line);
+      std::string f[6];
+      ls >> f[0] >> f[1] >> f[2] >> f[3] >> f[4] >> f[5];
+      std::uint64_t b = 0, k = 0, i = 0, s = 0, d = 0;
+      if (!f[5].empty() || !ParseU64(f[0], &b) || !ParseU64(f[1], &k) || !ParseU64(f[2], &i) || !ParseU64(f[3], &s) ||
+          !ParseU64(f[4], &d)) {
+        return fail("bad decision line: " + line);
+      }
       if (k > 0xFFFFFFFFull || i > 0xFFFFFFFFull || s > 0xFFFFFFFFull || d > 0xFFFFFFFFull) return fail("bad decision value");
       e.decisions.push_back(ll::ReplayDecision{b, static_cast<std::uint32_t>(k), static_cast<std::uint32_t>(i),
                                                static_cast<std::uint32_t>(s), static_cast<std::uint32_t>(d)});
@@ -580,6 +608,16 @@ bool WriteBugReport(const std::string& dir, const BugReport& rep, std::string* e
   if (!WriteBytes((fs::path(dir) / "summary.txt").string(), summary.data(), summary.size())) {
     return fail("cannot write summary.txt");
   }
+  // D-185: every text field comes back as written (summary.txt above is for people).
+  const struct {
+    const char* file;
+    const std::string* text;
+  } texts[] = {{"notes.txt", &rep.notes}, {"description.txt", &rep.summary}, {"comparison.txt", &rep.comparison}};
+  for (const auto& t : texts) {
+    if (!WriteBytes((fs::path(dir) / t.file).string(), t.text->data(), t.text->size())) {
+      return fail(std::string("cannot write ") + t.file);
+    }
+  }
   if (rep.replayed) {
     if (!SaveExpectation((fs::path(dir) / "expected.txt").string(), rep.expectation, &err)) return fail(err);
   }
@@ -636,9 +674,9 @@ bool ReadBugReport(const std::string& dir, BugReport* out, std::string* error) {
           return fail("bad bank file name: " + value);
         }
         b.file = value;
-      } else if (field == "bankId" && ParseU64(value, &u)) {
+      } else if (field == "bankId" && ParseU64(value, &u) && u <= 0xFFFFFFFFull) {
         b.bankId = static_cast<Id>(u);
-      } else if (field == "languageId" && ParseU64(value, &u)) {
+      } else if (field == "languageId" && ParseU64(value, &u) && u <= 0xFFFFFFFFull) {
         b.languageId = static_cast<Id>(u);
       } else if (field == "contentHash" && ParseU64(value, &u)) {
         b.contentHash = u;
@@ -664,9 +702,10 @@ bool ReadBugReport(const std::string& dir, BugReport* out, std::string* error) {
     if (!ReadText((fs::path(dir) / "banks" / b.file).string(), &bytes)) return fail("missing bank " + b.file);
     b.bytes.assign(bytes.begin(), bytes.end());
   }
-  std::string summary;
-  if (ReadText((fs::path(dir) / "summary.txt").string(), &summary)) r.summary = summary;
-  r.notes.clear();
+  // Reports written before notes.txt / description.txt / comparison.txt existed: empty texts.
+  ReadText((fs::path(dir) / "notes.txt").string(), &r.notes);
+  ReadText((fs::path(dir) / "description.txt").string(), &r.summary);
+  ReadText((fs::path(dir) / "comparison.txt").string(), &r.comparison);
   if (r.replayed) {
     if (!LoadExpectation((fs::path(dir) / "expected.txt").string(), &r.expectation, &err)) return fail(err);
   }

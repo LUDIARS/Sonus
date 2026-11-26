@@ -44,11 +44,14 @@ int Connection::Open(const ConnectionDesc& desc) {
   }
   if (desc.profilerMask != 0u) c->SetProfilerMask(desc.profilerMask, desc.meterHz, false);
   client_ = c;
+  ++opens_;
   state_ = LinkState::Connecting;
   mismatch_ = false;
   sessions_ = 0;
   seenConnects_ = 0;
   seenDisconnects_ = 0;
+  generation_ = 0;
+  awaiting_ = false;
   hello_ = livelink::HelloReply{};
   return SND_OK;
 }
@@ -60,6 +63,7 @@ void Connection::Close() {
   client_ = nullptr;
   state_ = LinkState::Offline;
   mismatch_ = false;
+  awaiting_ = false;
 }
 
 void Connection::Drop() {
@@ -72,8 +76,14 @@ ConnectionEvents Connection::Poll() {
     state_ = LinkState::Offline;
     return ev;
   }
+  // D-182: one consistent picture per Poll. "Waiting for a decision" is read first, then the
+  // HelloReply that caused it and the counters: what awaitingSync() / hello() / generation() return
+  // until the next Poll belongs to one connection of the game.
+  const bool awaiting = client_->AwaitingSync();
   const livelink::ClientStats st = client_->Stats();
-  const livelink::ClientState cs = client_->State();
+  const livelink::ClientState cs = awaiting ? livelink::ClientState::Handshake : client_->State();
+  awaiting_ = awaiting;
+  generation_ = st.disconnects;
   switch (cs) {
     case livelink::ClientState::Stopped: state_ = LinkState::Offline; break;
     case livelink::ClientState::Connecting: state_ = LinkState::Connecting; break;
@@ -93,7 +103,7 @@ ConnectionEvents Connection::Poll() {
     hello_ = client_->LastHelloReply();
     mismatch_ = hello_.status == static_cast<std::uint32_t>(livelink::HelloStatus::BuildMismatch);
   }
-  if (state_ == LinkState::Handshake && client_->AwaitingSync()) {
+  if (awaiting_) {
     hello_ = client_->LastHelloReply();  // the mismatch the tool is asked about
     mismatch_ = true;
   }
@@ -105,12 +115,29 @@ ConnectionEvents Connection::Poll() {
   return ev;
 }
 
-bool Connection::awaitingSync() const { return client_ != nullptr && client_->AwaitingSync(); }
+void Connection::SetProjectBuildHash(std::uint64_t hash) {
+  if (desc_.projectBuildHash == hash) return;
+  ConnectionDesc d = desc_;
+  d.projectBuildHash = hash;
+  if (client_ == nullptr) {
+    desc_ = d;
+    return;
+  }
+  const std::uint32_t sessions = sessions_;
+  if (Open(d) == SND_OK) sessions_ = sessions;
+}
+
+bool Connection::awaitingSync() const { return client_ != nullptr && awaiting_; }
 
 bool Connection::DecideSync(MismatchPolicy answer) {
   if (client_ == nullptr) return false;
-  return client_->DecideSync(answer == MismatchPolicy::Refuse ? livelink::SyncMode::Disconnect
-                                                             : livelink::SyncMode::SendDiffs);
+  // Only the connection Poll saw: a reply that came since (another connection, maybe another
+  // game) is answered after the next Poll, by whoever looks at it then.
+  if (!awaiting_ || client_->Stats().disconnects != generation_) return false;
+  const bool ok = client_->DecideSync(answer == MismatchPolicy::Refuse ? livelink::SyncMode::Disconnect
+                                                                       : livelink::SyncMode::SendDiffs);
+  if (ok) awaiting_ = false;
+  return ok;
 }
 
 std::string Connection::Target() const {

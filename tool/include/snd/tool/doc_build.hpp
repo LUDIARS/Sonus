@@ -138,8 +138,17 @@ struct DocBuild {
 };
 
 DocBuild BuildDocument(const ProjectDocument& doc, const DocBuildOptions& options = {});
-// The build's problems only (in memory, nothing written).
+// The build's problems only (in memory, nothing written), word for word as the build tool reports
+// them (a problem can come twice from two places of the build).
 std::vector<DocIssue> CheckDocument(const ProjectDocument& doc);
+// D-189: each problem once (same file, line, column, kind and message), order kept: what the
+// screens list.
+std::vector<DocIssue> DistinctIssues(const std::vector<DocIssue>& issues);
+// The tool's own checks beside the build's (D-189, fourth rework): values the build takes but the
+// tool's models read otherwise. Now: segments' tempo points whose bpm (1e-3 .. 1e5), beatsPerBar
+// (a whole number 1 .. 4294967295), beatUnit (1, 2, 4, 8, 16 or 32) or tick (a whole number >= 0)
+// are out of range; the models read such a point as 120 BPM 4/4. Errors, `text` in the build's form.
+std::vector<DocIssue> ToolIssues(const ProjectDocument& doc);
 // Problems about one object.
 std::vector<DocIssue> IssuesOf(const std::vector<DocIssue>& issues, const std::string& guid);
 

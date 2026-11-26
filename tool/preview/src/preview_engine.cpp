@@ -2,6 +2,7 @@
 #include "snd/tool/preview/preview_engine.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <map>
 #include <set>
 
@@ -75,6 +76,7 @@ bool PreviewEngine::PutFile(const std::string& path, const std::vector<std::uint
 std::string PreviewEngine::PutRebuiltBank(const std::string& file, const std::vector<std::uint8_t>& bytes) {
   const std::string path = "live/" + std::to_string(++reloadSerial_) + "/" + file;
   host_->fs().Put(path, bytes);
+  rebuilt_.push_back(path);
   return path;
 }
 
@@ -89,6 +91,26 @@ bool PreviewEngine::LoadBuild(const DocBuild& build, std::string* error) {
   StopAll();
   for (auto it = banks_.rbegin(); it != banks_.rend(); ++it) host_->UnloadBank(snd_bank_handle{*it}, desc_.bankTimeoutMs);
   banks_.clear();
+  // Banks a hot reload loaded (the live link's ReloadBank from the files PutRebuiltBank wrote): the
+  // engine holds no handle of them. LoadBankAsync of a loaded path gives its handle (a path that is
+  // not loaded loads and is unloaded again: newest first, so at most the superseded files).
+  for (auto it = rebuilt_.rbegin(); it != rebuilt_.rend(); ++it) {
+    const snd_bank_handle h = host_->system()->LoadBankAsync(it->c_str());
+    if (h.value == 0u) continue;
+    std::string ignored;
+    for (int i = 0; i < 100000; ++i) {  // until it settles (bounded by the bank timeout below)
+      const snd_bank_state st = host_->system()->GetBankState(h);
+      if (st != SND_BANK_STATE_LOADING) break;
+      if (host_->output() == HostOutput::Manual) {
+        host_->Step(nullptr);
+      } else {
+        host_->Pump();
+      }
+    }
+    if (host_->system()->GetBankState(h) == SND_BANK_STATE_LOADED) host_->UnloadBank(h, desc_.bankTimeoutMs);
+    host_->fs().Remove(*it);
+  }
+  rebuilt_.clear();
   ++buildSerial_;
   // Dependencies first.
   std::vector<const BankImage*> order;
@@ -122,6 +144,8 @@ bool PreviewEngine::LoadBuild(const DocBuild& build, std::string* error) {
       left.clear();
     }
   }
+  // The build's other files (stream files): at their output paths, the root of bank paths.
+  for (const buildtool::OutputFile& f : build.files) host_->fs().Put(f.path, f.bytes);
   for (const BankImage* b : order) {
     const std::string path = "build/" + std::to_string(buildSerial_) + "/" + b->file;
     host_->fs().Put(path, b->bytes);
@@ -285,6 +309,13 @@ std::vector<PreviewTransition> PreviewEngine::Transitions() const {
     out.push_back(t);
   }
   return out;
+}
+
+double PreviewEngine::StreamPrimeMs() const {
+  // source/stream_kind.cpp StreamKind::PrimeFrames: rate / 10 frames (+ the codec's pre-roll;
+  // PCM and ADPCM have none).
+  const double rate = host_->SampleRate() == 0u ? 48000.0 : static_cast<double>(host_->SampleRate());
+  return 1000.0 * std::floor(rate / 10.0) / rate;
 }
 
 PreviewStatus PreviewEngine::Status() const {

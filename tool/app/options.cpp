@@ -5,6 +5,7 @@
 #include <cstring>
 
 #include "snd/tool/ui/safe_drawing.hpp"
+#include "snd/tool/ui/views.hpp"
 
 namespace snd::tool::app {
 namespace {
@@ -24,12 +25,19 @@ const char* Usage() {
          "  --build-dir <dir>      build output for the project hash (default <project>/.sonus-tool-build)\n"
          "  --connect <host:port>  game to connect to (default 127.0.0.1:27460)\n"
          "  --no-connect           start offline\n"
-         "  --refuse-mismatch      disconnect when the game's build differs (default: send the tool's values)\n"
+         "  --refuse-mismatch      disconnect when the game's build differs\n"
+         "  --send-diffs           send the tool's data when the game's build differs (default: ask; without a\n"
+         "                         project: send the mixer's values)\n"
+         "  --preview <silent|device>    run the preview engine (a runtime in the tool) and connect to it\n"
+         "  --reload-dir <dir>     hot reloads write rebuilt banks there ...\n"
+         "  --reload-prefix <p>    ... which the game reads as <p> (default: the directory as given)\n"
+         "  --report-dir <dir>     the replay screen's bug report folder (default sonus-report)\n"
          "  --font <file.ttf>      TrueType font for text (window hosts; required there)\n"
          "  --recording <path>     file used by Save / Load of the profiler's recording\n"
          "  --headless             no window: run frames and write a snapshot with Tela::Raster\n"
          "  --snapshot <file.ppm>  headless: image written after the last frame\n"
-         "  --screen <mixer|profiler>  headless: screen to show\n"
+         "  --screen <name>        headless: screen to show (mixer buses event params spatial music material\n"
+         "                         patch profiler replay link problems)\n"
          "  --frames <n>           headless: frames to run (default 30)\n"
          "  --frame-ms <ms>        headless: time between frames (default 33)\n"
          "  --size <W>x<H>         window / snapshot size in physical pixels (default 1280x800)\n"
@@ -71,6 +79,24 @@ bool ParseOptions(int argc, char** argv, Options* o, std::string* error) {
       o->connect = false;
     } else if (a == "--refuse-mismatch") {
       o->refuseMismatch = true;
+    } else if (a == "--send-diffs") {
+      o->sendDiffs = true;
+    } else if (a == "--preview") {
+      if (!value(&v)) return false;
+      o->preview = v;
+      if (o->preview != "silent" && o->preview != "device") {
+        *error = "--preview expects silent or device";
+        return false;
+      }
+    } else if (a == "--reload-dir") {
+      if (!value(&v)) return false;
+      o->reloadDir = v;
+    } else if (a == "--reload-prefix") {
+      if (!value(&v)) return false;
+      o->reloadPrefix = v;
+    } else if (a == "--report-dir") {
+      if (!value(&v)) return false;
+      o->reportDir = v;
     } else if (a == "--headless") {
       o->headless = true;
     } else if (a == "--snapshot") {
@@ -79,8 +105,10 @@ bool ParseOptions(int argc, char** argv, Options* o, std::string* error) {
     } else if (a == "--screen") {
       if (!value(&v)) return false;
       o->screen = v;
-      if (o->screen != "mixer" && o->screen != "profiler") {
-        *error = "--screen expects mixer or profiler";
+      ui::Screen sc;
+      if (!ui::ParseScreen(o->screen, &sc)) {
+        *error = "--screen expects one of mixer buses event params spatial music material patch profiler replay "
+                 "link problems";
         return false;
       }
     } else if (a == "--frames") {
@@ -117,6 +145,10 @@ bool ParseOptions(int argc, char** argv, Options* o, std::string* error) {
     }
   }
   if (o->buildDir.empty() && !o->project.empty()) o->buildDir = o->project + "/.sonus-tool-build";
+  if (o->refuseMismatch && o->sendDiffs) {
+    *error = "--refuse-mismatch and --send-diffs exclude each other";
+    return false;
+  }
   return true;
 }
 

@@ -238,6 +238,130 @@ C-06（ストリームの詳細、ワーカーごとの CPU）、C-07（決定�
 MinGW（`x86_64-w64-mingw32-g++ -std=c++20 -fsyntax-only -Werror -Wall -Wextra -fno-exceptions -fno-rtti`）: 新しい・変えた .cpp
 （tool/src の 8、tool/preview の 5、tool/test の 8）全部通過（0a7da93）。
 
+## 差し戻し（受け入れ側の決定 D-182〜D-185）で決まったことと変えた点
+
+独立テストの結果: `C-notes/live-indep.md`（欠陥 10、仕様の穴 G1〜G9）。決定: `_briefs/P-fix.md`。
+
+| 決定 | 採った案 | 差し戻しで変えた点（コミット） |
+| --- | --- | --- |
+| D-182 照合と再接続 | 1・2・3（既定 Ask） | 答えは同じゲーム（バンクの一覧: bankId・言語・contentHash。1.0 はビルドハッシュ）のときだけ覚える。一覧が来るまでは Checking（質問を出さない）。ツール自身のリロードで変わったバンクは覚えた署名を更新。`SetDecision(Ask)` で忘れる。新しいクライアント（`Connection::opens()`）・新しい接続で照合をやり直す。Hello のハッシュは接続のたびに今のビルド（`Connection::SetProjectBuildHash`、接続中に作り直す）。再接続では、これまでに送った全セル（Undo で戻したものも）と差し替えた表を今のビルドの値で送り直す（欠陥 1、G1）。差分の基準 = 知っているビルドの contentHash ＋ 送ったセル（82a92db、b7e530f） |
+| D-183 編集のライブ反映 | 5・7・8・9 | 送り直しは同じセルの新しい値を追い越さない（セルごとに最後の編集の番号）。諦めるのは時間（`LiveSyncOptions::giveUpMs`、既定 5000 ms）（欠陥 2）。文書の Undo などの Remove で対応する Add の予備容量を返す、ホットリロードの成功でそのバンクのライブの分を 0 に（欠陥 3）。ライブで足したオブジェクトの値（NOT_FOUND）はホットリロードに回す（G7）。ミキサーが離したら文書の値を自動で送る（G8）。バスの追加は実際にはホットリロード（G3、文書だけ）。G9 は変更なし（82a92db） |
+| D-184 リロード・試聴・プレビュー | 6・10・11・12 | `LivePhase::Failed`（末尾に追加）と `failedBanks()`: ゲームでのリロードの失敗・書き出しの失敗で Failed、成功するまで戻らない。書き出しの失敗は reloads() の phase Failed と書き出しの理由（欠陥 4・5、G5）。リロードは常に「無ければ読み込む」（外れたバンクを戻せるように）。遷移の試聴: 要求は時刻以降で最初のブロックの頭、少なくとも 1 ブロック後（`AuditionRouter::PlayTransition`）。`MusicEditor::Preview` は同じブロック（新しい欄 `TransitionPreview::applySeconds`）から、ランタイム（music `transition.cpp` の HandleSetState: earliest = 適用ブロックの頭 + プライム）と同じ先読みで計算（1 ブロックを足さない）。`lookaheadMs` は 8.2 の表示の値のまま（欠陥 8・9、G4）（01a2e68） |
+| D-185 記録と再生 | 13・14・15・16 | 再生の上限: `ReplayOptions::maxBlocks`（記録の長さ、既定は実時間 1 時間、超えると読み込みで失敗・理由つき）と `maxAlignBlocks`（番号合わせの空回し、超えると合わせずに再生 `blockNumbersKept = false`）（欠陥 10、G6）。不具合報告は `notes.txt`・`description.txt`・`comparison.txt` で全項目を往復（欠陥 6）。数の読み取りは符号・範囲・型を確かめる（`ParseConfigLine`、期待のファイル、報告のバンクの id）（欠陥 7）。sonus-replay: 報告からの再生の失敗も 2、`--help`（a4547b5） |
+
+### `Defect_*` の結果
+
+`tool_indep_s7_live_Defect_*` 10 本すべて通過（82a92db 以降、構成 8）。
+
+### 決定と食い違って落ちる独立テスト・既存のテスト（変更していない）
+
+D-184「モデルは要求が適用されるブロックの頭から、ランタイムと同じ先読みで計算する」と、先読みに 1 ブロックを足していた
+前の計算を前提にしたアサーション:
+
+- `tool_indep_s7_compute_test` の `IndepS7Calc.F16_TransitionPreview`（695、703、704、709、720 行: 「ちょうど・直前の要求は
+  先読み（1 ブロック以上）で次へ」「startLate = 要求 + lookaheadMs」「小節線ちょうど 2.0 s は 4.0 s」）。ランタイムでは
+  素材がメモリにあればプライム 0 なので、その小節（またはその拍）で切り替わる。
+- `tool_music_editor_test` の `MusicEditor.MinimumLookaheadAndTransitionPreview`（306、307 行: 1.495 s の要求は 2.0 s）。
+  組 M の実装担当のテストで、common.md の「既存のアサーションは書き換えない」に従い直していない。ランタイムでは
+  1.5 s（適用は 1.4987 s のブロックの頭、次の拍 1.5 s、プライム 0）。
+
+### 画面（組 U）に影響する変更
+
+名前・引数を変えた公開関数は無い。足したもの・意味が変わったもの:
+
+- `LivePhase::Failed`（末尾、値 7）と `LivePhaseName`、`LiveSync::failedBanks()`。`switch (LivePhase)` に default が無い画面は
+  -Wswitch で止まる（今の tool/ui は LiveSync を使っていない）。
+- `LiveSync::SetDecision(Ask)` は覚えた答えも忘れる。`ChooseSendDiffs` / `ChooseRefuse` は `options.decision` を変えなくなった
+  （同じゲームのときだけ覚える）。
+- `LiveSyncOptions::giveUpMs`（末尾）。
+- `Connection::SetProjectBuildHash`、`Connection::opens()`。
+- `TransitionPreview::applySeconds`（末尾）。`MusicEditor::Preview` の `fireSeconds` などはランタイムに合わせて変わる
+  （小節線・拍のちょうど・直前の要求で、以前より 1 拍・1 小節早い値になることがある）。
+- `ReplayOptions::maxBlocks` / `maxAlignBlocks`（末尾）。
+- 不具合報告のフォルダに `notes.txt`・`description.txt`・`comparison.txt`（`summary.txt` は人向けのまま）。
+
+画面への要望（追加）: phase Failed の表示と `failedBanks()` の理由、「答えを取り消す」（`SetDecision(Ask)`）、遷移の試聴の
+予告は `applySeconds`（要求が効く時刻）と `fireSeconds`。
+
+### 差し戻しの後の構成と結果
+
+すべて -j2、ビルドは `$S/live/b-*`（終わったら消した）。「食い違う 2 本」= 上の `tool_indep_s7_compute_test` と `tool_music_editor_test`。
+
+| 構成 | コミット | テスト | 結果 |
+| --- | --- | --- | --- |
+| 8: TOOL_CORE、gcc Debug | dd35c5a | 全部（289） | 失敗は食い違う 2 本だけ（`platform_device_play_test` は既存の Skipped）。`tool_indep_s7_live_Defect_*` 10 本は全部通過 |
+| 8 + ASan/UBSan | c47d53c | `tool\|livelink`（104） | 失敗は食い違う 2 本だけ。サニタイザの報告なし |
+| 8 + TSan | c47d53c | `tool`（71）、`tool_live_concurrency_test`・`tool_live_mixer_test`・`tool_live_sync_test`・`tool_indep_s7_live_threads_test`・`tool_indep_s7_live_sync_test` を -j1 で 20 回 | 失敗は食い違う 2 本だけ。20 回: 全通過 |
+| 8 + Release | c47d53c | `tool`（71）、同じ 5 本＋`tool_live_preview_test`・`tool_replay_test` を -j1 で 20 回 | 失敗は食い違う 2 本だけ。20 回: 全通過 |
+| 8 + clang | c47d53c | `tool`（71） | 失敗は食い違う 2 本だけ |
+| 9: Tela 入り | c47d53c | `tool`（85） | 失敗は食い違う 2 本だけ（今ある画面と画面のテストは通過） |
+| 6: テストなし Release | c47d53c | ビルドのみ | 通過、警告 0 |
+| MinGW 構文検査 | c47d53c | 変えた .cpp 10 本 | 通過（`live_preview_test.cpp` の `%zu` を直した） |
+
+回していない: 構成 1・7（差し戻しはツールの中だけ）。
+
+### 差し戻しの後の未検証
+
+- 1.0 のゲームの不一致を自分のテストでは試していない（独立テスト `OneZeroGameMismatchAsksWithoutABankList` は通過）。
+- 送り直しの時間切れ（`giveUpMs`）で問題になる経路と、同じセルの新しい値で古い送り直しを捨てる経路は、自分のテストでは
+  作っていない（独立テストの欠陥 2 で確認）。
+- Hello のハッシュの作り直しは、クライアントが「接続中」の間だけ（ハンドシェイクの最中に文書が変わると、その接続は前の
+  ハッシュで照合する。1.1 のゲームではバンクの一覧で比べ直すので影響は小さい。1.0 では Accepted のあとに差分を送る）。
+- 再接続のとき、構造の変更（StructEdit）がゲームに残っているかは分からない（予備容量はリロードの成功でだけ 0 に戻す）。
+
+## 差し戻し 2 回目（D-182〜D-184 への追記）
+
+独立テストの再確認（`C-notes/live-indep.md` の「再確認」）: 新しい欠陥 5 件、仕様の穴 G10・G11。
+
+| 項目 | 変えた点 | コミット |
+| --- | --- | --- |
+| 1 `Defect_ValueEditBuiltWithAStructuralEditIsLost`（D-183） | 構造の変更の計画（`DeriveStructEdits`）が、残るバスの音量・残るエフェクトのパラメータ・残るセンドのレベルの変化を値として持ち、StructEdit の後に SetValue で送る。ほかの列（channels、flags、lodPriority、エフェクトの flags・パラメータ数、センドの preFader）の変化があれば StructEdit にせず表の経路（→ リロード）。StructEdit が断られてリロードになれば、値はリロードで入る | 04dc1e2 |
+| 2 `Defect_ReconnectSendsALiveStructuralEditAgain`（D-182/D-183） | 再接続の照合で、ライブの構造の変更を持つバンクは差分を作らずにリロード（書き出しが無い・1.0 なら未対応の一覧）。リロードの成功でそのバンクの構造の変更を一覧から消す（予備容量 0。待っている要求の番号は付け替え） | 04dc1e2 |
+| 3 `Defect_PreviewLoadBuildAfterAHotReloadFails`（D-184） | `PreviewEngine::LoadBuild` は、自分のハンドルのほかに `PutRebuiltBank` で書いたファイル（新しい順）を `LoadBankAsync` で引いて、読み込まれていれば外し、ファイルも消す。ビルドのほかのファイル（ストリーム）を出力のパスに置く | f93dad5 |
+| 4 `Defect_TransitionPreviewUsesTheTargetsLeadInsteadOfTheBridges`（D-184） | `MusicEditor::Preview` と `MinimumLookahead` は、ブリッジのある規則ではブリッジの素材のプライム（頭から）で判断する（music `FirstMaterialPrime` と同じ） | a45b218 |
+| 5 `Defect_RememberedAnswerGoesToAnotherGameWhenTheHelloArrivesAfterPoll`（D-182） | `Connection::Poll` が「決定待ち」→ HelloReply → 統計（世代 = disconnects）の順に 1 回で写し、`awaitingSync()` は写した値、`generation()` を足した。`DecideSync` は Poll が見た接続（世代が同じで決定待ち）にだけ答える。LiveSync の接続の判定はこの世代を使う | 6ec1711、04dc1e2 |
+| 6 G10 | 1.1 のゲームでは、覚えた答えが無くてもバンクの一覧が来るまで Checking（質問を出さない） | 04dc1e2 |
+| 7 G11 | `IPreviewEngine::StreamPrimeMs()`（source の StreamKind::PrimeFrames と同じ rate / 10。コーデックの pre-roll は含めない）と `MusicSettingsOf(engine)`。テストでストリームの素材の切り替えがモデルと一致（1.95 s → 4.0 s、1.5 s → 2.0 s、ブリッジあり 1.99 s → 2.0 s） | f93dad5、36a3f19 |
+| 8 `tool_profiler_streams_test` | 購読（`subscribedMask` が付き、BlockTiming が届く）を待ってから Play（期待値は不変） | ff66450 |
+| 9 自分のテスト | 上の 4 つの弱い箇所（構造の変更＋値、再接続とライブの構造の変更、リロードの後の LoadBuild を 3 回、ストリームとブリッジ） | 36a3f19 |
+
+`Defect_*`: `tool_indep_s7_live_Defect_*` 15 本すべて通過。`IndepS7LiveRecheck.NoQuestionBeforeTheBankListAndOneZeroByHash` は単独で 5 回、
+TSan / Release の 20 回でも通過（下）。決定と食い違って落ちる独立テスト: なし。
+
+画面（組 U）に影響する変更（名前・引数の変更なし、足したもの・意味の変化）:
+- `Connection::awaitingSync()` は最後の Poll で写した値（Poll の前は前の値）。`Connection::generation()` を追加。`DecideSync` は
+  Poll の後に接続が変わっていれば false。
+- 1.1 のゲームでは、初めての不一致でも一覧が来るまで `phase()` は Checking（`pending()` は一覧の後）。
+- `IPreviewEngine::StreamPrimeMs()`（純粋仮想を追加。ほかの実装があれば足す必要がある）、`MusicSettingsOf`。
+- `structEdits()` はリロードが成功したバンクの行が消える（前は undone の印）。
+- `MusicEditor::Preview` / `MinimumLookahead` はブリッジのある規則でブリッジのプライムを使う（値が変わる）。
+
+画面への要望（追加）: 音楽エディタの試聴の予告は `MusicSettingsOf(engine)` の値で計算し、`streamPrimeMs` を表示に使う。
+
+### 差し戻し 2 回目の構成と結果
+
+-j2、ビルドは `$S/live/b-*`（終わったら消した）。20 回の繰り返しは `tool_live_concurrency_test`・`tool_live_mixer_test`・`tool_live_sync_test`・
+`tool_indep_s7_live_threads_test`・`tool_indep_s7_live_sync_test`・`tool_indep_s7_live_recheck_test` の 6 本を -j1 で。
+
+| 構成 | コミット | テスト | 結果 |
+| --- | --- | --- | --- |
+| 8: TOOL_CORE、gcc Debug | d666382 | 全部（296） | 全部通過（`platform_device_play_test` は既存の Skipped） |
+| 8 + ASan/UBSan | d666382 | `tool\|livelink`（111） | 全部通過、サニタイザの報告なし |
+| 8 + TSan | d666382 | `tool`（78）と 6 本を 20 回 | 全部通過 |
+| 8 + Release | d666382 | `tool`（78）と 6 本を 20 回 | 全部通過 |
+| 8 + clang | d666382 | `tool`（78） | 全部通過 |
+| 9: Tela 入り | d666382 | `tool`（92） | 全部通過（今ある画面と画面のテストを含む） |
+| MinGW 構文検査 | d666382 | 変えた .cpp 8 本 | 通過 |
+
+回していない: 1・6・7。
+
+### 差し戻し 2 回目の未検証
+
+- `DecideSync` の世代の照合は、照合と送信の間（Client の外）に新しい接続ができる、ごく短い隙間が残る（Client に世代つきの答えの口が無い。livelink への要望）。
+- `LoadBuild` が書き出したファイルを引くとき、読み込まれていないファイルは一度読み込んでから外す（余分な読み込み）。言語バンク・依存のあるバンクのリロードの後は試していない。
+- `StreamPrimeMs` はコーデックの pre-roll を含めない（PCM / ADPCM は 0。Opus では短くなる）。
+- 構造の変更の後の値で、エフェクトのパラメータとセンドのレベルの SetValue は自分のテストでは通していない（バスの音量だけ）。
+
 ## 未検証の箇所
 
 - 実デバイスでのプレビュー（`PreviewOutput::Device`）と `OutputPlayer`（コンテナにデバイスが無い。無音の出力は並行性のテストで回した。

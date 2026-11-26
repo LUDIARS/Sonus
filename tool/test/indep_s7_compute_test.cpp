@@ -690,23 +690,41 @@ SND_TEST(IndepS7Calc, F16_TransitionPreview) {
   SND_CHECK_EQ(p.targetSegment, std::string(kSegB));
   SND_CHECK_NEAR(p.targetStartSeconds, 2.5, 1e-9);
   SND_CHECK_NEAR(p.targetStartTick, 0.0, 1e-9);
-  // Too late for the next beat (2 ms before it, the lookahead is >= one block): moved to the next.
+  // D-184 (the runtime's rules are the truth; music transition.cpp HandleSetState): the request is
+  // taken at the first block start at or after it (here 256 / 48000 s blocks, at least block 1),
+  // the rule's timing is evaluated from that block start (NextBeat / NextBar: a grid point at the
+  // block start itself counts), and the late rule applies only when that point is earlier than the
+  // block start + the prime of the first material (the bridge when the rule has one, else the
+  // target's first segment). No extra block of lead.
+  // 2 ms before a beat: taken at block 94 (0.50133 s), already past 0.5 s: the next beat 1.0 s, not late.
   p = me.Preview("Explore", "Battle", 0.5 - 0.002, s);
-  SND_CHECK(p.lateApplied);
+  SND_CHECK_NEAR(p.applySeconds, 94.0 * block, 1e-12);
+  SND_CHECK(!p.lateApplied);
   SND_CHECK_NEAR(p.fireSeconds, 1.0, 1e-9);
-  SND_CHECK(p.fireSeconds - p.requestSeconds >= p.lookaheadMs / 1000.0);
-  // startLate: request + lookahead.
+  // The late rules (no bridge: the first material is Seg/B's stream without preload: prime =
+  // streamPrimeMs 30 ms, D-179f). Request 0.47 s: taken at block 89 (0.474667 s); the next beat
+  // 0.5 s is earlier than 0.474667 + 0.030 -> late.
   auto rules = me.Rules();
+  rules[0].bridge.clear();
+  SND_REQUIRE(me.SetRule(0, rules[0]));
+  p = me.Preview("Explore", "Battle", 0.47, s);
+  SND_CHECK_NEAR(p.applySeconds, 89.0 * block, 1e-12);
+  SND_CHECK(p.lateApplied);
+  SND_CHECK_NEAR(p.fireSeconds, 1.0, 1e-9);  // nextGrid: the following beat
+  // startLate: the block start + the prime.
   rules[0].late = LateRule::StartLate;
   SND_REQUIRE(me.SetRule(0, rules[0]));
-  p = me.Preview("Explore", "Battle", 0.498, s);
+  p = me.Preview("Explore", "Battle", 0.47, s);
   SND_CHECK(p.lateApplied);
-  SND_CHECK_NEAR(p.fireSeconds, 0.498 + p.lookaheadMs / 1000.0, 1e-9);
-  SND_CHECK(p.lookaheadMs >= block * 1000.0 - 1e-9);
+  SND_CHECK_NEAR(p.fireSeconds, 89.0 * block + 0.030, 1e-6);
   rules[0].late = LateRule::Cancel;
   SND_REQUIRE(me.SetRule(0, rules[0]));
-  p = me.Preview("Explore", "Battle", 0.498, s);
+  p = me.Preview("Explore", "Battle", 0.47, s);
   SND_CHECK(p.cancelled);
+  // Far enough (0.4 s: block 75 = 0.4 s, 0.1 s before the beat): no late rule.
+  p = me.Preview("Explore", "Battle", 0.4, s);
+  SND_CHECK(!p.cancelled && !p.lateApplied);
+  SND_CHECK_NEAR(p.fireSeconds, 0.5, 1e-9);
   // Battle -> Explore: the wildcard row, next bar, 1 beat fades at 120 BPM.
   p = me.Preview("Battle", "Explore", 0.1, s);
   SND_CHECK_EQ(p.rule, 1);
@@ -715,9 +733,18 @@ SND_TEST(IndepS7Calc, F16_TransitionPreview) {
   SND_CHECK_NEAR(p.fadeInSeconds, 0.5, 1e-9);
   SND_CHECK_EQ(p.targetSegment, std::string(kSegA));
   SND_CHECK_NEAR(p.targetStartSeconds, 2.0, 1e-9);
-  // Exactly on a bar: that bar (>=), if the lookahead allows; request at 2.0 s is late -> 4.0 s.
+  // Exactly on a bar (2.0 s = block 375's start): taken at 2.0 s, the bar at the block start counts
+  // and Seg/A's stream is preloaded (prime 0): that bar, 2.0 s (D-184; before: 4.0 s).
   p = me.Preview("Battle", "Explore", 2.0, s);
+  SND_CHECK_NEAR(p.applySeconds, 2.0, 1e-12);
+  SND_CHECK_NEAR(p.fireSeconds, 2.0, 1e-9);
+  // Just after it (2.001 s: block 376): the next bar, 4.0 s.
+  p = me.Preview("Battle", "Explore", 2.001, s);
   SND_CHECK_NEAR(p.fireSeconds, 4.0, 1e-9);
+  // At 0: taken at block 1 (the music starts in the From state), the first bar line after: 2.0 s.
+  p = me.Preview("Battle", "Explore", 0.0, s);
+  SND_CHECK_NEAR(p.applySeconds, block, 1e-12);
+  SND_CHECK_NEAR(p.fireSeconds, 2.0, 1e-9);
   // Unknown states.
   SND_CHECK(!me.Preview("Nope", "Explore", 0, s).valid);
   // Fades follow the tempo: Battle's segment at 60 BPM -> 1 beat out = 1 s, in at Explore's 120 = 0.5 s.

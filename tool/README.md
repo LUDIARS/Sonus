@@ -58,7 +58,11 @@ sonus-tool --headless --project game/audio --connect 127.0.0.1:27460 --frames 60
 | `--refuse-mismatch` | ビルドハッシュが違えば接続を断る（既定はツールの値を全部送る） |
 | `--font <ttf>` | 文字の TrueType フォント。ウィンドウのホストでは必須（Tela はフォントを同梱しない） |
 | `--recording <path>` | プロファイラの Save / Load が使うファイル（既定 `sonus-recording.snrec`） |
-| `--headless`, `--snapshot`, `--screen`, `--frames`, `--frame-ms`, `--size WxH`, `--dpi 0.25..4`, `--text-placeholders` | ヘッドレス実行（上記） |
+| `--send-diffs` | 文書があるとき、ビルドの不一致に「差分をすべて送る」で即答する（既定は利用者に聞く。文書が無いときは従来どおりミキサーの値を送る） |
+| `--preview silent\|device` | プレビューエンジン（ツールの中のランタイム）を動かし、それに接続する（試聴・ホットリロードの書き出し先もそれ） |
+| `--reload-dir <dir>` / `--reload-prefix <p>` | ホットリロードの再ビルドしたバンクの書き出し先と、ゲームから見たその場所 |
+| `--report-dir <dir>` | 記録と再生の画面の不具合報告のフォルダ（既定 `sonus-report`） |
+| `--headless`, `--snapshot`, `--screen <名前>`, `--frames`, `--frame-ms`, `--size WxH`, `--dpi 0.25..4`, `--text-placeholders` | ヘッドレス実行（上記）。画面の名前は mixer buses event params spatial music material patch profiler replay link problems |
 
 ## 構成
 
@@ -87,7 +91,12 @@ tool/
     patch_editor     波形生成パッチ: ノード、接続の規則、検査と依存順の配列（表は buildtool の patch.hpp）
   ui/                sonus_tool_ui: Tela の宣言を作る層（OS 非依存）
     app              Tela の Runtime、画面の宣言、ポインタの振り分け
-    mixer_view, profiler_view, status_view   画面の宣言
+    mixer_view, profiler_view, status_view   画面の宣言（段階2）
+    buses_view, event_view, params_view, spatial_view, music_view, material_view, patch_view,
+    replay_view, link_view, common_view       段階5 の画面（common_view: 候補の一覧と Problems）
+    kit, text_entry  画面の部品（名前・数値・候補・トグル・ページ送り・ドラッグの受け口）とツールの文字の入力
+    editor_draw      タイムライン、カーブ、上から見た図、印のタイムライン、パッチ、系列の図形
+    services, replay_service   再生のサービス（実装は sonus_tool_ui_replay）
     widgets          フェーダー・ノブ・メータ・グラフの図形（canvas に描く）
     control_math     値と画素の対応（下記の規則）
     pointer_router   ドラッグ・ダブルクリック・ホイール
@@ -102,9 +111,10 @@ tool/
 
 ## 画面と操作の仕様
 
-**ヘッダ**: 画面の切り替え（Mixer / Profiler）、プロジェクト名、接続の状態（ランプ: 緑 = 接続、黄 = 接続中・ビルド不一致で
-ツールの値を送った、赤 = 拒否）、レート・ブロック長・往復時間、Connect / Disconnect。**フッタ**: 最新のメッセージと、
-送信待ち・Ack 待ち・拒否された値の数。
+**ヘッダ**: 画面の切り替え（12 面のタブ。下の「段階5 の画面」）、接続の状態（ランプ: 緑 = 接続、黄 = 接続中・ビルド不一致で
+ツールの値を送った、赤 = 拒否）、レート・ブロック長・往復時間・ライブ反映の段階、ビルド不一致の質問（Send diffs / Refuse）、
+Connect / Disconnect。**フッタ**: 最新のメッセージ、プロジェクト名と未保存の印・文書の Undo / Redo / Save（文書があるとき）、
+問題の数（Problems 画面へ）、送信待ち・Ack 待ち・拒否された値の数。
 
 **ミキサー**（左にストリップ、右に上書きの一覧とパラメータ）
 
@@ -139,7 +149,10 @@ tool/
   新しい BusMeters が届いたときだけ更新し、1.5 秒保持してから 20 dB/秒で落ちる。0 dBFS に達するとクリップを点け、
   Profiler の「Reset clips」まで残る。新しいメータが 500 ms 来なければ（切断・ゲーム停止）、peak / rms も 20 dB/秒で下がり、
   最後は −∞ になる（凍結しない）。
-- ショートカット: Ctrl+Z（macOS は Cmd+Z）取り消し、Ctrl+Y / Ctrl+Shift+Z やり直し、F2 ミキサー、F3 プロファイラ。
+- ショートカット: Ctrl+Z（macOS は Cmd+Z）取り消し、Ctrl+Y / Ctrl+Shift+Z やり直し（ミキサー画面ではライブの値の履歴、
+  ほかの画面では文書の履歴）、Ctrl+S 文書の保存、F2 ミキサー、F3 プロファイラ、F4 Buses、F5 Event、F6 Params、F7 3D、
+  F8 Music、F9 Material、F10 Patch、Ctrl+PageDown / Ctrl+PageUp（Ctrl+Tab / Ctrl+Shift+Tab）でタブを順に、Delete / Backspace
+  で選んだもの（クリップ、カーブの点、パッチのノード）を消す。
 
 **プロファイラ**
 
@@ -241,7 +254,7 @@ livelink だけなので、ソースの種別・音楽・IO を組み立てる�
 | `connection`（追記） | `deferSyncDecision`、`awaitingSync` / `DecideSync`、`peerMinor` |
 | `preview/preview_engine` | ツールの中のランタイム（メモリ上のファイルシステム、IO とストリーム、ソースの種別、音楽、core、プロセス内の転送路のライブリンク）。出力は手動（テスト・WAV）、デバイス、無音（実時間） |
 | `preview/replay_host` | 記録の再生（2 回再生して比較、期待と照合、不具合報告から再生、WAV、デバイスで聞く `OutputPlayer`） |
-| `preview/cli/sonus_replay` | `sonus-replay`: UI なしで記録と不具合報告を再生する（終了コード 0 一致、1 不一致、2 入力の誤り） |
+| `preview/cli/sonus_replay` | `sonus-replay`: UI なしで記録と不具合報告を再生する（終了コード 0 一致、1 比較の不一致、2 入力が読めない・再生そのものの失敗（報告からの再生も）、`--help`） |
 
 使い方（ホストの UI スレッド）:
 
@@ -260,6 +273,25 @@ s.Connect(desc);                                        // Hello のハッシュ
 `desc.connector = engine->connector()` で接続する。ホットリロードの書き出しは `engine->PutRebuiltBank`。
 試聴は `AuditionRouter`（`Bind(&connection, engine)`、`SetTarget(Game / Preview)`）。
 
+差し戻しの決定（D-182〜D-185）で決まった振る舞い:
+
+- 接続のたびに Hello のハッシュは今の文書のビルド。不一致の答えは同じゲーム（バンクの一覧）のときだけ覚える。再接続では、
+  これまでに送った全セル・差し替えた表を今のビルドの値で送り直す（ゲームが上書きを残していても文書になる）。
+- 送り直しは同じセルの新しい値を追い越さず、諦めるのは時間（`giveUpMs`）。ミキサーが離したセルは文書の値を自動で送る。
+  文書の Undo の Remove で予備容量を返し、ホットリロードの成功でそのバンクのライブの分は 0。ライブで足したオブジェクトの値は
+  ホットリロード。バスの追加は今のバンク形式ではマスターの行番号を動かすので、実際にはホットリロードになる。
+- リロードの失敗・書き出しの失敗は `LivePhase::Failed`（`failedBanks()` に理由）で、次の成功まで Live に戻らない。
+- 遷移の試聴の要求は時刻以降で最初のブロックの頭（少なくとも 1 ブロック後）。`MusicEditor::Preview` も同じブロック
+  （`applySeconds`）とランタイムの先読み（素材のプライムだけ）で計算する。
+- 差し戻し 2 回目: 構造の変更と同じビルドの値（バスの音量・エフェクトのパラメータ・センドのレベル）は StructEdit の後に SetValue で
+  送る。再接続ではライブの構造の変更を送り直さず、そのバンクをリロードする（成功で予備容量と一覧は 0）。1.1 のゲームでは
+  初めての不一致でもバンクの一覧が来るまで Checking。`Connection` は Poll ごとに「決定待ち」・HelloReply・接続の世代
+  （`generation()`）を一貫して写し、`DecideSync` はその接続にだけ答える。プレビューエンジンの `LoadBuild` はホットリロードで
+  入ったバンクも外してから読み、ストリームのファイルを置く。`StreamPrimeMs()` と `MusicSettingsOf(engine)` で、試聴の計算に
+  エンジンのストリームのプライムを使う。`MusicEditor` はブリッジのある規則ではブリッジの素材のプライムで遅れを判断する。
+- 再生は記録の長さ（`maxBlocks`）と番号合わせの空回し（`maxAlignBlocks`）に上限（既定は実時間 1 時間）。不具合報告は全項目が
+  往復する（`notes.txt`・`description.txt`・`comparison.txt`）。Config のテキストは符号・範囲・型を確かめる。
+
 スレッド: モデル（LiveSync、ProfilerStreams、AuditionRouter、Session）は UI のスレッドだけ。プレビューエンジンの関数も
 作ったスレッドだけ（`connector()` と `RecentOutput()` はどこからでも）。手動の出力では作ったスレッドが `Render` で描き、
 デバイス・無音の出力ではオーディオスレッドが描いて、作ったスレッドが毎フレーム `Pump` する。再生（`Replay`）は呼んだ
@@ -277,7 +309,124 @@ s.Connect(desc);                                        // Hello のハッシュ
 | `tool_live_v10_test` | 1.0 のゲーム（手で動かすゲーム側）: 1.1 の機能は理由つきで無効、1.0 のメッセージは使う、待ち続けない |
 | `tool_live_concurrency_test` | 実時間のプレビューエンジンとライブリンクの中で UI スレッドが編集・読み出し・試聴・切断を繰り返す、2 スレッドで同時に再生（TSan と Release で繰り返す） |
 
+## 段階5 の画面（組 U）
+
+設計書 11.1 の全画面を、ミキサー・プロファイラと同じ作り方（位置指定の要素、排他入力のボタン＋入力を通す canvas、
+`SafeDrawing`）で作った。画面はモデル（`tool/include/snd/tool/*.hpp`）を読んで宣言を作り、操作はモデルの関数に渡すだけ
+（編集の規則も計算もモデルの側。どの編集も文書の 1 つの履歴で取り消せる）。文書（`Workspace::document`）が無いときは
+エディタの画面は「`--project` で起動する」と出す。
+
+| タブ（`--screen`） | ファイル | 中身 |
+| --- | --- | --- |
+| Mixer（`mixer`） | `mixer_view` | 段階2 のストリップ。右の一覧に「Read back」（1.1 の読み返し）と「Write back to project」（ライブの値を文書へ、1 手） |
+| Buses（`buses`） | `buses_view` | Buses: バスの木（追加・削除・名前）、音量・親・チャンネル・フラグ・LOD 優先度、センド（宛先・レベル・pre/post・追加・削除）、エフェクトの鎖（追加・並べ替え・削除・全パラメータ）、graph order。Snapshots: 値（種類・バス・値・番号）、ミキサーから取り込み、重みと結果。Ducking: 種類・元・先・量・アタック・リリース・しきい値。Categories: 親・音量・フラグとボイスリミットグループ |
+| Event（`event`） | `event_view` | 一覧、Event の項目（シーケンス種別・バス・カテゴリ・数値・フラグ・コーン）、タイムライン（トラックとクリップ、ルーラー、ズームとスクロール、ドラッグで開始位置、上下でトラック、ダブルクリックで素材を足す）、クリップの項目（ランダム幅、フェード、weight、switch、layer、loop、synth）、トラックのバスとアクション、試聴 |
+| Params（`params`） | `params_view` | パラメータ（種類・スコープ・範囲・既定値・追従速度と軌跡）、カーブの図（点のドラッグ・ダブルクリックで追加・Delete で削除、shape、対象・合成・入力）、合成の規則の確認（値とスコープ、距離 → 対象ごとの結果と内訳、警告） |
+| 3D（`spatial`） | `spatial_view` | 上から見た図（リスナー・エミッタ・向きの取っ手のドラッグ、背景のドラッグで移動・ホイールで拡大）、maxDistance の円とコーン、計算の値、出力の利得、距離カーブと今の距離、試聴（動かすと追従。宛先が無ければ理由つきで無効） |
+| Music（`music`） | `music_view` | Segments（素材・小節・入口と出口、拍子と小節のタイムライン、マーカーのドラッグ、テンポ点・マーカー・Stem の表、タップとグリッド）、Playlists、States & rules（State の表、遷移ルール表の編集・並べ替え・自動の並べ替え・到達できない行の印、遷移の試聴の計算をタイムラインに、試聴の要求、最小先読み）、Stingers |
+| Material（`material`） | `material_view` | 表、材質と番号（付け替えの表示）、単体音・足音、強さのカーブと入力の結果、組の表（8×8 の窓をスクロール）、既定、接触の解決、代替の一覧 |
+| Patch（`patch`） | `patch_view` | ノードの図（ドラッグで移動、出力の端子から入力の端子へドラッグで接続、または端子を選んでつなぐ、つながった入力を押すと切断、背景のドラッグでスクロール）、ノードの追加・削除・名前・パラメータ、接続の一覧、検査と依存順 |
+| Profiler（`profiler`） | `profiler_view` | Overview（段階2）、CPU（負荷のグラフと BlockDetail の表）、Memory、Streams（スロットとストール）、LOD（段と履歴）、Event log（絞り込みと取りこぼしの数）。タブを開くとその View を購読する |
+| Replay（`replay`） | `replay_view` | 記録・保存・読み込み（ファイル名は入力）、記録の要約、2 回の再生と比較、記録した実行との比較、WAV と試聴、不具合報告の書き出しと読み込み・再生（`ReplayService`） |
+| Link（`link`） | `link_view` | 接続先の入力、状態と段階、照合（版・ハッシュ・バンクごとの判定）、不一致の質問、1.0 の相手で無い機能、ホットリロードの経過、予備容量と構造の変更（行ごとに Undo）、数、Resync。Items: オブジェクトごとの経路と状態 |
+| Problems（`problems`） | `common_view` | ビルドの検査の問題（エラーが先）、ライブの問題、ライブに出せないもの。行の Go でその編集画面へ |
+
+**文字の入力（Tela に無い。回避は 1 つに揃えた）**: ホストがキーボードを観測して `App::Key(KeyEvent)` に渡し（Windows は
+WM_KEYDOWN と WM_CHAR、macOS は NSEvent のローカルモニタ）、ツールの中の `TextEntry` が文字列を組む。
+- 名前: 欄を押すと今の名前で入力が始まる。Enter で確定（モデルが拒否すれば入力は開いたままメッセージ）、Esc で取り消し、
+  Backspace で 1 文字消す。新しいオブジェクトは「Event 1」のように連番の名前で作り、あとで名前を変える。
+- 数値: `[-] 値 [+]`。ボタンで 1 ステップ、値の上を縦にドラッグ（4 px で 1 ステップ、Shift で 1/10、ドラッグ 1 回が取り消し 1 回）、
+  ホイール（続けて回した分が取り消し 1 回）、動かさずに押すと数字の入力。
+- 参照と選択肢: 欄を押すと候補の一覧（画面の上に重ねる。外を押すか Esc で閉じる。多ければページ送り）。
+- Windows では Tela が Esc でウィンドウを閉じるので、入力中・一覧が開いている間の Esc だけは Tela に渡さない。
+
+**差し戻しの決定（D-186〜D-189）**:
+- 入力中（`TextEntry` が開いている間）は全部のキーが入力欄に行く（Ctrl+Z / Ctrl+Y、Delete、画面の切り替えのキーは何もしない）。
+  入力も一覧も開いていない時の Esc もツールが受け取り、ドラッグ中ならそのドラッグを取り消し、パッチの
+  接続待ちがあれば消す。取り消しはドラッグのグループを捨てる（`ProjectDocument::AbortGroup`: 押した時の状態に戻し、取り消しの
+  段を残さず、それまでの Undo / Redo の一覧は変えない。フェーダー・ノブはミキサーの値を押した時に戻してグループを閉じるので、
+  ライブの履歴にも段が残らない）。それ以外は何もしない（Windows でも Tela にウィンドウを閉じさせない）。
+- 打った数値は切り詰めずにモデルに渡す（拒否なら入力は開いたまま、文書は変わらない）。整数の欄は変換の前に、有限でない・
+  整数でない（2.5）・負・型の範囲の外の値を拒否する（`WholeU16` / `WholeU32` / `WholeU64`。Link の Port は 1〜65535）。
+  ファイルから読んだ値などを整数にするところは飽和させる（UI は `SatU32` / `SatU64` / `SatInt`、モデルは `ClampToU32` /
+  `ClampToU64` / `ClampToI32` と `U32At` / `U64At`。浮動小数から整数への変換は必ず範囲を確かめてから）。
+- モデルの数値の設定は、バンクのどの列にも入らない数値（非有限、最大の有限 float を超える値）を拒否する（`ProjectDocument` の
+  `Create` / `Set` / `SetDefaulted` / `Insert` と、値を持ち込む `Modify`）。整数の列は各エディタが型の範囲で拒否する。
+- 表示する値は常に有限。守りは数値を文字にする所だけ（`NumberText`・`ShownNumber` は「-」、画面の書式は `SnprintfFinite`:
+  %f %e %g %a の変換の非有限の値を「-」にし、%s などはそのまま。`FormatDb` は -144 dB 以下が約束の「-inf dB」、NaN / +inf は
+  「- dB」）。名前（オブジェクト・バス・パラメータ・材質・マーカーなど）はどんな文字列でもそのまま出す（「inf」「nan」でも）。
+  壊れたテンポ点（bpm・beatsPerBar・beatUnit・tick が範囲外）は Problems に出し（`ToolIssues`、ビルドの検査に足すツールの検査）、
+  モデルは 120 BPM 4/4 として読む。表示の算術（小節・拍の +1）は 64 ビットで、飽和した位置は「-」。
+  3D の位置は ±1,000,000 m、向きは ±1,000,000 rad まで（`SpatialPreview::PlaceListener` / `PlaceEmitter` / `TurnListener` /
+  `TurnEmitter`、超えれば入力は開いたまま）。遷移の試聴の要求時刻は 0〜1,000,000 s（`MusicEditor::kMaxRequestSeconds`。外は
+  `Preview` が無効を返し、画面は入力を拒否）、最小先読みは 0〜100,000 ms。
+- **窓の最小の大きさ（全画面で 1 つ）: 論理 1024 × 640**（`kMinEditorWidth` / `kMinEditorHeight`、`layout_metrics.hpp`）。
+  判断は `App::WindowTooSmall`: ビューポートは物理画素の整数（ホストが丸めた値、`SetViewport` の幅・高さ）で、それを DPI で割った
+  幅が 1024 未満、または DPI で割った高さから上の空き（`insetTop`、macOS のタイトルバー）を引いた値が 640 未満なら小さい。
+  つまり物理画素で 1024 × DPI 以上・(640 + insetTop) × DPI 以上が必要で、DPI 0.25 では物理 256 × 160（論理の 4 画素単位でしか
+  変わらない）、DPI 2 では 2048 × 1280。どの DPI でも同じ論理の値と比べる。それ以上の窓では、ヘッダのタブ、フッタのボタン（Undo / Redo / Save、問題の数）、全画面の
+  本体のボタンと欄が窓の中にある（パッチのノードの当たりは図の中に切る）。それ未満の窓では「window too small: the tool needs
+  1024 x 640」だけを宣言し、ほかの要素は宣言しない（キーの操作は効く）。値は全画面（Mixer、Profiler の 6 タブ、Replay、Problems、
+  Link と各エディタ）を 800×500 から 1280×720 まで DPI 0.25〜4 で確かめて決めた（800×500 では Material の組の表・既定、Segment
+  のグリッドの行、Event の Add synth、記録の行のボタンが、1000×620 では記録の行のボタンが外に出る。`ui_editor_window_test`）。
+  ± / ドラッグ / ホイールは欄の範囲で止まる。
+  ホイールと連打の ± は、宣言の間でもモデルの最新の値に足す（n ノッチは n ステップ）。数値の欄の値は少なくとも 48 px（ラベルが
+  先に縮み、24 px を切ればラベルを値の文字に入れる。ボタンの入らない欄はボタン無し）。
+- クリップを上下に動かすと、トラックは `round(縦の移動量 / 48 px)` だけ移り、範囲の外は端のトラックへ。
+- 選択は対象で持つ（GUID、名前、ノード id）。オブジェクトの中の位置で持つ選択（クリップ、アクション、カーブの点、テンポ点、
+  Stem、Playlist の行、ルール）は、Undo / Redo と画面の切り替え（ほかの画面の編集）、書き戻し、結び直しの答えで外す（選んでいない
+  物を Delete で消さない）。画面の外（ホスト、ライブ、読み込み直し）で文書が変わったときも、値だけの変更でも外す（文書の
+  revision と、画面が最後に行った編集の後の revision を比べる）。
+- 文書の構造が変わってミキサーを結び直すとき、ライブの値は対象（GUID、エフェクトの種類と位置）で引き継ぐ
+  （`MixerModel::Rebind`）。引き継げない値があれば結び直しを保留し、本体の上に「書き戻す／捨てる」の質問を出す。答えるまで上書きは残る。
+  「書き戻す」も先に対象（GUID、エフェクトの種類、パラメータ）で結び直してから書くので、消えた・種類の変わったエフェクトの上書きは
+  新しい物に書かれず捨てられ、「mixer: discarded N live overrides without a place: …」と出る。エフェクトには GUID が無いので、
+  上書きのあるバスのエフェクトの数か並び（種類の列）が変わったら、そのバスのエフェクトの値は引き継がずに質問する（同じ種類の
+  別のエフェクトに乗らない。`LiveValue::effectChain`）。
+- 名前で一意な物（材質、State、マーカー、Stinger）の要素の ID は名前から作る（`NameKey`）。位置の番号は名前の無い行だけ。
+- コーンは `EventEditor::Cone()`（無いときは 0 / 0 / 0 dB = コーンなし）で Event と 3D の両画面に同じ値を出す。3D の既定のエミッタは
+  maxDistance の半分（無ければ 5 m）だけ右前に置く。カーブの図は x にも余白（`kCurveXMargin`）。Link は未接続なら相手の版を出さない。
+  Problems の一覧は同じ問題を 1 回にする（`DistinctIssues(CheckDocument(doc))`。`CheckDocument` は buildtool と一語一語同じまま）。
+
+**ドラッグの受け口**（`pointer_router.hpp` の `ControlKind::Custom` / `DragHandler`）: 描いた物（クリップ、点、リスナー、ノード、
+数値の欄）の下に排他入力のボタンを置き、押下・移動・離す・ダブルクリック・ホイールを渡す。押した時のハンドラを
+ジェスチャーの終わりまで使う（宣言が毎フレーム差し替わっても状態を保つ）。要素が消えれば離したことにする。
+文書の編集は最初の移動でグループを開き、離した時に閉じる（1 手）。位置のドラッグは押した点からの絶対量、数値の
+ドラッグは移動量の積み上げ（Shift で 1/10）。
+
+**ミキサーと文書**: 文書のバス・カテゴリ・パラメータの構成が変われば、セッションのプロジェクトを文書から作り直して
+ミキサーを結び直す（`MixerModel::Bind`）。値だけの変更は、ミキサーに上書きが無ければ結び直し、あればメッセージを出して
+書き戻すか全部戻すまで待つ（上書きを消さない）。
+
+**記録と再生のサービス**: 再生はランタイムを要るので、UI のライブラリ（`sonus_tool_ui`、核だけに依存）は `ReplayService`
+（`services.hpp`）を通す。実装は `sonus_tool_ui_replay`（`Sonus::tool_preview` を使う）。`sonus-tool` は両方をリンクする。
+
+テスト（Tela 入り、`tool/test`）:
+
+| テスト | 内容 |
+| --- | --- |
+| `tool_ui_event_screen_test` | Event: 宣言と ID の安定、クリップのドラッグ（開始位置・トラック、取り消し 1 回）、ボタンと候補、数値の入力と拒否、名前、ズームとスクロール、クリップの箱の画素（DPI 1・2） |
+| `tool_ui_buses_screen_test` | バスの木と項目、新しいバスでミキサーが追従、センド、エフェクト、スナップショット（重みの結果、取り込み）、ダッキング、カテゴリ、グループ、書き戻し |
+| `tool_ui_params_screen_test` | パラメータの項目と軌跡、点のドラッグ（値の単位）・追加・削除、対象と合成、合成の確認が `ComposeEvent` と一致、点の画素 |
+| `tool_ui_spatial_screen_test` | エミッタと向きのドラッグ、拡大、値が `Compute` と一致、プレビューエンジンへの試聴と追従、宛先が無いときの無効、円と点の画素 |
+| `tool_ui_music_screen_test` | Segment のマーカーのドラッグ、テンポ・マーカー・Stem、グリッド、Playlist、ルール表（到達できない行、自動の並べ替えの拒否と実行）、試聴の計算が `Preview` と一致、Stinger |
+| `tool_ui_material_screen_test` | 材質と番号の付け替え、単体音・足音・組（対称）・既定、解決、強さ、64 材質の窓 |
+| `tool_ui_patch_screen_test` | ノードの追加・移動（取り消し 1 回）・パラメータ・削除、ドラッグとクリックでの接続、切断、検査と順、上限 |
+| `tool_ui_live_screens_test` | プレビューエンジンをゲームにして: Link（照合、不一致の質問をヘッダと画面から）、プロファイラのタブ、記録 → 保存 → 読み込み → 2 回の再生 → WAV → 不具合報告 |
+| `tool_ui_editor_limits_test` | 大きなプロジェクト（Event 300、40 トラック × 30 クリップ、ルール 100 行、ノード上限、64 材質、バス 60）の全画面を DPI 0.25・1・2・4 で: 要素の数、ID の重複なし、図形の上限、画像。ページ送り |
+| `tool_ui_editor_input_test` | 文字の入力（UTF-8、数値、拒否）、キー（画面、文書とミキサーの取り消し、保存）、ドラッグの受け口（差し替えをまたぐ、要素が消える）、数値の欄（ドラッグ、Shift、ホイール）、候補の一覧 |
+| `tool_ui_editor_concurrency_test` | 実時間のプレビューエンジンとライブリンクの中で、UI スレッドが画面から編集・試聴・切断を繰り返す（TSan） |
+| `tool_ui_editor_fix_test` | 差し戻しの決定: 打った数値の拒否、宣言の間のホイールと連打、縦のドラッグの移動量と端、数値の欄の幅（1280×800 と 640×400）、Pick、入力中のキー、Esc とドラッグの取り消し、位置の選択と Undo、ミキサーの結び直しの引き継ぎと質問、コーン・取っ手・余白・未接続・問題を 1 回、名前から作る ID |
+| `tool_ui_editor_fix2_test` | 差し戻し 2 回目: Esc で Undo / Redo の数が変わらない（行って戻るドラッグ、動かさない押下、数値の欄、フェーダー）、整数の欄の拒否（2.5、-1、1e300、4294967296、Port 0 / 70000）、窓の最小の大きさ、書き戻しの対象の対応、3D の値の範囲と表示、ホストの変更での選択 |
+| `tool_ui_editor_limits_<名前>` | 上限のテストを画面ごとに別のプロセスで（320×240 まで） |
+| `tool_ui_editor_fix3_test` | 差し戻し 3 回目: 遷移の試聴の要求時刻の範囲、Params で float を超える値の拒否と全画面で inf / nan が出ないこと |
+| `tool_ui_editor_fix4_test` | 差し戻し 4 回目: 名前「inf」「nan」「-inf」「NaN」がそのまま出る、`SnprintfFinite` と `FormatDb`、壊れたテンポ点が Problems に出て Music 画面が桁あふれなく出す |
+| `tool_ui_editor_window_test` | 最小の窓（1024 × 640）以上で全画面の全部のボタンが窓の中（DPI 0.25〜4）、未満では「too small」だけ、最小の窓でのストリップのページ送り（`SND_UI_WINDOW=<w>x<h>` で外に出る物を表示） |
+| `tool_model_fix3_test`（核） | バンクに入らない数値の拒否、`ClampTo*` と `TempoMap::Musical`・壊れたファイルの値の変換、エフェクトの並びが変わったときの結び直し、入れ子の `AbortGroup` |
+| `tool_model_fix_test`（核） | `MixerModel::LiveValues` / `Unmatched` / `Rebind`、`EventEditor::Cone`、`DistinctIssues` |
+| `tool_app_screen_<名前>` | `sonus-tool --headless --screen <名前>` が全画面で画像を書く |
+
 ## 段階2で入れていないもの
 
-Event / パラメータとカーブ / 3D / 音楽 / マテリアル / パッチの各エディタ、センド・スナップショット・ダッキングの編集、
-接続先やファイル名の画面上での入力（Tela に文字入力が無い）。構造の変更・チャンクの差し替え・記録の再生は組 P（上）で入れた。
+（段階5 の組 M・P・U で、各エディタ、センド・スナップショット・ダッキングの編集、接続先やファイル名の画面上での入力
+（ツールの中の文字の入力）、構造の変更・チャンクの差し替え・記録の再生を入れた。）

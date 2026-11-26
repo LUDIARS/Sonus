@@ -13,6 +13,7 @@ void PointerRouter::SetControls(std::vector<ControlBinding> controls) {
   // Indexes change with the declaration; the ids of a drag in progress do not.
   drag_ = dragId_.empty() ? -1 : Find(dragId_);
   if (drag_ < 0) dragId_.clear();
+  if (drag_ < 0 && custom_ != nullptr) EndDrag();  // the element of a custom gesture went away
   armed_ = armedId_.empty() ? -1 : Find(armedId_);
   if (armed_ < 0) armedId_.clear();
 }
@@ -53,12 +54,35 @@ float PointerRouter::FromNorm(const ControlBinding& b, float norm) const {
   return b.kind == ControlKind::Fader ? FaderPosToDb(norm) : KnobFromNorm(norm, b.range);
 }
 
-void PointerRouter::StartDrag(std::int32_t control, float y, bool fine) {
+bool PointerRouter::Local(const tela::Runtime& runtime, const std::string& id, float* x, float* y) const {
+  for (const tela::PlacedElement& p : runtime.elements()) {
+    if (p.element.id == id) {
+      *x = p.bounds.x;
+      *y = p.bounds.y;
+      return true;
+    }
+  }
+  return false;
+}
+
+void PointerRouter::StartDrag(const tela::Runtime& runtime, std::int32_t control, float x, float y, bool fine,
+                              std::uint32_t modifiers) {
   const ControlBinding& b = controls_[static_cast<std::size_t>(control)];
   drag_ = control;
   dragId_ = b.hitId;
   anchorY_ = y;
   lastY_ = y;
+  if (b.kind == ControlKind::Custom) {
+    custom_ = b.handler;
+    pressX_ = lastX_ = x;
+    pressY_ = y;
+    moved_ = false;
+    originX_ = originY_ = 0.0f;
+    Local(runtime, b.hitId, &originX_, &originY_);
+    wheelId_.clear();
+    if (custom_ != nullptr && custom_->press) custom_->press(x - originX_, y - originY_, modifiers);
+    return;
+  }
   anchorValue_ = sink_.ControlValue(b.target);
   anchorNorm_ = ToNorm(b, anchorValue_);
   anchorFine_ = fine;
@@ -67,9 +91,37 @@ void PointerRouter::StartDrag(std::int32_t control, float y, bool fine) {
 }
 
 void PointerRouter::EndDrag() {
+  if (custom_ != nullptr || (drag_ >= 0 && controls_[static_cast<std::size_t>(drag_)].kind == ControlKind::Custom)) {
+    const std::shared_ptr<DragHandler> h = std::move(custom_);
+    custom_.reset();
+    drag_ = -1;
+    dragId_.clear();
+    if (h != nullptr && h->release) h->release(moved_, lastX_ - originX_, lastY_ - originY_);
+    return;
+  }
   if (drag_ >= 0) sink_.ControlEnd(controls_[static_cast<std::size_t>(drag_)].target);
   drag_ = -1;
   dragId_.clear();
+}
+
+bool PointerRouter::Cancel() {
+  if (drag_ < 0 && custom_ == nullptr) return false;
+  if (custom_ != nullptr) {
+    const std::shared_ptr<DragHandler> h = std::move(custom_);
+    custom_.reset();
+    drag_ = -1;
+    dragId_.clear();
+    if (h->cancel) h->cancel();
+  } else {
+    const ControlBinding& b = controls_[static_cast<std::size_t>(drag_)];
+    const Target t = b.target;
+    drag_ = -1;
+    dragId_.clear();
+    sink_.ControlCancel(t, anchorValue_);
+  }
+  armed_ = -1;
+  armedId_.clear();
+  return true;
 }
 
 void PointerRouter::Tick(const tela::Runtime& runtime) {
@@ -104,11 +156,19 @@ bool PointerRouter::Pointer(tela::Runtime& runtime, const tela::HostPointerEvent
                                timeMs - lastPressMs_ <= params_.doubleClickMs &&
                                std::fabs(x - lastPressX_) <= params_.doubleClickPx &&
                                std::fabs(y - lastPressY_) <= params_.doubleClickPx;
-      if (doubleClick) {
+      const bool customDouble = b.kind == ControlKind::Custom && b.handler != nullptr && b.handler->doubleClick;
+      if (doubleClick && (b.kind != ControlKind::Custom || customDouble)) {
         havePress_ = false;
         armed_ = -1;
         armedId_.clear();
-        sink_.ControlReset(b.target);
+        if (customDouble) {
+          float ox = 0.0f, oy = 0.0f;
+          Local(runtime, b.hitId, &ox, &oy);
+          const std::shared_ptr<DragHandler> h = b.handler;  // the call may replace the controls
+          h->doubleClick(x - ox, y - oy);
+        } else {
+          sink_.ControlReset(b.target);
+        }
         return true;
       }
       havePress_ = true;
@@ -118,19 +178,40 @@ bool PointerRouter::Pointer(tela::Runtime& runtime, const tela::HostPointerEvent
       lastPressY_ = y;
       armed_ = c;
       armedId_ = b.hitId;
+      armedX_ = x;
       armedY_ = y;
-      if (Pressed(runtime, c)) StartDrag(c, y, fine);
+      armedMods_ = e.modifiers;
+      if (Pressed(runtime, c)) StartDrag(runtime, c, x, y, fine, e.modifiers);
       used = true;
       break;
     }
     case tela::PointerPhase::move: {
-      if (drag_ < 0 && armed_ >= 0 && Pressed(runtime, armed_)) StartDrag(armed_, armedY_, fine);
+      if (drag_ < 0 && armed_ >= 0 && Pressed(runtime, armed_)) {
+        StartDrag(runtime, armed_, armedX_, armedY_, (armedMods_ & kModShift) != 0u, armedMods_);
+      }
       if (drag_ < 0) break;
       if (!Pressed(runtime, drag_)) {  // Tela cancelled the gesture
         EndDrag();
         break;
       }
       const ControlBinding& b = controls_[static_cast<std::size_t>(drag_)];
+      if (b.kind == ControlKind::Custom) {
+        DragMotion m;
+        m.dx = x - pressX_;
+        m.dy = y - pressY_;
+        m.ddx = x - lastX_;
+        m.ddy = y - lastY_;
+        m.x = x - originX_;
+        m.y = y - originY_;
+        m.modifiers = e.modifiers;
+        lastX_ = x;
+        lastY_ = y;
+        if (m.dx != 0.0f || m.dy != 0.0f) moved_ = true;
+        const std::shared_ptr<DragHandler> h = custom_;
+        if (h != nullptr && h->drag && moved_) h->drag(m);
+        used = true;
+        break;
+      }
       if (fine != anchorFine_) {  // re-anchor at the previous position so that the value does not jump
         anchorValue_ = sink_.ControlValue(b.target);
         anchorNorm_ = ToNorm(b, anchorValue_);
@@ -151,7 +232,7 @@ bool PointerRouter::Pointer(tela::Runtime& runtime, const tela::HostPointerEvent
     }
     case tela::PointerPhase::up:
     case tela::PointerPhase::cancel: {
-      if (drag_ >= 0) {
+      if (drag_ >= 0 || custom_ != nullptr) {
         EndDrag();
         used = true;
       }
@@ -172,6 +253,13 @@ bool PointerRouter::Pointer(tela::Runtime& runtime, const tela::HostPointerEvent
         wheelId_ = b.hitId;
         ++wheelKey_;
         if (wheelKey_ == 0u) wheelKey_ = 1u;
+      }
+      if (b.kind == ControlKind::Custom) {
+        const std::shared_ptr<DragHandler> h = b.handler;
+        if (h == nullptr || !h->wheel) break;
+        h->wheel(e.wheel_y, e.modifiers, HashId(b.hitId) ^ wheelKey_);
+        used = true;
+        break;
       }
       const float v = sink_.ControlValue(b.target);
       float next = v;

@@ -63,6 +63,7 @@ const char* LivePhaseName(LivePhase p) {
     case LivePhase::Syncing: return "syncing";
     case LivePhase::Live: return "live";
     case LivePhase::Refused: return "refused";
+    case LivePhase::Failed: return "failed";
   }
   return "?";
 }
@@ -285,7 +286,10 @@ void LiveSync::Unsupported(const std::string& bank, std::uint32_t chunk, std::ui
 
 void LiveSync::Enqueue(Op op) {
   op.epoch = epoch_[op.bank];
+  op.serial = ++serial_;
   if (op.route == LiveRoute::SetValue) {
+    latestSerial_[op.cellKey] = op.serial;
+    held_.erase(op.cellKey);  // a newer value of the cell decides
     for (auto it = queue_.begin(); it != queue_.end(); ++it) {
       if (it->route == LiveRoute::SetValue && it->cellKey == op.cellKey) {  // the newer value wins
         queue_.erase(it);
@@ -311,6 +315,9 @@ void LiveSync::Escalate(const std::string& bank, const std::string& reason, std:
     const ParsedBank* v = b->view();
     op.languageId = v != nullptr ? v->languageId() : 0u;
   }
+  // The document is the truth: a bank the game does not hold (never loaded, or detached by a failed
+  // reload) is loaded.
+  op.loadIfAbsent = true;
   if (!options_.writer || peerMinor_ < 1u || b == nullptr) {
     const std::string why = b == nullptr ? "the bank is not in the document's build"
                             : peerMinor_ < 1u ? "the game speaks protocol 1.0 (no hot reload)"
@@ -377,6 +384,13 @@ struct StructPlan {
     std::vector<std::uint64_t> args;
   };
   std::vector<Edit> edits;
+  // D-183: value changes of the same tables (buses, effect parameters and sends that exist before
+  // and after) go as SetValue after the structural edits, so that no value of the build is lost.
+  struct Value {
+    std::uint32_t chunk, column, runtimeId, index, row;
+    std::uint64_t bits;
+  };
+  std::vector<Value> values;
 };
 
 // Bus / effect / send changes that StructEdit can carry: buses added or removed (other rows keep
@@ -408,11 +422,34 @@ StructPlan DeriveStructEdits(const ParsedBank& a, const ParsedBank& b) {
       const std::uint32_t n = x.U32(ch::BUSS, col, row);
       return n == bf::kNone ? 0u : n;
     };
+    // The bus's own cells: the volume is a live value; the others need a rebuild.
+    for (const std::uint32_t col : {co::BUSS_channels, co::BUSS_flags, co::BUSS_lodPriority}) {
+      std::uint64_t x = 0, y = 0;
+      a.Cell(ch::BUSS, col, ra, &x);
+      b.Cell(ch::BUSS, col, r, &y);
+      if (x != y) return p;
+    }
+    {
+      std::uint64_t x = 0, y = 0;
+      a.Cell(ch::BUSS, co::BUSS_volumeDb, ra, &x);
+      b.Cell(ch::BUSS, co::BUSS_volumeDb, r, &y);
+      if (x != y) p.values.push_back(StructPlan::Value{ch::BUSS, co::BUSS_volumeDb, ib[r], 0u, r, y});
+    }
     const std::uint32_t ea = count(a, ra, co::BUSS_effectCount), eb = count(b, r, co::BUSS_effectCount);
     const std::uint32_t fa = a.U32(ch::BUSS, co::BUSS_effectFirst, ra), fb = b.U32(ch::BUSS, co::BUSS_effectFirst, r);
     const std::uint32_t common = std::min(ea, eb);
     for (std::uint32_t k = 0; k < common; ++k) {  // the kept effects must be the same kinds
       if (a.U32(ch::EFFX, co::EFFX_effectType, fa + k) != b.U32(ch::EFFX, co::EFFX_effectType, fb + k)) return p;
+      if (a.U32(ch::EFFX, co::EFFX_flags, fa + k) != b.U32(ch::EFFX, co::EFFX_flags, fb + k)) return p;
+      const std::uint32_t pa = a.U32(ch::EFFX, co::EFFX_paramFirst, fa + k), pca = a.U32(ch::EFFX, co::EFFX_paramCount, fa + k);
+      const std::uint32_t pb = b.U32(ch::EFFX, co::EFFX_paramFirst, fb + k), pcb = b.U32(ch::EFFX, co::EFFX_paramCount, fb + k);
+      if (pca != pcb) return p;
+      for (std::uint32_t q = 0; pa != bf::kNone && pb != bf::kNone && pca != bf::kNone && q < pca; ++q) {
+        std::uint64_t x = 0, y = 0;
+        a.Cell(ch::EFPV, co::EFPV_value, pa + q, &x);
+        b.Cell(ch::EFPV, co::EFPV_value, pb + q, &y);
+        if (x != y) p.values.push_back(StructPlan::Value{ch::EFPV, co::EFPV_value, ib[r], (k << 16) | q, pb + q, y});
+      }
     }
     for (std::uint32_t k = ea; k < eb; ++k) {
       StructPlan::Edit e{ll::StructOp::AddEffect, ib[r], {b.U32(ch::EFFX, co::EFFX_effectType, fb + k), 0xFFFFFFFFu}};
@@ -430,6 +467,11 @@ StructPlan DeriveStructEdits(const ParsedBank& a, const ParsedBank& b) {
     const std::uint32_t ga = a.U32(ch::BUSS, co::BUSS_sendFirst, ra), gb = b.U32(ch::BUSS, co::BUSS_sendFirst, r);
     for (std::uint32_t k = 0; k < sa; ++k) {
       if (a.U32(ch::SEND, co::SEND_targetBus, ga + k) != b.U32(ch::SEND, co::SEND_targetBus, gb + k)) return p;
+      if (a.U32(ch::SEND, co::SEND_preFader, ga + k) != b.U32(ch::SEND, co::SEND_preFader, gb + k)) return p;
+      std::uint64_t x = 0, y = 0;
+      a.Cell(ch::SEND, co::SEND_levelDb, ga + k, &x);
+      b.Cell(ch::SEND, co::SEND_levelDb, gb + k, &y);
+      if (x != y) p.values.push_back(StructPlan::Value{ch::SEND, co::SEND_levelDb, ib[r], k, gb + k, y});
     }
     for (std::uint32_t k = sa; k < sb; ++k) {
       const std::uint32_t target = b.U32(ch::SEND, co::SEND_targetBus, gb + k);
@@ -549,6 +591,39 @@ void LiveSync::PlanDelta(const LiveDelta& d, const std::vector<BankImage>& befor
             op.guids = ObjectsOf(file);
             Enqueue(std::move(op));
           }
+          // The values of the same tables, after the structural edits (D-183). A refused edit
+          // sends the bank by reload, which carries them too.
+          for (const StructPlan::Value& x : sp.values) {
+            Op op;
+            op.route = LiveRoute::SetValue;
+            op.revision = rev;
+            op.bank = file;
+            op.bankId = after->bankId;
+            op.member = MemberOf(x.chunk, x.column);
+            ll::SetValue& v = op.value;
+            std::uint64_t lo = 0, hi = 0;
+            if (vb->Guid(x.runtimeId, &lo, &hi)) {
+              v.guidLo = lo;
+              v.guidHi = hi;
+              const std::string g = GuidText(Guid{lo, hi});
+              if (!g.empty()) op.guids.push_back(g);
+            }
+            v.runtimeId = x.runtimeId;
+            v.chunk = x.chunk;
+            v.column = x.column;
+            v.valueType = static_cast<std::uint32_t>(ll::ValueType::F32);
+            v.index = x.index;
+            v.value = x.bits;
+            op.cellKey = CellKey(file, v);
+            op.row = x.row;
+            if (options_.heldByMixer && options_.heldByMixer(v.runtimeId, v.chunk, v.column, v.index)) {
+              Mark(op, LiveState::HeldByMixer, 0, "the mixer's monitoring value holds this cell");
+              latestSerial_[op.cellKey] = ++serial_;
+              held_[op.cellKey] = op;
+              continue;
+            }
+            Enqueue(std::move(op));
+          }
           continue;
         }
       }
@@ -611,8 +686,11 @@ void LiveSync::PlanDelta(const LiveDelta& d, const std::vector<BankImage>& befor
     v.index = e.cell.index;
     v.value = e.cell.bits;
     op.cellKey = CellKey(file, v);
+    op.row = e.cell.row;
     if (options_.heldByMixer && options_.heldByMixer(v.runtimeId, v.chunk, v.column, v.index)) {
       Mark(op, LiveState::HeldByMixer, 0, "the mixer's monitoring value holds this cell");
+      latestSerial_[op.cellKey] = ++serial_;  // older values of the cell must not go out either
+      held_[op.cellKey] = op;                 // sent when the mixer lets go (D-183, G8)
       continue;
     }
     Enqueue(std::move(op));
@@ -689,6 +767,19 @@ void LiveSync::Reconcile(Connection& c) {
       m.gameContentHash = e->contentHash;
       m.gameBuildHash = e->projectBuildHash;
       m.writable = e->writable != 0u;
+      bool liveStruct = false;
+      for (const StructEditInfo& x : structs_) liveStruct = liveStruct || (x.bank == b.file && x.applied && !x.undone);
+      if (liveStruct) {
+        // D-182 / D-183: whether the game kept the live structural edits is not known. They are not
+        // sent again (an editor would get a second Add); the bank is reloaded from the document,
+        // and a successful reload ends them (reserve() and structEdits() start from zero).
+        m.verdict = e->contentHash == b.contentHash ? BankVerdict::Same : BankVerdict::Differs;
+        m.knownBase = known_.count(e->contentHash) != 0u;
+        sent_.push_back(b);
+        check_.banks.push_back(m);
+        Escalate(b.file, "live structural edits before the reconnect: the game's structure is not known", builtRevision_);
+        continue;
+      }
       if (e->contentHash == b.contentHash) {
         m.verdict = BankVerdict::Same;
         m.knownBase = true;
@@ -746,10 +837,110 @@ void LiveSync::Reconcile(Connection& c) {
       check_.banks.push_back(m);
     }
   }
+  // A bank the game lists again (a restarted game, another session) is no longer a failure unless
+  // this session's reconcile reloads it again.
+  if (banksAsked_) {
+    for (const BankMatch& m : check_.banks) {
+      if (m.verdict == BankVerdict::Same || m.verdict == BankVerdict::Differs) failedBanks_.erase(m.file);
+    }
+  }
+  // The answer given during the handshake is tied to the game as this session sees it (its bank
+  // list may have come after the answer).
+  if (rememberedValid_ && rememberPending_) {
+    rememberedGame_ = GameSignature();
+    rememberPending_ = false;
+  }
+  ResendSentState();
   sentRevision_ = builtRevision_;
   sentValid_ = true;
   sessionLive_ = true;
   changed_.clear();
+}
+
+std::string LiveSync::GameSignature() const {
+  std::vector<std::string> parts;
+  for (const BankMatch& m : check_.banks) {
+    if (m.gameContentHash == 0u) continue;  // not in the game (a ToolOnly bank until a reload loads it)
+    parts.push_back(std::to_string(m.bankId) + ":" + std::to_string(m.languageId) + ":" + std::to_string(m.gameContentHash));
+  }
+  std::sort(parts.begin(), parts.end());
+  // With a bank list the banks say it (the Hello hash follows the registration order, which a hot
+  // reload changes); a 1.0 game only has its build hash.
+  std::string s = check_.banksKnown ? std::string("banks") : std::to_string(check_.gameBuildHash);
+  for (const std::string& p : parts) s += "|" + p;
+  return s;
+}
+
+// D-182: the game may still hold what earlier sessions wrote (11.2: overrides stay when the tool
+// leaves), or may have put it back. Every cell and table the tool ever sent goes again with the
+// document's current value, so that after a reconnect the game holds the document's build.
+void LiveSync::ResendSentState() {
+  for (const auto& [key, cell] : sentCells_) {
+    bool reloading = false;
+    for (const Op& q : queue_) reloading = reloading || (q.bank == cell.bank && q.route == LiveRoute::Reload);
+    if (reloading) continue;  // the reload carries the file's values
+    bool queued = false;
+    for (const Op& q : queue_) queued = queued || (q.route == LiveRoute::SetValue && q.cellKey == key);
+    if (queued) continue;
+    const BankImage* b = CurrentBank(cell.bank);
+    const ParsedBank* v = b != nullptr ? b->view() : nullptr;
+    std::uint64_t bits = 0;
+    if (v == nullptr || !v->Cell(cell.value.chunk, cell.value.column, cell.row, &bits)) continue;  // the shape changed
+    Op op;
+    op.route = LiveRoute::SetValue;
+    op.revision = builtRevision_;
+    op.bank = cell.bank;
+    op.bankId = b->bankId;
+    op.value = cell.value;
+    op.value.value = bits;
+    op.cellKey = key;
+    op.row = cell.row;
+    op.member = MemberOf(cell.value.chunk, cell.value.column);
+    const std::string g = GuidText(Guid{cell.value.guidLo, cell.value.guidHi});
+    if (!g.empty()) op.guids.push_back(g);
+    if (options_.heldByMixer &&
+        options_.heldByMixer(op.value.runtimeId, op.value.chunk, op.value.column, op.value.index)) {
+      Mark(op, LiveState::HeldByMixer, 0, "the mixer's monitoring value holds this cell");
+      held_[key] = op;
+      continue;
+    }
+    Enqueue(std::move(op));
+  }
+  for (const auto& [bank, list] : sentChunks_) {
+    bool reloading = false;
+    for (const Op& q : queue_) reloading = reloading || (q.bank == bank && q.route == LiveRoute::Reload);
+    const BankImage* b = CurrentBank(bank);
+    const ParsedBank* v = b != nullptr ? b->view() : nullptr;
+    if (reloading || v == nullptr) continue;
+    for (const std::uint32_t fourcc : list) {
+      std::uint64_t n = 0;
+      const std::uint8_t* data = v->Chunk(fourcc, &n);
+      if (data == nullptr) continue;
+      Op op;
+      op.route = LiveRoute::ReplaceChunk;
+      op.revision = builtRevision_;
+      op.bank = bank;
+      op.bankId = b->bankId;
+      op.fourcc = fourcc;
+      op.bytes.assign(data, data + n);
+      Enqueue(std::move(op));
+    }
+  }
+}
+
+// D-183 (G8): a value the mixer held back goes out once the mixer lets go of the cell.
+void LiveSync::ReleaseHeld() {
+  std::vector<Op> release;
+  for (auto it = held_.begin(); it != held_.end();) {
+    const ll::SetValue& v = it->second.value;
+    if (options_.heldByMixer && options_.heldByMixer(v.runtimeId, v.chunk, v.column, v.index)) {
+      ++it;
+    } else {
+      release.push_back(it->second);
+      it = held_.erase(it);
+    }
+  }
+  for (Op& op : release) Enqueue(std::move(op));
 }
 
 // --- sending -----------------------------------------------------------------------------------
@@ -782,13 +973,19 @@ void LiveSync::Send(ll::Client* c, std::uint64_t nowNs) {
       case LiveRoute::SetValue:
         if (options_.heldByMixer && options_.heldByMixer(op.value.runtimeId, op.value.chunk, op.value.column, op.value.index)) {
           Mark(op, LiveState::HeldByMixer, 0, "the mixer's monitoring value holds this cell");
+          held_[op.cellKey] = op;
           queue_.pop_front();
           continue;
         }
         seq = c->SetValue(op.value, true);
+        if (seq != 0u) sentCells_[op.cellKey] = SentCell{op.bank, op.row, op.value};
         break;
       case LiveRoute::ReplaceChunk:
         seq = c->ReplaceChunk(op.bankId, op.fourcc, op.bytes.data(), op.bytes.size(), true);
+        if (seq != 0u) {
+          std::vector<std::uint32_t>& list = sentChunks_[op.bank];
+          if (std::find(list.begin(), list.end(), op.fourcc) == list.end()) list.push_back(op.fourcc);
+        }
         break;
       case LiveRoute::StructEdit:
         seq = c->StructEdit(op.structOp, op.target, op.args.data(), static_cast<std::uint32_t>(op.args.size()), true);
@@ -798,12 +995,18 @@ void LiveSync::Send(ll::Client* c, std::uint64_t nowNs) {
         const BankImage* b = CurrentBank(o.bank);
         std::string path, err;
         if (b == nullptr || !options_.writer(*b, &path, &err)) {
-          Problem(o, SND_ERR_IO, "the rebuilt bank could not be written: " + err);
-          Mark(o, LiveState::Failed, SND_ERR_IO, err);
-          if (o.reloadIndex >= 0) {
-            reloads_[static_cast<std::size_t>(o.reloadIndex)].finished = true;
-            reloads_[static_cast<std::size_t>(o.reloadIndex)].result = SND_ERR_IO;
+          const std::string why = "the rebuilt bank could not be written: " + (b == nullptr ? std::string("not in the build") : err);
+          Problem(o, SND_ERR_IO, why);
+          Mark(o, LiveState::Failed, SND_ERR_IO, why);
+          if (o.reloadIndex >= 0) {  // D-184: a failed phase with the writer's reason (the game still has the bank)
+            ReloadProgress& p = reloads_[static_cast<std::size_t>(o.reloadIndex)];
+            p.finished = true;
+            p.result = SND_ERR_IO;
+            p.phase = ll::ReloadPhase::Failed;
+            p.detached = false;
+            p.reason = why;
           }
+          failedBanks_[o.bank] = why;
           queue_.pop_front();
           continue;
         }
@@ -813,6 +1016,7 @@ void LiveSync::Send(ll::Client* c, std::uint64_t nowNs) {
         }
         if (std::none_of(sent_.begin(), sent_.end(), [&](const BankImage& s) { return s.file == o.bank; })) sent_.push_back(*b);
         known_[b->contentHash] = *b;
+        o.contentHash = b->contentHash;
         seq = c->ReloadBank(o.bankId, o.languageId, path.c_str(), o.loadIfAbsent, true);
         if (o.reloadIndex >= 0) {
           reloads_[static_cast<std::size_t>(o.reloadIndex)].path = path;
@@ -824,6 +1028,7 @@ void LiveSync::Send(ll::Client* c, std::uint64_t nowNs) {
     }
     if (seq == 0u) return;  // not connected or the send queue is full: next Tick
     op.seq = seq;
+    if (op.firstSentNs == 0u) op.firstSentNs = nowNs_ == 0u ? 1u : nowNs_;
     ++stats_.sent;
     switch (op.route) {
       case LiveRoute::SetValue: ++stats_.values; break;
@@ -872,6 +1077,19 @@ void LiveSync::Settle(const Op& op, std::int32_t r) {
         s.undone = true;  // the answer to an undo
       } else {
         s.applied = true;
+        // D-183: a Remove (e.g. the document's Undo of a live Add) gives the Add's cost back.
+        const bool removeEffect = s.op == ll::StructOp::RemoveEffect, removeBus = s.op == ll::StructOp::RemoveBus;
+        if (removeEffect || removeBus) {
+          s.undone = true;
+          for (auto it = structs_.rbegin(); it != structs_.rend(); ++it) {
+            const bool match = it->bank == s.bank && it->target == s.target && it->applied && !it->undone &&
+                               ((removeEffect && it->op == ll::StructOp::AddEffect) || (removeBus && it->op == ll::StructOp::AddBus));
+            if (match) {
+              it->undone = true;
+              break;
+            }
+          }
+        }
       }
     }
     if (op.route == LiveRoute::Reload && op.reloadIndex >= 0) {
@@ -880,16 +1098,57 @@ void LiveSync::Settle(const Op& op, std::int32_t r) {
       p.result = r;
       p.phase = ll::ReloadPhase::Done;
     }
+    if (op.route == LiveRoute::Reload) {
+      // The game holds the bank's file again: no live cell, table or structural edit of it is left.
+      failedBanks_.erase(op.bank);
+      for (auto it = sentCells_.begin(); it != sentCells_.end();) {
+        if (it->second.bank == op.bank) {
+          it = sentCells_.erase(it);
+        } else {
+          ++it;
+        }
+      }
+      sentChunks_.erase(op.bank);
+      // The game changed by the tool's own reload: still the same game for the remembered answer.
+      for (BankMatch& m : check_.banks) {
+        if (m.file == op.bank) {
+          m.gameContentHash = op.contentHash;  // (the verdict stays what the connection saw)
+        }
+      }
+      if (rememberedValid_ && !rememberPending_) rememberedGame_ = GameSignature();
+      // The bank's live structural edits are gone with the reload: the list and the reserve start
+      // from zero (D-182). Requests that point at removed entries no longer do.
+      std::vector<std::int32_t> remap(structs_.size(), -1);
+      std::vector<StructEditInfo> kept;
+      for (std::size_t i = 0; i < structs_.size(); ++i) {
+        if (structs_[i].bank == op.bank) continue;
+        remap[i] = static_cast<std::int32_t>(kept.size());
+        kept.push_back(structs_[i]);
+      }
+      structs_ = std::move(kept);
+      auto fix = [&](Op& o) {
+        if (o.structIndex >= 0) o.structIndex = remap[static_cast<std::size_t>(o.structIndex)];
+      };
+      for (Op& o : queue_) fix(o);
+      for (Op& o : inflight_) fix(o);
+    }
     return;
   }
   const bool chunkSlot = r == SND_ERR_LIMIT_REACHED && op.route == LiveRoute::ReplaceChunk;
   if (Transient(r) || chunkSlot) {
+    // D-183: a newer value of the same cell was edited since: the old one is not sent again.
+    if (op.route == LiveRoute::SetValue && op.serial < latestSerial_[op.cellKey]) {
+      ++stats_.superseded;
+      return;
+    }
     Op again = op;
     again.seq = 0;
     ++again.resends;
     ++stats_.resent;
-    if (again.resends > 1000u) {
-      Problem(op, r, "the game kept refusing the request as busy");
+    if (nowNs_ > again.firstSentNs && nowNs_ - again.firstSentNs > std::uint64_t{options_.giveUpMs} * 1000000ull) {
+      ++stats_.failed;
+      Problem(op, r, std::string("the game kept refusing the request as busy (") + ResultName(r) + ") for " +
+                         std::to_string(options_.giveUpMs) + " ms");
       Mark(op, LiveState::Failed, r, "busy");
       return;
     }
@@ -906,6 +1165,9 @@ void LiveSync::Settle(const Op& op, std::int32_t r) {
       p.detached = r != SND_ERR_NOT_FOUND && r != SND_ERR_LIMIT_REACHED && r != SND_ERR_BANK_IN_USE;
       p.reason = std::string(ResultName(r)) +
                  (p.detached ? ": the bank is detached in the game (not loaded until a reload succeeds)" : "");
+      failedBanks_[op.bank] = p.reason;
+    } else {
+      failedBanks_[op.bank] = ResultName(r);
     }
     ++stats_.failed;
     Problem(op, r,
@@ -927,6 +1189,19 @@ void LiveSync::Settle(const Op& op, std::int32_t r) {
                  (r == SND_ERR_OUT_OF_BUDGET ? ": dev reserve exhausted" : ""),
              op.revision, &op.guids);
     return;
+  }
+  // D-183 (G7): a value of an object a live structural edit added (core keeps no cell for it until
+  // its editor does, C-01): it needs a rebuild and hot reload, it is not a problem of the edit.
+  if (r == SND_ERR_NOT_FOUND && op.route == LiveRoute::SetValue) {
+    for (const StructEditInfo& s : structs_) {
+      if (s.applied && !s.undone && s.target == op.value.runtimeId &&
+          (s.op == ll::StructOp::AddBus || s.op == ll::StructOp::AddEffect)) {
+        const std::string why = "a live-added object: its values need a rebuild and hot reload until core's editor keeps "
+                                "cells for it (C-01)";
+        Escalate(op.bank, why, op.revision, &op.guids);  // listed as unsupported when no reload is possible
+        return;
+      }
+    }
   }
   ++stats_.failed;
   Problem(op, r, std::string(LiveRouteName(op.route)) + " refused by the game: " + ResultName(r));
@@ -1017,7 +1292,11 @@ bool LiveSync::ChooseSendDiffs(Connection& c) {
   if (!c.awaitingSync()) return false;
   decided_ = true;
   refused_ = false;
-  options_.decision = LiveDecision::SendDiffs;  // remembered: a reconnect is answered the same (D-87)
+  // D-182: remembered for a reconnect to the same game only (its build hash and banks).
+  rememberedValid_ = true;
+  remembered_ = LiveDecision::SendDiffs;
+  rememberedGame_ = GameSignature();
+  rememberPending_ = true;
   return c.DecideSync(MismatchPolicy::SendDiffs);
 }
 
@@ -1025,7 +1304,10 @@ bool LiveSync::ChooseRefuse(Connection& c) {
   if (!c.awaitingSync()) return false;
   decided_ = true;
   refused_ = true;
-  options_.decision = LiveDecision::Refuse;
+  rememberedValid_ = true;
+  remembered_ = LiveDecision::Refuse;
+  rememberedGame_ = GameSignature();
+  rememberPending_ = !check_.banksKnown;  // (a refused session has no reconcile: keep what was seen)
   return c.DecideSync(MismatchPolicy::Refuse);
 }
 
@@ -1033,25 +1315,42 @@ void LiveSync::UpdatePhase(Connection& c) {
   if (c.client() == nullptr) {
     phase_ = LivePhase::Offline;
   } else if (c.awaitingSync()) {
-    phase_ = LivePhase::AwaitingDecision;
+    phase_ = waitingForList_ ? LivePhase::Checking : LivePhase::AwaitingDecision;
   } else if (c.state() == LinkState::Rejected) {
     phase_ = refused_ ? LivePhase::Refused : LivePhase::Offline;
   } else if (c.state() != LinkState::Online) {
     phase_ = LivePhase::Connecting;
   } else if (!sessionLive_) {
     phase_ = LivePhase::Checking;
-  } else if (!queue_.empty() || !inflight_.empty() || doc_.revision() != builtRevision_) {
-    // (a document change not built yet: the throttle holds it until its interval ends)
-    phase_ = LivePhase::Syncing;
+  } else if (!queue_.empty() || !inflight_.empty() || doc_.revision() != builtRevision_ || !held_.empty()) {
+    // (a document change not built yet: the throttle holds it until its interval ends; a value the
+    // mixer holds back: the game does not hold the document's value)
+    phase_ = held_.empty() || !queue_.empty() || !inflight_.empty() || doc_.revision() != builtRevision_
+                 ? LivePhase::Syncing
+                 : LivePhase::Live;
+    if (phase_ == LivePhase::Live && !failedBanks_.empty()) phase_ = LivePhase::Failed;
+  } else if (!failedBanks_.empty()) {
+    phase_ = LivePhase::Failed;  // D-184: never Live while a bank did not reach the game
   } else {
     phase_ = LivePhase::Live;
   }
 }
 
 void LiveSync::Tick(Connection& c, const ConnectionEvents& ev, std::uint64_t nowNs) {
+  nowNs_ = nowNs;
   Build(nowNs);
+  // D-182: the Hello of every connection carries the document's current build (the client sends
+  // the hash it was opened with: a new client while connecting).
+  if (c.client() != nullptr && c.state() == LinkState::Connecting && current_.ok &&
+      c.desc().projectBuildHash != current_.buildHash) {
+    c.SetProjectBuildHash(current_.buildHash);
+  }
   ll::Client* cl = c.client();
-  if (ev.sessionLost || cl == nullptr) {
+  // A new client (Open) or a new connection of the client: what the old one showed is gone.
+  const std::uint64_t link = (std::uint64_t{c.opens()} << 32) | (cl != nullptr ? c.generation() : 0u);
+  const bool newLink = link != seenLink_;
+  seenLink_ = link;
+  if (ev.sessionLost || cl == nullptr || newLink) {
     sessionLive_ = false;
     banksAsked_ = false;
     for (const Op& o : inflight_) Mark(o, LiveState::Offline, 0, "the connection dropped");
@@ -1098,6 +1397,7 @@ void LiveSync::Tick(Connection& c, const ConnectionEvents& ev, std::uint64_t now
         m.verdict = BankVerdict::ToolOnly;
         for (const ll::BankEntry& e : game) {
           if (e.bankId != b.bankId) continue;
+          m.languageId = e.languageId;
           m.gameContentHash = e.contentHash;
           m.gameBuildHash = e.projectBuildHash;
           m.writable = e.writable != 0u;
@@ -1120,9 +1420,19 @@ void LiveSync::Tick(Connection& c, const ConnectionEvents& ev, std::uint64_t now
         check_.banks.push_back(m);
       }
     }
-    if (options_.decision == LiveDecision::SendDiffs) {
+    LiveDecision d = options_.decision;
+    // A 1.1 game: no question and no remembered answer before its bank list is in (the question
+    // shows the verdict per bank; the answer given before stands only for the same game, D-182).
+    // Until then the phase is Checking. A 1.0 game has no list: its build hash decides at once.
+    const bool known = check_.banksKnown || !cl->Supports(ll::MessageType::QueryBanks);
+    waitingForList_ = d == LiveDecision::Ask && !known;
+    if (d == LiveDecision::Ask && rememberedValid_ && known) {
+      d = GameSignature() == rememberedGame_ ? remembered_ : LiveDecision::Ask;
+    }
+    if (d == LiveDecision::SendDiffs) {
+      refused_ = false;
       c.DecideSync(MismatchPolicy::SendDiffs);
-    } else if (options_.decision == LiveDecision::Refuse) {
+    } else if (d == LiveDecision::Refuse) {
       refused_ = true;
       c.DecideSync(MismatchPolicy::Refuse);
     }
@@ -1156,6 +1466,7 @@ void LiveSync::Tick(Connection& c, const ConnectionEvents& ev, std::uint64_t now
       sentRevision_ = builtRevision_;
       changed_.clear();
     }
+    ReleaseHeld();
     TakeAnswers(cl);
     Send(cl, nowNs);
   }

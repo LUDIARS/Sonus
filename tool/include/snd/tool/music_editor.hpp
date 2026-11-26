@@ -24,7 +24,8 @@
 // row is unreachable (D-179e: sorting could then change which rule matches).
 //
 // Minimum lookahead (8.2), per reservation target: one block (blockFrames / sampleRate)
-// plus the target's prime time:
+// plus the prime time of the first material played (D-184: a rule's bridge when it has one, as the
+// runtime's FirstMaterialPrime; else the target's):
 //   - material in memory (loadForm pcm / compressed / decompressCache): 0;
 //   - a stream whose transition is "prepare" (8.3 事前プライム): 0;
 //   - a stream started at its head with a preload (preloadMs > 0): 0 (the preload chunk
@@ -35,11 +36,15 @@
 // The stream's prime time (open, seek, first decode) is a setting (MusicSettings::
 // streamPrimeMs): it depends on the device, not on the project.
 //
-// Transition preview (8.7): which rule, the firing tick (the rule's timing from the
-// request; nextMarker: the next user marker (by id, 0 = any) else the segment end;
+// Transition preview (8.7; D-184: the runtime's rules are the truth): the request is taken at the
+// first block start at or after it (at least one block after the music's start: applySeconds);
+// which rule, the firing tick (the rule's timing from that point; nextMarker: the next user marker (by id, 0 = any) else the segment end;
 // segmentEnd: the segment's exit), the late rule when the firing comes sooner than the
 // minimum lookahead (nextGrid: the next timing point; startLate: the request + lookahead;
 // cancel: no transition), fades in seconds (out at the source tempo, in at the target's),
+// the late rule compares the firing with applySeconds + the first material's prime time (the
+// rule's bridge when it has one, else the target) (the runtime has
+// no extra block there; lookaheadMs stays the 8.2 display value, one block + prime),
 // the bridge and where the target segment starts (head, same bar: the source bar modulo
 // the target's bars, beat kept when the signatures match (D-74); marker; lastPosition is
 // the head in the preview: no history). Computed on the source state's first segment.
@@ -255,6 +260,11 @@ struct TransitionPreview {
   std::string targetSegment;  // GUID (first entry of the target's playlist)
   double targetStartSeconds = 0.0;  // when the target is heard (fire + bridge)
   double targetStartTick = 0.0;     // position in the target segment
+  // D-184: when the runtime takes the request: the first block start (blocks of
+  // MusicSettings::blockFrames from the music's start) at or after requestSeconds, at least one
+  // block. The firing and the late rule are computed from it, with the runtime's lead (the target
+  // material's prime time only).
+  double applySeconds = 0.0;
 };
 
 class MusicEditor {
@@ -284,6 +294,9 @@ class MusicEditor {
   bool RemoveStinger(std::uint32_t i);
   // --- derived ---------------------------------------------------------------------------
   std::vector<LookaheadEntry> MinimumLookahead(const MusicSettings& s) const;
+  // The longest request time a preview takes (D-187: a computation's input has a range). A request
+  // time that is not finite, negative or beyond it gives an invalid preview (valid false).
+  static constexpr double kMaxRequestSeconds = 1.0e6;
   TransitionPreview Preview(const std::string& from, const std::string& to, double requestSeconds,
                             const MusicSettings& s) const;
 

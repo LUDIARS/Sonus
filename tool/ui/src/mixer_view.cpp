@@ -2,9 +2,12 @@
 // meter), category strips, the overrides list with undo / redo / revert, and
 // the parameter overrides.
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 
 #include "snd/tool/names.hpp"
+#include "snd/tool/ui/app.hpp"
+#include "snd/tool/ui/kit.hpp"
 #include "snd/tool/ui/layout_metrics.hpp"
 #include "snd/tool/ui/views.hpp"
 #include "snd/tool/ui/widgets.hpp"
@@ -25,11 +28,12 @@ tela::Color SyncColor(const CellSync& sync, std::int32_t cell, const Palette& p,
 std::string Short(const std::string& s, std::size_t n) { return s.size() <= n ? s : s.substr(0, n); }
 
 std::string FormatValue(float v, const std::string& unit) {
+  if (!std::isfinite(v)) return "-";  // D-189: a shown value is finite
   char b[32];
   if (unit == "Hz" && v >= 1000.0f) {
-    std::snprintf(b, sizeof b, "%.1fk", static_cast<double>(v) / 1000.0);
+    SnprintfFinite(b, sizeof b, "%.1fk", static_cast<double>(v) / 1000.0);
   } else {
-    std::snprintf(b, sizeof b, "%.3g%s", static_cast<double>(v), unit.empty() ? "" : unit.c_str());
+    SnprintfFinite(b, sizeof b, "%.3g%s", static_cast<double>(v), unit.empty() ? "" : unit.c_str());
   }
   return b;
 }
@@ -191,7 +195,17 @@ void DeclareSide(tela::Document& doc, ViewContext& ctx, float x, float height) {
     Button(doc, "ovr.undo", "Undo", [a] { a->OnUndo(); }, 0, 26, 70, 24);
     Button(doc, "ovr.redo", "Redo", [a] { a->OnRedo(); }, 76, 26, 70, 24);
     Button(doc, "ovr.revertall", "Revert all", [a] { a->OnRevertAll(); }, 152, 26, 140, 24);
-    float y = 56.0f;
+    // 1.1 read-back of every mixer cell, and (with a document) the live values into the project.
+    if (ctx.app != nullptr) {
+      App* app = ctx.app;
+      Button(doc, "ovr.readback", "Read back", [app] {
+        if (!app->session().ReadBack()) app->Message("read back: needs a 1.1 game");
+      }, 0, 54, 100, 22, 0.6f);
+      if (app->document() != nullptr) {
+        Button(doc, "ovr.writeback", "Write back to project", [app] { app->WriteBackMixer(); }, 106, 54, 186, 22, 0.6f);
+      }
+    }
+    float y = 82.0f;
     const float paramTop = std::max(160.0f, height * 0.55f);
     std::size_t shown = 0;
     for (const OverrideItem& it : items) {
@@ -220,7 +234,7 @@ void DeclareSide(tela::Document& doc, ViewContext& ctx, float x, float height) {
       const std::string base = "par." + pd.key;
       const KnobRange range{std::min(pd.minValue, pd.maxValue), std::max(pd.minValue, pd.maxValue), false, pd.isSwitch};
       char b[96];
-      std::snprintf(b, sizeof b, "%s %.3g%s", Short(pd.name, 16).c_str(), static_cast<double>(ps.value),
+      SnprintfFinite(b, sizeof b, "%s %s%s", Short(pd.name, 16).c_str(), FormatValue(ps.value, std::string()).c_str(),
                     ps.enabled ? " (override)" : "");
       Text(doc, base + ".name", b, 0, py + 4, w - 150, 22, 0.55f);
       KnobLook look;
@@ -258,7 +272,7 @@ void DeclareMixer(tela::Document& doc, ViewContext& ctx, float width, float heig
   const std::uint32_t page = std::min(ctx.state.mixerPage, pages - 1u);
   Panel(doc, "mixer", 0, 0, areaW, height, [&] {
     char b[64];
-    std::snprintf(b, sizeof b, "page %u / %u   %u buses  %u categories", page + 1u, pages,
+    SnprintfFinite(b, sizeof b, "page %u / %u   %u buses  %u categories", page + 1u, pages,
                   static_cast<unsigned>(project.buses().size()), static_cast<unsigned>(project.categories().size()));
     Button(doc, "mixer.prev", "<", [a] { a->OnPage(-1); }, 0, 2, 32, 24);
     Button(doc, "mixer.next", ">", [a] { a->OnPage(1); }, 36, 2, 32, 24);
