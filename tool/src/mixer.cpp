@@ -41,6 +41,133 @@ void MixerModel::Bind(const Project& project) {
   ++revision_;
 }
 
+std::vector<LiveValue> MixerModel::LiveValues() const {
+  std::vector<LiveValue> out;
+  if (project_ == nullptr) return out;
+  const Project& p = *project_;
+  auto add = [&](Control c, const Guid& g, const std::string& name, float v) {
+    LiveValue lv;
+    lv.control = c;
+    lv.guid = g;
+    lv.name = name;
+    lv.value = v;
+    out.push_back(lv);
+  };
+  for (std::size_t i = 0; i < buses_.size() && i < p.buses().size(); ++i) {
+    const BusDesc& d = p.buses()[i];
+    const BusStrip& s = buses_[i];
+    if (s.faderDb != ClampFader(d.volumeDb)) add(Control::BusFader, d.guid, d.name, s.faderDb);
+    if (s.muted) add(Control::BusMute, d.guid, d.name, 1.0f);
+    if (s.soloed) add(Control::BusSolo, d.guid, d.name, 1.0f);
+    std::vector<std::string> chain;
+    for (const EffectDesc& fx : d.effects) chain.push_back(fx.type);
+    for (std::size_t e = 0; e < s.params.size() && e < d.effects.size(); ++e) {
+      for (std::size_t k = 0; k < s.params[e].size() && k < d.effects[e].params.size(); ++k) {
+        if (s.params[e][k] == d.effects[e].params[k].projectValue) continue;
+        LiveValue lv;
+        lv.control = Control::EffectParam;
+        lv.guid = d.guid;
+        lv.name = d.name + " " + d.effects[e].type + " " + d.effects[e].params[k].name;
+        lv.effect = static_cast<std::uint32_t>(e);
+        lv.param = static_cast<std::uint32_t>(k);
+        lv.effectType = d.effects[e].type;
+        lv.effectChain = chain;
+        lv.value = s.params[e][k];
+        out.push_back(lv);
+      }
+    }
+  }
+  for (std::size_t i = 0; i < categories_.size() && i < p.categories().size(); ++i) {
+    const CategoryDesc& d = p.categories()[i];
+    if (categories_[i].faderDb != ClampFader(d.volumeDb)) add(Control::CategoryFader, d.guid, d.name, categories_[i].faderDb);
+    if (categories_[i].muted) add(Control::CategoryMute, d.guid, d.name, 1.0f);
+  }
+  for (std::size_t i = 0; i < params_.size() && i < p.parameters().size(); ++i) {
+    const ParameterDesc& d = p.parameters()[i];
+    if (!params_[i].enabled) continue;
+    add(Control::ParamOverride, d.guid, d.name, params_[i].value);  // the value first, then "on"
+    add(Control::ParamOverrideOn, d.guid, d.name, 1.0f);
+  }
+  return out;
+}
+
+namespace {
+
+// The target of a live value in `p` (false: its object or effect is not there).
+bool Locate(const Project& p, const LiveValue& v, Target* t) {
+  switch (v.control) {
+    case Control::BusFader:
+    case Control::BusMute:
+    case Control::BusSolo:
+    case Control::EffectParam:
+      for (std::size_t i = 0; i < p.buses().size(); ++i) {
+        const BusDesc& d = p.buses()[i];
+        if (!(d.guid == v.guid)) continue;
+        if (v.control == Control::EffectParam &&
+            (v.effect >= d.effects.size() || d.effects[v.effect].type != v.effectType ||
+             v.param >= d.effects[v.effect].params.size())) {
+          return false;
+        }
+        if (v.control == Control::EffectParam && !v.effectChain.empty()) {
+          // No GUID on effects: the same chain (count, order and types) or nothing (D-188).
+          if (d.effects.size() != v.effectChain.size()) return false;
+          for (std::size_t e = 0; e < d.effects.size(); ++e) {
+            if (d.effects[e].type != v.effectChain[e]) return false;
+          }
+        }
+        *t = Target{v.control, static_cast<std::int32_t>(i), static_cast<std::int32_t>(v.effect),
+                    static_cast<std::int32_t>(v.param)};
+        return true;
+      }
+      return false;
+    case Control::CategoryFader:
+    case Control::CategoryMute:
+      for (std::size_t i = 0; i < p.categories().size(); ++i) {
+        if (p.categories()[i].guid == v.guid) {
+          *t = Target{v.control, static_cast<std::int32_t>(i), 0, 0};
+          return true;
+        }
+      }
+      return false;
+    case Control::ParamOverride:
+    case Control::ParamOverrideOn:
+      for (std::size_t i = 0; i < p.parameters().size(); ++i) {
+        if (p.parameters()[i].guid == v.guid) {
+          *t = Target{v.control, static_cast<std::int32_t>(i), 0, 0};
+          return true;
+        }
+      }
+      return false;
+  }
+  return false;
+}
+
+}  // namespace
+
+std::vector<LiveValue> MixerModel::Unmatched(const Project& project, const std::vector<LiveValue>& values) {
+  std::vector<LiveValue> out;
+  Target t;
+  for (const LiveValue& v : values) {
+    if (!Locate(project, v, &t)) out.push_back(v);
+  }
+  return out;
+}
+
+std::uint32_t MixerModel::Rebind(const Project& project, const std::vector<LiveValue>& values,
+                                 std::vector<LiveValue>* dropped) {
+  Bind(project);
+  std::uint32_t n = 0;
+  for (const LiveValue& v : values) {
+    Target t;
+    if (Locate(project, v, &t) && Store(t, v.value)) {
+      ++n;
+    } else if (dropped != nullptr) {
+      dropped->push_back(v);
+    }
+  }
+  return n;
+}
+
 bool MixerModel::IsEditable(const Target& t) const {
   if (project_ == nullptr) return false;
   switch (t.control) {

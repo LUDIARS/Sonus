@@ -73,9 +73,15 @@ class Connection {
   // Creates and starts the client (closes a previous one). snd_result.
   int Open(const ConnectionDesc& desc);
   void Close();
+  // 1.1 (group P, D-182): the Hello hash of the next handshakes. Re-creates the client when it
+  // changes (the client sends the hash it was created with); the session count and the open state
+  // carry on (a reconnect, not a new Open).
+  void SetProjectBuildHash(std::uint64_t hash);
   // Drops the current connection; the client reconnects (autoReconnect).
   void Drop();
   bool IsOpen() const { return client_ != nullptr; }
+  // Group P: incremented by every Open (a new client: models drop what they knew of the old one).
+  std::uint32_t opens() const { return opens_; }
 
   ConnectionEvents Poll();
   LinkState state() const { return state_; }
@@ -87,9 +93,13 @@ class Connection {
   std::uint32_t roundTripUs() const { return roundTripUs_; }
   // 1.1 (group P): the game's protocol minor of the last handshake (0 = a 1.0 game, or none yet).
   std::uint16_t peerMinor() const { return hello_.protocolMinor; }
-  // deferSyncDecision: true while a BuildMismatch waits for DecideSync (state Handshake).
+  // deferSyncDecision: true while a BuildMismatch waits for DecideSync (state Handshake), as the
+  // last Poll saw it: awaitingSync(), hello() and generation() are one consistent picture (D-182).
   bool awaitingSync() const;
+  // The client's connection count (disconnects) at the last Poll: a new connection, a new number.
+  std::uint32_t generation() const { return generation_; }
   // Answers the waiting BuildMismatch: SendDiffs -> Online (mismatch() true), Refuse -> Rejected.
+  // false (nothing sent) if the connection Poll saw is no longer the one waiting.
   bool DecideSync(MismatchPolicy answer);
 
   livelink::Client* client() { return client_; }
@@ -101,6 +111,9 @@ class Connection {
   LinkState state_ = LinkState::Offline;
   bool mismatch_ = false;
   std::uint32_t sessions_ = 0;
+  std::uint32_t opens_ = 0;
+  bool awaiting_ = false;
+  std::uint32_t generation_ = 0;
   std::uint32_t seenConnects_ = 0;
   std::uint32_t seenDisconnects_ = 0;
   std::uint32_t roundTripUs_ = 0;

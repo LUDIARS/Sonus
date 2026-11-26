@@ -111,4 +111,85 @@ float GraphX(std::uint32_t i, std::uint32_t n, float left, float width) {
   return left + static_cast<float>(i) * width / static_cast<float>(n - 1u);
 }
 
+// --- editors ------------------------------------------------------------------------------
+float TimeAxis::X(double ms) const {
+  const double per = msPerPx > 0.0 ? msPerPx : 1.0;
+  const double x = (ms - scrollMs) / per;
+  return static_cast<float>(std::clamp(x, -90000.0, 90000.0));
+}
+
+double TimeAxis::Ms(float x) const { return scrollMs + static_cast<double>(x) * (msPerPx > 0.0 ? msPerPx : 1.0); }
+
+TimeAxis TimeAxis::Zoomed(double factor, float aboutX) const {
+  TimeAxis t = *this;
+  if (!(factor > 0.0) || !std::isfinite(factor)) return t;
+  const double at = Ms(aboutX);
+  t.msPerPx = std::clamp(msPerPx * factor, kMinMsPerPx, kMaxMsPerPx);
+  t.scrollMs = at - static_cast<double>(aboutX) * t.msPerPx;
+  return t;
+}
+
+double RulerStepMs(double msPerPx, float minPx) {
+  const double want = std::max(1e-6, msPerPx * static_cast<double>(std::max(1.0f, minPx)));
+  double base = std::pow(10.0, std::floor(std::log10(want)));
+  for (int i = 0; i < 4; ++i) {
+    for (double m : {1.0, 2.0, 5.0}) {
+      if (base * m >= want) return base * m;
+    }
+    base *= 10.0;
+  }
+  return base;
+}
+
+float PlotAxes::X(double x) const {
+  const double span = x1 - x0;
+  const double v = span != 0.0 ? (x - x0) / span * width : 0.0;
+  return static_cast<float>(std::clamp(std::isfinite(v) ? v : 0.0, -90000.0, 90000.0));
+}
+
+float PlotAxes::Y(double y) const {
+  const double span = y1 - y0;
+  const double v = span != 0.0 ? height - (y - y0) / span * height : height;
+  return static_cast<float>(std::clamp(std::isfinite(v) ? v : 0.0, -90000.0, 90000.0));
+}
+
+double PlotAxes::ValueX(float px) const { return width > 0.0f ? x0 + static_cast<double>(px) / width * (x1 - x0) : x0; }
+
+double PlotAxes::ValueY(float py) const {
+  return height > 0.0f ? y0 + static_cast<double>(height - py) / height * (y1 - y0) : y0;
+}
+
+PlotAxes PlotAxes::Fit(double x0, double x1, double y0, double y1, float width, float height, double yMargin,
+                       double xMargin) {
+  PlotAxes a;
+  if (!std::isfinite(x0) || !std::isfinite(x1)) x0 = 0.0, x1 = 1.0;
+  if (!std::isfinite(y0) || !std::isfinite(y1)) y0 = 0.0, y1 = 1.0;
+  if (x1 < x0) std::swap(x0, x1);
+  if (y1 < y0) std::swap(y0, y1);
+  if (x1 - x0 <= 0.0) x0 -= 0.5, x1 += 0.5;
+  if (y1 - y0 <= 0.0) y0 -= 0.5, y1 += 0.5;
+  const double m = (y1 - y0) * std::max(0.0, yMargin);
+  const double mx = (x1 - x0) * std::max(0.0, xMargin);
+  a.x0 = x0 - mx;
+  a.x1 = x1 + mx;
+  a.y0 = y0 - m;
+  a.y1 = y1 + m;
+  a.width = std::max(1.0f, width);
+  a.height = std::max(1.0f, height);
+  return a;
+}
+
+double ClampNumber(double v, double minValue, double maxValue, bool integer) {
+  if (!std::isfinite(v)) v = 0.0;
+  if (integer) v = std::round(v);
+  if (v < minValue) v = integer ? std::ceil(minValue) : minValue;
+  if (v > maxValue) v = integer ? std::floor(maxValue) : maxValue;
+  return v;
+}
+
+double NumberDrag(double anchor, float pixelsUp, double step, double minValue, double maxValue, bool integer) {
+  const double v = anchor + static_cast<double>(pixelsUp) / static_cast<double>(kNumberDragPixels) * step;
+  return ClampNumber(v, minValue, maxValue, integer);
+}
+
 }  // namespace snd::tool::ui

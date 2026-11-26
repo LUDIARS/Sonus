@@ -40,9 +40,11 @@ TempoMap::TempoMap(std::vector<TempoPointDesc> points) : points_(std::move(point
   if (points_.empty()) points_.push_back(TempoPointDesc{});
   std::stable_sort(points_.begin(), points_.end(), [](const TempoPointDesc& a, const TempoPointDesc& b) { return a.tick < b.tick; });
   for (TempoPointDesc& p : points_) {
-    if (!(p.bpm > 0.0)) p.bpm = 120.0;
+    // A broken point (a file's bpm, beats per bar or unit outside what SegmentEditor accepts) is
+    // read as 120 BPM 4/4 for the positions; the build reports it (Problems).
+    if (!(p.bpm >= 1e-3 && p.bpm <= 1e5)) p.bpm = 120.0;
     if (p.beatsPerBar == 0u) p.beatsPerBar = 4;
-    if (p.beatUnit == 0u) p.beatUnit = 4;
+    if (!ValidUnit(p.beatUnit)) p.beatUnit = 4;
   }
   bars_.assign(points_.size(), 0.0);
   bars_[0] = static_cast<double>(points_[0].tick) / BarTicks(0);
@@ -104,7 +106,8 @@ MusicalPosition TempoMap::Musical(double tick) const {
   double rest = std::floor(inBar - beat * bt + 0.5);
   if (rest < 0.0) rest = 0.0;
   if (rest >= kTicksPerQuarter) rest = kTicksPerQuarter - 1.0;
-  return MusicalPosition{static_cast<std::int32_t>(bar), static_cast<std::int32_t>(beat), static_cast<std::int32_t>(rest)};
+  // Checked before converting (D-187): a far or non-finite tick gives the saturated bar, not UB.
+  return MusicalPosition{ClampToI32(bar), ClampToI32(beat), ClampToI32(rest)};
 }
 bool TempoMap::MusicalIsApproximate(double tick) const { return BeatTicks(PointAt(tick)) > kTicksPerQuarter; }
 double TempoMap::TickOfMusical(const MusicalPosition& m) const {
@@ -251,10 +254,10 @@ std::vector<TempoPointDesc> SegmentEditor::Tempo() const {
   if (t == nullptr || !t->IsArray()) return out;
   for (const Value& p : t->items) {
     TempoPointDesc d;
-    d.tick = static_cast<std::uint64_t>(NumberAt(p, "tick", 0));
+    d.tick = U64At(p, "tick", 0);
     d.bpm = NumberAt(p, "bpm", 120);
-    d.beatsPerBar = static_cast<std::uint32_t>(NumberAt(p, "beatsPerBar", 4));
-    d.beatUnit = static_cast<std::uint32_t>(NumberAt(p, "beatUnit", 4));
+    d.beatsPerBar = U32At(p, "beatsPerBar", 4);
+    d.beatUnit = U32At(p, "beatUnit", 4);
     out.push_back(d);
   }
   return out;
@@ -347,7 +350,7 @@ std::vector<MarkerDesc> SegmentEditor::Markers() const {
   const Value* m = doc_.Find(guid_)->doc.Find("markers");
   if (m == nullptr || !m->IsArray()) return out;
   for (const Value& v : m->items) {
-    out.push_back(MarkerDesc{StringAt(v, "name"), static_cast<std::uint64_t>(NumberAt(v, "frame", 0)),
+    out.push_back(MarkerDesc{StringAt(v, "name"), U64At(v, "frame", 0),
                              ParseEnum<MarkerKind>(StringAt(v, "kind", "user"), kMarkerKinds, MarkerKind::User)});
   }
   return out;
@@ -578,7 +581,7 @@ std::vector<TransitionRule> MusicEditor::Rules() const {
     r.from = StringAt(v, "from", "*");
     r.to = StringAt(v, "to", "*");
     r.timing = ParseEnum<Timing>(StringAt(v, "timing", "nextBar"), kTimingNames, Timing::NextBar);
-    r.timingCount = static_cast<std::uint32_t>(NumberAt(v, "timingCount", 0));
+    r.timingCount = U32At(v, "timingCount", 0);
     r.fadeOutBeats = NumberAt(v, "fadeOutBeats", 0);
     r.fadeInBeats = NumberAt(v, "fadeInBeats", 0);
     const DocObject* b = doc_.Resolve("segment", StringAt(v, "bridge"));
@@ -809,8 +812,14 @@ std::vector<LookaheadEntry> MusicEditor::MinimumLookahead(const MusicSettings& s
     if (to.empty()) to.push_back(TransitionRule{});
     for (const TransitionRule& r : to) {
       LookaheadEntry e = best;
-      PrimeOf(doc_, asset, r.start == StartPosition::Head, r.prepare, seg != nullptr && BoolAt(seg->doc, "entryPreload", false),
-              s, &e);
+      // A rule with a bridge primes the bridge first (the runtime's lead, D-184).
+      const DocObject* bseg = r.bridge.empty() ? nullptr : doc_.Find(r.bridge);
+      if (bseg != nullptr) {
+        PrimeOf(doc_, doc_.Resolve("asset", StringAt(bseg->doc, "asset")), true, r.prepare, false, s, &e);
+      } else {
+        PrimeOf(doc_, asset, r.start == StartPosition::Head, r.prepare,
+                seg != nullptr && BoolAt(seg->doc, "entryPreload", false), s, &e);
+      }
       if (!any || e.primeMs > best.primeMs) best = e;
       any = true;
     }
@@ -858,6 +867,7 @@ std::vector<LookaheadEntry> MusicEditor::MinimumLookahead(const MusicSettings& s
 TransitionPreview MusicEditor::Preview(const std::string& from, const std::string& to, double requestSeconds,
                                        const MusicSettings& s) const {
   TransitionPreview p;
+  if (!std::isfinite(requestSeconds) || requestSeconds < 0.0 || requestSeconds > kMaxRequestSeconds) return p;  // D-187
   const std::vector<std::string> st = States();
   if (IndexOf(st, from) < 0 || IndexOf(st, to) < 0) return p;
   p.valid = true;
@@ -878,16 +888,30 @@ TransitionPreview MusicEditor::Preview(const std::string& from, const std::strin
   const TempoMap dmap = dst.valid() ? dst.Map() : TempoMap();
   const double srcRate = src.valid() && src.SampleRate() > 0 ? src.SampleRate() : 48000.0;
   p.requestSeconds = requestSeconds;
+  // D-184: the runtime takes the request at the start of a block (blocks counted from the music's
+  // start). A request is never applied earlier than asked: the first block start at or after the
+  // request, and at least one block after the start (the music starts in the From state).
+  const double applyRate = s.sampleRate == 0u ? 48000.0 : static_cast<double>(s.sampleRate);
+  const double applyFrames = s.blockFrames == 0u ? 256.0 : static_cast<double>(s.blockFrames);
+  double blocks = std::ceil(requestSeconds * applyRate / applyFrames - 1e-9);
+  if (!(blocks >= 1.0)) blocks = 1.0;
+  p.applySeconds = blocks * applyFrames / applyRate;
   p.requestTick = map.TickAtSeconds(requestSeconds);
-  // Lookahead of this target.
+  // Lookahead of the first material the transition plays (D-184, music transition.cpp
+  // FirstMaterialPrime): the rule's bridge when it has one (from its head), else the target.
   LookaheadEntry le;
-  const DocObject* dseg = doc_.Find(dstGuid);
-  PrimeOf(doc_, dseg != nullptr ? doc_.Resolve("asset", StringAt(dseg->doc, "asset")) : nullptr, r.start == StartPosition::Head,
-          r.prepare, dseg != nullptr && BoolAt(dseg->doc, "entryPreload", false), s, &le);
+  const DocObject* bseg = r.bridge.empty() ? nullptr : doc_.Find(r.bridge);
+  if (bseg != nullptr) {
+    PrimeOf(doc_, doc_.Resolve("asset", StringAt(bseg->doc, "asset")), true, r.prepare, false, s, &le);
+  } else {
+    const DocObject* dseg = doc_.Find(dstGuid);
+    PrimeOf(doc_, dseg != nullptr ? doc_.Resolve("asset", StringAt(dseg->doc, "asset")) : nullptr,
+            r.start == StartPosition::Head, r.prepare, dseg != nullptr && BoolAt(dseg->doc, "entryPreload", false), s, &le);
+  }
   const double blockMs = 1000.0 * s.blockFrames / (s.sampleRate == 0u ? 48000.0 : s.sampleRate);
   p.lookaheadMs = blockMs + le.primeMs;
-  // Timing.
-  const double now = p.requestTick;
+  // Timing (from where the runtime takes the request).
+  const double now = map.TickAtSeconds(p.applySeconds);
   const double exitTick = src.valid() ? src.ExitTick() : map.TickAtBar(1);
   auto nextMarker = [&](double x, double* out) {
     double best = -1;
@@ -918,12 +942,16 @@ TransitionPreview MusicEditor::Preview(const std::string& from, const std::strin
     return map.NextBar(x);
   };
   double fire = timing(now);
-  const double lookSeconds = p.lookaheadMs / 1000.0;
-  if (map.SecondsAtTick(fire) - requestSeconds < lookSeconds - 1e-12) {
+  // The runtime's lead check (music transition.cpp HandleSetState): the target material must be
+  // primed by the fire time, counted from the block the request is applied in (no extra block:
+  // lookaheadMs above is the display value, one block + prime, of 8.2).
+  const double lookSeconds = le.primeMs / 1000.0;
+  const double halfSample = 0.5 / applyRate;
+  if (map.SecondsAtTick(fire) < p.applySeconds + lookSeconds - halfSample) {
     p.lateApplied = true;
     switch (r.late) {
       case LateRule::NextGrid: {
-        const double reach = map.TickAtSeconds(requestSeconds + lookSeconds);
+        const double reach = map.TickAtSeconds(p.applySeconds + lookSeconds);
         double x = fire;
         for (int guard = 0; guard < 10000 && x < reach - kEps; ++guard) {
           const double nx = r.timing == Timing::Immediate ? reach : timing(x + 0.5);
@@ -936,7 +964,7 @@ TransitionPreview MusicEditor::Preview(const std::string& from, const std::strin
         fire = x;
         break;
       }
-      case LateRule::StartLate: fire = map.TickAtSeconds(requestSeconds + lookSeconds); break;
+      case LateRule::StartLate: fire = map.TickAtSeconds(p.applySeconds + lookSeconds); break;
       case LateRule::Cancel: p.cancelled = true; break;
     }
   }

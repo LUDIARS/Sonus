@@ -133,6 +133,14 @@ class EventEditor {
   bool SetFlag(EventFlag f, bool on);
   bool Flag(EventFlag f) const;
   bool SetCone(double innerDeg, double outerDeg, double outerDb);
+  // D-189: the cone in effect. Without a "cone" (or a member of it) the runtime's default: 0 / 0 /
+  // 0 dB = no cone (core applies a cone only with outerDeg > 0). `present`: "cone" is written.
+  struct ConeDesc {
+    double innerDeg = 0.0, outerDeg = 0.0, outerDb = 0.0;
+    bool present = false;
+    bool active() const { return outerDeg > 0.0; }
+  };
+  ConeDesc Cone() const;
   bool SetVirtualReturn(VirtualReturn r);
   // Member paths set but not read with the current sequence kind.
   std::vector<std::string> UnusedMembers() const;

@@ -16,7 +16,7 @@ struct Options {
   bool refuseMismatch = false;   // --refuse-mismatch
   bool headless = false;         // --headless
   std::string snapshot;          // --snapshot <file.ppm>
-  std::string screen = "mixer";  // --screen mixer|profiler
+  std::string screen = "mixer";  // --screen <name> (ui::ScreenName)
   std::uint32_t frames = 30;     // --frames <n> (headless)
   std::uint32_t frameMs = 33;    // --frame-ms <ms>
   int width = 1280, height = 800;  // --size WxH
@@ -24,6 +24,11 @@ struct Options {
   bool textPlaceholders = false; // --text-placeholders
   std::string font;              // --font <ttf> (window hosts; headless text when Tela has Pictor)
   std::string recording = "sonus-recording.snrec";  // --recording <path>
+  bool sendDiffs = false;        // --send-diffs: answer a build mismatch at once (else the user is asked)
+  std::string preview;           // --preview silent|device: run the preview engine and connect to it
+  std::string reloadDir;         // --reload-dir <dir>: where hot reloads write rebuilt banks (the game's view:
+  std::string reloadPrefix;      //   --reload-prefix <path>)
+  std::string reportDir = "sonus-report";  // --report-dir <dir>: bug report folder of the replay screen
   bool help = false;
 };
 

@@ -13,9 +13,20 @@
 //    SendDiffs / Refuse answer at once. The game waits for the answer for its handshake timeout
 //    (5 s by default); after that it drops the link, the client reconnects and the question comes
 //    again (pending() stays true until answered).
-//    Reconnect (D-87): a new session starts from the check again. The game's overrides are assumed
-//    gone (revertOnDisconnect), its banks are what its BankList says: the document's unsaved state
-//    is sent again under the same decision (with an Accepted handshake, nothing differs).
+//    D-182: the Hello hash is the document's current build at every connection (a new client while
+//    connecting: Connection::SetProjectBuildHash). The answer is remembered for a reconnect to the
+//    same game only (its bank list: bank id, language, content hash; a 1.0 game: its build hash);
+//    another game is asked again. A 1.1 game is never asked (nor answered from memory) before its
+//    bank list is in: the phase is Checking until then and the question carries the verdict per
+//    bank (G10). The connection's state, its HelloReply and its generation are read from one
+//    Connection::Poll (D-182): an answer goes only to the connection it was decided for.
+//    SetDecision(Ask) forgets it.
+//    Reconnect: no assumption on whether the game kept the overrides. Every cell and table the tool
+//    ever sent (Undone ones too) goes again with the current build's value, on top of the bank-list
+//    diff (the game's content hash against the builds the tool knows): after a reconnect the game's
+//    cells are the document's build. Live structural edits are not sent again (whether the game kept
+//    them is not known): a bank that had them is hot reloaded, and a successful reload empties
+//    structEdits() and reserve() for it.
 // 2. Edits: every change of the document (an edit, Undo, Redo: its revision) is built (throttled:
 //    at most one build per throttleMs while edits keep coming; the last state is always built and
 //    sent: FlushNow() forces it, e.g. at the end of a drag) and compared with what the game holds
@@ -23,27 +34,39 @@
 //      value cells the runtime writes live              -> SetValue (coalesced per cell)
 //      a table whose shape is unchanged                  -> ReplaceChunk (one in flight)
 //      buses / effects / sends added or removed          -> StructEdit (within Config.dev_reserve)
+//        (a bus added in today's bank format moves the master's row, so events' bus columns change
+//        too: in practice an added bus goes by hot reload, G3). Value changes of the same build in
+//        those tables (bus volumes, effect parameters, send levels of the objects that stay) go as
+//        SetValue right after the structural edits; anything else in them sends the bank by reload.
 //      anything else, or a refused ReplaceChunk / StructEdit (UNSUPPORTED, OUT_OF_BUDGET, LIMIT)
 //                                                        -> hot reload of the bank (step 3)
 //    What cannot go anywhere (no reload writer, a 1.0 game, a bank the game does not have, the
 //    runtime does not support it: LiveSupportOf) is listed in unsupported() with the reason.
 //    Back-pressure (D-86): at most maxInFlight requests wait for their Ack; COMMAND_BUFFER_FULL,
-//    NOT_READY and a busy chunk slot (LIMIT_REACHED on ReplaceChunk) are re-sent without showing.
+//    NOT_READY and a busy chunk slot (LIMIT_REACHED on ReplaceChunk) are re-sent without showing,
+//    never over a newer value of the same cell (D-183), until giveUpMs after the first send.
+//    A value of an object a live StructEdit added (NOT_FOUND: core keeps no cell for it, C-01) goes
+//    by hot reload instead of being a problem.
 //    Other failures become problems() naming the edit (document revision), the object and the
 //    member.
 //    items(): per object (and member for value cells) whether it is Live, Queued, InFlight,
 //    Reloading, Failed, Unsupported, HeldByMixer or Offline.
 //    Saving the document changes nothing live. Mixer monitoring values (MixerModel) win over the
 //    document for the same cell while the mixer holds them (heldByMixer): such cells are not sent
-//    and show HeldByMixer (the mixer's revert or WriteBackMixer hands the cell back).
+//    and show HeldByMixer; when the mixer lets go, the document's value is sent by itself (D-183).
 // 3. Hot reload (8.5): the bank is built (the current document), written where the game can read
 //    it (options.writer: a directory relative to the game's file system root, or the preview
 //    engine's PutRebuiltBank) and ReloadBank is sent; reloads() shows the phases (Unloading,
 //    Loading, Done / Failed). Edits during a reload wait and go out after it (NOT_READY is never
-//    shown). A failed reload says why and that the bank is detached in the game.
+//    shown). A failed reload says why and that the bank is detached in the game; a rebuilt bank that
+//    cannot be written is a Failed reload with the writer's reason. Either keeps phase() Failed
+//    (failedBanks()) until a reload of that bank succeeds (D-184). Reloads load a bank the game does
+//    not hold (kReloadLoadIfAbsent). A successful reload ends the bank's live edits (its cells,
+//    tables and structural edits: reserve() counts none of them).
 //    reserve(): what the live structural edits take from Config.dev_reserve (counted by the tool
 //    from what the game accepted; limits from options.reserveLimits); structEdits() lists them;
-//    UndoStructEdit(i) sends the inverse (RemoveBus / RemoveEffect; a send has none: reload).
+//    UndoStructEdit(i) sends the inverse (RemoveBus / RemoveEffect; a send has none: reload). A Remove
+//    the document sends (its Undo of a live Add) gives the Add's cost back (D-183).
 // Protocol 1.0 games: no QueryBanks / ReloadBank / StructEdit / RevertValue / ReadCell
 // (features() says so); SetValue and ReplaceChunk still work, the rest is listed.
 //
@@ -86,6 +109,10 @@ enum class LivePhase : std::uint8_t {
   Syncing = 4,           // requests queued or waiting for answers
   Live = 5,              // the game holds the document's build
   Refused = 6,           // the user refused the mismatch (nothing is sent)
+  // D-184: something the game should hold did not reach it: a hot reload failed (the bank may be
+  // detached in the game) or its rebuilt bank could not be written. failedBanks() says which and
+  // why; the phase stays Failed until a reload of that bank succeeds (or a new session finds it).
+  Failed = 7,
 };
 const char* LivePhaseName(LivePhase p);
 
@@ -211,6 +238,9 @@ struct LiveSyncOptions {
   LiveDecision decision = LiveDecision::Ask;
   std::uint32_t throttleMs = 33;
   std::uint32_t maxInFlight = 128;
+  // D-183: a request the game keeps answering as busy (COMMAND_BUFFER_FULL, NOT_READY, a busy chunk
+  // slot) is sent again until this much time passed since it was first sent; then it is a problem.
+  std::uint32_t giveUpMs = 5000;
   ReloadWriter writer;            // null: no hot reload (listed as unsupported)
   bool structEdits = true;        // try StructEdit for bus / effect / send changes
   ReserveLimits reserveLimits;
@@ -240,7 +270,11 @@ class LiveSync {
   const SyncCheck& check() const { return check_; }
   bool ChooseSendDiffs(Connection& connection);
   bool ChooseRefuse(Connection& connection);
-  void SetDecision(LiveDecision d) { options_.decision = d; }
+  // Ask also forgets the remembered answer (D-182).
+  void SetDecision(LiveDecision d) {
+    options_.decision = d;
+    if (d == LiveDecision::Ask) rememberedValid_ = false;
+  }
 
   // --- state ------------------------------------------------------------------------------
   const DocBuild& current() const { return current_; }  // the latest build
@@ -257,6 +291,8 @@ class LiveSync {
   ReserveUsage reserve() const;
   bool UndoStructEdit(std::size_t index);
   std::vector<LiveFeature> features() const;
+  // D-184: banks whose last hot reload failed (file -> reason); not empty: phase Failed.
+  const std::map<std::string, std::string>& failedBanks() const { return failedBanks_; }
   std::uint32_t queued() const { return static_cast<std::uint32_t>(queue_.size()); }
   std::uint32_t inFlight() const { return static_cast<std::uint32_t>(inflight_.size()); }
   const LiveSyncStats& stats() const { return stats_; }
@@ -285,6 +321,15 @@ class LiveSync {
     std::string member;
     std::uint32_t seq = 0;
     std::uint32_t resends = 0;
+    std::uint64_t serial = 0;       // order of the edits (a newer value of the same cell wins, D-183)
+    std::uint64_t firstSentNs = 0;  // when it was first sent (busy answers give up after giveUpMs)
+    std::uint32_t row = 0;          // SetValue: the cell's row in its table (re-sent on a reconnect)
+    std::uint64_t contentHash = 0;  // Reload: the content hash of the bank written
+  };
+  struct SentCell {
+    std::string bank;
+    std::uint32_t row = 0;
+    livelink::SetValue value{};
   };
   bool Build(std::uint64_t nowNs);
   void OnSessionStarted(Connection& c);
@@ -339,6 +384,22 @@ class LiveSync {
   bool decided_ = false;       // the user answered this mismatch
   std::uint16_t peerMinor_ = 0;
   LiveSyncStats stats_;
+  // D-182 / D-183
+  std::uint64_t serial_ = 0, nowNs_ = 0;
+  std::map<std::string, std::uint64_t> latestSerial_;            // cell key -> newest edit
+  std::map<std::string, SentCell> sentCells_;                    // every cell ever sent (re-sent on a new session)
+  std::map<std::string, std::vector<std::uint32_t>> sentChunks_;  // bank -> tables replaced live
+  std::map<std::string, Op> held_;                               // cell key -> value the mixer holds back
+  std::map<std::string, std::string> failedBanks_;               // bank -> why its last reload failed
+  bool rememberedValid_ = false;                                 // the answer to a mismatch, for the same game
+  LiveDecision remembered_ = LiveDecision::Ask;
+  std::string rememberedGame_;
+  bool rememberPending_ = false;
+  bool waitingForList_ = false;
+  std::uint64_t seenLink_ = ~0ull;
+  std::string GameSignature() const;
+  void ResendSentState();
+  void ReleaseHeld();
 };
 
 }  // namespace snd::tool

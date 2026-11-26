@@ -11,7 +11,7 @@
 // declaration leaves the title bar free with AppDesc::insetTop.
 //
 // Compiled with exceptions (-fexceptions, ARC): Tela's AppKit adapter throws.
-// Shortcuts: Cmd+Z undo, Cmd+Shift+Z redo, F2 mixer, F3 profiler.
+// Keys: App::Key (Cmd as Ctrl): Cmd+Z / Cmd+Shift+Z, Cmd+S, F2..F10 screens, the text entry.
 #import <AppKit/AppKit.h>
 
 #include <cmath>
@@ -59,21 +59,55 @@ tela::HostPointerEvent MakeEvent(MacPointer& mp, NSEvent* event, tela::PointerPh
   return e;
 }
 
+// Every key goes to App::Key (shortcuts, screen keys and the tool's text entry): the key code and
+// the character it typed.
 void Key(ui::App& app, NSEvent* event) {
-  const bool command = (event.modifierFlags & NSEventModifierFlagCommand) != 0;
-  const bool shift = (event.modifierFlags & NSEventModifierFlagShift) != 0;
-  NSString* chars = event.charactersIgnoringModifiers;
-  if (command && chars.length == 1 && [chars.lowercaseString isEqualToString:@"z"]) {
-    if (shift) {
-      app.OnRedo();
-    } else {
-      app.OnUndo();
-    }
-  } else if (event.keyCode == 120) {  // F2
-    app.OnScreen(ui::Screen::Mixer);
-  } else if (event.keyCode == 99) {  // F3
-    app.OnScreen(ui::Screen::Profiler);
+  ui::KeyEvent k;
+  if ((event.modifierFlags & NSEventModifierFlagShift) != 0) k.modifiers |= ui::kModShift;
+  if ((event.modifierFlags & NSEventModifierFlagCommand) != 0) k.modifiers |= ui::kModControl;
+  switch (event.keyCode) {
+    case 36: case 76: k.key = ui::kKeyEnter; break;
+    case 53: k.key = ui::kKeyEscape; break;
+    case 51: k.key = ui::kKeyBackspace; break;
+    case 117: k.key = ui::kKeyDelete; break;
+    case 48: k.key = ui::kKeyTab; break;
+    case 123: k.key = ui::kKeyLeft; break;
+    case 124: k.key = ui::kKeyRight; break;
+    case 125: k.key = ui::kKeyDown; break;
+    case 126: k.key = ui::kKeyUp; break;
+    case 115: k.key = ui::kKeyHome; break;
+    case 119: k.key = ui::kKeyEnd; break;
+    case 116: k.key = ui::kKeyPageUp; break;
+    case 121: k.key = ui::kKeyPageDown; break;
+    case 122: k.key = ui::kKeyF1; break;
+    case 120: k.key = ui::kKeyF1 + 1u; break;
+    case 99: k.key = ui::kKeyF1 + 2u; break;
+    case 118: k.key = ui::kKeyF1 + 3u; break;
+    case 96: k.key = ui::kKeyF1 + 4u; break;
+    case 97: k.key = ui::kKeyF1 + 5u; break;
+    case 98: k.key = ui::kKeyF1 + 6u; break;
+    case 100: k.key = ui::kKeyF1 + 7u; break;
+    case 101: k.key = ui::kKeyF1 + 8u; break;
+    case 109: k.key = ui::kKeyF1 + 9u; break;
+    default: break;
   }
+  NSString* plain = event.charactersIgnoringModifiers;
+  if (k.key == 0u && plain.length == 1) {
+    const unichar c = [plain.uppercaseString characterAtIndex:0];
+    if ((c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')) k.key = c;
+  }
+  NSString* typed = event.characters;
+  if (typed.length >= 1 && k.key != ui::kKeyEnter && k.key != ui::kKeyBackspace && k.key != ui::kKeyEscape &&
+      k.key != ui::kKeyTab && k.key != ui::kKeyDelete) {
+    unichar c = [typed characterAtIndex:0];
+    std::uint32_t cp = c;
+    if (c >= 0xD800 && c <= 0xDBFF && typed.length >= 2) {
+      const unichar lo = [typed characterAtIndex:1];
+      cp = 0x10000u + ((static_cast<std::uint32_t>(c) - 0xD800u) << 10) + (static_cast<std::uint32_t>(lo) - 0xDC00u);
+    }
+    if (cp >= 0x20u && !(cp >= 0xF700u && cp <= 0xF8FFu)) k.text = cp;  // not the function-key range
+  }
+  app.Key(k);
 }
 
 }  // namespace

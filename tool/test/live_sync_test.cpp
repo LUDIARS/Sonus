@@ -393,3 +393,248 @@ SND_TEST(LiveSync, SessionCarriesTheDocumentAndTheDetailProfiler) {
   SND_CHECK(it->state == LiveState::HeldByMixer);
   SND_REQUIRE(run([&] { return s.streams().hasMemory() && !s.streams().cpu().empty(); }));
 }
+
+// --- D-182 .. D-184 (the decisions after the independent tests) ---------------------------------
+
+SND_TEST(LiveSync, ReconnectToAGameThatKeptTheOverridesSendsWhatWasUndoneOffline) {
+  // revertOnDisconnect off (11.2's default): the game keeps -6; the document goes back offline.
+  Rig r(false, {}, livetest::MakeOptions(LiveDecision::SendDiffs));
+  SND_REQUIRE(r.ok);
+  const double base = PlayTone(r);
+  SND_REQUIRE(r.Connect());
+  SND_REQUIRE(r.Settled());
+  SND_REQUIRE(r.doc.SetNumber(livetest::SfxGuid(), "volumeDb", -6.0));
+  SND_REQUIRE(r.Settled());
+  SND_CHECK_NEAR(r.Left() / base, Ratio(-6.0), 1e-5);
+  r.conn.Close();
+  r.Frames(8);
+  SND_CHECK_NEAR(r.Left() / base, Ratio(-6.0), 1e-5);  // the game kept the override
+  SND_REQUIRE(r.doc.Undo());
+  r.Frames(2);
+  SND_REQUIRE(r.Connect());
+  SND_REQUIRE(r.Settled());
+  SND_CHECK_NEAR(r.Left() / base, 1.0, 1e-5);  // the document's value, although the bank file did not change
+}
+
+SND_TEST(LiveSync, ThinningDeliversTheLastValueWithoutFlush) {
+  LiveSyncOptions o = livetest::MakeOptions();
+  o.throttleMs = 80;
+  Rig r(false, {}, o);
+  SND_REQUIRE(r.ok);
+  const double base = PlayTone(r);
+  SND_REQUIRE(r.Connect());
+  SND_REQUIRE(r.Settled());
+  for (int i = 1; i <= 30; ++i) {
+    SND_REQUIRE(r.doc.SetNumber(livetest::SfxGuid(), "volumeDb", -0.4 * i));
+    r.Frame();
+  }
+  // No FlushNow: Ticks alone build the last state after the interval.
+  SND_REQUIRE(r.Settled());
+  SND_CHECK_NEAR(r.Left() / base, Ratio(-12.0), 1e-5);
+  SND_CHECK(r.sync->stats().values < 30u);
+}
+
+SND_TEST(LiveSync, FailedReloadsKeepThePhaseFailedUntilAReloadSucceeds) {
+  bool fail = true;
+  bool writeFails = false;
+  snd::tool::preview::PreviewEngine* engine = nullptr;
+  LiveSyncOptions o = livetest::MakeOptions(LiveDecision::SendDiffs);
+  o.writer = [&](const BankImage& b, std::string* path, std::string* error) {
+    if (writeFails) {
+      *error = "disk full";
+      return false;
+    }
+    *path = fail ? std::string("no/such/bank.sndb") : engine->PutRebuiltBank(b.file, b.bytes);
+    return true;
+  };
+  Rig r(false, {}, o);
+  SND_REQUIRE(r.ok);
+  engine = r.engine.get();
+  SND_REQUIRE(r.Connect());
+  SND_REQUIRE(r.Settled());
+  const json::Value init = Json("{\"bank\": \"Main\", \"bus\": \"Sfx\"}");
+  SND_REQUIRE(!r.doc.Create("event", "Fresh", &init).empty());
+  SND_REQUIRE(r.Run([&] { return r.sync->phase() == LivePhase::Failed; }));
+  SND_CHECK_EQ(r.sync->failedBanks().size(), 1u);
+  SND_CHECK(r.sync->reloads().back().detached);
+  r.Frames(10);
+  SND_CHECK(r.sync->phase() == LivePhase::Failed);
+  // The writer fails: still Failed, with the writer's reason; the game still has the bank.
+  writeFails = true;
+  SND_REQUIRE(!r.doc.Create("event", "Fresh2", &init).empty());
+  SND_REQUIRE(r.Run([&] { return r.sync->reloads().size() >= 2u && r.sync->reloads().back().finished; }));
+  SND_CHECK(r.sync->reloads().back().phase == snd::livelink::ReloadPhase::Failed);
+  SND_CHECK(r.sync->reloads().back().reason.find("disk full") != std::string::npos);
+  SND_CHECK(r.sync->phase() == LivePhase::Failed);
+  // A reload that succeeds: Live again, the bank is back.
+  writeFails = false;
+  fail = false;
+  SND_REQUIRE(!r.doc.Create("event", "Fresh3", &init).empty());
+  SND_REQUIRE(r.Run([&] { return r.sync->phase() == LivePhase::Live; }));
+  SND_CHECK(r.sync->failedBanks().empty());
+  SND_CHECK(r.engine->Play(snd::HashId("Fresh3"), nullptr) != 0u);
+}
+
+SND_TEST(LiveSync, DocumentUndoOfALiveEffectGivesTheReserveBack) {
+  livetest::YesEditor editor;
+  snd::tool::preview::PreviewEngineDesc ed;
+  ed.structEditor = &editor;
+  Rig r(false, ed);
+  SND_REQUIRE(r.ok);
+  SND_REQUIRE(r.Connect());
+  SND_REQUIRE(r.Settled());
+  SND_REQUIRE(r.doc.Insert(livetest::G(4), "effects", 0,
+                           Json("{\"type\": \"snd.fx.delay\", \"params\": [10, 0, 0, -96, 20000, 0, 100]}")));
+  SND_REQUIRE(r.Settled());
+  SND_REQUIRE_EQ(r.sync->reserve().effects, 1u);
+  SND_REQUIRE(r.doc.Undo());  // RemoveEffect goes out
+  SND_REQUIRE(r.Settled());
+  SND_CHECK_EQ(r.sync->reserve().effects, 0u);
+  SND_CHECK_EQ(r.sync->reserve().bytes, 0u);
+  SND_REQUIRE(r.doc.Redo());
+  SND_REQUIRE(r.Settled());
+  SND_CHECK_EQ(r.sync->reserve().effects, 1u);
+  // A hot reload of the bank (a new event) puts the file's structure back: nothing live is left.
+  const json::Value init = Json("{\"bank\": \"Main\", \"bus\": \"Sfx\"}");
+  SND_REQUIRE(!r.doc.Create("event", "Fresh", &init).empty());
+  SND_REQUIRE(r.Settled());
+  SND_CHECK(!r.sync->reloads().empty());
+  SND_CHECK_EQ(r.sync->reserve().effects, 0u);
+}
+
+SND_TEST(LiveSync, MixerLettingGoSendsTheDocumentsValue) {
+  bool held = true;
+  LiveSyncOptions o = livetest::MakeOptions();
+  o.heldByMixer = [&](snd::Id id, std::uint32_t chunk, std::uint32_t column, std::uint32_t) {
+    return held && id == snd::HashId("Sfx") && chunk == bf::chunk::BUSS && column == bf::col::BUSS_volumeDb;
+  };
+  Rig r(false, {}, o);
+  SND_REQUIRE(r.ok);
+  const double base = PlayTone(r);
+  SND_REQUIRE(r.Connect());
+  SND_REQUIRE(r.Settled());
+  SND_REQUIRE(r.doc.SetNumber(livetest::SfxGuid(), "volumeDb", -6.0));
+  SND_REQUIRE(r.Settled());
+  SND_CHECK_NEAR(r.Left() / base, 1.0, 1e-6);  // held
+  held = false;  // the mixer lets go: no Resync, no new edit
+  r.Frame();
+  SND_REQUIRE(r.Settled());
+  SND_CHECK_NEAR(r.Left() / base, Ratio(-6.0), 1e-5);
+  const LiveItem* it = r.sync->Find(livetest::SfxGuid(), "volumeDb");
+  SND_REQUIRE(it != nullptr);
+  SND_CHECK(it->state == LiveState::Live);
+}
+
+SND_TEST(LiveSync, MismatchAnswerIsRememberedForTheSameGameOnly) {
+  Rig r;
+  SND_REQUIRE(r.ok);
+  SND_REQUIRE(r.doc.SetNumber(livetest::SfxGuid(), "volumeDb", -6.0));  // unsaved: a mismatch
+  SND_REQUIRE(r.Connect());
+  SND_REQUIRE(r.Run([&] { return r.sync->pending(); }));
+  SND_REQUIRE(r.sync->ChooseSendDiffs(r.conn));
+  SND_REQUIRE(r.Settled());
+  // Same game: the reconnect is answered as before (no question).
+  r.conn.Drop();
+  bool asked = false;
+  SND_REQUIRE(r.Run([&] {
+    asked = asked || r.sync->pending();
+    return r.conn.sessions() >= 2u && r.sync->phase() == LivePhase::Live;
+  }));
+  SND_CHECK(!asked);
+  // Another game (its bank reloaded from another build by someone else): asked again.
+  r.conn.Close();
+  snd::tool::ProjectDocument other;
+  livetest::LoadLive(other);
+  SND_REQUIRE(other.SetNumber(livetest::G(4), "volumeDb", -9.0));
+  std::string err;
+  SND_REQUIRE(r.engine->LoadBuild(BuildDocument(other), &err));
+  SND_REQUIRE(r.Connect());
+  const bool askedAgain = r.Run([&] { return r.sync->pending(); }, 10000);
+  SND_REQUIRE(askedAgain);
+  r.sync->SetDecision(LiveDecision::Ask);
+  SND_REQUIRE(r.sync->ChooseRefuse(r.conn));
+}
+
+// --- second round of decisions (D-182 .. D-184 additions) ----------------------------------------
+
+SND_TEST(LiveSync, StructuralEditAndValueEditInOneBuildBothReachTheGame) {
+  livetest::YesEditor editor;
+  snd::tool::preview::PreviewEngineDesc ed;
+  ed.structEditor = &editor;
+  Rig r(false, ed);
+  SND_REQUIRE(r.ok);
+  const double base = PlayTone(r);
+  SND_REQUIRE(r.Connect());
+  SND_REQUIRE(r.Settled());
+  SND_REQUIRE(r.doc.Insert(livetest::G(4), "effects", 0,
+                           Json("{\"type\": \"snd.fx.delay\", \"params\": [10, 0, 0, -96, 20000, 0, 100]}")));
+  SND_REQUIRE(r.doc.SetNumber(livetest::SfxGuid(), "volumeDb", -6.0));  // the same build
+  SND_REQUIRE(r.Settled());
+  SND_CHECK_EQ(editor.applied, 1u);
+  SND_CHECK_NEAR(r.Left() / base, Ratio(-6.0), 1e-5);
+  SND_CHECK(r.sync->reloads().empty());
+  // The same with the structural edit refused (no editor): the reload carries the value.
+  Rig r2;
+  SND_REQUIRE(r2.ok);
+  const double base2 = PlayTone(r2);
+  SND_REQUIRE(r2.Connect());
+  SND_REQUIRE(r2.Settled());
+  SND_REQUIRE(r2.doc.Insert(livetest::G(4), "effects", 0,
+                            Json("{\"type\": \"snd.fx.delay\", \"params\": [10, 0, 0, -96, 20000, 0, 100]}")));
+  SND_REQUIRE(r2.doc.SetNumber(livetest::SfxGuid(), "volumeDb", -6.0));
+  SND_REQUIRE(r2.Settled());
+  SND_REQUIRE(!r2.sync->reloads().empty());
+  SND_REQUIRE(r2.engine->Play(snd::HashId("Tone"), nullptr) != 0u);  // the reload stopped the bank's sounds
+  r2.Frames(8);
+  SND_CHECK_NEAR(r2.Left() / base2, Ratio(-6.0), 1e-5);
+}
+
+SND_TEST(LiveSync, ReconnectReloadsABankWithLiveStructuralEdits) {
+  for (const bool revert : {false, true}) {
+    livetest::YesEditor editor;
+    snd::tool::preview::PreviewEngineDesc ed;
+    ed.structEditor = &editor;
+    ed.revertOnDisconnect = revert;
+    Rig r(false, ed, livetest::MakeOptions(LiveDecision::SendDiffs));
+    SND_REQUIRE(r.ok);
+    SND_REQUIRE(r.Connect());
+    SND_REQUIRE(r.Settled());
+    SND_REQUIRE(r.doc.Insert(livetest::G(4), "effects", 0,
+                             Json("{\"type\": \"snd.fx.delay\", \"params\": [10, 0, 0, -96, 20000, 0, 100]}")));
+    SND_REQUIRE(r.Settled());
+    SND_REQUIRE_EQ(r.sync->reserve().effects, 1u);
+    r.conn.Close();
+    r.Frames(10);
+    SND_REQUIRE(r.Connect());
+    SND_REQUIRE(r.Settled());
+    SND_CHECK_EQ(editor.applied, 1u);  // never a second Add
+    SND_CHECK(!r.sync->reloads().empty());
+    SND_CHECK_EQ(r.sync->reloads().back().result, SND_OK);
+    SND_CHECK_EQ(r.sync->reserve().effects, 0u);
+    SND_CHECK(r.sync->structEdits().empty());
+  }
+}
+
+SND_TEST(LiveSync, PreviewLoadBuildAfterHotReloads) {
+  Rig r;
+  SND_REQUIRE(r.ok);
+  SND_REQUIRE(r.Connect());
+  SND_REQUIRE(r.Settled());
+  const json::Value init = Json("{\"bank\": \"Main\", \"bus\": \"Sfx\"}");
+  SND_REQUIRE(!r.doc.Create("event", "Fresh", &init).empty());
+  SND_REQUIRE(r.Settled());
+  SND_REQUIRE(!r.doc.Create("event", "Fresh2", &init).empty());
+  SND_REQUIRE(r.Settled());
+  SND_REQUIRE_EQ(r.sync->reloads().size(), 2u);
+  for (int round = 0; round < 3; ++round) {
+    snd::tool::ProjectDocument other;
+    livetest::LoadLive(other);
+    SND_REQUIRE(other.SetNumber(livetest::SfxGuid(), "volumeDb", -3.0 * round));
+    std::string err;
+    SND_CHECK_MSG(r.engine->LoadBuild(BuildDocument(other), &err), "round %d: %s", round, err.c_str());
+    SND_CHECK_EQ(r.engine->Status().banks, 1u);
+    SND_CHECK(r.engine->Play(snd::HashId("Tone"), nullptr) != 0u);
+    r.engine->Render(4, nullptr);
+    SND_CHECK_EQ(r.engine->StopAll(), 1u);
+  }
+}

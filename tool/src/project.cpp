@@ -291,7 +291,7 @@ bool Project::LoadTexts(const std::vector<std::pair<std::string, std::string>>& 
     const json::Value* m = o.doc.Find("master");
     b.master = m != nullptr && m->IsBool() && m->boolean;
     b.volumeDb = Number(o.doc.Find("volumeDb"), 0.0f);
-    b.channels = static_cast<std::uint32_t>(Number(o.doc.Find("channels"), 0.0f));
+    b.channels = ClampToU32(Number(o.doc.Find("channels"), 0.0f));  // a broken file's -5: 0 (D-187)
     if (const json::Value* fx = o.doc.Find("effects"); fx != nullptr && fx->IsArray()) {
       for (const json::Value& e : fx->items) {
         EffectDesc d;

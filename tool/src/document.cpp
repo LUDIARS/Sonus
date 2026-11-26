@@ -6,6 +6,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
+#include <limits>
 #include <set>
 #include <system_error>
 
@@ -432,6 +433,28 @@ static bool HasNonFinite(const Value& v) {
     default: return false;
   }
 }
+// A number no column of a bank can hold (D-187): non-finite, or beyond the largest float (every
+// column is U32, F32, U64 or I64; the F32 columns hold finite floats, the integer columns are
+// checked by the editors against their type's range).
+static bool OutOfBank(const Value& v) {
+  switch (v.type) {
+    case json::Type::Number: {
+      const double x = std::strtod(v.text.c_str(), nullptr);
+      return !std::isfinite(x) || std::fabs(x) > static_cast<double>(std::numeric_limits<float>::max());
+    }
+    case json::Type::Array:
+      for (const Value& x : v.items) {
+        if (OutOfBank(x)) return true;
+      }
+      return false;
+    case json::Type::Object:
+      for (const json::Member& m : v.members) {
+        if (OutOfBank(m.second)) return true;
+      }
+      return false;
+    default: return false;
+  }
+}
 Value String(std::string s) { return json::MakeString(std::move(s)); }
 Value Bool(bool b) { return json::MakeBool(b); }
 
@@ -451,6 +474,27 @@ Value* FindPath(Value& root, std::string_view path) {
   return v;
 }
 const Value* FindPath(const Value& root, std::string_view path) { return FindPath(const_cast<Value&>(root), path); }
+
+std::uint32_t ClampToU32(double v) {
+  if (!(v > 0.0)) return 0u;  // NaN, negative, zero
+  return v >= 4294967295.0 ? 4294967295u : static_cast<std::uint32_t>(v);
+}
+std::uint64_t ClampToU64(double v) {
+  if (!(v > 0.0)) return 0u;
+  return v >= 18446744073709551615.0 ? std::numeric_limits<std::uint64_t>::max() : static_cast<std::uint64_t>(v);
+}
+std::int32_t ClampToI32(double v) {
+  if (std::isnan(v)) return 0;
+  if (v <= -2147483648.0) return std::numeric_limits<std::int32_t>::min();
+  if (v >= 2147483647.0) return std::numeric_limits<std::int32_t>::max();
+  return static_cast<std::int32_t>(v);
+}
+std::uint32_t U32At(const Value& root, std::string_view path, std::uint32_t def) {
+  return ClampToU32(NumberAt(root, path, static_cast<double>(def)));
+}
+std::uint64_t U64At(const Value& root, std::string_view path, std::uint64_t def) {
+  return ClampToU64(NumberAt(root, path, static_cast<double>(def)));
+}
 
 double NumberAt(const Value& root, std::string_view path, double def) {
   const Value* v = FindPath(root, path);
@@ -899,6 +943,27 @@ void ProjectDocument::EndGroup() {
   closedLast_ = true;
 }
 
+void ProjectDocument::AbortGroup() {
+  if (groupDepth_ == 0u) return;
+  groupDepth_ = 0;
+  opOpen_ = false;
+  openKey_ = 0;
+  bool changed = false;
+  for (auto it = open_.changes.rbegin(); it != open_.changes.rend(); ++it) {
+    const DocObject* now = Find(it->guid);
+    const bool differs = (now != nullptr) != it->before.exists ||
+                         (now != nullptr && (now->file != it->before.object.file || !JsonEqual(now->doc, it->before.object.doc)));
+    if (differs) changed = true;
+    ApplySnapshot(it->guid, it->before);
+  }
+  if (changed) {
+    ++revision_;  // what the group showed is gone: observers look again
+    lastChanged_.clear();
+    for (const ObjChange& c : open_.changes) lastChanged_.push_back(c.guid);
+  }
+  open_ = Step{};
+}
+
 void ProjectDocument::ApplySnapshot(const std::string& guid, const Snapshot& s) {
   for (std::size_t i = 0; i < objects_.size(); ++i) {
     if (objects_[i].guid == guid) {
@@ -959,7 +1024,7 @@ std::string ProjectDocument::Create(std::string_view kind, const std::string& na
     return std::string();
   }
   if (kind == "project" && projectObject() != nullptr) return std::string();
-  if (init != nullptr && HasNonFinite(*init)) return std::string();  // D-176c
+  if (init != nullptr && (HasNonFinite(*init) || OutOfBank(*init))) return std::string();  // D-176c, D-187
   DocObject o;
   o.guid = NewGuid();
   if (o.guid.empty()) return std::string();
@@ -1091,7 +1156,7 @@ bool ProjectDocument::Modify(std::string_view guid, const std::function<bool(Val
   o = FindMutable(g);
   const Value before = o->doc;
   if (!fn(o->doc) || !o->doc.IsObject() || StringAt(o->doc, "type") != type || NormalizeGuid(StringAt(o->doc, "guid")) != g ||
-      HasNonFinite(o->doc)) {
+      HasNonFinite(o->doc) || (OutOfBank(o->doc) && !OutOfBank(before))) {
     Cancel();
     return false;
   }
@@ -1119,7 +1184,7 @@ bool ProjectDocument::Set(std::string_view guid, std::string_view path, Value va
     if (!value.IsString()) return false;
     return Rename(guid, value.text, RenameOptions{false, false});
   }
-  if (HasNonFinite(value)) return false;  // D-176c
+  if (HasNonFinite(value) || OutOfBank(value)) return false;  // D-176c, D-187
   if (const Value* cur = FindPath(o->doc, path); cur != nullptr && JsonEqual(*cur, value)) return true;  // D-177b
   return Modify(
       guid,
@@ -1157,7 +1222,7 @@ bool ProjectDocument::Set(std::string_view guid, std::string_view path, Value va
 bool ProjectDocument::SetDefaulted(std::string_view guid, std::string_view path, Value value, const Value& def,
                                    std::uint32_t mergeKey) {
   const DocObject* o = Find(guid);
-  if (o == nullptr || HasNonFinite(value)) return false;
+  if (o == nullptr || HasNonFinite(value) || OutOfBank(value)) return false;
   const Value* cur = FindPath(o->doc, path);
   if (JsonSameMeaning(cur != nullptr ? *cur : def, value)) return true;  // D-177b
   return Set(guid, path, std::move(value), mergeKey);
@@ -1193,7 +1258,7 @@ bool ProjectDocument::Erase(std::string_view guid, std::string_view path) {
 
 bool ProjectDocument::Insert(std::string_view guid, std::string_view arrayPath, std::size_t index, Value value) {
   const DocObject* o = Find(guid);
-  if (o == nullptr || HasNonFinite(value)) return false;
+  if (o == nullptr || HasNonFinite(value) || OutOfBank(value)) return false;
   const Value* arr = FindPath(o->doc, arrayPath);
   if (arr == nullptr) {
     if (index != 0) return false;

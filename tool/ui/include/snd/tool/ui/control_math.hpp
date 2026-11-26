@@ -68,6 +68,44 @@ struct GraphScale {
 };
 float GraphX(std::uint32_t i, std::uint32_t n, float left, float width);
 
+// --- editors (stage 5) -------------------------------------------------------------------
+// Time line of the Event / music screens: x = (ms - scrollMs) / msPerPx (left edge = scrollMs).
+// Zoom keeps the time under `aboutX` in place; msPerPx is clamped to [kMinMsPerPx, kMaxMsPerPx].
+inline constexpr double kMinMsPerPx = 0.01;
+inline constexpr double kMaxMsPerPx = 10000.0;
+struct TimeAxis {
+  double scrollMs = 0.0;
+  double msPerPx = 4.0;
+  float X(double ms) const;
+  double Ms(float x) const;
+  TimeAxis Zoomed(double factor, float aboutX) const;
+};
+// A ruler step (ms) of about `minPx` pixels or more: 1, 2, 5 x 10^n.
+double RulerStepMs(double msPerPx, float minPx);
+
+// A value plot (curves, distance curves, strength curves): x0..x1 to 0..width, y0..y1 to
+// height..0 (y up). A degenerate range is widened by 1 around its value.
+struct PlotAxes {
+  double x0 = 0.0, x1 = 1.0, y0 = 0.0, y1 = 1.0;
+  float width = 100.0f, height = 100.0f;
+  float X(double x) const;
+  float Y(double y) const;
+  double ValueX(float px) const;
+  double ValueY(float py) const;
+  // Axes that hold [x0, x1] x [y0, y1] with margins (fractions of the ranges) on y and x.
+  static PlotAxes Fit(double x0, double x1, double y0, double y1, float width, float height, double yMargin = 0.08,
+                      double xMargin = 0.0);
+};
+
+// Curves keep their end points inside the plot (D-189): this x margin on each side.
+inline constexpr double kCurveXMargin = 0.04;
+
+// Number fields: a vertical drag of kNumberDragPixels changes the value by one step (1/10 with
+// Shift); the value is clamped and, for integers, rounded.
+inline constexpr float kNumberDragPixels = 4.0f;
+double NumberDrag(double anchor, float pixelsUp, double step, double minValue, double maxValue, bool integer);
+double ClampNumber(double v, double minValue, double maxValue, bool integer);
+
 }  // namespace snd::tool::ui
 
 #endif  // SND_TOOL_UI_CONTROL_MATH_HPP

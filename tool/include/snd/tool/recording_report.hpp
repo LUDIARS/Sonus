@@ -31,7 +31,9 @@
 //                  runtime build hashes, rate, block, platform, contract version), protocol,
 //                  the runtime Config used to replay (every numeric snd_config member), the banks
 //                  (file, bank id, language, content hash), the comparison results
-//   summary.txt    DescribeRecording(...).Text() and the comparison in words
+//   summary.txt    for people: the title, the notes, the description and the comparison
+//   notes.txt, description.txt, comparison.txt   BugReport::notes / summary / comparison exactly
+//                  (D-185: a report reads back into the same BugReport)
 //   recording.snrec  the recording file (recording_file.hpp)
 //   banks/<file>   the bank files the recording plays (the project's build)
 // It reads back into the same BugReport; the preview library replays it (ReplayBugReport).
@@ -99,7 +101,8 @@ snd_config ReplayConfigFor(const Recording& r);
 
 // Every numeric member of snd_config as "name = value" lines (dotted for the nested ones:
 // "memory.stream_pool_bytes"); pointers are left out. ParseConfigLine sets one member from
-// such a line (false: unknown name or a malformed value).
+// such a line (false: unknown name or a malformed value; D-185: integers are digits only (or
+// 0x + hex), no sign, and must fit the member's type; floats must be finite; nothing wraps).
 std::string ConfigText(const snd_config& c);
 bool ParseConfigLine(const std::string& name, const std::string& value, snd_config* c);
 

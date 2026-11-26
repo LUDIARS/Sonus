@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 
@@ -184,7 +185,10 @@ SND_TEST(ToolReplay, RecordSaveLoadReplayTwiceAndReport) {
   SND_REQUIRE_EQ(got.banks.size(), rd.banks.size());
   SND_CHECK(got.banks[0].bytes == rd.banks[0].bytes);
   SND_CHECK_EQ(got.banks[0].contentHash, rd.banks[0].contentHash);
-  SND_CHECK(got.summary.find("tone too quiet") != std::string::npos);
+  SND_CHECK(got.summary == rep.summary);  // D-185: every text field comes back as written
+  SND_CHECK(got.notes == rep.notes);
+  SND_CHECK(got.comparison == rep.comparison);
+  SND_CHECK(!got.comparison.empty());
   ExpectationResult ge;
   const ReplayComparison gc = ReplayBugReport(got, &ge);
   SND_CHECK_MSG(gc.ok, "%s", gc.Text().c_str());
@@ -259,6 +263,35 @@ SND_TEST(ToolReplay, BrokenInputIsRefusedWithoutCrashing) {
   SND_CHECK_EQ(r2.dev_reserve.bytes, 12345u);
   SND_CHECK(!ParseConfigLine("no_such", "1", &r2));
   SND_CHECK(!ParseConfigLine("max_playbacks", "x", &r2));
+  // D-185: sign, range and type are checked (no wrap-around), for every member.
+  {
+    snd_config d0;
+    snd_config_init(&d0);
+    std::size_t at2 = 0;
+    std::uint32_t refused = 0, lines = 0;
+    const std::string all = ConfigText(d0);
+    while (at2 < all.size()) {
+      const std::size_t nl = all.find('\n', at2);
+      const std::string line = all.substr(at2, nl - at2);
+      at2 = nl + 1;
+      const std::string name = line.substr(0, line.find(" = "));
+      ++lines;
+      snd_config t = d0;
+      refused += !ParseConfigLine(name, "-1", &t) ? 1u : 0u;
+      refused += !ParseConfigLine(name, "99999999999999999999999", &t) ? 1u : 0u;
+      refused += !ParseConfigLine(name, "1 2", &t) ? 1u : 0u;
+      refused += !ParseConfigLine(name, "nan", &t) ? 1u : 0u;
+      SND_CHECK_MSG(std::memcmp(&t, &d0, sizeof t) == 0 || name.find("_ms") != std::string::npos ||
+                        name.find("ratio") != std::string::npos || name.find("hysteresis") != std::string::npos,
+                    "%s changed by a refused value", name.c_str());
+    }
+    // Floats take -1 (a finite number); every integer member refuses all four.
+    SND_CHECK(refused >= lines * 3u);
+  }
+  SND_CHECK(!ParseConfigLine("max_banks", "4294967296", &r2));
+  SND_CHECK(ParseConfigLine("max_banks", "4294967295", &r2));
+  SND_CHECK(!ParseConfigLine("memory.stream_pool_bytes", "18446744073709551616", &r2));
+  SND_CHECK(ParseConfigLine("memory.stream_pool_bytes", "18446744073709551615", &r2));
   std::error_code ec;
   fs::remove_all(dir, ec);
 }
@@ -275,4 +308,43 @@ SND_TEST(ToolReplay, OutputPlayerPlaysEverySample) {
   SND_CHECK(p.Done());
   SND_CHECK_EQ(p.FramesPlayed(), samples.size() / 2u);
   p.Stop();
+}
+
+SND_TEST(ToolReplay, HugeBlockNumbersAreBounded) {
+  // D-185: a well-formed record stream with absurd block numbers (Lod + empty arenas).
+  auto make = [](std::uint64_t first, std::uint64_t last) {
+    std::vector<std::uint8_t> b;
+    auto put = [&](const void* p, std::size_t n) {
+      const auto* c = static_cast<const std::uint8_t*>(p);
+      b.insert(b.end(), c, c + n);
+    };
+    const ll::RecordLod lod{static_cast<std::uint32_t>(ll::RecordKind::Lod), 0u, first};
+    put(&lod, sizeof lod);
+    for (const std::uint64_t block : {first, last}) {
+      const ll::RecordArena a{static_cast<std::uint32_t>(ll::RecordKind::Arena), 0u, block, 16u, 0u};
+      put(&a, sizeof a);
+      const ll::ArenaSections s{0u, 0u, 0u, 0u};
+      put(&s, sizeof s);
+    }
+    Recording r;
+    r.info.sampleRate = 48000;
+    r.info.blockSize = 256;
+    r.records = std::move(b);
+    return r;
+  };
+  ReplayRun run;
+  const auto t0 = std::chrono::steady_clock::now();
+  SND_CHECK(!Replay(make(0, 1000000000000000ull), {}, ReplayOptions{}, &run));  // longer than an hour: refused
+  SND_CHECK(run.error.find("limit") != std::string::npos);
+  ReplayOptions small;
+  small.maxBlocks = 100;
+  SND_CHECK(!Replay(make(0, 200), {}, small, &run));
+  SND_CHECK(Replay(make(5, 50), {}, small, &run));
+  SND_CHECK(run.blockNumbersKept);
+  // A huge first block: replayed without bringing the runtime up to it.
+  SND_CHECK(Replay(make(1000000000000000ull, 1000000000000010ull), {}, ReplayOptions{}, &run));
+  SND_CHECK(run.ok);
+  SND_CHECK(!run.blockNumbersKept);
+  SND_CHECK(run.finished);
+  SND_CHECK(std::chrono::steady_clock::now() - t0 < std::chrono::seconds(60));
 }

@@ -251,6 +251,17 @@ bool EventEditor::SetCone(double innerDeg, double outerDeg, double outerDb) {
     return true;
   });
 }
+EventEditor::ConeDesc EventEditor::Cone() const {
+  ConeDesc c;
+  const Value* e = event();
+  if (e == nullptr) return c;
+  c.present = e->Find("cone") != nullptr;
+  c.innerDeg = NumberAt(*e, "cone.innerDeg", 0.0);
+  c.outerDeg = NumberAt(*e, "cone.outerDeg", 0.0);
+  c.outerDb = NumberAt(*e, "cone.outerDb", 0.0);
+  return c;
+}
+
 bool EventEditor::SetVirtualReturn(VirtualReturn r) {
   return valid() && doc_.SetDefaulted(guid_, "virtualReturn", String(kVirtualNames[static_cast<int>(r)]), String("continue"));
 }
