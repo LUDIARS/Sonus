@@ -5,7 +5,7 @@
 
 - 契約の版: **1.2**（`SND_CONTRACT_VERSION_MAJOR = 1`, `SND_CONTRACT_VERSION_MINOR = 2`、`contract/public/include/snd/version.h`）。1.1 の変更は 3 節の D-43〜D-55、1.2 の変更は D-88〜D-99、D-102〜D-104 と 7 節
 - 1.2 への版の更新は受け入れ側の決定（ユーザー承認）。凍結ファイルの変更は `version.h` の MINOR と、`contract/test/contract11_test.cpp` の版の検査を「major が 1、minor が 1 以上」に緩めたこと。1.2 は新しいコマンド種別を足さず、既存の予約欄を `variant` にして表した（1.1 の記録は 0 を書いていたので互換）
-- バンク形式: **2.0**（`snd::bank_format::kFormatMajor/Minor`）
+- バンク形式: **2.1**（`snd::bank_format::kFormatMajor/Minor`）。2.1 の変更は D-07（`SYNP` の列 9〜16、粒の `CurveTarget`、`CurveCompose::AddLinear`、`PTCH` v1。bank-format.md §7）
 - ライブリンク: **1.0**（`snd::livelink::kProtocolMajor/Minor`）
 
 ## 1. 凍結対象のファイル
