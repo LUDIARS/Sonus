@@ -647,6 +647,7 @@ fileBytes     終端
 | `snd.fx.pitchshift` | `0x6AE27268` | `kEffectPitchShifter` | 3 | 2 タップのピッチシフター |
 | `snd.fx.normalize` | `0xFBDFA555` | `kEffectNormalize` | 3 | ノーマライズ（Unity Normalize） |
 | `snd.fx.surround` | `0x2072E34C` | `kEffectSurround` | 5 | 疑似サラウンド・ステレオ拡幅 |
+| `snd.fx.convolution` | `0x8837ECB0` | `kEffectConvolution` | 7 | 一様分割のコンボリューションリバーブ（IR は準備済み IR の登録表を `IrSlot` で引く、D-212〜D-215。段階 7-D で追加。上の本文の「14 種」は統合のときに 15 種に直す） |
 
 ### 6.5 組み込みコーデックのバイト配置（契約 1.1 で追記）
 

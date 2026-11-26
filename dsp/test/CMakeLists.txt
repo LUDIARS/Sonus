@@ -13,7 +13,11 @@ set(SND_DSP_TEST_SOURCES
   indep_effects_test.cpp
   indep_effects_behaviour_test.cpp
   # Stage 3 group 2: EQ band types (D-135), I3DL2 parameters.
-  effects_coverage_test.cpp)
+  effects_coverage_test.cpp
+  # Stage 7-D: FFT, time stretch, convolution (D-208..D-215).
+  fft_test.cpp
+  time_stretch_test.cpp
+  convolution_test.cpp)
 
 snd_add_test(dsp_test
   SOURCES ${SND_DSP_TEST_SOURCES}
@@ -48,3 +52,24 @@ target_include_directories(dsp_indep_g2_test_scalar PRIVATE ${CMAKE_CURRENT_SOUR
                                                             ${CMAKE_CURRENT_SOURCE_DIR}/../src)
 target_compile_definitions(dsp_indep_g2_test_scalar PRIVATE SND_SIMD_FORCE_SCALAR=1)
 set_tests_properties(dsp_indep_g2_test dsp_indep_g2_test_scalar PROPERTIES TIMEOUT 600)
+# Independent tests of stage 7-D dsp (FFT, time stretch, convolution; D-208..D-215).
+# Built twice like dsp_test: against sonus_dsp and against the dsp sources with the
+# scalar SIMD path forced.
+set(SND_DSP_INDEP_S7D_SOURCES
+  indep_fft_test.cpp
+  indep_time_stretch_test.cpp
+  indep_convolution_test.cpp)
+snd_add_test(dsp_indep_s7d_test
+  SOURCES ${SND_DSP_INDEP_S7D_SOURCES}
+  LINK sonus_dsp sonus_mocks)
+snd_add_test(dsp_indep_s7d_test_scalar
+  SOURCES ${SND_DSP_INDEP_S7D_SOURCES} ${_snd_dsp_src_abs}
+  LINK sonus_base sonus_platform sonus_mocks)
+target_include_directories(dsp_indep_s7d_test_scalar PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../include
+                                                            ${CMAKE_CURRENT_SOURCE_DIR}/../src)
+target_compile_definitions(dsp_indep_s7d_test_scalar PRIVATE SND_SIMD_FORCE_SCALAR=1)
+set_tests_properties(dsp_indep_s7d_test dsp_indep_s7d_test_scalar PROPERTIES TIMEOUT 1800)
+
+# Stream 2^32 frames through the public API once per configuration. Keep this
+# serial history test separate from the concurrency suite repeated twenty times.
+snd_add_test(dsp_indep_long_stream_test SOURCES indep_long_stream_test.cpp LINK sonus_dsp)

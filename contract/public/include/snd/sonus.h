@@ -356,6 +356,18 @@ SND_API snd_playback_handle SND_CALL snd_play_user_buffer_ex(snd_system* sys,
 SND_API snd_playback_handle SND_CALL snd_play_input(snd_system* sys, const snd_input_desc* desc,
                                                     snd_emitter_handle emitter,
                                                     const snd_when* when);
+/* Stage 7-D (D-195): feeds the input port `device_index` (snd_input_desc::device_index)
+ * with `frames` frames of non-interleaved float PCM (`channel_count` pointers; port channels
+ * beyond them repeat the last one, extra ones are ignored). The platform has no capture
+ * device yet: the game writes what it captured, an input playback (snd_play_input) plays it
+ * live (of what was written before the playback started, only the newest block is kept).
+ * Returns the frames accepted: what does not fit in the port's ring is dropped (the newest
+ * frames). Samples that are not finite (NaN, +-Inf) are written as 0 (D-197). The port rate
+ * is the internal rate. NULL system or channels, an unknown port, 0 channels -> 0.
+ * Thread: ANY, one writer per port at a time. Lock-free; does not record a command. */
+SND_API uint32_t SND_CALL snd_write_input(snd_system* sys, uint32_t device_index,
+                                          const float* const* channels, uint32_t channel_count,
+                                          uint32_t frames);
 
 /* ========================================================================= */
 /* Queries: values consistent as of the latest snd_update() (2.1). Thread: any. */

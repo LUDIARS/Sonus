@@ -136,7 +136,8 @@ enum class EffectKind : std::uint32_t {
   PitchShifter = 11,
   Normalize = 12,
   Surround = 13,
-  Count = 14,
+  Convolution = 14,  // stage 7-D (D-211): convolution.hpp
+  Count = 15,
 };
 
 inline constexpr Id kEffectReverb = HashId("snd.fx.reverb");
@@ -153,6 +154,8 @@ inline constexpr Id kEffectHighpass = HashId("snd.fx.highpass");
 inline constexpr Id kEffectPitchShifter = HashId("snd.fx.pitchshift");
 inline constexpr Id kEffectNormalize = HashId("snd.fx.normalize");
 inline constexpr Id kEffectSurround = HashId("snd.fx.surround");
+// Partitioned convolution reverb; parameters, IR registry: snd/dsp/convolution.hpp.
+inline constexpr Id kEffectConvolution = HashId("snd.fx.convolution");
 
 inline constexpr std::uint32_t kMaxEffectParams = 16;
 

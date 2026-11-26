@@ -107,6 +107,7 @@ SND_FX_DECLARE(Highpass)
 SND_FX_DECLARE(PitchShifter)
 SND_FX_DECLARE(Normalize)
 SND_FX_DECLARE(Surround)
+SND_FX_DECLARE(Convolution)
 
 #undef SND_FX_DECLARE
 
