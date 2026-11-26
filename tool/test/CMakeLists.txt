@@ -14,8 +14,55 @@ function(_snd_tool_test name link)
 endfunction()
 
 # Core only (no Tela). core_host_test uses the core the way an outside host does (D-101).
-foreach(_t model_test live_mixer_test live_profiler_test indep_sync_test core_host_test)
+foreach(_t model_test live_mixer_test live_profiler_test indep_sync_test core_host_test document_test
+        event_editor_test mixer_editor_test curve_editor_test
+        spatial_preview_test runtime_compare_test music_editor_test
+        material_editor_test patch_editor_test decisions_test)
   _snd_tool_test(${_t} "${_tool_core_test_link}")
+endforeach()
+
+# Group P (live reflection, preview engine, auditions, item revert, profiler streams, replay).
+# The preview engine and the replay host are in Sonus::tool_preview (tool/preview).
+set(_tool_live_link sonus_tool_preview ${_tool_core_test_link})
+foreach(_t live_preview_test live_sync_test live_revert_test profiler_streams_test replay_test
+        live_concurrency_test live_v10_test)
+  _snd_tool_test(${_t} "${_tool_live_link}")
+endforeach()
+# The 1.0 game of live_v10_test is the live link tests' hand-driven game (livelink/test).
+target_include_directories(tool_live_v10_test PRIVATE ${PROJECT_SOURCE_DIR}/livelink/test)
+# sonus-replay on the bug report replay_test writes (FIXTURES: replay_test first).
+set_tests_properties(tool_replay_test PROPERTIES FIXTURES_SETUP tool_replay_report
+                     ENVIRONMENT "SND_TOOL_REPLAY_REPORT_DIR=${CMAKE_CURRENT_BINARY_DIR}/replay-report")
+add_test(NAME tool_replay_cli COMMAND sonus-replay ${CMAKE_CURRENT_BINARY_DIR}/replay-report)
+set_tests_properties(tool_replay_cli PROPERTIES FIXTURES_REQUIRED tool_replay_report)
+add_test(NAME tool_replay_cli_bad_input COMMAND sonus-replay ${CMAKE_CURRENT_BINARY_DIR}/no-such-report)
+set_tests_properties(tool_replay_cli_bad_input PROPERTIES WILL_FAIL TRUE)
+
+# The runtime comparisons read the music module's time line and rule lookup (music/src).
+target_link_libraries(tool_runtime_compare_test PRIVATE sonus_music)
+target_include_directories(tool_runtime_compare_test PRIVATE ${PROJECT_SOURCE_DIR}/music/src)
+
+# Independent tests of group M (tool/test/indep_s7_model_properties.md, written from the
+# specs before reading the code). Core only. The Defect_* tests are in their own
+# executable, one CTest test each; they fail on purpose (each documents a defect).
+foreach(_t indep_s7_document_test indep_s7_editors_test indep_s7_compute_test indep_s7_build_test
+        indep_s7_robust_test)
+  _snd_tool_test(${_t} "${_tool_core_test_link}")
+endforeach()
+# Re-check after D-176..D-180: the recheck test compares with music's Timeline (music/src);
+# the threads test is the D-178d concurrency test (TSan, repeat 20).
+_snd_tool_test(indep_s7_recheck_test "${_tool_core_test_link}")
+target_link_libraries(tool_indep_s7_recheck_test PRIVATE sonus_music)
+target_include_directories(tool_indep_s7_recheck_test PRIVATE ${PROJECT_SOURCE_DIR}/music/src)
+_snd_tool_test(indep_s7_threads_test "${_tool_core_test_link}")
+_snd_tool_test(indep_s7_defects_test "${_tool_core_test_link}")
+set_tests_properties(tool_indep_s7_defects_test PROPERTIES DISABLED TRUE)  # run per defect below
+foreach(_d Defect_NegativeZeroLosesItsSign Defect_SetSameValueReturnsFalse
+        Defect_StemChannelsOutsideTheMaterialAccepted
+        Defect_LocateFieldMissesMusicSegmentAndDistanceCurveMembers Defect_LocateFieldLiveWritableForAbsentColumn
+        Defect_SaveIgnoresAFailedDeletion Defect_EmptyMaterialTableBuildIsUndefinedBehaviour
+        Defect_SameValueSettersRewriteExplicitDefaults Defect_SaveToSameDirectoryOtherSpellingLeavesStaleFiles)
+  add_test(NAME tool_indep_s7_${_d} COMMAND tool_indep_s7_defects_test --filter ${_d})
 endforeach()
 
 if(NOT SND_BUILD_TOOL)

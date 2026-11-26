@@ -15,7 +15,7 @@ struct Recorded {
   std::uint32_t blockSamples = 0;
 };
 
-enum class During { Plays, ReplaceChunk, StructEdit, Audition };
+enum class During { Plays, ReplaceChunk, StructEdit, Audition, ToneBefore, TwoReplaceChunks };
 
 // A session recorded through the tool. `before` edits come before the recording starts.
 void RecordSession(Recorded& rec, bool editsBefore, During during, ll::IStructEditor* editor = nullptr) {
@@ -40,14 +40,25 @@ void RecordSession(Recorded& rec, bool editsBefore, During during, ll::IStructEd
     SND_CHECK_EQ(ack(c->SetValue(BusVolume("Sfx", -6.0f))), SND_OK);
     SND_CHECK_EQ(ack(c->OverrideParam(HashId("Knob"), 0.75f, true, true)), SND_OK);
   }
+  if (during == During::ToneBefore) {
+    f.sys->Play(HashId("Tone"), snd_emitter_handle{0}, nullptr);
+    f.Steps(4);
+  }
   SND_REQUIRE_EQ(ack(c->StartRecording(true)), SND_OK);
   SND_REQUIRE(f.StepUntil([&] { return f.rt->Recording(); }));
   f.sys->Play(HashId("Tone"), snd_emitter_handle{0}, nullptr);
   f.Steps(4);
   switch (during) {
     case During::Plays:
+    case During::ToneBefore:
       f.sys->Play(HashId("Blip"), snd_emitter_handle{0}, nullptr);
       break;
+    case During::TwoReplaceChunks: {  // the same slot (same key) twice, other values
+      const std::vector<std::uint8_t> first = BussVolumes({-3.0f, 0.0f});
+      SND_CHECK_EQ(ack(c->ReplaceChunk(kBankId, bf::chunk::BUSS, first.data(), first.size())), SND_OK);
+      f.Steps(3);
+      [[fallthrough]];
+    }
     case During::ReplaceChunk: {
       const std::vector<std::uint8_t> chunk = BussVolumes({-6.0f, 0.0f});
       SND_CHECK_EQ(ack(c->ReplaceChunk(kBankId, bf::chunk::BUSS, chunk.data(), chunk.size())), SND_OK);
@@ -89,6 +100,7 @@ struct Replayed {
   std::vector<ll::ReplayDecision> decisions;
   std::uint64_t digest = 0;
   bool bitExact = false;
+  bool reproduces = false;
 };
 
 void Replay(const Recorded& rec, Replayed* rp, ll::IStructEditor* editor = nullptr, bool applyStart = true,
@@ -112,6 +124,7 @@ void Replay(const Recorded& rec, Replayed* rp, ll::IStructEditor* editor = nullp
     r->Start();
     ll::OutputDigest d;
     for (std::uint64_t i = 0; i < r->Blocks() + 4u; ++i) {
+      SND_CHECK_EQ(r->Finished(), i >= r->Blocks());  // D-175: right after the Blocks()-th block
       f.sys->RenderBlock(f.out.data());
       if (i < lead) continue;
       rp->out.insert(rp->out.end(), f.out.begin(), f.out.end());
@@ -121,6 +134,7 @@ void Replay(const Recorded& rec, Replayed* rp, ll::IStructEditor* editor = nullp
     rp->info = r->Info();
     rp->digest = d.value;
     rp->bitExact = r->BitExactExpected();
+    rp->reproduces = r->ReproducesRecordedRun();
     rp->decisions.resize(rp->info.decisions);
     r->CopyDecisions(rp->decisions.data(), static_cast<std::uint32_t>(rp->decisions.size()));
   }
@@ -187,6 +201,7 @@ SND_TEST(LivelinkV11Record, MidRunRecordingCarriesTheStartState) {
   SND_CHECK_EQ(a.info.leadBlocks, 1u);
   SND_CHECK((a.info.conditions & ll::kReplayMidRun) != 0u);
   SND_CHECK(a.bitExact);
+  SND_CHECK(a.reproduces);  // MidRun with its whole starting state (nothing played before)
   SND_CHECK_EQ(a.digest, b.digest);
   SND_CHECK_EQ(Differences(rec, a), 0u);
   // Without the starting state the level is the bank's (0 dB), not the recorded run's.
@@ -319,7 +334,9 @@ SND_TEST(LivelinkV11Record, StructEditsAreRecordedAndReplayedThroughAnEditor) {
   SND_CHECK(with.bitExact);
 }
 
-// The replaying System itself changes its LOD (a tiny budget): reported, not bit exact.
+// The replaying System itself changes its LOD (a tiny budget): whenever it does, the replay
+// reports it and does not promise bit identity. (Whether the LOD changes depends on the
+// machine's speed; the report itself is fixed by LivelinkV11Unit.ReplayLodEventIsReported.)
 SND_TEST(LivelinkV11Record, LodInTheReplayIsReported) {
   Recorded rec;
   RecordSession(rec, false, During::Plays);
@@ -328,7 +345,48 @@ SND_TEST(LivelinkV11Record, LodInTheReplayIsReported) {
   cfg.tuning.load_target_percent = 1;
   Replayed r;
   Replay(rec, &r, nullptr, true, cfg);
-  SND_CHECK(r.info.replayLodChanges >= 1u);
-  SND_CHECK((r.info.conditions & ll::kReplayLodInReplay) != 0u);
-  SND_CHECK(!r.bitExact);
+  SND_CHECK_EQ((r.info.conditions & ll::kReplayLodInReplay) != 0u, r.info.replayLodChanges != 0u);
+  if (r.info.replayLodChanges != 0u) SND_CHECK(!r.bitExact);
+}
+
+// D-175: a playback alive in core at the start is state the recording does not carry:
+// the replays still agree with each other, but they do not reproduce the recorded run.
+SND_TEST(LivelinkV11Record, PlaybackAliveAtTheStartIsLostState) {
+  Recorded rec;
+  RecordSession(rec, false, During::ToneBefore);
+  ll::RecordReader rr(rec.bytes.data(), rec.bytes.size());
+  ll::RecordItem it;
+  std::uint32_t lost = 0;
+  while (rr.Next(&it)) {
+    if (ll::IsKind(it, ll::kRecordBegin)) lost = it.begin.lostState;
+  }
+  SND_CHECK_EQ(lost, 1u);
+  Replayed a, b;
+  Replay(rec, &a);
+  Replay(rec, &b);
+  SND_CHECK((a.info.conditions & ll::kReplayStateLost) != 0u);
+  SND_CHECK(a.bitExact);
+  SND_CHECK(!a.reproduces);
+  SND_CHECK_EQ(a.digest, b.digest);
+  SND_CHECK(Differences(rec, a) > 0u);
+}
+
+// Two replacements through the same slot (the same pairing key) replay in order.
+SND_TEST(LivelinkV11Record, TwoReplacementsWithTheSameKeyReplayInOrder) {
+  Recorded rec;
+  RecordSession(rec, false, During::TwoReplaceChunks);
+  std::vector<std::uint64_t> keys;
+  ll::RecordReader rr(rec.bytes.data(), rec.bytes.size());
+  ll::RecordItem it;
+  while (rr.Next(&it)) {
+    if (ll::IsKind(it, ll::kRecordLiveData)) keys.push_back(it.liveData.key);
+  }
+  SND_REQUIRE_EQ(keys.size(), 2u);
+  SND_CHECK_EQ(keys[0], keys[1]);
+  Replayed a;
+  Replay(rec, &a);
+  SND_CHECK_EQ(a.info.replacedChunks, 2u);
+  SND_CHECK_EQ(a.info.skippedCommands, 0u);
+  SND_CHECK(a.reproduces);
+  SND_CHECK_EQ(Differences(rec, a), 0u);
 }

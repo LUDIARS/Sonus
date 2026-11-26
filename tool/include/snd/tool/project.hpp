@@ -23,6 +23,8 @@
 
 namespace snd::tool {
 
+class ProjectDocument;  // document.hpp
+
 struct Guid {
   std::uint64_t lo = 0;  // last 16 hex digits (bank GUID chunk guidLo)
   std::uint64_t hi = 0;  // first 16 hex digits
@@ -110,6 +112,10 @@ class Project {
   // start with '.' and `skipDir` if given). false if the directory cannot be read or any
   // error was found (the lists are still filled with what could be read).
   bool Load(const std::string& dir, const std::string& skipDir = std::string());
+  // The same view, made from the editable document (its unsaved state). Build() then
+  // builds the saved files of directory(); use BuildDocument (doc_build.hpp) for the
+  // unsaved state and SetBuildHash with its hash.
+  bool Load(const ProjectDocument& doc);
   // Runs the build tool (dev build) into `outDir`. Sets buildHash() and banks(). false
   // with issues() on a build error.
   bool Build(const std::string& outDir);
@@ -139,6 +145,7 @@ class Project {
   const std::vector<BankFile>& banks() const { return banks_; }
 
  private:
+  bool LoadTexts(const std::vector<std::pair<std::string, std::string>>& texts);
   std::string dir_;
   std::string name_;
   std::vector<BusDesc> buses_;

@@ -121,6 +121,23 @@ struct ClientSequences {
   std::uint64_t recordBytes = 0;  // recording bytes received (kept + overflow)
 };
 
+// D-170: what the client keeps (oldest first; a new entry pushes the oldest out). The
+// answers (Ack, CellValue) are kept until taken; one pushed out before it was taken is
+// counted in ClientStats (acksLost, cellsLost). History streams keep historySeconds of
+// data at these rates (a faster stream keeps a shorter time); what was pushed out is
+// counted too (timingsLost ...), and Copy*Since tells it per reader.
+inline constexpr std::uint32_t kClientAcksKept = 1024;        // Ack (TakeAck / WaitAck)
+inline constexpr std::uint32_t kClientCellsKept = 256;        // CellValue (TakeCell / WaitCell)
+inline constexpr std::uint32_t kClientErrorsKept = 256;       // Error (CopyErrors)
+inline constexpr std::uint32_t kClientReloadStatusKept = 64;  // ReloadStatus (CopyReloadStatus)
+inline constexpr std::uint32_t kClientStallsKept = 1024;      // StreamStall
+inline constexpr std::uint32_t kClientLodsKept = 1024;        // LodChange
+inline constexpr std::uint32_t kClientTimingsPerSecond = 120;          // BlockTiming and BlockDetail, x historySeconds
+inline constexpr std::uint32_t kClientMeterSnapshotsPerSecond = 60;    // meter entries per bus, x historySeconds
+inline constexpr std::uint32_t kClientLogEntriesPerSecond = 2000;      // EventLog entries, x historySeconds
+// Latest only: VoiceList (maxVoices), BusMeters (maxMeterBuses), MemoryUsage, StreamList
+// (maxStreams), BankList (maxBanks); the recording: recordBufferBytes.
+
 struct ClientStats {
   std::uint32_t connects = 0;        // handshakes completed (reconnects included)
   std::uint32_t disconnects = 0;
@@ -131,6 +148,10 @@ struct ClientStats {
   std::uint64_t lastGameClock = 0;   // Pong.gameClockSample
   std::uint32_t errorsReceived = 0;
   std::uint32_t recordOverflow = 0;  // recording bytes received after the buffer was full (not errors)
+  // D-170: entries pushed out of what the client keeps (see kClient*Kept). For Ack / CellValue only
+  // answers that were never taken count (a lost answer); for the rest every entry pushed out.
+  std::uint32_t acksLost = 0, cellsLost = 0, errorsLost = 0, reloadStatusLost = 0;
+  std::uint32_t timingsLost = 0, detailsLost = 0, meterEntriesLost = 0, eventLogLost = 0, stallsLost = 0, lodsLost = 0;
 };
 
 class Client {

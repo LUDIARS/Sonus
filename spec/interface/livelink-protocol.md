@@ -6,6 +6,8 @@
 ## 1. 接続
 
 - ゲームに組み込んだランタイムが TCP で待ち受け（`Config.liveLink.port`、既定 27460）、ツールが接続する。同時接続は 1。
+- 1 つの `LiveRuntime` で同時に Start できる Server は 1 つ（D-170）。2 つ目の `Server::Start` は SND_ERR_LIMIT_REACHED。
+  先の Server を Stop / 破棄すれば Start できる。
 - リリースビルドでは `SND_LIVELINK=0` でコードごと外す（11.2）。
 - 受信したメッセージはライブリンクのスレッドでコマンド（`snd/internal/commands.hpp` の `Live*`）に変換して投入する。
   ランタイムデータへ直接書き込まない（2 章のスレッド表）。
@@ -84,6 +86,10 @@ magic 不一致・上限超えは `Error` を送って切断する。未知の `
 （例: エフェクトの 3 番目のパラメータ）。`valueType` は 0 f32, 1 u32, 2 i32, 3 ID。値は `value` の下位ビットに入れる。
 GUID は開発ビルドのバンクの `GUID` チャンクとの照合用（ID 衝突やリネームの検出）。
 
+`SetValue` は全部か無しか（D-171）: そのオブジェクトを持つバンクのどれか 1 つでも書けなければ（上書き層の無いリリースビルドの
+バンクが同じオブジェクトを持つ、など）、どのセルも書かずに SND_ERR_UNSUPPORTED（ほかの理由はその結果）で答える。
+`ReplaceChunk`、`RevertValue` も同じ。
+
 **応答と背圧**（段階2 livelink の受け入れ側の決定）:
 
 - `flags` bit0 のメッセージには、各 seq にちょうど 1 回 `Ack(seq, result)` で答える。bit0 が無いものは失敗のときだけ `Error` を返す。
@@ -156,7 +162,12 @@ GUID は開発ビルドのバンクの `GUID` チャンクとの照合用（ID �
 | Stall | 再現しない（同上）。`kReplayStallRecorded` |
 | 再生中の LOD の変化・ストール | 数えて `kReplayLodInReplay` / `kReplayStallInReplay` |
 
-`Replayer::BitExactExpected()` は 2.5 を壊す条件（`kReplayBreaksBitExact`）が 1 つも無いとき true。比べる材料として、再生は
+述語（D-175）: `Replayer::BitExactExpected()` は同じ記録の 2 回の再生どうしがビットまで一致すると期待できるとき（2.5 を壊す条件
+`kReplayBreaksBitExact` が 1 つも無い）。`ReproducesRecordedRun()` は、それに加えて再生が記録した実行と一致すると期待できるとき:
+作成時からの記録、または途中からでも開始時の状態が全部入っている（`lostState` 0。開始時に core で生きていた再生は lostState に
+数える）。1.0 の記録（Begin なし）は false。開始時に見分けられない core の状態（それまでに設定したパラメータの値、エミッタ、
+トランスポート、リスナー。C-04）は既定値と見なす。`kReplayMidRun` は情報として `conditions` に出るだけ。
+`Replayer::Finished()` は最後の記録ブロックを描き終えた時点（Start の後の `Blocks()` 個目、先行ブロックを含む）で true。比べる材料として、再生は
 決定のログ（`ReplayDecision`: 適用した Play / LiveAudition / Stop、再生の終わりと理由、イベントリングのマーカー・拍・エラー・警告、
 ボイスの一覧の要約。ブロックは再生の始まりからの相対）と、出力のハッシュ（`OutputDigest`: サンプルのビットの FNV-1a）を出す。
 
@@ -196,6 +207,7 @@ GUID は開発ビルドのバンクの `GUID` チャンクとの照合用（ID �
 | --- | --- |
 | 既知の表（`kChunks` の Table）、行数がロード済みと同じ、列の値の変更 | 受け付け。全セルを検査してから書く（一部だけ書くことはない）。ブロック境界で反映 |
 | 未知の列 ID | 読み飛ばす（bank-format.md の互換） |
+| 列が 0 本（行数は同じ） | SND_OK、何も変えない（D-173） |
 | 置き換えに無い列（列が減った） | その列は今の値のまま |
 | 行数が違う（行の増減） | SND_ERR_UNSUPPORTED（再ビルドとホットリロード） |
 | 参照・配置の列（`parent`、`effectFirst` など core が登録時に組み立てたもの）が変わる | SND_ERR_UNSUPPORTED（同上）。同じ値なら可 |
@@ -217,9 +229,9 @@ GUID は開発ビルドのバンクの `GUID` チャンクとの照合用（ID �
 | op | targetId | args | 予備容量（`Config.dev_reserve`）から取るもの |
 | --- | --- | --- | --- |
 | AddBus | 新しいバスの ID | `{親バス ID, チャンネル数 1..8 [, volumeDb f32]}` | buses 1、bytes 64 + 8 × argCount |
-| RemoveBus | バス ID | なし | なし（ライブで足したバスを外すと、その分を返す） |
+| RemoveBus | バス ID | なし | なし（ライブで足したバスを外すと、その Add の費用（buses・bytes）を全部返す。そのバスの上にライブで足したエフェクトと、そのバスから出るライブのセンドも一緒に外れ、それぞれの費用（effects・bytes）を返す。D-172） |
 | AddEffect | バス ID | `{エフェクト種別 ID, 挿す位置（~0u = 末尾）, パラメータ f32 …（32 個まで）}` | effects 1、bytes 64 + 8 × argCount |
-| RemoveEffect | バス ID | `{エフェクトの番号（< 65536）}` | なし（同じバスにライブで足したエフェクトを外すと返す） |
+| RemoveEffect | バス ID | `{エフェクトの番号（< 65536）}` | なし（同じバスにライブで足した最後のエフェクトを外すと、その Add の費用（effects・bytes）を全部返す） |
 | AddSend | 送り元バス ID | `{送り先バス ID, レベル dB f32 [, 1 = プリフェーダー]}` | bytes 64 + 8 × argCount |
 
 ID は 0 でない 32 ビット、f32 は有限で下位 32 ビット。`events` の予備は、イベントを足す op がまだ無いので使わない。
@@ -233,8 +245,16 @@ ID は 0 でない 32 ビット、f32 は有限で下位 32 ビット。`events`
 | SND_ERR_OUT_OF_BUDGET | 予備容量を超える（Error の文 "dev reserve exhausted: rebuild and hot reload"） | 再ビルドと ReloadBank |
 | SND_ERR_UNSUPPORTED | core に構造を変える手段が無い（今はこれ。依頼 C-01） | 再ビルドと ReloadBank |
 | SND_ERR_NOT_READY | ホットリロードの最中 | 終わってから送る |
+| SND_ERR_LIMIT_REACHED | 戻しの記録（`RuntimeDesc::maxStructLog`、既定 64）か差し替えの枠（`chunkSlots`）が一杯（D-172）。予備容量は取らず、編集器も呼ばない | 戻すか、再ビルドと ReloadBank |
 | ほか（NOT_FOUND など） | 編集器が断った | — |
 
+戻しの記録（D-172）: どの構造の変更も、受け付けの時点で戻しの記録の枠を 1 つ取る（取れなければ LIMIT_REACHED）。
+例外は Remove: 枠が一杯でも受け付ける。ライブで足したものを打ち消す Remove は枠を使わずに適用し、打ち消した Add（と一緒に外れた
+もの）の枠と予備容量が返る。バンクにあるものを外す Remove（戻しの記録が要る）は、オーディオスレッドが適用の時点で枠を取り、
+取れなければ編集器を呼ばずに LIMIT_REACHED で答える。枠を取るのは受け付けのライブリンクのスレッドか適用のオーディオスレッドの
+どちらか一方、返すのはオーディオスレッドだけ。適用された
+編集はその枠に残り、適用されなかった・ライブの Add を打ち消した Remove・戻した編集の枠はオーディオスレッドが返す。よって
+「適用されたが戻せない」編集は無い。ライブで足したバスを外したとき、一緒に外れたエフェクト・センドの Undo は編集器に渡さない。
 予備容量はゲーム（`LiveRuntime`）ごとに数え、Server を作り直しても続く。反映されなかった編集（断られた、古いセッション、
 Server の破棄で取り消し）の分はオーディオスレッドが返す。切断時の戻し（revertOnDisconnect）は、そのセッション以前の構造の
 変更を新しい順に元に戻し（編集器の Undo）、予備容量を返す。記録中は LiveData（`kStructEditTag`）で記録に入る。
@@ -249,7 +269,13 @@ core に渡す最後の一歩は livelink の中の継ぎ目（`snd/livelink/str
    バンク管理は、古い写しが解放されてから（エポック、3.3）新しい写しを登録する。
 3. `ReloadStatus` を Unloading → Loading → Done / Failed の順に送り、最後に Ack（Done は SND_OK、読めなかった・壊れていたは
    SND_ERR_IO、新しい登録が外されたら SND_ERR_INVALID_HANDLE）。読み込みに失敗すると、バンクは外れたままになる。
-4. ロードされていなければ SND_ERR_NOT_FOUND。flags bit0（`kReloadLoadIfAbsent`）があれば読み込むだけ。同時に 1 つまで
+4. 読み込んだファイルのバンクが要求と違う（bankId か言語）ときは Failed（SND_ERR_INVALID_ARGUMENT、Error の文
+   "ReloadBank: the file holds another bank"）。読み込んだ別のバンクは登録が済み次第外す（残さない）。要求したバンクは外れたまま
+   （読み込みの失敗と同じ。D-173）。外すのは、そのリロードが新しく作った登録だけ: 同じパスのバンクをゲームがもう読み込んで
+   いて `LoadBankAsync` がその登録を返したとき（ゲーム自身のバンク）は外さない（Failed で答えるだけ）。外す前にファイルのヘッダを読んで確かめることはしていない: ライブリンクのスレッドから
+   ゲームのファイルシステムを読むと IO スケジューラと読み込みの識別子（IoToken）を取り合うため（C-03 の読み込みの入口で直す）。
+   Done は新しい登録がオーディオ側に公開されてから送る（その後の BankList / SetValue は新しい登録を見る）。
+5. ロードされていなければ SND_ERR_NOT_FOUND。flags bit0（`kReloadLoadIfAbsent`）があれば読み込むだけ。同時に 1 つまで
    （2 つ目は SND_ERR_LIMIT_REACHED）。
 
 - 最中の扱い: `SetValue`、`ReplaceChunk`、`RevertValue`、`StructEdit` は SND_ERR_NOT_READY（ツールが送り直す）。`ReadCell`、
@@ -263,7 +289,8 @@ core に渡す最後の一歩は livelink の中の継ぎ目（`snd/livelink/str
 ### 8.6 試聴（Audition）
 
 - 再生: `LiveAudition` はゲームの Playback スロットを 1 つ使う（`RecordLive` が取る。空きが無ければ SND_ERR_LIMIT_REACHED）。
-  one-shot なので `on_end` はゲームに出ない。同時に鳴らせる試聴は `RuntimeDesc::maxAuditions`（既定 32）まで、超えると
+  one-shot なので `on_end` はゲームに出ない。Audition の Ack は記録の結果（D-171）: 存在しない Event の試聴も SND_OK で、
+  その再生は始まらずに終わり、試聴の枠は戻る。同時に鳴らせる試聴は `RuntimeDesc::maxAuditions`（既定 32）まで、超えると
   SND_ERR_LIMIT_REACHED。
 - 全停止（flags bit0）: ライブリンクが始めた試聴だけを止める。順序は記録の順: 全停止より前に送った試聴が対象。オーディオスレッドが
   そのハンドルをライブリンクのスレッドに渡し、ライブリンクのスレッドが `System::Stop`（`tuning.short_fade_ms` のフェード）を記録する。
@@ -278,11 +305,16 @@ core に渡す最後の一歩は livelink の中の継ぎ目（`snd/livelink/str
   保留したボイス、並列で描いたか、LOD の段（core の `BlockProfile`）。ワーカーごとの内訳は取れない（依頼 C-06）。
 - どちらもほかのプロファイラと同じ帯域の上限と送信待ちの空きに従い、入らなければ捨てて数える（D-86）。
 
-### 8.8 Client の更新番号
+### 8.8 Client の更新番号と保持数
 
 `Client::Sequences()` は受け取った数（履歴の流れは項目の数、最新値の流れはメッセージの数）を返す。`Copy*Since(after, …, &first)`
 は番号が `after` より後の項目のうち残っているものを返し、`first > after + 1` なら `first - after - 1` 個を取りこぼした
 （履歴から押し出された）。既存の `Copy*` はそのまま。
+
+保持数（D-170、`client.hpp` の `kClient*`）: Ack 1024、CellValue 256、Error 256、ReloadStatus 64、StreamStall 1024、LodChange 1024、
+BlockTiming と BlockDetail は historySeconds × 120、メータは historySeconds × 60 × バス数、EventLog は historySeconds × 2000。
+最新値だけのもの（VoiceList、BusMeters、MemoryUsage、StreamList、BankList）は 1 つ。押し出した数は `ClientStats` の
+`*Lost`（Ack と CellValue は受け取られないまま押し出された答えだけ）。
 
 ### 8.9 1.1 での変更の一覧
 

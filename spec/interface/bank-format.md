@@ -761,3 +761,31 @@ setup（`extra`）:
 5. 行参照（`kNone` 以外）が対象テーブルの行数未満、ブロブ内オフセット＋長さがチャンク内。
    6.0 の並びの規則（バス・入れ子 Event・カテゴリの親が後ろの行、シーク表の単調性）と `ALIS` の制約（昇順・0 でない・自己参照でない）。
 6. 失敗はすべて `SND_ERR_CORRUPT`（版・機種は `SND_ERR_VERSION_MISMATCH`）。壊れた入力で落ちないことをファズで確認する（14 章）。
+
+## 9. 仮の任意チャンク（未凍結。段階5 ツール、セッション C）
+
+形式の版は 2.0 のまま。ここのチャンクは凍結対象ではなく、ランタイムは読まない（未知のチャンクは無視、§5・§7、D-32）。
+正式な定義が決まったら差し替える。
+
+### `XPCH`（波形生成パッチのプログラム、仮）
+
+`PTCH`（§6.2、段階 6 で形式を定める）の形式がまだ無いため、ビルドツールはパッチ（project-format.md の `patch`）を
+この任意チャンクに出す。ランタイムの Patch ソースとバンクでの表現はセッション D が決める
+（`spec/handoff/parallel/requests/C-10.md`）。そのときに `PTCH` へ移し、このチャンクはやめる。
+
+- fourcc `'XPCH'`、ブロブ。ChunkEntry.flags 0、version 1。整数はリトルエンディアン、浮動小数は binary32。
+- `SYNP` の行は `kind` = Patch（3）、`programOffset` = `programBytes` = 0（`PTCH` は書かない）。どの `SYNP` 行がどのプログラムかは
+  このチャンクの対応表で引く。
+
+| 部分 | 大きさ | 内容 |
+| --- | --- | --- |
+| ヘッダ | 16 B | `u32 version (1), u32 programCount, u32 linkCount, u32 nodeBytes (128)` |
+| プログラム | 16 B × programCount | `u32 patchId (snd_hash_id(name)), u32 nodeFirst, u32 nodeCount, u32 reserved` |
+| ノード | 128 B × 全ノード | `u32 kind, u32 parameterId, u32 pointCount, u32 reserved, u32 inputs[4], f32 params[8], f32 points[8][2]` |
+| 対応表 | 8 B × linkCount | `u32 synpRow, u32 program` |
+
+- ノードは依存順（入力が先、出力ノードが最後。同順位はプロジェクトのファイルでの順）。`inputs[i]` は同じプログラムの中の
+  ノード番号（0 から）、無ければ 0xFFFFFFFF。`kind` と `inputs` / `params` の並びはビルドツールのノードの表
+  （`buildtool/include/snd/buildtool/patch.hpp` の `NodeKinds`、追加は末尾）。列挙のパラメータは選択肢の番号を浮動小数で持つ。
+- `parameterCurve` ノードは `parameterId`（パラメータの ID）と `points`（x 昇順、`pointCount` 個、最大 8）を持つ。
+- 出力ノードに届かないノードは入れない（ビルドの警告）。

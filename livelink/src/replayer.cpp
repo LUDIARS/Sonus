@@ -531,7 +531,15 @@ void Replayer::OnEnded(std::uint32_t slot, std::uint32_t, std::uint32_t reason, 
 void Replayer::OnStall(std::uint32_t) noexcept { replayStalls_.fetch_add(1u, std::memory_order_relaxed); }
 
 void Replayer::OnBlock(core::System& sys) noexcept {
-  if (!begun_ || finished_.load(std::memory_order_relaxed) != 0u || maxDecisions_ == 0u) return;
+  if (!begun_ || finished_.load(std::memory_order_relaxed) != 0u) return;
+  LogVoices(sys);
+  // D-175: finished at the end of the last recorded block.
+  const std::uint64_t span = Blocks() - info_.leadBlocks;
+  if (cursor_ >= arenaCount_ && block_ + 1u >= base_ + span) finished_.store(1u, std::memory_order_release);
+}
+
+void Replayer::LogVoices(core::System& sys) noexcept {
+  if (maxDecisions_ == 0u) return;
   std::uint32_t n = sys.LiveVoices(voiceScratch_, voiceCap_);
   if (n > voiceCap_) n = voiceCap_;
   std::uint32_t h = 0x811C9DC5u;
@@ -567,6 +575,7 @@ void Replayer::CheckBanks(core::System& sys) noexcept {
 
 bool Replayer::Next(std::uint64_t block, core::LiveArenaView* out) noexcept {
   if (armed_.load(std::memory_order_acquire) == 0u || finished_.load(std::memory_order_relaxed) != 0u) return false;
+  block_ = block;
   if (!begun_) {
     begun_ = true;
     base_ = block + info_.leadBlocks;

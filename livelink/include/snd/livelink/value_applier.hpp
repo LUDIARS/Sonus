@@ -59,6 +59,10 @@ struct PendingChunk {
   std::uint32_t costBuses = 0;
   std::uint32_t costEffects = 0;
   std::uint64_t costBytes = 0;
+  // D-172: 1 when it holds a place of the runtime's structural-edit log (taken at acceptance,
+  // given back by the audio thread unless the edit stays in the log).
+  std::uint32_t structLogPlace = 0;
+  std::uint32_t reserved2 = 0;
 };
 
 // 1.1: the answer to a ReadCell (audio thread -> live link thread).
