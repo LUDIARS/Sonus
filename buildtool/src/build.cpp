@@ -21,7 +21,7 @@
 #include "self_check.hpp"
 #include "snd/buildtool/bank_writer.hpp"
 #include "snd/buildtool/json.hpp"
-#include "snd/buildtool/patch.hpp"
+#include "patch_runtime.hpp"
 #include "snd/codec/codec.hpp"
 #include "snd/codec/encode.hpp"
 #include "snd/dsp/effects.hpp"
@@ -52,8 +52,9 @@ const char* const kStall[] = {"time", "sound", nullptr};
 const char* const kIoPriority[] = {"normal", "music", "voice", nullptr};
 const char* const kAction[] = {"play", "stop", "setParameter", "applySnapshot", nullptr};
 const char* const kCurveTarget[] = {"volume", "pitch", "lowpass", "highpass", "pan", "send", "effectParam",
-                                    "spread", "reverbSend", "blend3D", nullptr};
-const char* const kCompose[] = {"addDb", "addCents", "min", "max", "multiply", nullptr};
+                                    "spread", "reverbSend", "blend3D",
+                                    "grainDensity", "grainLengthMs", "grainPosition", "grainPitchJitterCents", nullptr};
+const char* const kCompose[] = {"addDb", "addCents", "min", "max", "multiply", "addLinear", nullptr};
 const char* const kParamKind[] = {"continuous", "switch", nullptr};
 const char* const kSteal[] = {"oldest", "quietest", "lowestPriority", "never", nullptr};
 const char* const kDuckKind[] = {"sidechain", "rule", nullptr};
@@ -78,7 +79,7 @@ std::uint32_t DefaultCompose(std::uint32_t target) {
     case 1: return 1;  // pitch: cents add
     case 2: return 2;  // lowpass: min
     case 3: return 3;  // highpass: max
-    default: return 4; // multiply
+    default: return target >= static_cast<unsigned>(bf::CurveTarget::GrainDensity) ? 5 : 4;
   }
 }
 
@@ -135,7 +136,8 @@ struct BankTables {
       strm{ch::STRM}, synp{ch::SYNP}, mseg{ch::MSEG}, mpls{ch::MPLS}, mple{ch::MPLE}, mstm{ch::MSTM},
       msta{ch::MSTA}, mtrn{ch::MTRN}, mstg{ch::MSTG}, mmrk{ch::MMRK}, mtmp{ch::MTMP}, name{ch::NAME},
       guid{ch::GUID}, alis{ch::ALIS};
-  std::vector<std::uint8_t> wave, prel, spth, efbl, strs, phys;
+  std::vector<std::uint8_t> wave, prel, spth, efbl, strs, phys, ptch;
+  std::map<const Object*, std::pair<std::uint32_t, std::uint32_t>> patchRanges;
   std::vector<patch::Program> programs;               // provisional XPCH chunk (patch.hpp)
   std::vector<patch::Link> programLinks;
   std::map<const Object*, std::uint32_t> programIndex;
@@ -185,6 +187,8 @@ class Builder {
   void CheckBusRoots();
   // Every patch object: graph checks (patch.hpp), problems reported at their members.
   void CheckPatches();
+  void WritePatch(BankTables&, std::uint32_t, const Object&, const Value&);
+  void WriteGrains(BankTables&, std::uint32_t, const Object&, const Value&);
   bool CompilePatch(const Object& patchObj, Diagnostics& d, patch::Program* out);
   // Kahn order: `before` must precede everything it points to; ties by name.
   std::vector<const Object*> TopoOrder(const std::vector<const Object*>& nodes,
@@ -349,6 +353,81 @@ bool Builder::CompilePatch(const Object& po, Diagnostics& d, patch::Program* out
     }
   }
   return ok;
+}
+
+void Builder::WriteGrains(BankTables& t, std::uint32_t row, const Object& e, const Value& synth) {
+  struct Field { const char* name; std::uint16_t column; double low, high; };
+  constexpr Field fields[] = {{"density", col::SYNP_density, 0, 384000}, {"lengthMs", col::SYNP_lengthMs, 0, 1000},
+      {"position", col::SYNP_position, 0, 1}, {"pitchJitterCents", col::SYNP_pitchJitterCents, 0, 4800},
+      {"positionJitter", col::SYNP_positionJitter, 0, 1}, {"pitchCents", col::SYNP_pitchCents, -4800, 4800}};
+  for (const auto& f : fields) {
+    const auto* v = synth.Find(f.name);
+    if (!v) continue;
+    double value;
+    if (!v->IsNumber() || !v->AsDouble(&value) || !(value >= f.low && value <= f.high))
+      p_.ErrorAt(e, *v, std::string("granular ") + f.name + " outside its numeric range", d_);
+    else
+      t.synp.F32(f.column, row, static_cast<float>(value));
+  }
+  if (const auto* w = synth.Find("window")) {
+    constexpr const char* names[] = {"hann", "triangle", "rectangle", nullptr};
+    std::uint64_t id = 0;
+    if (w->IsString()) id = p_.Enum(e, synth, "window", names, 0, d_);
+    else if (!w->AsU64(&id) || id > 2) p_.ErrorAt(e, *w, "invalid granular window", d_);
+    t.synp.U32(col::SYNP_window, row, static_cast<std::uint32_t>(id));
+  }
+}
+
+void Builder::WritePatch(BankTables& t, std::uint32_t row, const Object& e, const Value& synth) {
+  std::vector<std::uint8_t> bytes;
+  const Object* named = nullptr;
+  if (const auto* ref = synth.Find("patch")) {
+    if (synth.Find("nodes") || synth.Find("output")) {
+      p_.ErrorAt(e, synth, "choose one inline graph or named patch", d_);
+      return;
+    }
+    named = p_.Resolve(e, *ref, Kind::Patch, d_);
+    if (!named) return;
+    auto cached = t.patchRanges.find(named);
+    if (cached != t.patchRanges.end()) {
+      t.synp.U32(col::SYNP_programOffset, row, cached->second.first);
+      t.synp.U32(col::SYNP_programBytes, row, cached->second.second);
+      t.programLinks.push_back({row, t.programIndex.at(named)});
+      return;
+    }
+    patch::Program program;
+    if (!CompilePatch(*named, quiet_, &program)) return;
+    if (!patch::EncodeRuntime(program, bytes)) {
+      const char* message = "named patch cannot be represented by PTCH v1 (node type, input or 16-node limit)";
+      if (!opt_.allowEditorOnlyPatches) {
+        p_.ErrorAt(*named, named->doc, message, d_);
+        return;
+      }
+      p_.WarnAt(*named, named->doc, std::string(message) + "; retained as editor-only XPCH", d_);
+      bytes.clear();
+    }
+    const auto idx = static_cast<std::uint32_t>(t.programs.size());
+    t.programIndex.emplace(named, idx);
+    t.programs.push_back(std::move(program));
+    t.programLinks.push_back({row, idx});
+  } else {
+    const Value* at = &synth;
+    std::string message;
+    if (!patch::CompileInline(synth, bytes, at, message)) {
+      p_.ErrorAt(e, *at, message, d_);
+      return;
+    }
+  }
+  if (t.ptch.size() > UINT32_MAX - bytes.size()) {
+    p_.ErrorAt(e, synth, "PTCH exceeds the 32-bit program offset range", d_);
+    return;
+  }
+  const auto offset = bytes.empty() ? 0u : static_cast<std::uint32_t>(t.ptch.size());
+  const auto size = static_cast<std::uint32_t>(bytes.size());
+  if (named) t.patchRanges.emplace(named, std::make_pair(offset, size));
+  t.ptch.insert(t.ptch.end(), bytes.begin(), bytes.end());
+  t.synp.U32(col::SYNP_programOffset, row, offset);
+  t.synp.U32(col::SYNP_programBytes, row, size);
 }
 
 void Builder::CheckPatches() {
@@ -717,6 +796,7 @@ std::uint32_t Builder::EmitCurve(BankTables& t, const Object& o, const Value& cu
       params->insert(param);
     }
     target = p_.Enum(o, curve, "target", kCurveTarget, 0, d_);
+    if (target >= 10) target += 2;  // reserve the D-01 wire IDs
   }
   const Value* pts = curve.Find("points");
   if (pts == nullptr || !pts->IsArray() || pts->items.size() < 2) {
@@ -1753,30 +1833,20 @@ void Builder::BuildBank(const Object& bank, const std::string& language) {
           const std::uint32_t sr = t.synp.AddRow();
           t.synp.U32(col::SYNP_kind, sr, kind);
           if (kind == 3) {
-            // Patch (design.md 5.1): the program goes into the provisional XPCH chunk (patch.hpp).
-            const Value* pv = sv->Find("patch");
-            const Object* po = pv != nullptr ? p_.Resolve(*e, *pv, Kind::Patch, d_) : nullptr;
-            if (pv == nullptr) {
-              p_.ErrorAt(*e, *sv, "patch synthesis needs \"patch\" (a patch reference)", d_);
-            } else if (po != nullptr) {
-              auto it = t.programIndex.find(po);
-              if (it == t.programIndex.end()) {
-                patch::Program prog;
-                if (CompilePatch(*po, quiet_, &prog)) {  // problems were reported by CheckPatches
-                  it = t.programIndex.emplace(po, static_cast<std::uint32_t>(t.programs.size())).first;
-                  t.programs.push_back(std::move(prog));
-                }
-              }
-              if (it != t.programIndex.end()) t.programLinks.push_back(patch::Link{sr, it->second});
-            }
+            WritePatch(t, sr, *e, *sv);
+            t.synp.U64(col::SYNP_gateFrames, sr, p_.U64(*e, *sv, "gateFrames", 0, d_));
           } else if (sv->Find("patch") != nullptr) {
             p_.WarnAt(*e, *sv->Find("patch"), "\"patch\" is only used with kind \"patch\"", d_);
           }
+          if (kind == 2) WriteGrains(t, sr, *e, *sv);
           t.synp.U32(col::SYNP_waveform, sr, p_.Enum(*e, *sv, "waveform", kWaveform, 0, d_));
           t.synp.F32(col::SYNP_frequencyHz, sr, static_cast<float>(p_.Num(*e, *sv, "frequencyHz", 440, d_)));
           t.synp.F32(col::SYNP_duty, sr, static_cast<float>(p_.Num(*e, *sv, "duty", 0.5, d_)));
           t.synp.U32(col::SYNP_noiseColor, sr, p_.Enum(*e, *sv, "noiseColor", kNoise, 0, d_));
-          t.synp.U32(col::SYNP_channels, sr, static_cast<std::uint32_t>(p_.U64(*e, *sv, "channels", 1, d_)));
+          const auto channels = p_.U64(*e, *sv, "channels", 1, d_);
+          if ((kind == 2 || kind == 3) && (!channels || channels > SND_MAX_CHANNELS))
+            p_.ErrorAt(*e, *sv, "synth channels outside 1..SND_MAX_CHANNELS", d_);
+          t.synp.U32(col::SYNP_channels, sr, static_cast<std::uint32_t>(channels));
           if (const Value* sa = sv->Find("asset"); sa != nullptr) {
             const Object* a = p_.Resolve(*e, *sa, Kind::Asset, d_);
             if (a != nullptr) t.synp.U32(col::SYNP_asset, sr, assetRow[a]);
@@ -2252,6 +2322,7 @@ void Builder::BuildBank(const Object& bank, const std::string& language) {
   if (!t.spth.empty()) b.writer.AddBlob(ch::SPTH, t.spth);
   if (!t.efbl.empty()) b.writer.AddBlob(ch::EFBL, t.efbl);
   if (!t.phys.empty()) b.writer.AddBlob(ch::PHYS, t.phys);
+  if (!t.ptch.empty()) b.writer.AddBlob(ch::PTCH, t.ptch);
   if (!t.programLinks.empty()) b.writer.AddBlob(patch::kChunkFourcc, patch::WritePatchChunk(t.programs, t.programLinks));
   if (t.dspCount > 0) {
     const bf::DspPoolNeed need{t.dspBytes, t.dspCount, 0};

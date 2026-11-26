@@ -167,7 +167,10 @@ void SelectVoices(Impl& im) noexcept {
     const bool restart = pvs.virtualReturn == 1u && pvs.firstClock != im.clock &&
                          (ph.frame != pvs.startFrame || ph.loopCount != 0u || ph.fraction != 0u);
     if (restart) pvs.flags |= kVsRestartReturn;
-    if ((pvs.flags & kVsVirtualized) != 0u) {
+    if (restart && (pvs.sourceKind == static_cast<unsigned>(SourceKind::Granular) ||
+                    pvs.sourceKind == static_cast<unsigned>(SourceKind::Patch))) {
+      control(c.voice, source::ControlOp::Seek, pvs.startFrame);
+    } else if ((pvs.flags & kVsVirtualized) != 0u) {
       control(c.voice, source::ControlOp::Devirtualize, restart ? pvs.startFrame : ph.frame);
     }
   }

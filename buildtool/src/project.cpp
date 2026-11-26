@@ -63,8 +63,13 @@ constexpr Schema kCone{kConeF, false, nullptr};
 SND_FIELDS(kRandomF, {"volumeDb", nullptr}, {"pitchCents", nullptr}, {"pan", nullptr}, {"startMs", nullptr},
            {"filterHz", nullptr})
 constexpr Schema kRandom{kRandomF, false, nullptr};
+SND_FIELDS(kInlineNodeF, {"id", nullptr}, {"op", nullptr}, {"inputs", nullptr}, {"args", nullptr}, {"waveform", nullptr})
+constexpr Schema kInlineNode{kInlineNodeF, false, nullptr};
 SND_FIELDS(kSynthF, {"kind", nullptr}, {"waveform", nullptr}, {"frequencyHz", nullptr}, {"duty", nullptr},
-           {"noiseColor", nullptr}, {"asset", nullptr}, {"channels", nullptr}, {"patch", nullptr})
+           {"noiseColor", nullptr}, {"asset", nullptr}, {"channels", nullptr}, {"patch", nullptr},
+           {"density", nullptr}, {"lengthMs", nullptr}, {"position", nullptr}, {"pitchJitterCents", nullptr},
+           {"window", nullptr}, {"positionJitter", nullptr}, {"pitchCents", nullptr}, {"gateFrames", nullptr},
+           {"nodes", &kInlineNode}, {"output", nullptr})
 constexpr Schema kSynth{kSynthF, false, nullptr};
 SND_FIELDS(kClipF, {"asset", nullptr}, {"event", nullptr}, {"synth", &kSynth}, {"startMs", nullptr}, {"weight", nullptr},
            {"volumeDb", nullptr}, {"pitchCents", nullptr}, {"random", &kRandom}, {"switchValue", nullptr},
@@ -198,7 +203,7 @@ std::string Describe(const json::Value& v) {
 bool IsArrayKey(const std::string& k) {
   static const char* const kArrays[] = {"tracks", "clips", "actions", "curves", "sends", "effects", "values", "states",
                                         "transitions", "stingers", "tempo", "markers", "stems", "entries", "pairs",
-                                        "nodes", "connections", "aliases", "dependsOn", "languagesList", "params",
+                                        "nodes", "inputs", "args", "connections", "aliases", "dependsOn", "languagesList", "params",
                                         "points", "layer", "materials", "scope", "position"};
   for (const char* a : kArrays) {
     if (k == a) return true;
@@ -219,7 +224,7 @@ void Walk(const Schema* s, const std::string& prefix, bool topLevel, std::vector
     std::string p = prefix.empty() ? key : prefix + "." + key;
     // "languages" is an array of names in project, a free-key object in asset; "params" an
     // array in effects, an object in patch nodes: decided by the child schema.
-    const bool array = IsArrayKey(key) && !(key == "params" && f->child != nullptr) && !(key == "languages" && f->child != nullptr);
+    const bool array = IsArrayKey(key) && !(s == &kSynth && key == "position") && !(key == "params" && f->child != nullptr) && !(key == "languages" && f->child != nullptr);
     if (key == "languages" && topLevel && f->child == nullptr) {
       out->push_back(p);
       out->push_back(p + "[]");

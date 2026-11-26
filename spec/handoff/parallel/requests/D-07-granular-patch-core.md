@@ -7,3 +7,5 @@
 3. core/src/sys_event.cpp の SYNP switch で検証済みの記述子を渡す。Granular はレート取得用に ASST の sample_rate を VoiceStatic.sourceRate に設定する（SourceStartResult.reserved にも内部レートとの差が返る）。Render 側の元レート種別として既存のリサンプラで処理し、仮想にも素材/内部レート込みの比率を一度だけ渡す。Patch は内部レート。現在の core の Start 失敗の通知を保つ。
 4. D-01 の CurveTarget 案に GrainDensity、GrainLengthMs、GrainPosition、GrainPitchJitterCents を加える。core/src/sys_params.cpp で算出したブロック両端の加算量を、core/src/sys_render.cpp の直列リスト組立で grainDensityOffset、grainLengthMsOffset、grainPositionOffset、grainPitchJitterCentsOffset へ写す。未指定は 0。ワーカーはテーブルを参照しない。単位は各 SYNP 列と同じ。
 5. 統合試験で 24 kHz 素材の 48 kHz 出力（仮想の復帰を含む）、各曲線、バンク解放・再登録、壊れた PTCH 範囲、D-06 の JSON からのオシレーターとゲインを検査する。
+
+実装と公開 API 回帰試験の結果は [D-07 統合レポート](../report-D-07.md) を参照。

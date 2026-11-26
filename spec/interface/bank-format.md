@@ -1,4 +1,4 @@
-# バンクのバイナリ仕様（形式 2.0）
+# バンクのバイナリ仕様（形式 2.1）
 
 設計書 10.2 の「バイト単位の仕様」。**凍結対象**（`spec/interface/CONTRACTS.md`）。
 正本の構造体定義は `contract/internal/include/snd/format/bank_format.hpp`。本書と食い違う場合はヘッダが正で、
@@ -411,6 +411,14 @@ fileBytes     終端
 | 6 | programOffset | U32 | 任意 | 0 | within PTCH |
 | 7 | programBytes | U32 | 任意 | 0 |  |
 | 8 | channels | U32 | 任意 | 1 |  |
+| 9 | density | F32 | 任意 | 20 | 粒/秒 |
+| 10 | lengthMs | F32 | 任意 | 100 | 粒の長さ (ms) |
+| 11 | position | F32 | 任意 | 0 | 素材内の位置 (0..1) |
+| 12 | pitchJitterCents | F32 | 任意 | 0 | 音程揺らぎの半幅 |
+| 13 | window | U32 | 任意 | 0 | 0 Hann、1 triangle、2 rectangle |
+| 14 | positionJitter | F32 | 任意 | 0 | 位置揺らぎの半幅 (0..1) |
+| 15 | pitchCents | F32 | 任意 | 0 | 粒の移調 |
+| 16 | gateFrames | U64 | 任意 | 0 | Patch のノート長。内部レートのフレーム数、0 で保持 |
 
 #### `MSEG`
 
@@ -580,7 +588,9 @@ fileBytes     終端
 - `SPTH`: ストリームファイルのパス（NUL 終端 UTF-8）。ランタイムで必要なので除去不可。`STRM.pathOffset` は SPTH 先頭から。
   ストリーム本体は別ファイルで、パケットは `STRM.sectorAlign` 境界から置く（10.2）。形式は下の「ストリームファイル」。
 - `EFBL`: エフェクト用データ（IR 等）。`EFFX.blobOffset` は EFBL 先頭から。
-- `PTCH`: パッチのプログラム（段階 6 で形式を定める。minor 版で追加）。
+- `PTCH` は [D-06](../handoff/parallel/requests/D-06-patch-format.md) の v1 プログラムを連結する。
+  SYNP の各スライスは 12 + 20N バイト。全整数・binary32 は LE。先頭のアラインメントを仮定しない。
+  読み込み時にスライスの範囲、版、予約領域、全ノードと入力、引数、出力への到達性を検証する。
 - `DSPN`: `DspPoolNeed { u64 instanceBytes; u32 instanceCount; u32 reserved; }`。`instanceBytes` は各 `EFFX.stateBytes` を
   64 に切り上げた和。DSP インスタンスプールの残りが足りなければ読み込み失敗（3.3）。
 - `PHYS`: 物理マテリアル表（9 章）。アプリケーションチャンク。
@@ -749,6 +759,7 @@ setup（`extra`）:
 | 1.0 | 段階0で凍結 |
 | 2.0 | headerChecksum をヘッダ全体（自身の欄は 0 とみなす）に拡大、予約バイト 0 の検証、`ALIS` チャンク追加、行の並びの規則（6.0: 入れ子 Event・カテゴリの親・シーク表）、`loopEnd`・`SEEK.byteOffset`・ストリームファイル（6.3）・エンディアン・`fileBytes` の明文化 |
 | 2.0（契約 1.1） | 文書の追記のみ（版は 2.0 のまま）: 6.4 標準エフェクトの種別 ID、6.5 組み込みコーデックのバイト配置 |
+| 2.1（D-07） | 追加のみ（minor）: `SYNP` の任意列 9〜16（`density`〜`gateFrames`。無い列は既定値で埋める）、`CurveTarget` の `GrainDensity`〜`GrainPitchJitterCents`（12〜15。10・11 は D-01 の予約）、`CurveCompose::AddLinear`（5）、`PTCH` v1 の中身（§6.2）。2.0 のランタイムは新しい列を無視して読める。版の検査は major だけなので 2.0 のバンクも 2.1 のランタイムで読める |
 | 2.0（Opus、D-57） | 文書の追記のみ（版は 2.0 のまま）: 6.5 に Opus のバイト配置と setup（`ASST.extra*`）。チャンク・列・列挙値は変えない（`OPUS` の fourcc は 1.0 から列挙にある）。setup に自前の版（1）を持つ |
 
 ## 8. 読み込み時の検証（bank モジュールの完了条件）
@@ -764,18 +775,16 @@ setup（`extra`）:
 
 ## 9. 仮の任意チャンク（未凍結。段階5 ツール、セッション C）
 
-形式の版は 2.0 のまま。ここのチャンクは凍結対象ではなく、ランタイムは読まない（未知のチャンクは無視、§5・§7、D-32）。
+この節のチャンクは凍結対象外（形式の版の対象でもない）。ランタイムは旧 XPCH のリンク表だけを互換判定に使う。その他の未知チャンクは §5・§7、D-32 に従い読み飛ばす。
 正式な定義が決まったら差し替える。
 
 ### `XPCH`（波形生成パッチのプログラム、仮）
 
-`PTCH`（§6.2、段階 6 で形式を定める）の形式がまだ無いため、ビルドツールはパッチ（project-format.md の `patch`）を
-この任意チャンクに出す。ランタイムの Patch ソースとバンクでの表現はセッション D が決める
-（`spec/handoff/parallel/requests/C-10.md`）。そのときに `PTCH` へ移し、このチャンクはやめる。
+名前付きパッチのエディタ用データ。ゲーム再生には同じバンクの `PTCH` を使う。
+旧ライターが作った XPCH のみのバンクはロードでき、対応する Patch の Start は従来どおり失敗する。
 
 - fourcc `'XPCH'`、ブロブ。ChunkEntry.flags 0、version 1。整数はリトルエンディアン、浮動小数は binary32。
-- `SYNP` の行は `kind` = Patch（3）、`programOffset` = `programBytes` = 0（`PTCH` は書かない）。どの `SYNP` 行がどのプログラムかは
-  このチャンクの対応表で引く。
+- 対応表は名前付きパッチの SYNP 行をエディタ用プログラムに結ぶ。旧バンクではその行の programOffset / programBytes はともに 0。
 
 | 部分 | 大きさ | 内容 |
 | --- | --- | --- |

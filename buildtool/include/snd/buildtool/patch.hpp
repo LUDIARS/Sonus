@@ -11,13 +11,8 @@
 // The node table below is the single definition the build tool (checks, conversion)
 // and the authoring tool's patch editor share.
 //
-// Bank representation (PROVISIONAL, bank-format.md §6.6): the runtime's Patch source
-// and the PTCH layout belong to session D and were not defined when this was written.
-// Until then the programs go into the optional chunk 'XPCH' (unknown chunks are
-// ignored by the runtime, D-32); the clip's SYNP row has kind Patch and
-// programOffset / programBytes 0, and XPCH links SYNP rows to programs. Everything
-// about the layout is in WritePatchChunk / ReadPatchChunk (patch.cpp), to be replaced
-// once D's definition arrives (requests/C-10.md).
+// Named graphs retain XPCH editor data and also emit PTCH v1 for the game.
+// The inline D-06 form emits PTCH only. See bank-format.md, SYNP and XPCH.
 #ifndef SND_BUILDTOOL_PATCH_HPP
 #define SND_BUILDTOOL_PATCH_HPP
 
@@ -102,7 +97,7 @@ using ParameterResolver = Id (*)(void* user, const json::Value& ref);
 bool Compile(const json::Value& doc, Id patchId, Program* out, std::vector<Problem>* problems,
              ParameterResolver resolveParameter = nullptr, void* user = nullptr);
 
-// Bank chunk (provisional layout, see above). `links`: (SYNP row, program index).
+// Editor chunk (legacy layout). `links`: (SYNP row, program index).
 struct Link {
   std::uint32_t synpRow = 0;
   std::uint32_t program = 0;

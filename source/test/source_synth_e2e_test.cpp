@@ -190,8 +190,8 @@ SND_TEST(SourceSynthE2E, InputPlaybackPlaysThePort) {
   SND_CHECK_EQ(r.runtime.Stats().inputInstances, 0u);
 }
 
-// Until D-07 is integrated the SYNP path starts Granular with null params.
-SND_TEST(SourceSynthE2E, GranularWithoutCoreDescriptorEndsSilently) {
+// The writer omits optional columns at their defaults (legacy SYNP layout).
+SND_TEST(SourceSynthE2E, GranularPlaysWithLegacyColumnDefaults) {
   const Built b = BuildSynths("granular");
   SND_REQUIRE_MSG(b.ok, "%s", b.diag.c_str());
   Rig r;
@@ -200,7 +200,8 @@ SND_TEST(SourceSynthE2E, GranularWithoutCoreDescriptorEndsSilently) {
   const auto h = r.Play("Grains");
   SND_REQUIRE(h.value != 0u);
   r.Steps(16);
-  SND_REQUIRE(r.EndOf(h) != nullptr);
-  SND_CHECK_EQ(r.runtime.Stats().granularInstances, 0u);
-  for (std::size_t i = 0; i < r.Frames(); ++i) SND_CHECK_EQ(r.At(i, 0), 0.f);
+  SND_CHECK(r.EndOf(h) == nullptr);
+  SND_CHECK_EQ(r.runtime.Stats().granularInstances, 1u);
+  const auto samples = Channel(r, 0);
+  SND_CHECK(std::any_of(samples.begin(), samples.end(), [](float x) { return std::abs(x) > 0.01f; }));
 }

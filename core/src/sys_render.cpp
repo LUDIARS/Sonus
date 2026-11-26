@@ -459,6 +459,8 @@ void InitRenderState(Impl& im, SlotIndex r, SlotIndex v, std::uint32_t vd, const
   if (sourceRate) {
     const dsp::ResamplerQuality q = im.rd.lod >= 2u ? dsp::kResamplerLight : dsp::kResamplerHigh;
     dsp::ResamplerInit(ResamplerState(im, r), q, vs.channels, im.cfg.maxPitchRatio);
+    if (vs.sourceKind == static_cast<unsigned>(SourceKind::Granular))
+      dsp::ResamplerSetFraction(ResamplerState(im, r), ph.fraction);
   }
   im.rd.stateChannels[r] = vs.channels;
   // The previous owner's last output must not be faded into a bus by this voice.
@@ -488,7 +490,7 @@ double PlayedSourceFrames(const VoiceStatic& vs, const Playhead& ph) noexcept {
 void TakeLookahead(Impl& im, SlotIndex v, const VoiceStatic& vs, Playhead& ph) noexcept {
   double la = im.rd.voiceLookahead[v];
   im.rd.voiceLookahead[v] = 0.0;
-  if (!(la > 0.0)) return;
+  if (la == 0.0 || (la < 0.0 && vs.sourceKind != static_cast<unsigned>(SourceKind::Granular))) return;
   double pos = static_cast<double>(ph.frame) + static_cast<double>(ph.fraction) * (1.0 / 4294967296.0) - la;
   if (vs.loopEndFrame != 0u && ph.loopCount != 0u && pos < static_cast<double>(vs.loopStartFrame)) {
     pos += static_cast<double>(vs.loopEndFrame - vs.loopStartFrame);  // back across the wrap
@@ -498,6 +500,17 @@ void TakeLookahead(Impl& im, SlotIndex v, const VoiceStatic& vs, Playhead& ph) n
   const double fl = std::floor(pos);
   ph.frame = static_cast<std::uint64_t>(fl);
   ph.fraction = static_cast<std::uint32_t>((pos - fl) * 4294967296.0);
+}
+
+// The resampler integrates pitch in Q32, including the slope across this block.
+// Split the product to retain fractional carries even across many held blocks.
+void AdvanceGrainClock(Playhead& ph, std::uint32_t frames, float start, float end, float maxRatio,
+                       std::uint64_t blocks = 1) noexcept {
+  const auto delta = dsp::ResamplerAdvanceQ32(frames, start, end, maxRatio);
+  const std::uint64_t frac = static_cast<std::uint32_t>(delta);
+  const auto low = frac * static_cast<std::uint32_t>(blocks) + ph.fraction;
+  ph.frame += (delta >> 32) * blocks + frac * (blocks >> 32) + (low >> 32);
+  ph.fraction = static_cast<std::uint32_t>(low);
 }
 
 // Posts the markers of an effect clip (markers.hpp) crossed while the voice's played
@@ -638,8 +651,21 @@ void Render(Impl& im) noexcept {
             float ratio = SND_R(Voice_pitch)[d].end *
                           ((vs.flags & kVsSourceRate) != 0u ? vs.sourceRate / static_cast<float>(im.cfg.sampleRate) : 1.0f);
             ratio = ratio > im.cfg.maxPitchRatio ? im.cfg.maxPitchRatio : ratio;
-            const source::AdvanceItem item{v, srcSlot, static_cast<std::uint32_t>(missed * frames), ratio,
-                                           &t.RealVoice.col.playhead[r]};
+            auto& ph = t.RealVoice.col.playhead[r];
+            source::AdvanceItem item{v, srcSlot, static_cast<std::uint32_t>(missed * frames), ratio, &ph};
+            source::GrainOffsets held{};
+            if (vs.sourceKind == static_cast<unsigned>(SourceKind::Granular)) {
+              auto* rs = ResamplerState(im, r);
+              rd.voiceLookahead[v] = -dsp::ResamplerPendingOffset(rs);
+              TakeLookahead(im, v, vs, ph);
+              AdvanceGrainClock(ph, frames, ratio, ratio, im.cfg.maxPitchRatio, missed);
+              auto atEnd = [](Ramp ramp) { return Ramp{ramp.end, ramp.end}; };
+              held = {atEnd(vs.grain.density), atEnd(vs.grain.lengthMs),
+                      atEnd(vs.grain.position), atEnd(vs.grain.pitchJitterCents)};
+              item.grain = &held;
+              dsp::ResamplerReset(rs);
+              dsp::ResamplerSetFraction(rs, ph.fraction);
+            }
             VoiceRenderStatus st{};
             src->AdvanceVirtual(&item, 1u, &st);
             t.RealVoice.col.renderStatus[r] = st;
@@ -716,6 +742,11 @@ void Render(Impl& im) noexcept {
     in.ratio0 = clampRatio(pitch.start * srcRatio);
     in.ratio1 = clampRatio(pitch.end * srcRatio);
     if (sourceRate) in.flags |= kItemSourceRate;
+    it.grainResampled = kind == SourceKind::Granular;
+    it.grainDensityOffset = vs.grain.density;
+    it.grainLengthMsOffset = vs.grain.lengthMs;
+    it.grainPositionOffset = vs.grain.position;
+    it.grainPitchJitterCentsOffset = vs.grain.pitchJitterCents;
     it.pitch = Ramp{in.ratio0, in.ratio1};
     // 1.2 (D-90): followed transport (synth voices), as of this block's first frame.
     it.transportBeats = vs.followTransport.generation != 0u ? vs.transportBeats : -1.0;
@@ -944,6 +975,13 @@ void Render(Impl& im) noexcept {
           before[n] = PlayedSourceFrames(vs, vPlayhead[d]);
           if ((vs.flags & kVsFadeInHold) == 0u) rd.voicePlayed[v] += frames - off;  // D-146: played time
           adv[n] = source::AdvanceItem{v, srcSlot, frames - off, ratio, &vPlayhead[d]};
+          if (k == static_cast<unsigned>(SourceKind::Granular)) {
+            const auto pitch = SND_R(Voice_pitch)[d];
+            const auto scale = vs.sourceRate / rate;
+            auto& ph = vPlayhead[d];
+            AdvanceGrainClock(ph, frames - off, pitch.start * scale, pitch.end * scale, im.cfg.maxPitchRatio);
+            adv[n].grain = &vs.grain;
+          }
           st[n] = VoiceRenderStatus{};
           dens[n] = d;
           ++n;

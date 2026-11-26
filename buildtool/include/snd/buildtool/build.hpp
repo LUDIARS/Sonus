@@ -55,6 +55,7 @@ struct BuildOptions {
   // banks first) and nothing is written; outDir may be "". Reading old outputs to skip
   // unchanged files does not happen (BuildResult::filesWritten counts every output).
   std::vector<OutputFile>* memoryOutput = nullptr;
+  bool allowEditorOnlyPatches = false;  // preview: retain unrepresentable named XPCH graphs with a warning
 };
 
 struct BuiltBank {

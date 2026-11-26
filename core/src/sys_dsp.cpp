@@ -300,7 +300,8 @@ void EvaluateDspParams(Impl& im) noexcept {
   const float* busGainPrev = SND_R(Bus_gain);
   for (std::uint32_t d = 0; d < vr.count; ++d) {
     const SlotIndex v = base::rows::SlotAt(vr, d);
-    const VoiceStatic& vs = im.ev.vs[v];
+    VoiceStatic& vs = im.ev.vs[v];
+    source::GrainOffsets offsets{};
     const SlotIndex pb = vpb[d];
     const std::uint32_t pd = base::rows::DenseOf(t.Playback.rows, pb);
     float gainDb = vs.gainDb;
@@ -336,7 +337,10 @@ void EvaluateDspParams(Impl& im) noexcept {
       for (std::uint32_t k = 0; k < cc; ++k) {
         const std::uint32_t cv = cf + k;
         const auto destination = static_cast<bf::CurveTarget>(view->Column<bk::col::CURV_target>()[cv]);
-        if (destination > bf::CurveTarget::Pan) continue;  // spatial curves were evaluated at each listener
+        const bool grain = destination >= bf::CurveTarget::GrainDensity &&
+                           destination <= bf::CurveTarget::GrainPitchJitterCents &&
+                           vs.sourceKind == static_cast<unsigned>(SourceKind::Granular);
+        if (destination > bf::CurveTarget::Pan && !grain) continue;
         const Id input = view->Column<bk::col::CURV_input>()[cv];
         float x = 0.0f;
         if (input == bf::kInputDistance) {
@@ -345,6 +349,17 @@ void EvaluateDspParams(Impl& im) noexcept {
           x = ParamValueOf<kSys>(im, input, pb, emitter);
         }
         float y = EvaluateCurve(*view, cv, x);
+        if (grain) {
+          if (input == bf::kInputDistance && mix.count) y *= spatial.blend;
+          switch (destination) {
+            case bf::CurveTarget::GrainDensity: offsets.density.end += y; break;
+            case bf::CurveTarget::GrainLengthMs: offsets.lengthMs.end += y; break;
+            case bf::CurveTarget::GrainPosition: offsets.position.end += y; break;
+            case bf::CurveTarget::GrainPitchJitterCents: offsets.pitchJitterCents.end += y; break;
+            default: break;
+          }
+          continue;
+        }
         if (input == bf::kInputDistance && mix.count && spatial.blend < 1) {
           // The same blend applies to distance-input CURV rows as to the
           // dedicated EVNT curves. Other parameter inputs remain active in 2D.
@@ -445,6 +460,16 @@ void EvaluateDspParams(Impl& im) noexcept {
       }
     }
     const bool fresh = vlc[d].state == static_cast<std::uint8_t>(VoiceStateId::Starting);
+    if (vs.sourceKind == static_cast<unsigned>(SourceKind::Granular)) {
+      auto step = [fresh](Ramp& ramp, float value) {
+        if (!std::isfinite(value)) value = 0;
+        ramp = {fresh ? value : ramp.end, value};
+      };
+      step(vs.grain.density, offsets.density.end);
+      step(vs.grain.lengthMs, offsets.lengthMs.end);
+      step(vs.grain.position, offsets.position.end);
+      step(vs.grain.pitchJitterCents, offsets.pitchJitterCents.end);
+    }
     vgain[d] = Ramp{fresh ? gEnd : vgain[d].end, gEnd};
     vpitch[d] = Ramp{fresh ? pEnd : vpitch[d].end, pEnd};
     vfilt[d] = FilterTarget{lowpass, highpass};

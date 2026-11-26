@@ -33,12 +33,17 @@ struct GranularVoice {
 
 class GranularKind final : public ResidentSynth<GranularKind, GranularVoice> {
  public:
+  std::size_t PoolBytes(const SourceLimits&) const noexcept override;
+  bool Init(void*, std::size_t, const SourceLimits&, const SourceServices&) noexcept override;
   SourceKind Kind() const noexcept override { return SourceKind::Granular; }
   bool RendersAtOutputRate() const noexcept override { return false; }
   bool Prepare(GranularVoice&, const SourceStartRequest&, SourceStartResult&) noexcept;
   void Control(const SourceControlOp*, std::uint32_t) noexcept override;
   void RenderBatch(const source::RenderBatch&, VoiceRenderStatus*) noexcept override;
   void AdvanceVirtual(const AdvanceItem*, std::uint32_t, VoiceRenderStatus*) noexcept override;
+ private:
+  float* history_ = nullptr;
+  std::uint32_t historyFrames_ = 0, historyChannels_ = 0;
 };
 }  // namespace snd::source::detail
 #endif

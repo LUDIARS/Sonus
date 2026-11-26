@@ -68,8 +68,22 @@ std::uint64_t VirtualFrames(GranularVoice& voice, float pitch, std::uint32_t fra
 
 // Advance the same Q32 accumulator as rendering. Only the newest eight births
 // can survive, independent of how many samples or whole grain cycles elapsed.
-void Skip(GranularVoice& v, std::uint64_t frames) noexcept {
-  const auto inc = Increment(v, 0);
+void Skip(GranularVoice& v, std::uint64_t frames, const GrainOffsets& offsets = {}) noexcept {
+  const auto firstFrame = v.frame;
+  auto spawnAt = [&](std::uint64_t serial, std::uint64_t birth) {
+    const double t = double(birth - firstFrame) / double(frames);
+    Spawn(v, serial, birth, Modulation(offsets.lengthMs, t), Modulation(offsets.position, t),
+          Modulation(offsets.pitchJitterCents, t));
+  };
+  if (offsets.density.start != offsets.density.end) {
+    for (std::uint64_t f = 0; f < frames; ++f, ++v.frame) {
+      const auto phase = v.phase + Increment(v, Modulation(offsets.density, double(f) / double(frames)));
+      v.phase = static_cast<std::uint32_t>(phase);
+      if (phase >= kCycle) spawnAt(v.serial++, v.frame);
+    }
+    return;
+  }
+  const auto inc = Increment(v, offsets.density.end);
   const auto tail = v.phase + (frames & UINT32_MAX) * inc;
   const auto births = (frames >> 32) * inc + (tail >> 32);
   v.phase = static_cast<std::uint32_t>(tail);
@@ -77,7 +91,7 @@ void Skip(GranularVoice& v, std::uint64_t frames) noexcept {
   v.frame += frames;
   for (std::uint64_t j = 0; j < std::min<std::uint64_t>(births, kGrainSlots); ++j) {
     const auto age = 1 + (v.phase + j * kCycle) / inc;
-    Spawn(v, v.serial - 1 - j, v.frame - age, 0, 0, 0);
+    spawnAt(v.serial - 1 - j, v.frame - age);
   }
 }
 
@@ -222,13 +236,13 @@ void RenderTile(GranularVoice& v, const RenderItem& item, unsigned offset,
     std::copy_n(item.out[channels - 1] + offset, count, item.out[c] + offset);
 }
 
-void RenderVoice(GranularVoice& v, const RenderItem& item) noexcept {
+void RenderVoice(GranularVoice& v, const RenderItem& item, unsigned first = 0) noexcept {
   const unsigned n = item.framesRequested;
   const bool constant = item.grainDensityOffset.start == item.grainDensityOffset.end;
   const auto fixed = Increment(v, Modulation(item.grainDensityOffset, 0));
   const bool stereo = item.channels == 2 && v.asset.codec.channels == 2;
   const bool floating = v.asset.codec.codec == SND_CODEC_PCM_F32;
-  for (unsigned f = 0; f < n;) {
+  for (unsigned f = first; f < n;) {
     const double t = double(f) / n;
     const auto inc = constant ? fixed : Increment(v, Modulation(item.grainDensityOffset, t));
     const auto phase = v.phase + inc;
@@ -270,7 +284,41 @@ void RenderVoice(GranularVoice& v, const RenderItem& item) noexcept {
     f += count;
   }
 }
+// Write or read the trailing PCM across at most one wrap. Memory belongs to the
+// preallocated voice slot; re-promotion can use another real slot or quality.
+template<bool Save>
+void History(float* history, unsigned capacity, unsigned channels, const RenderItem& it,
+             std::uint64_t frame, unsigned offset, unsigned n) noexcept {
+  const unsigned pos = static_cast<unsigned>(frame % capacity);
+  const auto first = std::min(n, capacity - pos);
+  for (unsigned c = 0; c < std::min(it.channels, channels); ++c) {
+    auto* pcm = it.out[c] + offset;
+    auto* ring = history + std::size_t{c} * capacity;
+    if constexpr (Save) {
+      std::copy_n(pcm, first, ring + pos);
+      std::copy_n(pcm + first, n - first, ring);
+    } else {
+      std::copy_n(ring + pos, first, pcm);
+      std::copy_n(ring, n - first, pcm + first);
+    }
+  }
+}
 }  // namespace
+
+std::size_t GranularKind::PoolBytes(const SourceLimits& limits) const noexcept {
+  Carver measure{nullptr, ResidentSynth::PoolBytes(limits), 0};
+  measure.Take<float>(std::size_t{limits.maxVoices} * limits.grainHistoryChannels * limits.grainHistoryFrames);
+  return measure.used;
+}
+
+bool GranularKind::Init(void* pool, std::size_t bytes, const SourceLimits& limits, const SourceServices& services) noexcept {
+  if (!ResidentSynth::Init(pool, bytes, limits, services)) return false;
+  Carver tail{static_cast<std::uint8_t*>(pool), ResidentSynth::PoolBytes(limits), bytes};
+  historyFrames_ = limits.grainHistoryFrames;
+  historyChannels_ = limits.grainHistoryChannels;
+  history_ = tail.Take<float>(std::size_t{limits.maxVoices} * historyFrames_ * historyChannels_);
+  return tail.ok;
+}
 
 bool GranularKind::Prepare(GranularVoice& v, const SourceStartRequest& rq,
                            SourceStartResult& result) noexcept {
@@ -331,9 +379,27 @@ void GranularKind::RenderBatch(const source::RenderBatch& batch,
       st.ended = 1;
       continue;
     }
-    RenderVoice(*v, item);
-    item.playhead->frame = v->frame;
-    item.playhead->fraction = v->fraction.back();
+    if (item.grainResampled) {
+      float* history = history_ + std::size_t{item.sourceSlot} * historyFrames_ * historyChannels_;
+      const auto start = item.playhead->frame;
+      if (start > v->frame) Skip(*v, start - v->frame);
+      const auto replay = static_cast<unsigned>(std::min<std::uint64_t>(v->frame - start, item.framesRequested));
+      // Older history can be unavailable after starvation. Leave that prefix
+      // zero (RenderItem buffers are cleared by core), then resume on the clock.
+      const auto oldest = v->frame > historyFrames_ ? v->frame - historyFrames_ : 0;
+      const auto silence = static_cast<unsigned>(std::min<std::uint64_t>(replay, oldest > start ? oldest - start : 0));
+      if (replay > silence) History<false>(history, historyFrames_, historyChannels_, item, start + silence, silence, replay - silence);
+      RenderVoice(*v, item, replay);
+      const auto end = start + item.framesRequested;
+      const auto save = std::min(item.framesRequested - replay, historyFrames_);
+      if (save) History<true>(history, historyFrames_, historyChannels_, item, end - save, item.framesRequested - save, save);
+      item.playhead->frame = end;
+      item.playhead->fraction = 0;
+    } else {
+      RenderVoice(*v, item);
+      item.playhead->frame = v->frame;
+      item.playhead->fraction = v->fraction.back();
+    }
     st.framesRendered = item.framesRequested;
   }
 }
@@ -348,9 +414,14 @@ void GranularKind::AdvanceVirtual(const AdvanceItem* items, std::uint32_t count,
       status[i].ended = 1;
       continue;
     }
-    Skip(*v, VirtualFrames(*v, a.pitch, a.outputFrames));
-    a.playhead->frame = v->frame;
-    a.playhead->fraction = v->fraction.back();
+    if (a.grain) {
+      const auto end = a.playhead->frame;
+      if (end > v->frame) Skip(*v, end - v->frame, *a.grain);
+    } else {
+      Skip(*v, VirtualFrames(*v, a.pitch, a.outputFrames));
+      a.playhead->frame = v->frame;
+      a.playhead->fraction = v->fraction.back();
+    }
   }
 }
 }  // namespace snd::source::detail
