@@ -311,7 +311,7 @@ SND_TEST(IndepConvolution, PartitionRuleAndStateSize) {
   Opt o;
   o.partition = 256;
   Conv ex(2, 0, o);
-  snd::test::Note("state stereo 48k 2 s B256: %zu bytes", ex.bytes);
+  snd::test::Note("state stereo 48k 2 s B256: %llu bytes", static_cast<unsigned long long>(ex.bytes));
   SND_CHECK(ex.bytes > 1500000u && ex.bytes < 1650000u);
   SND_CHECK_EQ(ConvolutionStateCapacityFrames(ex.st()), 96000u + 256u);
   // 1 GiB limit: a huge sizing rate is capped.
@@ -405,8 +405,8 @@ SND_TEST(IndepConvolution, PartitionBoundariesMatchDirectConvolution) {
         const std::vector<double> want = Direct(x, h, zl != 0.0f ? 0u : b);
         std::size_t at = 0;
         const double e = MaxErr(y[0], want, &at);
-        SND_CHECK_MSG(e < Tol(h, 0.5f), "B %u taps %u zl %g: error %g at %zu (tol %g)", b, taps,
-                      static_cast<double>(zl), e, at, Tol(h, 0.5f));
+        SND_CHECK_MSG(e < Tol(h, 0.5f), "B %u taps %u zl %g: error %g at %llu (tol %g)", b, taps,
+                      static_cast<double>(zl), e, static_cast<unsigned long long>(at), Tol(h, 0.5f));
         SND_CHECK_EQ(ConvolutionStateActiveIrFrames(ref.st()), taps);
         for (const std::vector<std::uint32_t>& sizes :
              {std::vector<std::uint32_t>{1}, std::vector<std::uint32_t>{b - 1u}, std::vector<std::uint32_t>{b},
@@ -449,8 +449,8 @@ SND_TEST(IndepConvolution, LongIrMatchesDirectConvolution) {
         const std::vector<double> want = Direct(x[c], h[c], zl != 0.0f ? 0u : b);
         std::size_t at = 0;
         const double e = MaxErr(y[c], want, &at);
-        snd::test::Note("2 s IR, B %u zl %g ch %u: max error %.3g at %zu (peak %.3g)", b, static_cast<double>(zl), c,
-                        e, at, Peak(want));
+        snd::test::Note("2 s IR, B %u zl %g ch %u: max error %.3g at %llu (peak %.3g)", b, static_cast<double>(zl), c,
+                        e, static_cast<unsigned long long>(at), Peak(want));
         SND_CHECK(e < 2e-5 * (1.0 + Peak(want)));
       }
       SND_CHECK(fx.GuardIntact());
@@ -605,8 +605,8 @@ SND_TEST(IndepConvolution, IrSlotSelectionAndSharing) {
       eAt = i;
     }
   }
-  SND_CHECK_MSG(e < Tol(h2, 0.5f), "IrSlot switch: error %g at %zu (the new IR must apply to the history at once)", e,
-                eAt);
+  SND_CHECK_MSG(e < Tol(h2, 0.5f), "IrSlot switch: error %g at %llu (the new IR must apply to the history at once)", e,
+                static_cast<unsigned long long>(eAt));
   SND_CHECK_EQ(ConvolutionStateActiveIrFrames(fx.st()), 900u);
   // Unusable / absent IRs: wet silent, dry passes.
   for (std::uint32_t slot : {wrongB.slot, wrongRate.slot, 0u, kConvolutionMaxIrNumber + 1u}) {
@@ -896,7 +896,7 @@ SND_TEST(IndepConvolution, BlobFuzz) {
   for (std::size_t n = 0; n < need; n += (n < 64u ? 1u : 97u)) {
     std::vector<unsigned char> t(blob.begin(), blob.begin() + n);
     SND_CHECK_MSG(!ConvolutionParseIrBlob(n != 0u ? t.data() : nullptr, n, &bi) && ConvolutionIrBytesFromBlob(t.data(), n, kRate, 64) == 0u,
-                  "truncated blob of %zu bytes accepted", n);
+                  "truncated blob of %llu bytes accepted", static_cast<unsigned long long>(n));
   }
   std::vector<unsigned char> longer(need + 1u, 0);
   std::memcpy(longer.data(), blob.data(), need);
@@ -1231,8 +1231,9 @@ SND_TEST(IndepConvolution, CostAndResetTime) {
         rworst = std::max(rworst, us);
       }
       snd::test::Note("convolution 2 s stereo, block %u, zl %g: mean %.1f us, worst %.1f us (peak/mean %.1f), "
-                      "budget %.0f us; EffectReset of %zu bytes: mean %.1f us, worst %.1f us",
-                      block, static_cast<double>(zl), mean, worst, worst / mean, block * 1e6 / kRate, fx.bytes,
+                      "budget %.0f us; EffectReset of %llu bytes: mean %.1f us, worst %.1f us",
+                      block, static_cast<double>(zl), mean, worst, worst / mean, block * 1e6 / kRate,
+                      static_cast<unsigned long long>(fx.bytes),
                       rsum / 20.0, rworst);
     }
   }

@@ -248,8 +248,9 @@ SND_TEST(IndepTimeStretch, ShapeFormulas) {
   for (unsigned char c : m) untouched = untouched && c == 0x5A;
   SND_CHECK_MSG(untouched, "a failed Init wrote to the state");
   // D-217 specifies these two state sizes.
-  snd::test::Note("state bytes: stereo 48k x4 %zu, 8ch 96k x4 %zu, 8ch 384k x4 %zu", b,
-                  TimeStretchStateBytes(8, 96000), TimeStretchStateBytes(8, 384000));
+  snd::test::Note("state bytes: stereo 48k x4 %llu, 8ch 96k x4 %llu, 8ch 384k x4 %llu",
+                  static_cast<unsigned long long>(b), static_cast<unsigned long long>(TimeStretchStateBytes(8, 96000)),
+                  static_cast<unsigned long long>(TimeStretchStateBytes(8, 384000)));
   SND_CHECK_EQ(b, 41152u);
   SND_CHECK_EQ(TimeStretchStateBytes(8, 96000), 310528u);
 }
@@ -740,8 +741,10 @@ SND_TEST(IndepTimeStretch, SpecialSignals) {
       std::size_t lastBad = 0;
       for (std::size_t i = 0; i < o[0].size(); ++i)
         if (!std::isfinite(o[0][i])) lastBad = i;
-      snd::test::Note("NaN at source 10000..10100, speed %.1f: last non-finite output frame %zu", speed, lastBad);
-      SND_CHECK_MSG(lastBad < 10100.0 / speed + 3000.0, "speed %g: NaN persists to output frame %zu", speed, lastBad);
+      snd::test::Note("NaN at source 10000..10100, speed %.1f: last non-finite output frame %llu", speed,
+                      static_cast<unsigned long long>(lastBad));
+      SND_CHECK_MSG(lastBad < 10100.0 / speed + 3000.0, "speed %g: NaN persists to output frame %llu", speed,
+                    static_cast<unsigned long long>(lastBad));
     }
   }
 }
