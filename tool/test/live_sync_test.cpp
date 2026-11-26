@@ -194,17 +194,16 @@ SND_TEST(LiveSync, StructuralEditWithinTheReserveOrFallsBackToReload) {
     SND_CHECK(r.sync->structEdits()[0].undone);
     SND_CHECK_EQ(r.sync->reserve().effects, 0u);
   }
-  {  // No editor (today's core): UNSUPPORTED -> rebuild and hot reload, without a problem shown.
+  {  // Production preview installs the real editor.
     Rig r;
     SND_REQUIRE(r.ok);
     SND_REQUIRE(r.Connect());
     SND_REQUIRE(r.Settled());
     SND_REQUIRE(r.doc.Insert(livetest::G(4), "effects", 0, Json(effect)));
     SND_REQUIRE(r.Settled());
-    SND_REQUIRE(!r.sync->reloads().empty());
-    SND_CHECK_EQ(r.sync->reloads().back().result, SND_OK);
+    SND_REQUIRE(r.sync->reloads().empty());
     SND_CHECK(r.sync->problems().empty());
-    SND_CHECK_EQ(r.sync->reserve().effects, 0u);
+    SND_CHECK_EQ(r.sync->reserve().effects, 1u);
   }
 }
 
@@ -574,7 +573,9 @@ SND_TEST(LiveSync, StructuralEditAndValueEditInOneBuildBothReachTheGame) {
   SND_CHECK_NEAR(r.Left() / base, Ratio(-6.0), 1e-5);
   SND_CHECK(r.sync->reloads().empty());
   // The same with the structural edit refused (no editor): the reload carries the value.
-  Rig r2;
+  snd::tool::preview::PreviewEngineDesc noEditor;
+  noEditor.structEditor = nullptr;
+  Rig r2(false, noEditor);
   SND_REQUIRE(r2.ok);
   const double base2 = PlayTone(r2);
   SND_REQUIRE(r2.Connect());

@@ -4,6 +4,8 @@
 
 #include <atomic>
 #include <cstring>
+
+#include "prepare_effect.hpp"
 #include <new>
 
 #include "snd/core/core.hpp"
@@ -805,10 +807,16 @@ struct Server::Impl final : FrameReader::Handler {
       c.costEffects = cost.effects;
       c.costBytes = cost.bytes;
       c.structLogPlace = logPlace ? 1u : 0u;
-      c.state.store(PendingChunk::kQueued, std::memory_order_release);
-      const cmd::LiveReplaceChunk cc{0u, kStructEditTag, &c};
-      r = Record(cmd::CommandType::LiveReplaceChunk, &cc, sizeof(cc), h.seq, wantAck, slot, true, kOpStruct);
-      if (r != SND_OK) c.state.store(PendingChunk::kFree, std::memory_order_release);
+      r = rt->PreparePlugin(c);
+      if (r == SND_OK) {
+        c.state.store(PendingChunk::kQueued, std::memory_order_release);
+        const cmd::LiveReplaceChunk cc{0u, kStructEditTag, &c};
+        r = Record(cmd::CommandType::LiveReplaceChunk, &cc, sizeof(cc), h.seq, wantAck, slot, true, kOpStruct);
+      }
+      if (r != SND_OK) {
+        CancelPreparedEffect(c);
+        c.state.store(PendingChunk::kFree, std::memory_order_release);
+      }
     }
     if (r == SND_OK) return;  // answered when applied (the audio thread gives the reserve back on failure)
     if (reserved) rt->ReleaseStruct(cost);

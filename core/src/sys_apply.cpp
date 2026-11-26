@@ -1292,14 +1292,14 @@ void ApplyCommands(Impl& im) noexcept {
       ArenaView& av = pr.arenas[idx];
       cmd::ArenaHeader& h = *av.header;
       h.appliedBlock = im.block;  // D-12
-      if (tap.arena != nullptr) {  // 11.3 recording
-        const bool fb = (h.flags & cmd::kArenaHasFallback) != 0u;
-        tap.arena(tap.user, LiveArenaView{pi, h.flags, im.block, av.normal, h.normalBytes, h.reserveBytes, av.reserve,
-                                          fb ? &av.fallback : nullptr});
-      }
+      const bool fb = (h.flags & cmd::kArenaHasFallback) != 0u;
+      const LiveArenaView view{pi, h.flags, im.block, av.normal, h.normalBytes, h.reserveBytes, av.reserve,
+                               fb ? &av.fallback : nullptr};
+      if (tap.arena) tap.arena(tap.user, view);
       cmd::ForEachCommand(av.normal, av.normal + h.normalBytes, apply);
       cmd::ForEachCommand(av.reserve, av.reserve + h.reserveBytes, apply);
       if ((h.flags & cmd::kArenaHasFallback) != 0u) ApplyFallback(im, av.fallback);
+      if (tap.arenaApplied) tap.arenaApplied(tap.user, view);
       pr.cycle.Return(idx);
     }
   }

@@ -3,6 +3,8 @@
 
 #include <cstddef>
 #include <cstring>
+
+#include "prepare_effect.hpp"
 #include <new>
 
 #include "snd/core/core.hpp"
@@ -107,6 +109,10 @@ void Replayer::Destroy(Replayer* r) noexcept {
 
 Replayer::~Replayer() {
   if (alloc_ == nullptr) return;
+  if (pluginPool_) {
+    pluginPool_->~LivePluginPool();
+    alloc_->Free(pluginPool_, MemTag::LiveLink);
+  }
   alloc_->Free(commands_, MemTag::LiveLink);
   alloc_->Free(arenas_, MemTag::LiveLink);
   alloc_->Free(fallbacks_, MemTag::LiveLink);
@@ -124,6 +130,11 @@ Replayer::~Replayer() {
 
 int Replayer::Init(const ReplayDesc& d) noexcept {
   config_ = *d.config;
+  if (config_.plugins.effect_count) {
+    auto* mem = alloc_->Allocate(sizeof(core::LivePluginPool), 64, MemTag::LiveLink);
+    if (!mem) return SND_ERR_OUT_OF_BUDGET;
+    pluginPool_ = new (mem) core::LivePluginPool();
+  }
   const FallbackCaps caps = CapsOf(config_);
   const CommandLimits limits = LimitsOf(config_);
   if (!applier_.Init(*alloc_, d.maxEdits, config_.max_banks)) return SND_ERR_OUT_OF_BUDGET;
@@ -223,6 +234,7 @@ int Replayer::Init(const ReplayDesc& d) noexcept {
   fallbackMemory_ = static_cast<std::uint8_t*>(A(fbBytes));
   banks_ = static_cast<BankRef*>(A(sizeof(BankRef) * std::uint64_t{info_.bankMaps}));
   chunks_ = static_cast<PendingChunk*>(A(sizeof(PendingChunk) * std::uint64_t{chunkCount_}));
+  if (chunks_) for (std::uint32_t i = 0; i < chunkCount_; ++i) new (&chunks_[i]) PendingChunk();
   chunkMemory_ = static_cast<std::uint8_t*>(A(liveBytes));
   startCells_ = static_cast<RecordCell*>(A(sizeof(RecordCell) * std::uint64_t{info_.startCells}));
   maxDecisions_ = d.maxDecisions;
@@ -234,7 +246,6 @@ int Replayer::Init(const ReplayDesc& d) noexcept {
       decisions_ == nullptr || voiceScratch_ == nullptr) {
     return SND_ERR_OUT_OF_BUDGET;
   }
-  for (std::uint32_t i = 0; i < chunkCount_; ++i) new (&chunks_[i]) PendingChunk();
   std::memset(fallbackMemory_, 0, static_cast<std::size_t>(fbBytes != 0u ? fbBytes : 64u));
   // Pass 2: copy, filter.
   RecordReader rr(d.record, d.bytes);
@@ -242,6 +253,7 @@ int Replayer::Init(const ReplayDesc& d) noexcept {
   std::uint32_t at = 0, fi = 0;
   std::uint64_t fbAt = 0, liveAt = 0;
   std::uint32_t chunkAt = 0, pendingFrom = 0;  // chunks_[pendingFrom, chunkAt): data for the next arena
+  snd_result prepResult = SND_OK;
   std::uint32_t overrides = 0;
   if (prologue) {  // reserve the first arena for the starting overrides (filled below)
     Arena& a = arenas_[arenaCount_++];
@@ -309,11 +321,13 @@ int Replayer::Init(const ReplayDesc& d) noexcept {
     Arena& a = arenas_[arenaCount_++];
     a = Arena{};
     a.relBlock = it.arena.appliedBlock - info_.firstBlock;
+    a.producer = it.arena.producer;
     a.flags = it.sections.arenaFlags;
     a.fallback = ~0u;
     auto copy = [&](const std::uint8_t* b, std::uint32_t n, std::uint32_t* off, std::uint32_t* bytes) {
       *off = at;
       cmd::ForEachCommand(b, b + n, [&](const cmd::CommandHeader& h, const std::uint8_t* payload) {
+        if (!applyStart_ && (it.sections.arenaFlags & kInitialRoutingArena)) return;
         if (h.type == static_cast<std::uint16_t>(cmd::CommandType::LiveReplaceChunk)) {
           // 1.1: replayed with the data recorded just before this arena (paired by pointer).
           const auto c = LoadP<cmd::LiveReplaceChunk>(payload);
@@ -334,6 +348,11 @@ int Replayer::Init(const ReplayDesc& d) noexcept {
           pc.reserved = 0u;
           pc.seq = 0u;
           if (pc.fourcc == kStructEditTag) {
+            if (structEditor_ == &CoreStructEditor() && prepResult == SND_OK) {
+              const auto limit = d.pluginPreparationBytes ? d.pluginPreparationBytes : config_.dev_reserve.bytes;
+              if (pluginPool_) prepResult = PrepareExternalEffect(*pluginPool_, *alloc_, config_, nullptr, pc, limit);
+              else if (pc.bankId) prepResult = SND_ERR_UNSUPPORTED;
+            }
             ++info_.structEdits;
           } else {
             ++info_.replacedChunks;
@@ -363,6 +382,7 @@ int Replayer::Init(const ReplayDesc& d) noexcept {
     };
     copy(it.normal, it.sections.normalBytes, &a.normalOffset, &a.normalBytes);
     copy(it.reserve, it.sections.reserveBytes, &a.reserveOffset, &a.reserveBytes);
+    if (prepResult != SND_OK) return prepResult;
     if (it.fallback != nullptr) {
       FallbackHeader fh;
       std::memcpy(&fh, it.fallback, sizeof(fh));
@@ -605,6 +625,7 @@ bool Replayer::Next(std::uint64_t block, core::LiveArenaView* out) noexcept {
   while (cursor_ < arenaCount_ && arenas_[cursor_].relBlock < rel) ++cursor_;  // cannot happen (ordered)
   if (cursor_ < arenaCount_ && arenas_[cursor_].relBlock == rel) {
     const Arena& a = arenas_[cursor_++];
+    producer_ = a.producer;
     LogArena(a);
     *out = core::LiveArenaView{};
     out->producer = kInvalidSlot;
@@ -628,7 +649,23 @@ void Replayer::OnCommand(cmd::CommandType type, const void* payload) noexcept {
     cmd::LiveSetValue c;
     std::memcpy(&c, payload, sizeof(c));
     if (c.valueType == kValueTypeReadCell) return;  // a read changes nothing
-    applier_.SetValue(*sys, c);
+    if (c.field == kFieldSession && c.objectId == 0u && producer_ < 64u) {
+      sessions_[producer_] = static_cast<std::uint32_t>(c.value);
+      return;
+    }
+    const auto session = producer_ < 64u ? sessions_[producer_] : 0u;
+    if (c.field == kFieldRevertAll && structEditor_) {
+      for (std::uint32_t i = chunkCount_; i-- > 0;) {
+        auto& p = chunks_[i];
+        if (p.fourcc != kStructEditTag || !p.replayApplied || (session && p.replaySession > session)) continue;
+        const auto h = LoadP<StructEdit>(p.data);
+        StructEditRequest q{static_cast<StructOp>(h.op), h.targetId, h.argCount, p.replaySession,
+                            reinterpret_cast<const std::uint64_t*>(p.data + sizeof(h)), std::uint64_t{i} + 1};
+        if (structEditor_->Undo(*sys, q) == SND_OK) p.replayApplied = false;
+        else structNotApplied_.fetch_add(1u, std::memory_order_relaxed);
+      }
+    }
+    applier_.SetValue(*sys, c, session);
     return;
   }
   if (type != cmd::CommandType::LiveReplaceChunk) return;
@@ -640,9 +677,14 @@ void Replayer::OnCommand(cmd::CommandType type, const void* payload) noexcept {
   if (p->fourcc == kStructEditTag) {
     StructEdit h{};
     std::memcpy(&h, p->data, sizeof(h));
-    const StructEditRequest q{static_cast<StructOp>(h.op), h.targetId, h.argCount, 0u,
-                              reinterpret_cast<const std::uint64_t*>(p->data + sizeof(StructEdit))};
+    p->replaySession = producer_ < 64u ? sessions_[producer_] : 0u;
+    const StructEditRequest q{static_cast<StructOp>(h.op), h.targetId, h.argCount, p->replaySession,
+                              reinterpret_cast<const std::uint64_t*>(p->data + sizeof(h)),
+                              static_cast<std::uint64_t>(p - chunks_) + 1, p->prepared};
     const snd_result r = structEditor_ != nullptr ? structEditor_->Apply(*sys, q) : SND_ERR_UNSUPPORTED;
+    if (r != SND_OK) CancelPreparedEffect(*p);
+    else p->prepared = nullptr;
+    p->replayApplied = r == SND_OK;
     if (r != SND_OK) structNotApplied_.fetch_add(1u, std::memory_order_relaxed);
     return;
   }

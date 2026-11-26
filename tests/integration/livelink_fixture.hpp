@@ -48,7 +48,7 @@ inline constexpr std::uint64_t kProjectHash = 0x5EED5EED12345678ull;
 inline constexpr float kDc = 0.5f;
 inline constexpr snd::Id kBankId = snd::HashId("Live");
 
-inline std::vector<std::uint8_t> DevBank(std::uint64_t projectHash = kProjectHash, bool dev = true) {
+inline std::vector<std::uint8_t> DevBank(std::uint64_t projectHash = kProjectHash, bool dev = true, bool authoredEcho = false) {
   namespace c = bf::col;
   bt::BankWriter w;
   bt::TableBuilder ev(bf::chunk::EVNT), tr(bf::chunk::TRAK), cl(bf::chunk::CLIP), bu(bf::chunk::BUSS),
@@ -101,6 +101,29 @@ inline std::vector<std::uint8_t> DevBank(std::uint64_t projectHash = kProjectHas
   w.AddTable(ev);
   w.AddTable(tr);
   w.AddTable(cl);
+  if (authoredEcho) {
+    bt::TableBuilder fx(bf::chunk::EFFX), pv(bf::chunk::EFPV);
+    const auto row = fx.AddRow();
+    fx.U32(c::EFFX_effectType, row, snd::HashId("snd.fx.echo"));
+    fx.U32(c::EFFX_paramFirst, row, 0);
+    fx.U32(c::EFFX_paramCount, row, 5);
+    for (float p : {4.f, 0.f, .25f, 0.f, 10.f}) pv.F32(c::EFPV_value, pv.AddRow(), p);
+    bu.U32(c::BUSS_effectFirst, 0, 0);
+    bu.U32(c::BUSS_effectCount, 0, 1);
+    w.AddTable(fx);
+    w.AddTable(pv);
+    bt::TableBuilder snap(bf::chunk::SNAP), values(bf::chunk::SNPV);
+    const auto preset = snap.AddRow(), value = values.AddRow();
+    snap.U32(c::SNAP_id, preset, snd::HashId("RaiseDry"));
+    snap.U32(c::SNAP_valueFirst, preset, 0);
+    snap.U32(c::SNAP_valueCount, preset, 1);
+    values.U32(c::SNPV_targetKind, value, 1);
+    values.U32(c::SNPV_targetRow, value, 0);
+    values.U32(c::SNPV_paramIndex, value, 2);
+    values.F32(c::SNPV_value, value, .25f);
+    w.AddTable(snap);
+    w.AddTable(values);
+  }
   w.AddTable(bu);
   w.AddTable(as);
   w.AddBlob(bf::chunk::WAVE, wave);
@@ -147,19 +170,19 @@ enum class Hooks { None, Live, Replay };
 class Fixture {
  public:
   explicit Fixture(Hooks hooks = Hooks::Live, const snd_config& cfg = Config(), ll::Replayer* replayer = nullptr,
-                   ll::RuntimeDesc rd = {})
+                   ll::RuntimeDesc rd = {}, snd::IAllocator& allocator = snd::base::DefaultAllocator())
       : cfg_(cfg) {
     kinds_.kinds[static_cast<int>(snd::SourceKind::Sample)] = &sample;
     snd::core::CoreDesc d;
     d.config = &cfg_;
-    d.allocator = &snd::base::DefaultAllocator();
+    d.allocator = &allocator;
     d.sources = &kinds_;
     d.jobs = &jobs;
     d.bankFileSystem = &fs;
     d.rtWorkerRealtimePriority = false;
     if (hooks == Hooks::Live) {
       rd.config = &cfg_;
-      rd.allocator = &snd::base::DefaultAllocator();
+      rd.allocator = &allocator;
       created = ll::LiveRuntime::Create(rd, &rt);
       if (rt != nullptr) rt->Install(&d);
     } else if (hooks == Hooks::Replay && replayer != nullptr) {

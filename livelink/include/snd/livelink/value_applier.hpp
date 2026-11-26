@@ -32,6 +32,7 @@ namespace snd::core {
 class System;
 struct LiveCell;
 struct LiveBankInfo;
+struct PreparedLivePlugin;
 }  // namespace snd::core
 
 namespace snd::livelink {
@@ -62,7 +63,9 @@ struct PendingChunk {
   // D-172: 1 when it holds a place of the runtime's structural-edit log (taken at acceptance,
   // given back by the audio thread unless the edit stays in the log).
   std::uint32_t structLogPlace = 0;
-  std::uint32_t reserved2 = 0;
+  std::uint32_t replaySession = 0;
+  bool replayApplied = false;
+  core::PreparedLivePlugin* prepared = nullptr;
 };
 
 // 1.1: the answer to a ReadCell (audio thread -> live link thread).

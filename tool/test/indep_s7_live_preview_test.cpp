@@ -141,12 +141,16 @@ SND_TEST(IndepS7LivePreview, EdgeValuesAreRefusedOrHarmless) {
   EmitterPose bad;
   bad.position = Vec3f{std::numeric_limits<float>::quiet_NaN(), 0.0f, INFINITY};
   const std::uint64_t spot = en.e->Play(snd::HashId("Spot"), &bad);
+  SND_CHECK_EQ(spot, 0u);
   en.Frames(4);
   SND_CHECK(Finite(en.out));
-  if (spot != 0u) en.e->MoveEmitter(spot, bad);
+  EmitterPose valid;
+  const auto live = en.e->Play(snd::HashId("Spot"), &valid);
+  SND_REQUIRE(live != 0u);
+  SND_CHECK(!en.e->MoveEmitter(live, bad));
   ListenerPose lb;
   lb.position = Vec3f{INFINITY, -INFINITY, std::numeric_limits<float>::quiet_NaN()};
-  en.e->SetListener(lb);
+  SND_CHECK(!en.e->SetListener(lb));
   en.e->SetParam(snd::HashId("Knob"), std::numeric_limits<float>::quiet_NaN());
   en.e->SetParam(snd::HashId("Knob"), 1e30f);
   en.Frames(8);

@@ -4,6 +4,7 @@
 // digest, and the 2.5 conditions the replay reports. Levels are analytic ("Tone" plays a
 // constant through the Sfx bus).
 #include "livelink_v11_common.hpp"
+#include "snd/internal/rt_check.hpp"
 
 using namespace v11;
 
@@ -15,13 +16,13 @@ struct Recorded {
   std::uint32_t blockSamples = 0;
 };
 
-enum class During { Plays, ReplaceChunk, StructEdit, Audition, ToneBefore, TwoReplaceChunks };
+enum class During { Plays, ReplaceChunk, StructEdit, Mixer, StaticRoutesBefore, Audition, ToneBefore, TwoReplaceChunks };
 
 // A session recorded through the tool. `before` edits come before the recording starts.
-void RecordSession(Recorded& rec, bool editsBefore, During during, ll::IStructEditor* editor = nullptr) {
+void RecordSession(Recorded& rec, bool editsBefore, During during, ll::IStructEditor* editor = nullptr, snd_config cfg = Config()) {
   ll::RuntimeDesc rd;
   rd.structEditor = editor;
-  Fixture f(Hooks::Live, Config(), nullptr, rd);
+  Fixture f(Hooks::Live, cfg, nullptr, rd);
   rec.blockSamples = f.sys->BlockFrames() * f.sys->OutputChannels();
   f.Load(DevBank());
   SND_REQUIRE_EQ(f.StartServer(), SND_OK);
@@ -40,6 +41,13 @@ void RecordSession(Recorded& rec, bool editsBefore, During during, ll::IStructEd
     SND_CHECK_EQ(ack(c->SetValue(BusVolume("Sfx", -6.0f))), SND_OK);
     SND_CHECK_EQ(ack(c->OverrideParam(HashId("Knob"), 0.75f, true, true)), SND_OK);
   }
+  if (during == During::StaticRoutesBefore) {
+    const auto aux = HashId("PreExistingAux");
+    const std::uint64_t bus[]{HashId("Master"), 2u, Bits(-6)};
+    const std::uint64_t send[]{aux, Bits(0)};
+    SND_REQUIRE_EQ(ack(c->StructEdit(ll::StructOp::AddBus, aux, bus, 3)), SND_OK);
+    SND_REQUIRE_EQ(ack(c->StructEdit(ll::StructOp::AddSend, HashId("Sfx"), send, 2)), SND_OK);
+  }
   if (during == During::ToneBefore) {
     f.sys->Play(HashId("Tone"), snd_emitter_handle{0}, nullptr);
     f.Steps(4);
@@ -49,6 +57,12 @@ void RecordSession(Recorded& rec, bool editsBefore, During during, ll::IStructEd
   f.sys->Play(HashId("Tone"), snd_emitter_handle{0}, nullptr);
   f.Steps(4);
   switch (during) {
+    case During::StaticRoutesBefore: {
+      f.Steps(4);
+      const cmd::LiveSetValue revert{0, ll::kFieldRevertAll, 0, 0, 0};
+      SND_REQUIRE_EQ(f.sys->RecordLive(cmd::CommandType::LiveSetValue, &revert, sizeof(revert)), SND_OK);
+      break;
+    }
     case During::Plays:
     case During::ToneBefore:
       f.sys->Play(HashId("Blip"), snd_emitter_handle{0}, nullptr);
@@ -62,6 +76,27 @@ void RecordSession(Recorded& rec, bool editsBefore, During during, ll::IStructEd
     case During::ReplaceChunk: {
       const std::vector<std::uint8_t> chunk = BussVolumes({-6.0f, 0.0f});
       SND_CHECK_EQ(ack(c->ReplaceChunk(kBankId, bf::chunk::BUSS, chunk.data(), chunk.size())), SND_OK);
+      break;
+    }
+    case During::Mixer: {
+      const auto aux = HashId("LiveAux");
+      const std::uint64_t bus[]{HashId("Master"), 2u, Bits(-6)};
+      const std::uint64_t send[]{aux, Bits(0)};
+      const std::uint64_t fx[]{HashId("snd.fx.echo"), 0u, Bits(4), Bits(0.3f), Bits(0), Bits(1), Bits(20)};
+      SND_REQUIRE_EQ(ack(c->StructEdit(ll::StructOp::AddBus, aux, bus, 3)), SND_OK);
+      SND_REQUIRE_EQ(ack(c->StructEdit(ll::StructOp::AddSend, HashId("Sfx"), send, 2)), SND_OK);
+      SND_REQUIRE_EQ(ack(c->StructEdit(ll::StructOp::AddEffect, aux, fx, 7)), SND_OK);
+      f.Steps(16);
+      const std::uint64_t index = 0;
+      SND_REQUIRE_EQ(ack(c->StructEdit(ll::StructOp::RemoveEffect, aux, &index, 1)), SND_OK);
+      // The same core command emitted on disconnect; keep the connection to collect its recording.
+      f.Steps(3);
+      const cmd::LiveSetValue revert{0, ll::kFieldRevertAll, 0, 0, 0};
+      SND_REQUIRE_EQ(f.sys->RecordLive(cmd::CommandType::LiveSetValue, &revert, sizeof(revert)), SND_OK);
+      f.Steps(4);
+      // A rejected edit must have no effect even in a replay with a different editor.
+      const std::uint64_t cycle[]{HashId("Sfx"), Bits(0)};
+      SND_REQUIRE_EQ(ack(c->StructEdit(ll::StructOp::AddSend, HashId("Master"), cycle, 2)), SND_ERR_INVALID_ARGUMENT);
       break;
     }
     case During::StructEdit: {
@@ -387,6 +422,97 @@ SND_TEST(LivelinkV11Record, TwoReplacementsWithTheSameKeyReplayInOrder) {
   Replay(rec, &a);
   SND_CHECK_EQ(a.info.replacedChunks, 2u);
   SND_CHECK_EQ(a.info.skippedCommands, 0u);
+  SND_CHECK(a.reproduces);
+  SND_CHECK_EQ(Differences(rec, a), 0u);
+}
+
+SND_TEST(LivelinkV11Record, RealMixerMatchesEveryRecordedSampleAndRepeatedReplay) {
+  Recorded rec;
+  auto* editor = &ll::CoreStructEditor();
+  RecordSession(rec, false, During::Mixer, editor);
+  Replayed a, b;
+  Replay(rec, &a, editor);
+  Replay(rec, &b, editor);
+  SND_REQUIRE_EQ(a.info.structEdits, 4u);
+  SND_CHECK_EQ(a.info.skippedCommands, 0u);  // a refused cycle was an observed no-op
+  SND_CHECK(a.reproduces);
+  SND_CHECK_EQ(a.info.structEditsNotApplied, 0u);
+  SND_CHECK_EQ(Differences(rec, a), 0u);
+  SND_CHECK_EQ(Differences(rec, b), 0u);
+  SND_CHECK_EQ(a.digest, b.digest);
+}
+
+// Override a standard type. This plugin stores a self-pointer: moving its initialised
+// bytes to a different address would break processing even if the parameters matched.
+SND_TEST(LivelinkV11Record, ExternalDspPreparesOffAudioAndReplaysAtItsFinalAddress) {
+  struct State { const void* self; float gain; };
+  struct Counters { std::atomic<unsigned> sizes{0}, inits{0}, processed{0}, errors{0}; } counters;
+  snd_dsp_effect fx{};
+  fx.user = &counters;
+  fx.effect_type = HashId("snd.fx.echo");
+  fx.state_bytes = [](void* u, const snd_effect_desc* d) -> std::uint32_t {
+    auto& c = *static_cast<Counters*>(u);
+    ++c.sizes;
+    if (snd::rt::InRtScope() || !d->sample_rate || d->channels != 2) ++c.errors;
+    return sizeof(State);
+  };
+  fx.init = [](void* u, void* state, const snd_effect_desc* d, std::uint32_t rate) {
+    auto& c = *static_cast<Counters*>(u);
+    ++c.inits;
+    if (snd::rt::InRtScope() || rate != d->sample_rate || d->param_count != 5 ||
+        reinterpret_cast<std::uintptr_t>(state) % 64 != 0) ++c.errors;
+    new (state) State{state, d->initial_params[1]};
+  };
+  fx.process = [](void* u, void* state, const float* const* in, float* const* out,
+                  std::uint32_t channels, std::uint32_t frames, const snd_param_block*) {
+    auto& c = *static_cast<Counters*>(u);
+    const auto& s = *static_cast<State*>(state);
+    ++c.processed;
+    if (s.self != state) ++c.errors;
+    for (std::uint32_t i = 0; i < channels; ++i)
+      for (std::uint32_t j = 0; j < frames; ++j) out[i][j] = in[i][j] * s.gain;
+  };
+  fx.is_tail_done = [](void*, const void*) -> std::int32_t { return 1; };
+  auto cfg = Config();
+  cfg.plugins.effects = &fx;
+  cfg.plugins.effect_count = 1;
+  auto* editor = &ll::CoreStructEditor();
+  Recorded rec;
+  RecordSession(rec, false, During::Mixer, editor, cfg);
+  // This recording used an external override of a standard ID; silently substituting
+  // the builtin on a different replay host would produce the wrong samples.
+  auto missing = Config();
+  ll::ReplayDesc rd;
+  rd.config = &missing;
+  rd.allocator = &snd::base::DefaultAllocator();
+  rd.record = rec.bytes.data();
+  rd.bytes = rec.bytes.size();
+  rd.structEditor = editor;
+  ll::Replayer* bad = nullptr;
+  SND_CHECK_EQ(ll::Replayer::Create(rd, &bad), SND_ERR_UNSUPPORTED);
+  SND_CHECK(bad == nullptr);
+  const auto usedLive = counters.processed.load();
+  SND_REQUIRE(usedLive > 0u);
+  Replayed a, b;
+  Replay(rec, &a, editor, true, cfg);
+  Replay(rec, &b, editor, true, cfg);
+  SND_CHECK_EQ(counters.inits.load(), 3u);
+  SND_CHECK_EQ(counters.sizes.load(), 3u);
+  SND_CHECK_EQ(counters.errors.load(), 0u);
+  SND_CHECK_EQ(counters.processed.load(), 3u * usedLive);
+  SND_CHECK(a.reproduces && b.reproduces);
+  SND_CHECK_EQ(Differences(rec, a), 0u);
+  SND_CHECK_EQ(Differences(rec, b), 0u);
+}
+
+SND_TEST(LivelinkV11Record, StartingRoutingTopologyReplaysIncludingLaterUndo) {
+  Recorded rec;
+  auto* editor = &ll::CoreStructEditor();
+  RecordSession(rec, false, During::StaticRoutesBefore, editor);
+  Replayed a;
+  Replay(rec, &a, editor);
+  SND_CHECK_EQ(a.info.lostState, 0u);
+  SND_CHECK_EQ(a.info.structEdits, 2u);
   SND_CHECK(a.reproduces);
   SND_CHECK_EQ(Differences(rec, a), 0u);
 }

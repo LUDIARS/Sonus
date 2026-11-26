@@ -371,6 +371,19 @@ snd_result CreateImpl(Impl& im) noexcept {
   im.fire.entries = Arr<music::FireEntry>(im, g.maxReservations, MemTag::Tables);
   im.fire.capacity = g.maxReservations;
   // Definitions and id maps.
+  im.graphScratch = Arr<std::uint32_t>(im, std::size_t{g.busCap} * 3u, MemTag::Tables);
+  if (!im.graphScratch) return SND_ERR_OUT_OF_BUDGET;
+  if (im.config.livelink.enabled || im.desc.liveTap.replay) {
+    if (im.config.plugins.effect_count) {
+      im.publishedBus = Arr<std::atomic<std::uint64_t>>(im, g.busCap, MemTag::Tables);
+      if (!im.publishedBus) return SND_ERR_OUT_OF_BUDGET;
+      for (SlotIndex s = 0; s < g.busCap; ++s) im.publishedBus[s].store(0, std::memory_order_relaxed);
+    }
+    im.retiredRoutes = Arr<SlotIndex>(im, g.busCap, MemTag::Tables);
+    if (!im.retiredRoutes) return SND_ERR_OUT_OF_BUDGET;
+    im.tailScratch = Arr<float>(im, std::size_t{kMaxChannels} * g.blockFrames, MemTag::Tables);
+    if (!im.tailScratch) return SND_ERR_OUT_OF_BUDGET;
+  }
   im.busDefs = Arr<BusDef>(im, g.busCap, MemTag::Tables);
   im.catDefs = Arr<CatDef>(im, g.catCap, MemTag::Tables);
   im.snapDefs = Arr<SnapDef>(im, g.snapCap, MemTag::Tables);
@@ -627,7 +640,7 @@ snd_result CreateImpl(Impl& im) noexcept {
     bd.fileSystem = im.desc.bankFileSystem;
     bd.jobs = im.desc.jobs;
     bd.maxBanks = g.maxBanks;
-    bd.prepare.devOverlay = im.config.livelink.enabled != 0u;
+    bd.prepare.devOverlay = im.config.livelink.enabled != 0u || im.desc.liveTap.replay != nullptr;
     bd.prepare.devReserve.buses = im.config.dev_reserve.buses;
     bd.prepare.devReserve.effects = im.config.dev_reserve.effects;
     bd.prepare.devReserve.events = im.config.dev_reserve.events;

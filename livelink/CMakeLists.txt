@@ -11,6 +11,7 @@ snd_add_module(livelink
     src/memory_transport.cpp
     src/record_format.cpp
     src/value_applier.cpp
+    src/core_struct_editor.cpp
     src/runtime.cpp
     src/server.cpp
     src/client.cpp
