@@ -7,11 +7,8 @@
 // holds StructEdit + args), the session rules (D-83, D-87), the Ack, the
 // recording (RecordLiveData) and the disconnect revert (undo in reverse order).
 //
-// The last step, changing core's tables, goes through this narrow seam. core
-// has no function for it yet (request spec/handoff/parallel/requests/C-01.md),
-// so the default (no editor installed) answers SND_ERR_UNSUPPORTED and the tool
-// falls back to a rebuild and hot reload. A test or a future core binding
-// installs an editor (RuntimeDesc::structEditor, ReplayDesc::structEditor).
+// The game composition, preview and replay host install CoreStructEditor.
+// A host can supply its own editor or keep the null-editor hot reload fallback.
 //
 // Both functions run on the audio thread at a block boundary (inside
 // CoreDesc::liveCommand): principle 1 applies (no allocation, no lock, no IO).
@@ -25,6 +22,7 @@
 
 namespace snd::core {
 class System;
+struct PreparedLivePlugin;
 }  // namespace snd::core
 
 namespace snd::livelink {
@@ -34,8 +32,10 @@ struct StructEditRequest {
   StructOp op = StructOp::AddBus;
   std::uint32_t targetId = 0;
   std::uint32_t argCount = 0;
-  std::uint32_t session = 0;  // live link session that sent it (0 in a replay)
+  std::uint32_t session = 0;  // live link session that sent it (restored from recorded producer markers)
   const std::uint64_t* args = nullptr;
+  std::uint64_t token = 0;  // unique within the bound runtime, retained for Undo
+  core::PreparedLivePlugin* prepared = nullptr;  // worker-owned storage, transferred on success
 };
 
 class IStructEditor {
@@ -44,11 +44,17 @@ class IStructEditor {
   // Applies the edit. SND_OK, or why not (SND_ERR_UNSUPPORTED: rebuild and hot reload;
   // SND_ERR_NOT_FOUND: unknown target; ...). A failed edit must leave core unchanged.
   virtual snd_result Apply(core::System& sys, const StructEditRequest& edit) noexcept = 0;
+  virtual std::uint64_t OwnerBank(core::System&, const StructEditRequest&) noexcept { return 0; }
+  // Token of the addition a Remove would cancel; zero for an authored row.
+  // Legacy editors without identity support retain their original matching rules.
+  virtual std::uint64_t RemovalOrigin(core::System&, const StructEditRequest&) noexcept { return ~std::uint64_t{0}; }
   // Undoes an edit this editor applied earlier (disconnect revert, newest first). For a
   // Remove the editor restores what it removed if it can; the result is only counted.
   // Effects and sends that went away with a removed live bus are never undone.
   virtual snd_result Undo(core::System& sys, const StructEditRequest& edit) noexcept = 0;
 };
+
+IStructEditor& CoreStructEditor() noexcept;
 
 // What an edit takes from Config.dev_reserve (LiveRuntime::StructCostOf).
 //   AddBus: 1 bus, AddEffect: 1 effect, AddSend: no unit; every Add takes

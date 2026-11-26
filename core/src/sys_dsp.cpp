@@ -192,7 +192,7 @@ void ApplySnapshotOffset(Impl& im, const BankRecord& rec, std::uint32_t kind, st
     const auto* owner = RegisteredBank(im, def.defBank);
     if (owner == nullptr) continue;
     if (fx) {
-      auto* e = BusEffectInstance(im, rec.busSlot[b], row - first);
+      auto* e = BusEffectInstance(im, rec.busSlot[b], row - first, true);
       if (e && e->type == v.Column<bk::col::EFFX_effectType>()[row] && param < e->paramCount &&
           !EffectParamIsInitOnly(e->plugin, e->type, param)) e->ctl[param].contrib += offset;
     } else {
@@ -449,7 +449,7 @@ void EvaluateDspParams(Impl& im) noexcept {
     vpitch[d] = Ramp{fresh ? pEnd : vpitch[d].end, pEnd};
     vfilt[d] = FilterTarget{lowpass, highpass};
     im.dp.pan[v] = pan < -1.0f ? -1.0f : (pan > 1.0f ? 1.0f : pan);
-    const SlotIndex bus = vbus[d];
+    const SlotIndex bus = RoutedBus(im, vbus[d]);
     const std::uint32_t bd = bus == kNoSlot ? kNoSlot : base::rows::DenseOf(t.Bus.rows, bus);
     vaud[d] = gEnd * (bd != kNoSlot ? busGainPrev[bd] : 1.0f);
   }

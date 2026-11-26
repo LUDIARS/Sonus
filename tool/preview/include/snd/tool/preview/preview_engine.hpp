@@ -34,6 +34,7 @@ class System;
 }
 namespace snd::livelink {
 class IStructEditor;
+IStructEditor& CoreStructEditor() noexcept;
 class Server;
 }  // namespace snd::livelink
 
@@ -51,7 +52,7 @@ struct PreviewEngineDesc {
   PreviewOutput output = PreviewOutput::Manual;
   bool liveLink = true;                                // the in-process server
   bool revertOnDisconnect = false;                     // ServerDesc::revertOnDisconnect
-  livelink::IStructEditor* structEditor = nullptr;     // structural edits (null: UNSUPPORTED, C-01)
+  livelink::IStructEditor* structEditor = &livelink::CoreStructEditor();  // null: hot reload fallback
   std::uint32_t chunkSlots = 1;                        // ReplaceChunk in flight (RuntimeDesc)
   std::uint32_t bankTimeoutMs = 10000;
 };

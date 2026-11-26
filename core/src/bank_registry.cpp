@@ -11,6 +11,7 @@
 // initial state).
 #include <algorithm>
 #include <cstring>
+#include <functional>
 #include <new>
 
 #include "access.hpp"
@@ -79,6 +80,7 @@ bool PrepareBankRecord(Impl& im, const cmd::BankRegister& reg) noexcept {
   r.prepared = pb;
   r.view = &pb->view;
   r.bankId = pb->bankId;
+  r.nextCell = std::max({nB, nX, v.Rows(bf::chunk::EFPV), v.Rows(bf::chunk::SEND)});
   r.languageId = pb->languageId;
   // Event index sorted by id.
   r.eventCount = nE;
@@ -242,7 +244,7 @@ bool PrepareBankRecord(Impl& im, const cmd::BankRegister& reg) noexcept {
     }
     std::uint64_t at = 0;
     for (std::uint32_t x = 0; x < nX; ++x) {
-      EffectInstance& e = r.effects[x];
+      EffectInstance& e = *new (&r.effects[x]) EffectInstance{};
       snd_effect_desc d = descs[x];
       d.sample_rate = im.cfg.sampleRate;
       e.type = d.effect_type;
@@ -352,6 +354,24 @@ bool FindOtherDefinition(Impl& im, std::uint32_t exceptBank, F&& has) noexcept {
 
 }  // namespace
 
+bool AdoptAuthoredBus(Impl& im, SlotIndex slot, std::uint32_t oldBank) noexcept {
+  auto& b = im.busDefs[slot];
+  if (b.refCount <= 1) return false;
+  return FindOtherDefinition(im, oldBank, [&](const BankRecord& other) {
+    for (std::uint32_t row = 0; row < other.busCount; ++row) {
+      if (other.busSlot[row] != slot) continue;
+      b.live = nullptr;
+      b.sends = nullptr;
+      b.customChain = false;
+      b.chainCount = 0;
+      --b.refCount;
+      WriteBusDefinition(im, slot, other, row);
+      return true;
+    }
+    return false;
+  });
+}
+
 void ApplyBankRegister(Impl& im, const cmd::BankRegister& reg) noexcept {
   schema::Tables& t = im.tables;
   if (reg.bank.slot >= im.cfg.maxBanks) return;
@@ -368,6 +388,8 @@ void ApplyBankRegister(Impl& im, const cmd::BankRegister& reg) noexcept {
     const Id id = v.Column<bk::col::BUSS_id>()[b];
     std::uint32_t slot = im.busMap.Find(id);
     if (slot != IdMap::kNotFound) {
+      // A newly registered authored definition makes the shared bus live again.
+      if (im.busDefs[slot].removed) RestoreBusRow(im, slot);
       ++im.busDefs[slot].refCount;
       r.busSlot[b] = slot;
       continue;
@@ -550,6 +572,7 @@ void UnregisterBank(Impl& im, std::uint32_t bankSlot) noexcept {
   BankAudio& ba = im.ap.banks[bankSlot];
   BankRecord& r = *ba.rec;
   const bk::BankView& v = *r.view;
+  PrepareBusRetirement(im, r);
   ba.state = BankAudioState::AwaitEpoch;  // excluded from the definition search below
   ba.unregisterBlock = im.block;
   // Sources drop what they cached of this bank (PCM cache) once it is unused (stage 2).
@@ -673,22 +696,25 @@ void UnregisterBank(Impl& im, std::uint32_t bankSlot) noexcept {
 // before the targets of its sends; ties by slot (deterministic). Sends that
 // would close a cycle (possible only across banks) are ignored at mix time.
 void RebuildBusGraph(Impl& im) noexcept {
+  OrderBusGraph(im, kNoSlot, kNoSlot, false);
+}
+
+bool OrderBusGraph(Impl& im, SlotIndex from, SlotIndex to, bool strict) noexcept {
   schema::Tables& t = im.tables;
   const schema::TableRows& rows = t.Bus.rows;
   const std::uint32_t cap = im.cfg.busCap;
-  std::uint32_t* indeg = im.frameArena.AllocateArray<std::uint32_t>(cap);
-  std::uint8_t* done = im.frameArena.AllocateArray<std::uint8_t>(cap);
-  if (indeg == nullptr || done == nullptr) return;
-  for (std::uint32_t s = 0; s < cap; ++s) {
-    indeg[s] = 0;
-    done[s] = 0;
-  }
+  auto* indeg = im.graphScratch;
+  auto* ready = indeg + cap;
+  auto* candidate = ready + cap;
+  std::fill_n(indeg, cap, 0u);
   const SlotIndex* parent = SND_W(Bus_parentSlot);
   const RangeU32* sends = SND_W(Bus_sendRange);
   auto forEachTarget = [&](std::uint32_t slot, auto&& fn) {
     const std::uint32_t dn = base::rows::DenseOf(rows, slot);
     if (parent[dn] != kNoSlot && base::rows::IsLive(rows, parent[dn])) fn(parent[dn]);
     const BusDef& def = im.busDefs[slot];
+    if (slot == from) fn(to);
+    for (auto* send = def.sends; send; send = send->nextSend) fn(send->target);
     const BankRecord* br = RegisteredBank(im, def.defBank);
     if (br == nullptr) {
       // The defining bank is being unregistered right now: use the record directly.
@@ -706,35 +732,48 @@ void RebuildBusGraph(Impl& im) noexcept {
   for (std::uint32_t s = 0; s < cap; ++s) {
     if (base::rows::IsLive(rows, s)) forEachTarget(s, [&](std::uint32_t tgt) { ++indeg[tgt]; });
   }
-  std::uint32_t order = 0;
-  std::uint32_t* go = SND_W(Bus_graphOrder);
-  for (;;) {
-    std::uint32_t pick = kNoSlot;
-    for (std::uint32_t s = 0; s < cap; ++s) {
-      if (base::rows::IsLive(rows, s) && done[s] == 0u && indeg[s] == 0u) {
-        pick = s;
-        break;
-      }
+  // Kahn's algorithm with a preallocated min-heap preserves the slot tie-break
+  // without scanning the entire bus capacity for each vertex on the audio thread.
+  std::uint32_t count = 0;
+  const std::greater<SlotIndex> bySlot{};
+  for (std::uint32_t d = 0; d < rows.count; ++d) {
+    const auto slot = base::rows::SlotAt(rows, d);
+    if (indeg[slot] == 0) ready[count++] = slot;
+  }
+  std::make_heap(ready, ready + count, bySlot);
+  SlotIndex firstRemaining = 0;
+  auto* go = SND_W(Bus_graphOrder);
+  for (std::uint32_t order = 0; order < rows.count; ++order) {
+    SlotIndex pick;
+    if (count != 0) {
+      std::pop_heap(ready, ready + count, bySlot);
+      pick = ready[--count];
+    } else {
+      if (strict) return false;
+      // Authored cross-bank cycles retain the established lowest-slot fallback.
+      while (!base::rows::IsLive(rows, firstRemaining) || indeg[firstRemaining] == kNoSlot) ++firstRemaining;
+      pick = firstRemaining++;
     }
-    if (pick == kNoSlot) {  // cycle: take the lowest remaining slot
-      for (std::uint32_t s = 0; s < cap; ++s) {
-        if (base::rows::IsLive(rows, s) && done[s] == 0u) {
-          pick = s;
-          break;
-        }
+    indeg[pick] = kNoSlot;
+    candidate[base::rows::DenseOf(rows, pick)] = order;
+    forEachTarget(pick, [&](SlotIndex target) {
+      if (indeg[target] != kNoSlot && --indeg[target] == 0) {
+        ready[count++] = target;
+        std::push_heap(ready, ready + count, bySlot);
       }
-    }
-    if (pick == kNoSlot) break;
-    done[pick] = 1u;
-    go[base::rows::DenseOf(rows, pick)] = order++;
-    forEachTarget(pick, [&](std::uint32_t tgt) {
-      if (indeg[tgt] > 0u) --indeg[tgt];
     });
   }
+  if (strict && from == kNoSlot) return true;
+  std::copy_n(candidate, rows.count, go);
   // Depth (for diagnostics) and the master slot.
   im.rd.masterSlot = kNoSlot;
   for (std::uint32_t s = 0; s < cap; ++s) {
-    if (!base::rows::IsLive(rows, s)) continue;
+    const bool live = base::rows::IsLive(rows, s);
+    if (im.publishedBus) {
+      const auto layout = live ? (std::uint64_t{im.busDefs[s].id} << 32) | im.busDefs[s].channels : 0;
+      im.publishedBus[s].store(layout, std::memory_order_release);
+    }
+    if (!live) continue;
     const std::uint32_t dn = base::rows::DenseOf(rows, s);
     if (parent[dn] == kNoSlot && (im.busDefs[s].flags & bf::kBusOutput) == 0u &&
         (im.rd.masterSlot == kNoSlot || (im.busDefs[s].flags & bf::kBusMaster) != 0u)) {
@@ -744,6 +783,7 @@ void RebuildBusGraph(Impl& im) noexcept {
     }
   }
   im.ap.graphDirty = 1u;
+  return true;
 }
 
 }  // namespace snd::core

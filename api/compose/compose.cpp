@@ -319,6 +319,7 @@ snd_result Compose(snd_system& sys, const snd_allocator*, const snd_file_system*
   d.limits.maxDuckRules = cfg.max_duck_rules;
   if (live) {
     livelink::RuntimeDesc rd;
+    rd.structEditor = &livelink::CoreStructEditor();
     rd.config = &sys.coreConfig;
     rd.allocator = &a;
     const int r = livelink::LiveRuntime::Create(rd, &sys.live);

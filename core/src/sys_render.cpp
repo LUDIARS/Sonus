@@ -575,7 +575,7 @@ void FadeTail(Impl& im, SlotIndex r, std::uint32_t frames) noexcept {
   const std::uint32_t total = im.cfg.shortFadeFrames == 0u ? 1u : im.cfg.shortFadeFrames;
   std::uint32_t left = rd.tailFadeLeft[r];
   const std::uint32_t n = left < frames ? left : frames;
-  SlotIndex bus = rd.tailFadeBus[r];
+  SlotIndex bus = RoutedBus(im, rd.tailFadeBus[r]);
   if (bus != kNoSlot && !base::rows::IsLive(t.Bus.rows, bus)) bus = kNoSlot;  // freed meanwhile
   float* dst = bus == kNoSlot ? rd.outBuf : rd.busBuf + std::size_t{bus} * kMaxChannels * frames;
   const float* tail = rd.tailFade + std::size_t{r} * kMaxChannels;
@@ -594,6 +594,13 @@ void FadeTail(Impl& im, SlotIndex r, std::uint32_t frames) noexcept {
 void Render(Impl& im) noexcept {
   schema::Tables& t = im.tables;
   RenderPriv& rd = im.rd;
+  if (im.routesPending) {
+    for (SlotIndex r = 0; r < im.cfg.realTotal; ++r) {
+      if (rd.tailBus[r] != kNoSlot) rd.tailBus[r] = im.retiredRoutes[rd.tailBus[r]];
+      if (rd.tailFadeBus[r] != kNoSlot) rd.tailFadeBus[r] = im.retiredRoutes[rd.tailFadeBus[r]];
+    }
+    im.routesPending = false;
+  }
   RenderSet& set = rd.sets[rd.currentSet];
   const std::uint32_t frames = im.cfg.blockFrames;
   const ClockSample blockEnd = im.clock + frames;
@@ -676,7 +683,7 @@ void Render(Impl& im) noexcept {
       in.flags |= kItemInitPan;
     }
     // Bus and accumulator segment.
-    SlotIndex bus = SND_R(Voice_busSlot)[d];
+    SlotIndex bus = RoutedBus(im, SND_R(Voice_busSlot)[d]);
     if (bus != kNoSlot && !base::rows::IsLive(t.Bus.rows, bus)) bus = rd.masterSlot;
     in.outChannels = bus == kNoSlot ? im.cfg.outChannels : im.busDefs[bus].channels;
     const std::uint32_t chunk = i / im.cfg.voicesPerChunk;

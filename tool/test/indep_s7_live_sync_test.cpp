@@ -244,8 +244,10 @@ SND_TEST(IndepS7Live, NewEventReachesTheGameByReload) {
 SND_TEST(IndepS7Live, StructuralEditsTakeTheReserveAndUndoGivesItBack) {
   const json::Value bus = Json("{\"bank\": \"Main\", \"parent\": \"Master\", \"volumeDb\": -4}");
   const json::Value fx = Json("{\"type\": \"snd.fx.delay\", \"params\": [10, 0, 0, -96, 20000, 0, 100]}");
-  {  // no structural editor in core (C-01): a reload, no problem, nothing taken
-    Rig r;
+  {  // Explicit fallback without a structural editor.
+    preview::PreviewEngineDesc noEditor;
+    noEditor.structEditor = nullptr;
+    Rig r(noEditor);
     SND_REQUIRE(r.ok);
     SND_REQUIRE(r.Connect());
     SND_REQUIRE(r.Settle());

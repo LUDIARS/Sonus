@@ -40,7 +40,7 @@ void BuildRenderList(Impl& im) noexcept {
     const VoiceLifecycle& lc = SND_R(Voice_lifecycle)[d];
     if ((lc.flags & kVoicePausedFlag) != 0u || lc.startClock >= blockEnd) continue;
     if (SND_R(Voice_sourceSlot)[d] == kNoSlot) continue;
-    const SlotIndex bus = SND_R(Voice_busSlot)[d];
+    const SlotIndex bus = RoutedBus(im, SND_R(Voice_busSlot)[d]);
     const std::uint32_t bd = bus == kNoSlot ? kNoSlot : base::rows::DenseOf(t.Bus.rows, bus);
     const std::uint32_t order = bd == kNoSlot ? 0xFFFFFFFFu : SND_R(Bus_graphOrder)[bd];
     e[n++] = Entry{order, static_cast<std::uint32_t>(SND_R(Voice_sourceKind)[d]), r, v};

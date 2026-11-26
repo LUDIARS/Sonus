@@ -11,6 +11,10 @@
 
 namespace snd::tool::preview {
 namespace ll = livelink;
+namespace {
+bool Finite(const Vec3f& v) { return std::isfinite(v.x) && std::isfinite(v.y) && std::isfinite(v.z); }
+bool Finite(const EmitterPose& pose) { return Finite(pose.position) && Finite(pose.forward) && Finite(pose.velocity); }
+}  // namespace
 
 snd_config PreviewConfig() {
   snd_config c;
@@ -167,6 +171,10 @@ std::uint64_t PreviewEngine::Play(Id event, const EmitterPose* emitter) {
   core::System* s = host_->system();
   snd_emitter_handle em{0};
   if (emitter != nullptr) {
+    if (!Finite(*emitter)) {
+      error_ = "non-finite emitter pose";
+      return 0;
+    }
     em = s->CreateEmitter();
     if (em.value == 0u) {
       error_ = "no emitter slot";
@@ -175,7 +183,11 @@ std::uint64_t PreviewEngine::Play(Id event, const EmitterPose* emitter) {
     const snd_vec3 p{emitter->position.x, emitter->position.y, emitter->position.z};
     const snd_vec3 f{emitter->forward.x, emitter->forward.y, emitter->forward.z};
     const snd_vec3 v{emitter->velocity.x, emitter->velocity.y, emitter->velocity.z};
-    s->SetTransform(em, &p, &f, &v);
+    if (s->SetTransform(em, &p, &f, &v) != SND_OK) {
+      s->DestroyEmitter(em);
+      error_ = "the emitter transform was refused";
+      return 0;
+    }
   }
   const snd_playback_handle h = s->Play(event, em, nullptr);
   if (h.value == 0u) {
@@ -188,6 +200,7 @@ std::uint64_t PreviewEngine::Play(Id event, const EmitterPose* emitter) {
 }
 
 bool PreviewEngine::MoveEmitter(std::uint64_t playback, const EmitterPose& pose) {
+  if (!Finite(pose)) return false;
   for (const Playing& p : playing_) {
     if (p.playback != playback || p.emitter == 0u) continue;
     const snd_vec3 pos{pose.position.x, pose.position.y, pose.position.z};
@@ -199,6 +212,7 @@ bool PreviewEngine::MoveEmitter(std::uint64_t playback, const EmitterPose& pose)
 }
 
 bool PreviewEngine::SetListener(const ListenerPose& pose) {
+  if (!Finite(pose.position) || !Finite(pose.forward) || !Finite(pose.up)) return false;
   snd_listener_desc d{};
   d.position = snd_vec3{pose.position.x, pose.position.y, pose.position.z};
   d.forward = snd_vec3{pose.forward.x, pose.forward.y, pose.forward.z};

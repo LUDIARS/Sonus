@@ -183,7 +183,13 @@ SpatialResult SpatialPreview::Compute(std::uint32_t outCh, std::uint32_t srcCh, 
   }
   r.gainDb = gainDb;
   r.distanceGain = r.is3D ? (r.volumeCurve ? 1.0f : r.distanceGain) : 1.0f;
-  r.linearGain = dsp::DbToGain(gainDb) * linear;
+  if (r.is3D && r.blend3D < 1.0f) {
+    // The unspatialized portion keeps its level. Event volume applies to both portions.
+    const float spatialGain = dsp::DbToGain(r.distanceDb + r.coneDb) * linear;
+    r.linearGain = dsp::DbToGain(r.curveDb) * ((1.0f - r.blend3D) + r.blend3D * spatialGain);
+  } else {
+    r.linearGain = dsp::DbToGain(gainDb) * linear;
+  }
   r.lowpassHz = lowpass < 1.0e9f ? lowpass : 0.0f;
   // PanFor (sys_render.cpp).
   PanMatrix m{};
