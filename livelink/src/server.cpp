@@ -10,6 +10,7 @@
 #include "snd/format/bank_format.hpp"
 #include "snd/livelink/frame_stream.hpp"
 #include "snd/livelink/runtime.hpp"
+#include "snd/livelink/struct_edit.hpp"
 #include "snd/livelink/tcp.hpp"
 #include "snd/livelink/wire.hpp"
 #include "snd/platform/clock.hpp"
@@ -52,12 +53,23 @@ struct Counter {
 struct Server::Impl final : FrameReader::Handler {
   enum class Phase : std::uint8_t { AwaitHello, AwaitSync, Ready, Closing };
   enum class RecMode : std::uint8_t { None, Tool, Sink };
+  // What a tracked command is, for its answer (1.1).
+  enum Op : std::uint16_t { kOpEdit = 0, kOpRead = 1, kOpStopAuditions = 2, kOpStruct = 3, kOpRevert = 4 };
   struct Pending {
     std::uint32_t seq;
     std::uint32_t conn;    // connection generation (replies only to the same one)
     std::uint16_t wantAck;
     std::uint16_t kind;    // cmd::CommandType
+    std::uint16_t op;      // Op
+    std::uint16_t reserved;
     PendingChunk* chunk;   // ReplaceChunk slot (LiveRuntime pool) or null
+  };
+  // 1.1: one hot reload at a time (ReloadBank).
+  struct Reload {
+    bool active = false;
+    std::uint32_t seq = 0, conn = 0, bankId = 0;
+    bool wantAck = false;
+    snd_bank_handle bank{0};
   };
 
   ServerDesc d{};
@@ -114,9 +126,20 @@ struct Server::Impl final : FrameReader::Handler {
   std::uint64_t recOffset = 0;
   std::uint32_t recStage = 0;  // bytes staged in scratch for the next RecordData
 
-  // registered banks (for HelloReply)
+  // registered banks (for HelloReply, BankList)
   core::LiveBankInfo* banks = nullptr;
   std::uint32_t bankCount = 0;
+
+  // 1.1
+  std::uint16_t peerMinor = 0;  // Hello.protocolMinor of the tool
+  Reload reload;
+  char* reloadPath = nullptr;   // kMaxReloadPathBytes + 1
+  std::uint8_t* listBuf = nullptr;  // BankList / StreamList payloads
+  std::uint32_t listBufBytes = 0;
+  BlockDetail worstDetail{};
+  bool haveDetail = false;
+  std::uint32_t detailLate = 0;
+  Counter auditionsStopped, reloadsDone, reloadsFailed, structRefused, readsAnswered;
 
   // stats
   Counter controlDropped, revertsLost, staleResults;
@@ -149,7 +172,17 @@ struct Server::Impl final : FrameReader::Handler {
     pending = static_cast<Pending*>(alloc->Allocate(sizeof(Pending) * pendingCap, 64, MemTag::LiveLink));
     banks = static_cast<core::LiveBankInfo*>(
         alloc->Allocate(sizeof(core::LiveBankInfo) * (cfg.max_banks != 0u ? cfg.max_banks : 1u), 64, MemTag::LiveLink));
-    if (recvBuf == nullptr || scratch == nullptr || logBuf == nullptr || pending == nullptr || banks == nullptr) return false;
+    reloadPath = static_cast<char*>(alloc->Allocate(kMaxReloadPathBytes + 1u, 64, MemTag::LiveLink));
+    {
+      const std::uint64_t bl = sizeof(ListHeader) + sizeof(BankEntry) * std::uint64_t{cfg.max_banks != 0u ? cfg.max_banks : 1u};
+      const std::uint64_t sl = sizeof(ListHeader) + sizeof(StreamInfo) * std::uint64_t{rt->MaxStreams() != 0u ? rt->MaxStreams() : 1u};
+      listBufBytes = static_cast<std::uint32_t>(bl > sl ? bl : sl);
+    }
+    listBuf = static_cast<std::uint8_t*>(alloc->Allocate(listBufBytes, 64, MemTag::LiveLink));
+    if (recvBuf == nullptr || scratch == nullptr || logBuf == nullptr || pending == nullptr || banks == nullptr ||
+        reloadPath == nullptr || listBuf == nullptr) {
+      return false;
+    }
     return reader.Init(*alloc, desc.maxReceivePayloadBytes) && sender.Init(*alloc, desc.controlBufferBytes, bulk);
   }
 
@@ -163,6 +196,10 @@ struct Server::Impl final : FrameReader::Handler {
     logBuf = nullptr;
     alloc->Free(pending, MemTag::LiveLink);
     alloc->Free(banks, MemTag::LiveLink);
+    alloc->Free(reloadPath, MemTag::LiveLink);
+    alloc->Free(listBuf, MemTag::LiveLink);
+    reloadPath = nullptr;
+    listBuf = nullptr;
     recvBuf = scratch = nullptr;
     pending = nullptr;
     banks = nullptr;
@@ -226,6 +263,8 @@ struct Server::Impl final : FrameReader::Handler {
     tokenNs = now;
     haveWorst = false;
     lateSum = 0;
+    haveDetail = false;
+    peerMinor = 0;
   }
 
   void BeginClose() noexcept {
@@ -283,7 +322,7 @@ struct Server::Impl final : FrameReader::Handler {
   // Records a live command from this (registered) thread. With track, the applied
   // result is matched later (SetValue / ReplaceChunk).
   snd_result Record(cmd::CommandType type, const void* payload, std::uint32_t bytes, std::uint32_t seq, bool wantAck,
-                    PendingChunk* chunk, bool reply) noexcept {
+                    PendingChunk* chunk, bool reply, std::uint16_t op = kOpEdit) noexcept {
     // Commands with an applied result (the markers other than the revert have none).
     bool track = type == cmd::CommandType::LiveReplaceChunk;
     if (type == cmd::CommandType::LiveSetValue) {
@@ -316,7 +355,7 @@ struct Server::Impl final : FrameReader::Handler {
     if (track) {
       Pending& p = pending[(pendingHead + pendingCount) % pendingCap];
       p = Pending{seq, reply ? connGen : 0u, static_cast<std::uint16_t>(wantAck ? 1u : 0u),
-                  static_cast<std::uint16_t>(type), chunk};
+                  static_cast<std::uint16_t>(type), op, 0u, chunk};
       ++pendingCount;
     }
     return SND_OK;
@@ -372,9 +411,16 @@ struct Server::Impl final : FrameReader::Handler {
       SendError(SND_ERR_INVALID_ARGUMENT, h.seq, "game -> tool message sent by the tool");
       return;
     }
+    // 1.1: the bank list may be asked for before SyncDecision (the tool decides with it).
+    if (h.type == static_cast<std::uint16_t>(MessageType::QueryBanks) && (phase == Phase::AwaitSync || phase == Phase::Ready)) {
+      return OnQueryBanks(h, wantAck);
+    }
     if (phase != Phase::Ready) return Fatal(h.seq, "handshake first");
     switch (static_cast<MessageType>(h.type)) {
       case MessageType::SetValue: return OnSetValue(h, ReadFixed<SetValue>(p, n), wantAck);
+      case MessageType::RevertValue: return OnCellRequest(h, ReadFixed<SetValue>(p, n), wantAck, false);
+      case MessageType::ReadCell: return OnCellRequest(h, ReadFixed<SetValue>(p, n), wantAck, true);
+      case MessageType::ReloadBank: return OnReloadBank(h, p, wantAck);
       case MessageType::ReplaceChunk: return OnReplaceChunk(h, p, wantAck);
       case MessageType::Audition: return OnAudition(h, ReadFixed<Audition>(p, n), wantAck);
       case MessageType::OverrideParam: {
@@ -408,7 +454,7 @@ struct Server::Impl final : FrameReader::Handler {
                      "ClearOverrides");
       case MessageType::SetProfilerMask: {
         const SetProfilerMask m = ReadFixed<SetProfilerMask>(p, n);
-        const snd_result r = CheckSetProfilerMask(m);
+        const snd_result r = CheckSetProfilerMask(m, kProtocolMinor);
         if (r == SND_OK) {
           if (m.meterHz != 0u) meterHz = m.meterHz;
           rt->SetProfiler(m.mask, meterHz);
@@ -416,19 +462,7 @@ struct Server::Impl final : FrameReader::Handler {
         return Reply(h.seq, wantAck, r, "SetProfilerMask");
       }
       case MessageType::RecordControl: return OnRecordControl(h, ReadFixed<RecordControl>(p, n), wantAck);
-      case MessageType::StructEdit: {
-        const StructEdit m = ReadFixed<StructEdit>(p, n);
-        const std::uint8_t* args = nullptr;
-        snd_result r = CheckStructEdit(m);
-        if (r == SND_OK && !TrailingData(p, n, sizeof(StructEdit), std::uint64_t{m.argCount} * 8u, &args)) {
-          r = SND_ERR_INVALID_ARGUMENT;
-        }
-        // Structural edits within Config.dev_reserve need core support that does not
-        // exist yet: answered as "rebuild and hot reload" (protocol §5).
-        if (r == SND_OK) r = SND_ERR_UNSUPPORTED;
-        if (!wantAck && r != SND_OK) return SendError(r, h.seq, "structural edit: rebuild and hot reload");
-        return Reply(h.seq, wantAck, r, "StructEdit");
-      }
+      case MessageType::StructEdit: return OnStructEdit(h, p, wantAck);
       default:
         return;
     }
@@ -460,7 +494,11 @@ struct Server::Impl final : FrameReader::Handler {
       handshakesRejected.Add();
       return Fatal(h.seq, "Hello.role must be Tool");
     }
+    peerMinor = m.protocolMinor;
     // runtimeBuildHash: projectBuildHash of the loaded banks; all must agree (protocol §4).
+    // Edge rules (1.1, §4): no bank -> 0 (Accepted only for a tool hash of 0); banks that
+    // disagree -> BuildMismatch with the first registered bank's hash, even when the tool's
+    // hash equals one of them (the tool lists them with QueryBanks).
     RefreshBanks();
     std::uint64_t hash = 0;
     bool agree = true;
@@ -498,6 +536,7 @@ struct Server::Impl final : FrameReader::Handler {
 
   void OnSetValue(const FrameHeader& h, const SetValue& m, bool wantAck) noexcept {
     snd_result r = CheckSetValue(m);
+    if (r == SND_OK && reload.active) r = SND_ERR_NOT_READY;  // 1.1: a hot reload is running
     if (r == SND_OK) {
       cmd::LiveSetValue c{};
       c.objectId = m.runtimeId;
@@ -516,6 +555,7 @@ struct Server::Impl final : FrameReader::Handler {
     std::uint32_t rows = 0;
     snd_result r = TrailingData(p, h.payloadBytes, sizeof(ReplaceChunk), m.bytes, &data) ? SND_OK : SND_ERR_INVALID_ARGUMENT;
     if (r == SND_OK) r = CheckTableChunk(m.fourcc, data, m.bytes, &rows);
+    if (r == SND_OK && reload.active) r = SND_ERR_NOT_READY;  // 1.1: a hot reload is running
     if (r == SND_ERR_UNSUPPORTED) return Reply(h.seq, wantAck, r, "blob chunk: rebuild and hot reload");
     PendingChunk* slot = nullptr;
     if (r == SND_OK && m.bytes > rt->ChunkBytes()) r = SND_ERR_OUT_OF_BUDGET;
@@ -533,6 +573,8 @@ struct Server::Impl final : FrameReader::Handler {
       c.seq = h.seq;
       c.result = 0;
       c.cells = 0;
+      c.costBuses = c.costEffects = 0u;
+      c.costBytes = 0u;
       c.state.store(PendingChunk::kQueued, std::memory_order_release);
       const cmd::LiveReplaceChunk cc{m.bankId, m.fourcc, &c};
       r = Record(cmd::CommandType::LiveReplaceChunk, &cc, sizeof(cc), h.seq, wantAck, slot, true);
@@ -541,10 +583,19 @@ struct Server::Impl final : FrameReader::Handler {
     if (r != SND_OK) Reply(h.seq, wantAck, r, "ReplaceChunk");
   }
 
+  // 1.1: stop-all stops the auditions this live link started before it (the marker is
+  // answered once the audio thread handed them over and they were stopped); a play
+  // takes one of RuntimeDesc::maxAuditions places (LIMIT_REACHED when none is free).
   void OnAudition(const FrameHeader& h, const Audition& m, bool wantAck) noexcept {
     snd_result r = CheckAudition(m);
-    // Stopping every audition needs a core command that does not exist (report).
-    if (r == SND_OK && (m.flags & kAuditionStopAll) != 0u) r = SND_ERR_UNSUPPORTED;
+    if (r == SND_OK && (m.flags & kAuditionStopAll) != 0u) {
+      cmd::LiveSetValue mk{};
+      mk.field = kFieldAuditionStop;
+      r = Record(cmd::CommandType::LiveSetValue, &mk, sizeof(mk), h.seq, wantAck, nullptr, true, kOpStopAuditions);
+      if (r != SND_OK) Reply(h.seq, wantAck, r, "Audition stop");
+      return;
+    }
+    if (r == SND_OK && !rt->ReserveAudition()) r = SND_ERR_LIMIT_REACHED;
     if (r == SND_OK) {
       cmd::LiveAudition c{};
       c.event = m.eventId;
@@ -553,8 +604,192 @@ struct Server::Impl final : FrameReader::Handler {
         c.position = Vec3{m.position[0], m.position[1], m.position[2]};
       }
       r = Record(cmd::CommandType::LiveAudition, &c, sizeof(c), h.seq, wantAck, nullptr, true);
+      if (r != SND_OK) rt->ReleaseAudition();
     }
     Reply(h.seq, wantAck, r, "Audition");
+  }
+
+  // Stops the auditions the audio thread handed over (System::Stop, short fade). Only
+  // handles of LiveAudition playbacks ever reach this channel.
+  void DrainStops() noexcept {
+    std::uint64_t v = 0;
+    const float fade = rt->config().tuning.short_fade_ms / 1000.0f;
+    while (rt->auditionStops().TryPop(v)) {
+      if (registered && sys->Stop(snd_playback_handle{v}, fade, nullptr) == SND_OK) auditionsStopped.Add();
+    }
+  }
+
+  // --- 1.1 requests --------------------------------------------------------------------------
+  void OnCellRequest(const FrameHeader& h, const SetValue& m, bool wantAck, bool read) noexcept {
+    snd_result r = CheckCellAddress(m);
+    if (r == SND_OK && !read && reload.active) r = SND_ERR_NOT_READY;
+    if (r == SND_OK) {
+      cmd::LiveSetValue c{};
+      c.objectId = m.runtimeId;
+      c.field = EncodeField(m.chunk, m.column);
+      c.valueType = read ? kValueTypeReadCell : kValueTypeRevertCell;
+      c.index = m.index;
+      c.value = read ? h.seq : 0u;
+      r = Record(cmd::CommandType::LiveSetValue, &c, sizeof(c), h.seq, wantAck, nullptr, true, read ? kOpRead : kOpRevert);
+    }
+    if (r == SND_OK) return;  // answered when applied
+    if (read) {
+      const CellValue cv{h.seq, r, 0u, 0u, 0u, 0u};
+      Control(MessageType::CellValue, h.seq, &cv, sizeof(cv));
+      if (wantAck) Reply(h.seq, true, r, "ReadCell");
+      return;
+    }
+    Reply(h.seq, wantAck, r, "RevertValue");
+  }
+
+  void OnQueryBanks(const FrameHeader& h, bool wantAck) noexcept {
+    RefreshBanks();
+    const ListHeader lh{bankCount, sizeof(BankEntry)};
+    std::memcpy(listBuf, &lh, sizeof(lh));
+    for (std::uint32_t i = 0; i < bankCount; ++i) {
+      const core::LiveBankInfo& b = banks[i];
+      const BankEntry e{b.bankId, b.languageId, b.projectBuildHash, b.contentHash, b.writable, b.handle.slot};
+      std::memcpy(listBuf + sizeof(lh) + std::size_t{i} * sizeof(e), &e, sizeof(e));
+    }
+    const std::uint32_t bytes = static_cast<std::uint32_t>(sizeof(lh) + std::size_t{bankCount} * sizeof(BankEntry));
+    bool sent = sender.control().Free() >= kFrameHeaderBytes + bytes + 2u * kReplyRoom &&
+                Control(MessageType::BankList, h.seq, listBuf, bytes);
+    if (!sent && conn != nullptr && sender.bulk().Push(static_cast<std::uint16_t>(MessageType::BankList), 0, h.seq, listBuf, bytes)) {
+      framesOut.Add();
+      sent = true;
+    }
+    Reply(h.seq, wantAck, sent ? SND_OK : SND_ERR_OUT_OF_BUDGET, "BankList did not fit the send buffer");
+  }
+
+  void SendReloadStatus(ReloadPhase ph, snd_result r) noexcept {
+    if (conn == nullptr || reload.conn != connGen) return;
+    const ReloadStatus st{reload.seq, static_cast<std::uint32_t>(ph), r, reload.bankId,
+                          ph == ReloadPhase::Loading || ph == ReloadPhase::Done ? reload.bank.value : 0u};
+    Control(MessageType::ReloadStatus, reload.seq, &st, sizeof(st));
+  }
+
+  // 1.1 hot reload (11.2 大きな差し替え): StopAndUnload the loaded copy (its sounds stop
+  // with a short fade), then load the file again through the normal path; the bank
+  // manager registers the new copy once the old one is released (epoch, 10.3). The
+  // override layer forgets the old registration's edits. Edits wait (NOT_READY) until done.
+  void OnReloadBank(const FrameHeader& h, const std::uint8_t* p, bool wantAck) noexcept {
+    const ReloadBank m = ReadFixed<ReloadBank>(p, h.payloadBytes);
+    const std::uint8_t* path = nullptr;
+    snd_result r = TrailingData(p, h.payloadBytes, sizeof(ReloadBank), m.pathBytes, &path) ? SND_OK : SND_ERR_INVALID_ARGUMENT;
+    if (r == SND_OK) r = CheckReloadBank(m, path);
+    if (r == SND_OK && reload.active) r = SND_ERR_LIMIT_REACHED;  // one at a time
+    if (r == SND_OK && !registered) r = SND_ERR_THREAD_NOT_REGISTERED;
+    const core::LiveBankInfo* old = nullptr;
+    if (r == SND_OK) {
+      RefreshBanks();
+      for (std::uint32_t i = 0; i < bankCount && old == nullptr; ++i) {
+        if (banks[i].bankId == m.bankId && banks[i].languageId == m.languageId) old = &banks[i];
+      }
+      if (old == nullptr && (m.flags & kReloadLoadIfAbsent) == 0u) r = SND_ERR_NOT_FOUND;
+    }
+    if (r != SND_OK) return Reply(h.seq, wantAck, r, "ReloadBank");
+    std::memcpy(reloadPath, path, m.pathBytes);
+    reloadPath[m.pathBytes] = '\0';
+    reload = Reload{};
+    reload.seq = h.seq;
+    reload.conn = connGen;
+    reload.bankId = m.bankId;
+    reload.wantAck = wantAck;
+    if (old != nullptr) {
+      r = sys->UnloadBank(snd_bank_handle{old->handle.Value()}, SND_UNLOAD_STOP_AND_UNLOAD);
+      if (r != SND_OK) return Reply(h.seq, wantAck, r, "ReloadBank: unload refused");
+      reload.active = true;
+      SendReloadStatus(ReloadPhase::Unloading, SND_OK);
+    }
+    reload.bank = sys->LoadBankAsync(reloadPath);
+    reload.active = true;
+    if (reload.bank.value == 0u) {
+      FinishReload(ReloadPhase::Failed, SND_ERR_INVALID_ARGUMENT);
+      return;
+    }
+    SendReloadStatus(ReloadPhase::Loading, SND_OK);
+  }
+
+  void FinishReload(ReloadPhase ph, snd_result r) noexcept {
+    SendReloadStatus(ph, r);
+    (ph == ReloadPhase::Done ? reloadsDone : reloadsFailed).Add();
+    if (conn != nullptr && reload.conn == connGen) {
+      Reply(reload.seq, reload.wantAck, r, "ReloadBank failed");
+    }
+    reload.active = false;
+  }
+
+  // Every loop: the new copy's state (GetBankState: any thread).
+  void PollReload() noexcept {
+    if (!reload.active) return;
+    switch (sys->GetBankState(reload.bank)) {
+      case SND_BANK_STATE_LOADED: return FinishReload(ReloadPhase::Done, SND_OK);
+      case SND_BANK_STATE_FAILED: return FinishReload(ReloadPhase::Failed, SND_ERR_IO);
+      case SND_BANK_STATE_UNLOADED:
+      case SND_BANK_STATE_UNLOADING: return FinishReload(ReloadPhase::Failed, SND_ERR_INVALID_HANDLE);
+      default: return;  // loading (or waiting for the old copy's release)
+    }
+  }
+
+  // 1.1 structural edit (§8.4): rules, Config.dev_reserve, then the editor seam on the
+  // audio thread (struct_edit.hpp). Refusals tell the tool to rebuild and hot reload.
+  void OnStructEdit(const FrameHeader& h, const std::uint8_t* p, bool wantAck) noexcept {
+    const StructEdit m = ReadFixed<StructEdit>(p, h.payloadBytes);
+    const std::uint8_t* raw = nullptr;
+    snd_result r = CheckStructEdit(m);
+    if (r == SND_OK && !TrailingData(p, h.payloadBytes, sizeof(StructEdit), std::uint64_t{m.argCount} * 8u, &raw)) {
+      r = SND_ERR_INVALID_ARGUMENT;
+    }
+    std::uint64_t args[64 + 2];
+    if (r == SND_OK && m.argCount != 0u) std::memcpy(args, raw, std::size_t{m.argCount} * 8u);
+    if (r == SND_OK) r = CheckStructArgs(m, args);
+    if (r == SND_OK && reload.active) r = SND_ERR_NOT_READY;
+    const StructCost cost = StructCostOf(static_cast<StructOp>(m.op), m.argCount);
+    bool reserved = false;
+    if (r == SND_OK) {
+      r = rt->ReserveStruct(cost);
+      reserved = r == SND_OK;
+    }
+    PendingChunk* slot = nullptr;
+    const std::uint64_t bytes = sizeof(StructEdit) + std::uint64_t{m.argCount} * 8u;
+    if (r == SND_OK && bytes > rt->ChunkBytes()) r = SND_ERR_OUT_OF_BUDGET;
+    if (r == SND_OK) {
+      slot = rt->AcquireChunk();
+      if (slot == nullptr) r = SND_ERR_LIMIT_REACHED;
+    }
+    if (r == SND_OK) {
+      PendingChunk& c = *slot;
+      std::memcpy(c.data, &m, sizeof(m));
+      if (m.argCount != 0u) std::memcpy(c.data + sizeof(m), args, std::size_t{m.argCount} * 8u);
+      c.bytes = bytes;
+      c.bankId = 0;
+      c.fourcc = kStructEditTag;
+      c.rows = 0;
+      c.seq = h.seq;
+      c.result = 0;
+      c.cells = 0;
+      c.costBuses = cost.buses;
+      c.costEffects = cost.effects;
+      c.costBytes = cost.bytes;
+      c.state.store(PendingChunk::kQueued, std::memory_order_release);
+      const cmd::LiveReplaceChunk cc{0u, kStructEditTag, &c};
+      r = Record(cmd::CommandType::LiveReplaceChunk, &cc, sizeof(cc), h.seq, wantAck, slot, true, kOpStruct);
+      if (r != SND_OK) c.state.store(PendingChunk::kFree, std::memory_order_release);
+    }
+    if (r == SND_OK) return;  // answered when applied (the audio thread gives the reserve back on failure)
+    if (reserved) rt->ReleaseStruct(cost);
+    structRefused.Add();
+    if (!wantAck) return SendError(r, h.seq, StructWhy(r));
+    Reply(h.seq, true, r, "StructEdit");
+  }
+
+  static const char* StructWhy(snd_result r) noexcept {
+    switch (r) {
+      case SND_ERR_OUT_OF_BUDGET: return "dev reserve exhausted: rebuild and hot reload";
+      case SND_ERR_UNSUPPORTED: return "structural edit: rebuild and hot reload";
+      case SND_ERR_NOT_READY: return "hot reload running";
+      default: return "structural edit refused";
+    }
   }
 
   void OnRecordControl(const FrameHeader& h, const RecordControl& m, bool wantAck) noexcept {
@@ -599,10 +834,39 @@ struct Server::Impl final : FrameReader::Handler {
       pendingHead = (pendingHead + 1u) % pendingCap;
       --pendingCount;
       if (pd.chunk != nullptr) rt->FinishChunk(pd.chunk);
+      CellReading rd{};
+      if (pd.op == kOpRead) {  // the reading was pushed before the result (same audio thread)
+        bool found = false;
+        CellReading x{};
+        while (!found && rt->readings().TryPop(x)) found = x.seq == pd.seq && x.session == session;
+        if (found) rd = x;
+        if (!found) rd.result = ar.result != SND_OK ? ar.result : SND_ERR_NOT_FOUND;
+      }
+      if (pd.op == kOpStopAuditions) DrainStops();  // the stops were handed over before the result
       if (pd.conn == 0u || pd.conn != connGen || conn == nullptr) continue;
-      Reply(pd.seq, pd.wantAck != 0u, ar.result,
-            pd.kind == static_cast<std::uint16_t>(cmd::CommandType::LiveReplaceChunk) ? "ReplaceChunk not applied"
-                                                                                       : "SetValue not applied");
+      switch (pd.op) {
+        case kOpRead: {
+          const CellValue cv{pd.seq, rd.result, rd.cells, rd.flags, rd.current, rd.original};
+          if (Control(MessageType::CellValue, pd.seq, &cv, sizeof(cv))) readsAnswered.Add();
+          if (pd.wantAck != 0u) Reply(pd.seq, true, ar.result, "ReadCell");
+          break;
+        }
+        case kOpStruct:
+          if (ar.result != SND_OK) structRefused.Add();
+          if (pd.wantAck == 0u && ar.result != SND_OK) {
+            SendError(ar.result, pd.seq, StructWhy(ar.result));
+          } else {
+            Reply(pd.seq, pd.wantAck != 0u, ar.result, StructWhy(ar.result));
+          }
+          break;
+        case kOpStopAuditions: Reply(pd.seq, pd.wantAck != 0u, ar.result, "Audition stop not applied"); break;
+        case kOpRevert: Reply(pd.seq, pd.wantAck != 0u, ar.result, "RevertValue not applied"); break;
+        default:
+          Reply(pd.seq, pd.wantAck != 0u, ar.result,
+                pd.kind == static_cast<std::uint16_t>(cmd::CommandType::LiveReplaceChunk) ? "ReplaceChunk not applied"
+                                                                                           : "SetValue not applied");
+          break;
+      }
     }
   }
 
@@ -685,7 +949,8 @@ struct Server::Impl final : FrameReader::Handler {
         haveWorst = true;
       }
     }
-    if (now >= nextTimingNs) {
+    const bool timingDue = now >= nextTimingNs;
+    if (timingDue) {
       nextTimingNs = now + 1000000000ull / (d.timingHz != 0u ? d.timingHz : 1u);
       if (haveWorst && live && (mask & kProfTiming) != 0u) {
         BlockTiming w = worst;
@@ -694,6 +959,20 @@ struct Server::Impl final : FrameReader::Handler {
       }
       haveWorst = false;
       lateSum = 0;
+    }
+    // 1.1: block detail (worst block of each timing interval, like BlockTiming)
+    BlockDetail bd{};
+    while (rt->details().TryPop(bd)) {
+      detailLate += bd.lateChunks;
+      if (!haveDetail || bd.totalMicroseconds > worstDetail.totalMicroseconds) {
+        worstDetail = bd;
+        haveDetail = true;
+      }
+    }
+    if (timingDue) {
+      if (haveDetail && live && (mask & kProfBlockDetail) != 0u) Profiler(MessageType::BlockDetail, &worstDetail, sizeof(worstDetail));
+      haveDetail = false;
+      detailLate = 0;
     }
     // voices and meters at meterHz
     if (now >= nextMetersNs) {
@@ -704,6 +983,14 @@ struct Server::Impl final : FrameReader::Handler {
         const ListHeader lh{vh.count, sizeof(VoiceInfo)};
         Profiler(MessageType::VoiceList, &lh, sizeof(lh), rt->voices().Front() + sizeof(vh),
                  static_cast<std::uint32_t>(sizeof(VoiceInfo) * vh.count));
+      }
+      if (rt->streams().Take() && live && (mask & kProfStreamList) != 0u) {  // 1.1
+        StreamSnapshotHeader sh;
+        std::memcpy(&sh, rt->streams().Front(), sizeof(sh));
+        const std::uint32_t cnt = sh.count < rt->MaxStreams() ? sh.count : rt->MaxStreams();
+        const ListHeader lh{cnt, sizeof(StreamInfo)};
+        Profiler(MessageType::StreamList, &lh, sizeof(lh), rt->streams().Front() + sizeof(sh),
+                 static_cast<std::uint32_t>(sizeof(StreamInfo) * cnt));
       }
       if (rt->meters().Take() && live && (mask & kProfMeters) != 0u) {
         VoiceSnapshotHeader mh;
@@ -778,6 +1065,8 @@ struct Server::Impl final : FrameReader::Handler {
         Service(now);
       }
       TryRevert();
+      DrainStops();
+      PollReload();
       DrainResults();
       DrainRecords();
       DrainProfiler(platform::MonotonicNanoseconds());
@@ -1004,6 +1293,11 @@ ServerStats Server::Stats() const noexcept {
   s.revertsLost = static_cast<std::uint32_t>(im.revertsLost.Get());
   s.staleResults = static_cast<std::uint32_t>(im.staleResults.Get());
   s.lastRoundTripUs = im.lastRttUs.load(std::memory_order_relaxed);
+  s.auditionsStopped = static_cast<std::uint32_t>(im.auditionsStopped.Get());
+  s.reloadsDone = static_cast<std::uint32_t>(im.reloadsDone.Get());
+  s.reloadsFailed = static_cast<std::uint32_t>(im.reloadsFailed.Get());
+  s.structRefused = static_cast<std::uint32_t>(im.structRefused.Get());
+  s.readsAnswered = static_cast<std::uint32_t>(im.readsAnswered.Get());
   return s;
 }
 

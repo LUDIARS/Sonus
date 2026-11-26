@@ -153,7 +153,9 @@ std::uint32_t ValueApplier::Generation(std::uint32_t bankSlot) const noexcept {
 
 ApplyOutcome ValueApplier::SetValue(core::System& sys, const cmd::LiveSetValue& c, std::uint32_t session) noexcept {
   if (c.field == kFieldRevertAll) return RevertAll(sys, session);
-  if (c.field == kFieldSession || c.field == kFieldRevertBegin) return ApplyOutcome{};  // live link markers (runtime)
+  if (IsMarkerField(c.field)) return ApplyOutcome{};  // live link markers (runtime)
+  if (c.valueType == kValueTypeRevertCell) return RevertCell(sys, c);
+  if (c.valueType == kValueTypeReadCell) return ApplyOutcome{};  // reads go through ReadCell
   std::uint32_t fourcc = 0, column = 0;
   if (edits_ == nullptr || !DecodeField(c.field, &fourcc, &column)) return ApplyOutcome{SND_ERR_INVALID_ARGUMENT, 0};
   LoadBanks(sys);
@@ -256,6 +258,108 @@ ApplyOutcome ValueApplier::RevertAll(core::System& sys, std::uint32_t session) n
     count_.store(0, std::memory_order_relaxed);
   }
   return out;
+}
+
+bool ValueApplier::ReadBits(core::System& sys, const core::LiveCell& cell, std::uint32_t fourcc, std::uint32_t column,
+                           std::uint64_t* bits) noexcept {
+  // LiveWriteCell stores *previous as soon as the cell exists; writing that value back
+  // with apply = false is always SND_OK ("unchanged: any column"), so the pair tells a
+  // real read from an early refusal (no bank / column / row / override layer).
+  std::uint64_t a = 0x5AFE5AFE5AFE5AFEull, b = 0;
+  sys.LiveWriteCell(cell, fourcc, column, 0u, &a, false);
+  if (sys.LiveWriteCell(cell, fourcc, column, a, &b, false) != SND_OK || a != b) return false;
+  *bits = a;
+  return true;
+}
+
+ApplyOutcome ValueApplier::RevertCell(core::System& sys, const cmd::LiveSetValue& c) noexcept {
+  std::uint32_t fourcc = 0, column = 0;
+  if (edits_ == nullptr || !DecodeField(c.field, &fourcc, &column)) return ApplyOutcome{SND_ERR_INVALID_ARGUMENT, 0};
+  LoadBanks(sys);
+  std::uint32_t n = sys.LiveFindCells(c.objectId, fourcc, c.index, cells_, maxBanks_);
+  if (n > maxBanks_) n = maxBanks_;
+  if (n == 0u) return ApplyOutcome{SND_ERR_NOT_FOUND, 0};
+  ApplyOutcome out;
+  // Find every entry first (clearing one breaks the probe chains of the others).
+  for (std::uint32_t i = 0; i < n; ++i) bankSlots_[i] = Find(cells_[i].bankSlot, fourcc, column, cells_[i].row);
+  bool removed = false;
+  for (std::uint32_t i = 0; i < n; ++i) {
+    const std::uint32_t k = bankSlots_[i];
+    if (k == kInvalidSlot) continue;
+    if (sys.LiveWriteCell(cells_[i], fourcc, column, edits_[k].original, nullptr, true) == SND_OK) ++out.cells;
+    edits_[k].used = 0u;
+    removed = true;
+  }
+  if (removed) Rebuild(false);
+  return out;
+}
+
+void ValueApplier::ReadCell(core::System& sys, const cmd::LiveSetValue& c, CellReading* out) noexcept {
+  *out = CellReading{};
+  out->seq = static_cast<std::uint32_t>(c.value);
+  std::uint32_t fourcc = 0, column = 0;
+  if (edits_ == nullptr || !DecodeField(c.field, &fourcc, &column)) {
+    out->result = SND_ERR_INVALID_ARGUMENT;
+    return;
+  }
+  LoadBanks(sys);
+  std::uint32_t n = sys.LiveFindCells(c.objectId, fourcc, c.index, cells_, maxBanks_);
+  if (n > maxBanks_) n = maxBanks_;
+  bool first = true;
+  for (std::uint32_t i = 0; i < n; ++i) {
+    std::uint64_t v = 0;
+    if (!ReadBits(sys, cells_[i], fourcc, column, &v)) continue;
+    const std::uint32_t k = Find(cells_[i].bankSlot, fourcc, column, cells_[i].row);
+    ++out->cells;
+    if (first) {
+      first = false;
+      out->current = v;
+      out->original = k != kInvalidSlot ? edits_[k].original : v;
+      if (k != kInvalidSlot) out->flags |= kCellOverridden;
+    } else if (v != out->current) {
+      out->flags |= kCellsDiffer;
+    }
+  }
+  out->result = out->cells != 0u ? SND_OK : SND_ERR_NOT_FOUND;
+}
+
+snd_result ValueApplier::WriteCell(core::System& sys, Id bankId, std::uint32_t fourcc, std::uint32_t column,
+                                   std::uint32_t row, std::uint64_t bits, std::uint32_t session) noexcept {
+  if (edits_ == nullptr) return SND_ERR_INVALID_ARGUMENT;
+  LoadBanks(sys);
+  std::uint32_t nb = sys.LiveFindBanks(bankId, bankSlots_, maxBanks_);
+  if (nb > maxBanks_) nb = maxBanks_;
+  if (nb == 0u) return SND_ERR_NOT_FOUND;
+  snd_result result = SND_OK;
+  for (std::uint32_t b = 0; b < nb; ++b) {
+    std::uint64_t prev = 0;
+    const core::LiveCell cell{bankSlots_[b], row};
+    snd_result r = sys.LiveWriteCell(cell, fourcc, column, bits, &prev, false);
+    if (r == SND_OK && prev != bits && Find(cell.bankSlot, fourcc, column, row) == kInvalidSlot &&
+        count_.load(std::memory_order_relaxed) >= capacity_) {
+      r = SND_ERR_LIMIT_REACHED;
+    }
+    if (r == SND_OK) r = sys.LiveWriteCell(cell, fourcc, column, bits, &prev, true);
+    if (r == SND_OK) {
+      Remember(cell.bankSlot, fourcc, column, row, prev, session, prev != bits);
+    } else {
+      result = r;
+    }
+  }
+  return result;
+}
+
+std::uint32_t ValueApplier::CopyEdits(core::System& sys, EditView* out, std::uint32_t capacity) noexcept {
+  if (edits_ == nullptr) return 0;
+  LoadBanks(sys);
+  std::uint32_t n = 0;
+  for (std::uint32_t i = 0; i < tableSize_; ++i) {
+    const Edit& e = edits_[i];
+    if (e.used == 0u || e.bankGeneration == 0u || Generation(e.bankSlot) != e.bankGeneration) continue;
+    if (n < capacity) out[n] = EditView{e.bankSlot, e.fourcc, e.column, e.row, e.original};
+    ++n;
+  }
+  return n;
 }
 
 }  // namespace snd::livelink

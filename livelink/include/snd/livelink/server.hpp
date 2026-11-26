@@ -19,6 +19,12 @@
 // then the server records LiveClearOverrides and the revert marker, which puts
 // every value edit back to the bank value.
 //
+// Protocol 1.1 (livelink-protocol.md §8): RevertValue / ReadCell (answered with
+// CellValue once applied), QueryBanks (BankList; also before SyncDecision), ReloadBank
+// (hot reload: StopAndUnload + the normal load path, ReloadStatus progress, edits
+// answered NOT_READY meanwhile), Audition stop-all (stops this runtime's auditions only),
+// StructEdit within Config.dev_reserve (struct_edit.hpp seam), StreamList and BlockDetail.
+//
 // The live link thread never touches runtime data directly and never waits for
 // the audio thread (2 thread table). Threads: Create / Start / Stop / Destroy
 // on one non-RT thread (normally the owner); Stats / Connected from any thread.
@@ -87,6 +93,12 @@ struct ServerStats {
   std::uint32_t controlDropped = 0;     // server pings that did not fit (the tool reads too slowly)
   std::uint32_t staleResults = 0;       // applied results of an earlier Server's commands (dropped)
   std::uint32_t revertsLost = 0;        // disconnect reverts that could not be recorded (warning)
+  // 1.1
+  std::uint32_t auditionsStopped = 0;   // audition playbacks stopped by stop-all
+  std::uint32_t reloadsDone = 0;        // ReloadBank completed
+  std::uint32_t reloadsFailed = 0;
+  std::uint32_t structRefused = 0;      // structural edits refused (rules, reserve, editor)
+  std::uint32_t readsAnswered = 0;      // CellValue sent
 };
 
 class Server {
