@@ -130,6 +130,8 @@ bool RecordReader::Next(RecordItem* out) noexcept {
       std::memcpy(&out->bankMap, p, sizeof(RecordBankMap));
       at_ += sizeof(RecordBankMap);
       return true;
+    default:
+      break;
     case RecordKind::Arena: {
       if (left < sizeof(RecordArena)) return fail(RecordError::Truncated);
       out->kind = RecordKind::Arena;
@@ -158,6 +160,40 @@ bool RecordReader::Next(RecordItem* out) noexcept {
       at_ += sizeof(RecordArena) + body;
       return true;
     }
+  }
+  // 1.1 kinds (constants, see livelink_protocol.hpp).
+  out->kind = static_cast<RecordKind>(kind);
+  switch (kind) {
+    case kRecordLiveData: {
+      if (left < sizeof(RecordLiveData)) return fail(RecordError::Truncated);
+      std::memcpy(&out->liveData, p, sizeof(RecordLiveData));
+      const std::uint64_t padded = (std::uint64_t{out->liveData.bytes} + 7u) & ~std::uint64_t{7};
+      if (padded > left - sizeof(RecordLiveData)) return fail(RecordError::Truncated);
+      out->data = p + sizeof(RecordLiveData);
+      at_ += sizeof(RecordLiveData) + padded;
+      return true;
+    }
+    case kRecordBegin:
+      if (left < sizeof(RecordBegin)) return fail(RecordError::Truncated);
+      std::memcpy(&out->begin, p, sizeof(RecordBegin));
+      if (out->begin.origin != static_cast<std::uint16_t>(RecordOrigin::FromCreation) &&
+          out->begin.origin != static_cast<std::uint16_t>(RecordOrigin::MidRun)) {
+        return fail(RecordError::BadSections);
+      }
+      at_ += sizeof(RecordBegin);
+      return true;
+    case kRecordCell:
+      if (left < sizeof(RecordCell)) return fail(RecordError::Truncated);
+      std::memcpy(&out->cell, p, sizeof(RecordCell));
+      at_ += sizeof(RecordCell);
+      return true;
+    case kRecordOverride:
+      if (left < sizeof(RecordOverride)) return fail(RecordError::Truncated);
+      std::memcpy(&out->override_, p, sizeof(RecordOverride));
+      at_ += sizeof(RecordOverride);
+      return true;
+    default:
+      break;
   }
   return fail(RecordError::UnknownKind);
 }
