@@ -23,6 +23,9 @@
 
 #include "snd/format/bank_format.hpp"
 #include "snd/types.h"
+#include "snd/ext.h"
+#include "snd/format/patch_program.hpp"
+#include <cmath>
 
 namespace snd::bank_format::check {
 
@@ -179,6 +182,25 @@ class Checker {
   snd_result Run(const CheckOptions& opt, CheckedBank* out) noexcept;
 
  private:
+  // The original editor writer appended (SYNP row, program) pairs in row order.
+  // Inspect only the link directory; the legacy graph is opaque to the runtime.
+  const std::uint8_t* legacyLinks_ = nullptr;
+  std::uint32_t legacyLinksCount_ = 0, legacyPrograms_ = 0;
+  static std::uint32_t ReadU32(const std::uint8_t* p) noexcept {
+    std::uint32_t value;
+    std::memcpy(&value, p, sizeof(value));
+    return value;
+  }
+  void RememberLegacyLinks(const std::uint8_t* p, std::uint64_t bytes) noexcept {
+    if (bytes < 16 || ReadU32(p) != 1 || ReadU32(p + 12) != 128) return;
+    const auto programs = ReadU32(p + 4), links = ReadU32(p + 8);
+    const auto firstNode = 16u + std::uint64_t{programs} * 16u;
+    const auto linkBytes = std::uint64_t{links} * 8u;
+    if (!InRange(firstNode, linkBytes, bytes) || (bytes - firstNode - linkBytes) % 128u) return;
+    legacyLinks_ = p + (bytes - linkBytes);
+    legacyLinksCount_ = links;
+    legacyPrograms_ = programs;
+  }
   snd_result CheckHeader(const CheckOptions& opt) noexcept;
   snd_result CheckDependencies() noexcept;
   snd_result CheckChunks() noexcept;
@@ -396,6 +418,8 @@ inline snd_result Checker::CheckChunks() noexcept {
       }
     }
     const int idx = KnownChunkIndex(e.fourcc);
+    if (e.fourcc == Fourcc('X', 'P', 'C', 'H') && e.version == 1 && !(e.flags & bf::kChunkTable))
+      RememberLegacyLinks(d_ + e.offset, e.bytes);
     if (idx < 0) continue;  // unknown chunk: ignored (§5, §7)
     const bf::ChunkInfo& info = bf::kChunks[idx];
     const bool isTable = (e.flags & bf::kChunkTable) != 0u;
@@ -756,6 +780,52 @@ inline snd_result Checker::CheckReferences() noexcept {
   // SYNP
   SND_BANK_CHECK_TRY(Row(ch::SYNP, c::SYNP_asset, ch::ASST, true));
   SND_BANK_CHECK_TRY(Blob(ch::SYNP, c::SYNP_programOffset, c::SYNP_programBytes, ch::PTCH, 1));
+  const auto& programs = chunks_[KnownChunkIndex(ch::PTCH)];
+  std::uint32_t legacy = 0;
+  for (std::uint32_t s = 0; s < RowsOf(ch::SYNP); ++s) {
+    const auto kind = static_cast<SynthKind>(C(ch::SYNP, c::SYNP_kind).Get(s));
+    if (kind == SynthKind::Patch || kind == SynthKind::Granular) {
+      const auto channels = C(ch::SYNP, c::SYNP_channels).Get(s);
+      if (!channels || channels > SND_MAX_CHANNELS)
+        return Fail(SND_ERR_CORRUPT, ch::SYNP, c::SYNP_channels, s, "invalid synth channel count");
+    }
+    if (kind == SynthKind::Patch) {
+      const auto off = C(ch::SYNP, c::SYNP_programOffset).Get(s);
+      const auto bytes = C(ch::SYNP, c::SYNP_programBytes).Get(s);
+      // Old editor banks had only XPCH. Keep the bank usable and let just this voice fail Start.
+      if (!bytes && !off) {
+        while (legacy < legacyLinksCount_ && ReadU32(legacyLinks_ + std::uint64_t{legacy} * 8) < s) ++legacy;
+        if (legacy < legacyLinksCount_) {
+          const auto* link = legacyLinks_ + std::uint64_t{legacy} * 8;
+          if (ReadU32(link) == s && ReadU32(link + 4) < legacyPrograms_) continue;
+        }
+      }
+      if (!programs.data || !InRange(off, bytes, programs.bytes) ||
+          !patch::ValidatePatchProgram(programs.data + off, bytes))
+        return Fail(SND_ERR_CORRUPT, ch::SYNP, c::SYNP_programOffset, s, "invalid PTCH program");
+    }
+    if (kind != SynthKind::Granular) continue;
+    const auto asset = static_cast<std::uint32_t>(C(ch::SYNP, c::SYNP_asset).Get(s));
+    if (asset >= RowsOf(ch::ASST))
+      return Fail(SND_ERR_CORRUPT, ch::SYNP, c::SYNP_asset, s, "granular needs a resident asset");
+    const auto codec = C(ch::ASST, c::ASST_codec).Get(asset);
+    const auto channels = C(ch::ASST, c::ASST_channels).Get(asset);
+    const auto frames = C(ch::ASST, c::ASST_totalFrames).Get(asset);
+    const auto rate = C(ch::ASST, c::ASST_sampleRate).Get(asset);
+    if (C(ch::ASST, c::ASST_loadForm).Get(asset) != 0 ||
+        (codec != SND_CODEC_PCM_F32 && codec != SND_CODEC_PCM_S16) ||
+        !channels || channels > SND_MAX_CHANNELS || !rate || rate > 384000 || !frames || frames > UINT32_MAX ||
+        frames * channels * (codec == SND_CODEC_PCM_F32 ? 4u : 2u) > C(ch::ASST, c::ASST_dataBytes).Get(asset))
+      return Fail(SND_ERR_CORRUPT, ch::SYNP, c::SYNP_asset, s, "invalid granular PCM layout");
+    if (C(ch::SYNP, c::SYNP_window).Get(s) > 2)
+      return Fail(SND_ERR_CORRUPT, ch::SYNP, c::SYNP_window, s, "invalid grain window");
+    for (auto id : {c::SYNP_density, c::SYNP_lengthMs, c::SYNP_position, c::SYNP_pitchJitterCents,
+                    c::SYNP_positionJitter, c::SYNP_pitchCents}) {
+      const Col col = C(ch::SYNP, id);
+      if (col.p && !std::isfinite(std::bit_cast<float>(static_cast<std::uint32_t>(col.Get(s)))))
+        return Fail(SND_ERR_CORRUPT, ch::SYNP, id, s, "non-finite granular parameter");
+    }
+  }
   // Music
   SND_BANK_CHECK_TRY(Row(ch::MSEG, c::MSEG_asset, ch::ASST, false));
   SND_BANK_CHECK_TRY(Range(ch::MSEG, c::MSEG_tempoFirst, c::MSEG_tempoCount, ch::MTMP));

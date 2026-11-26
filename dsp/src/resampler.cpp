@@ -270,6 +270,21 @@ void ResamplerInit(void* state, ResamplerQuality q, std::uint32_t channels, floa
   h->maxRatio = ClampMaxRatio(maxRatio);
 }
 
+void ResamplerSetFraction(void* state, std::uint32_t fraction) noexcept {
+  Hdr(state)->frac = fraction;
+}
+
+std::uint64_t ResamplerAdvanceQ32(std::uint32_t frames, float ratioStart, float ratioEnd,
+                                  float maxRatio) noexcept {
+  if (!frames) return 0;
+  Header h{};
+  h.maxRatio = ClampMaxRatio(maxRatio);
+  const auto ramp = MakeBlock(&h, ratioStart, ratioEnd, frames).ramp;
+  std::uint64_t last, end;
+  Advance(0, ramp, frames, &last, &end);
+  return end;
+}
+
 void ResamplerReset(void* state) noexcept {
   const Header h = *Hdr(state);
   ResamplerInit(state, static_cast<ResamplerQuality>(h.quality), h.channels, h.maxRatio);

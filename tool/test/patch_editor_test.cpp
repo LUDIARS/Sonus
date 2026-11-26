@@ -143,6 +143,11 @@ SND_TEST(PatchEditor, BuildsIntoTheProvisionalChunk) {
   const DocBuild b = BuildDocument(doc);
   SND_REQUIRE_MSG(b.ok, "%s", Dump(b.issues).c_str());
   SND_CHECK(HasIssue(b.issues, "does not reach the output", false));
+  SND_CHECK(HasIssue(b.issues, "editor-only XPCH", false));
+  DocBuildOptions game;
+  game.devBuild = false;
+  const auto unsupported = BuildDocument(doc, game);
+  SND_CHECK(!unsupported.ok && HasIssue(unsupported.issues, "cannot be represented by PTCH", true));
   const ParsedBank* v = b.FindBank("Main")->view();
   std::uint64_t bytes = 0;
   const std::uint8_t* chunk = v->Chunk(pt::kChunkFourcc, &bytes);

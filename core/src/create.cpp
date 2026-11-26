@@ -587,6 +587,8 @@ snd_result CreateImpl(Impl& im) noexcept {
   // Sources and music.
   if (im.desc.sources != nullptr) {
     source::SourceLimits sl{};
+    sl.grainHistoryFrames = dsp::ResamplerLookaheadFrames(dsp::kResamplerHigh, g.maxPitchRatio) + 1;
+    sl.grainHistoryChannels = g.maxVoiceChannels;
     sl.maxVoices = g.maxVirtual;
     sl.maxRealVoices = g.realTotal;
     sl.maxStreams = g.maxStreams;

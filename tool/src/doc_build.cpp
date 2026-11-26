@@ -321,6 +321,8 @@ std::vector<FieldColumn> MakeFields() {
   for (const ClipCol& c : kClip) C("event", clipNames[n++].c_str(), ch::CLIP, c.col, R::Owner2);
   S("event", "tracks[#].clips[#].layer[#]");  // other indices (the two above are the cells)
   for (const ClipCol& c : kSynth) C("event", clipNames[n++].c_str(), ch::SYNP, c.col, R::SynpOfClip);
+  // The remaining synth fields are rebuilt into immutable descriptors and PTCH.
+  S("event", "tracks[#].clips[#].synth.**");
   for (const ClipCol& c : kAction) C("event", clipNames[n++].c_str(), ch::ACTN, c.col, R::Owner2);
   struct TrCol {
     const char* m;
@@ -638,6 +640,7 @@ DocBuild BuildDocument(const ProjectDocument& doc, const DocBuildOptions& option
   o.cacheDir = options.cacheDir;
   o.platform = options.platform;
   o.devBuild = options.devBuild;
+  o.allowEditorOnlyPatches = options.devBuild;
   o.warningsAsErrors = options.warningsAsErrors;
   o.dspSampleRate = options.dspSampleRate;
   o.dspMaxFrames = options.dspMaxFrames;

@@ -727,11 +727,11 @@ void StartClip(Ctx& c, StartContext& sc, const BankRecord& r, std::uint32_t clip
         break;
       case bf::SynthKind::Granular:
         kind = SourceKind::Granular;
-        params = nullptr;
+        params = &r.granular[target];
         break;
       case bf::SynthKind::Patch:
         kind = SourceKind::Patch;
-        params = nullptr;
+        params = &r.patch[target];
         break;
       default:
         break;
@@ -1420,6 +1420,8 @@ void FlushSourceCalls(Ctx& c) noexcept {
       SND_W(Voice_sourceSlot)[d] = r.sourceSlot;
       im.ev.vs[v].flags |= kVsSourceStarted;
       Priv(im, SND_W(Voice_playbackSlot)[d]).flags |= kPbSourceStarted;
+      if (k == static_cast<std::size_t>(SourceKind::Granular) && r.reserved != 0)
+        im.ev.vs[v].sourceRate = static_cast<float>(r.reserved);
       im.ev.vs[v].sourceSlot = r.sourceSlot;
       im.ev.vs[v].sourceKind = static_cast<std::uint32_t>(k);
       if (r.needsPriming != 0u) {

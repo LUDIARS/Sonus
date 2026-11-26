@@ -49,6 +49,10 @@ bool PrepareBankRecord(Impl& im, const cmd::BankRegister& reg) noexcept {
   off = Up64(off + sizeof(source::OscillatorParams) * nS);
   const std::size_t oNoise = off;
   off = Up64(off + sizeof(source::NoiseParams) * nS);
+  const std::size_t oGranular = off;
+  off = Up64(off + sizeof(source::GranularParams) * nS);
+  const std::size_t oPatch = off;
+  off = Up64(off + sizeof(source::PatchParams) * nS);
   const std::size_t oMaps = off;
   off = Up64(off + sizeof(std::uint32_t) * (2u * nB + nC + nSn + nG + nD));
   const std::size_t oSend = off;
@@ -149,6 +153,9 @@ bool PrepareBankRecord(Impl& im, const cmd::BankRegister& reg) noexcept {
   r.synthCount = nS;
   r.osc = reinterpret_cast<source::OscillatorParams*>(mem + oOsc);
   r.noise = reinterpret_cast<source::NoiseParams*>(mem + oNoise);
+  r.granular = reinterpret_cast<source::GranularParams*>(mem + oGranular);
+  r.patch = reinterpret_cast<source::PatchParams*>(mem + oPatch);
+  const auto programs = v.Chunk(bf::chunk::PTCH);
   for (std::uint32_t s = 0; s < nS; ++s) {
     r.osc[s].waveform = v.Column<bk::col::SYNP_waveform>()[s];
     r.osc[s].frequencyHz = v.Column<bk::col::SYNP_frequencyHz>()[s];
@@ -156,6 +163,18 @@ bool PrepareBankRecord(Impl& im, const cmd::BankRegister& reg) noexcept {
     r.osc[s].tablePosition = 0.0f;
     const std::uint32_t asset = v.Column<bk::col::SYNP_asset>()[s];
     r.osc[s].wavetable = asset < nA ? &r.assets[asset] : nullptr;
+    const auto kind = static_cast<bf::SynthKind>(v.Column<bk::col::SYNP_kind>()[s]);
+    if (kind == bf::SynthKind::Granular) {
+      r.granular[s] = {r.osc[s].wavetable, v.Column<bk::col::SYNP_density>()[s],
+                       v.Column<bk::col::SYNP_lengthMs>()[s], v.Column<bk::col::SYNP_position>()[s],
+                       v.Column<bk::col::SYNP_pitchJitterCents>()[s],
+                       static_cast<source::GrainWindow>(v.Column<bk::col::SYNP_window>()[s]),
+                       v.Column<bk::col::SYNP_positionJitter>()[s], v.Column<bk::col::SYNP_pitchCents>()[s]};
+    } else if (kind == bf::SynthKind::Patch) {
+      const auto size = v.Column<bk::col::SYNP_programBytes>()[s];
+      r.patch[s] = {size ? programs.data + v.Column<bk::col::SYNP_programOffset>()[s] : nullptr,
+                    size, 0, v.Column<bk::col::SYNP_gateFrames>()[s]};
+    }
     r.noise[s].color = v.Column<bk::col::SYNP_noiseColor>()[s];
     r.noise[s].seed = s * 2654435761u + 1u;
   }

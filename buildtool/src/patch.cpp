@@ -1,5 +1,5 @@
 // Patch graphs: node table, checks, dependency order, provisional bank chunk (patch.hpp).
-#include "snd/buildtool/patch.hpp"
+#include "patch_runtime.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -7,6 +7,7 @@
 #include <map>
 
 #include "snd/format/bank_format.hpp"
+#include "snd/format/patch_program.hpp"
 
 namespace snd::buildtool::patch {
 namespace {
@@ -56,6 +57,34 @@ const NodeKindInfo kKinds[] = {
     {"output", Signal::None, 1, {{"in", Signal::Audio, true}}, 0, {}, false, false},
 };
 constexpr std::uint32_t kKindCount = sizeof(kKinds) / sizeof(kKinds[0]);
+
+std::vector<std::size_t> DependencyOrder(const std::vector<std::vector<std::size_t>>& preds) {
+  const auto n = preds.size();
+  // Kahn order (ties: file order); a cycle leaves nodes unplaced.
+  std::vector<std::uint32_t> indeg(n, 0);
+  std::vector<std::vector<std::size_t>> succ(n);
+  for (std::size_t i = 0; i < n; ++i) {
+    for (std::size_t p : preds[i]) {
+      succ[p].push_back(i);
+      ++indeg[i];
+    }
+  }
+  std::vector<std::size_t> order;
+  std::vector<std::size_t> ready;
+  for (std::size_t i = 0; i < n; ++i) {
+    if (indeg[i] == 0u) ready.push_back(i);
+  }
+  while (!ready.empty()) {
+    std::sort(ready.begin(), ready.end(), std::greater<>());
+    const std::size_t x = ready.back();
+    ready.pop_back();
+    order.push_back(x);
+    for (std::size_t s : succ[x]) {
+      if (--indeg[s] == 0u) ready.push_back(s);
+    }
+  }
+  return order;
+}
 
 std::string NodePath(std::size_t i) { return "nodes[" + std::to_string(i) + "]"; }
 
@@ -358,29 +387,7 @@ bool Compile(const json::Value& doc, Id patchId, Program* out, std::vector<Probl
       }
     }
   }
-  // Kahn order (ties: file order); a cycle leaves nodes unplaced.
-  std::vector<std::uint32_t> indeg(n, 0);
-  std::vector<std::vector<std::size_t>> succ(n);
-  for (std::size_t i = 0; i < n; ++i) {
-    for (std::size_t p : preds[i]) {
-      succ[p].push_back(i);
-      ++indeg[i];
-    }
-  }
-  std::vector<std::size_t> order;
-  std::vector<std::size_t> ready;
-  for (std::size_t i = 0; i < n; ++i) {
-    if (indeg[i] == 0u) ready.push_back(i);
-  }
-  while (!ready.empty()) {
-    std::sort(ready.begin(), ready.end(), std::greater<>());
-    const std::size_t x = ready.back();
-    ready.pop_back();
-    order.push_back(x);
-    for (std::size_t s : succ[x]) {
-      if (--indeg[s] == 0u) ready.push_back(s);
-    }
-  }
+  const auto order = DependencyOrder(preds);
   if (order.size() != n) {
     error("connections", "the connections form a cycle");
   }
@@ -418,6 +425,152 @@ bool Compile(const json::Value& doc, Id patchId, Program* out, std::vector<Probl
     out->nodes.push_back(cn);
   }
   return true;
+}
+
+namespace pt = bank_format::patch;
+
+static bool EncodeNodes(const std::vector<pt::PatchNode>& nodes, std::vector<std::uint8_t>& bytes) {
+  const auto count = static_cast<unsigned>(nodes.size());
+  if (count > pt::kPatchMaxNodes) return false;
+  bytes.resize(pt::PatchProgramBytes(count));
+  return pt::Encode(nodes.data(), count, bytes.data(), bytes.size()) != 0;
+}
+
+bool CompileInline(const Value& synth, std::vector<std::uint8_t>& bytes,
+                   const Value*& at, std::string& message) {
+  auto fail = [&](const Value& where, const char* why) {
+    at = &where;
+    message = why;
+    return false;
+  };
+  const auto* list = synth.Find("nodes");
+  const auto* output = synth.Find("output");
+  if (!list || !list->IsArray() || list->items.size() < 2 || list->items.size() > pt::kPatchMaxNodes)
+    return fail(list ? *list : synth, "PTCH needs 2..16 nodes");
+  if (!output || !output->IsString()) return fail(synth, "expected an output node id");
+  const auto n = list->items.size();
+  std::map<std::string, std::size_t> ids;
+  for (std::size_t i = 0; i < n; ++i) {
+    const auto* id = list->items[i].Find("id");
+    if (!id || !id->IsString() || id->text.empty() || !ids.emplace(id->text, i).second)
+      return fail(list->items[i], "expected a unique nonempty node id");
+  }
+  const auto& ops = pt::kOps;
+  std::vector<pt::PatchNode> nodes(n);
+  std::vector<std::vector<std::size_t>> preds(n);
+  for (std::size_t i = 0; i < n; ++i) {
+    const auto& node = list->items[i];
+    const auto* op = node.Find("op");
+    auto entry = std::find_if(std::begin(ops), std::end(ops), [&](const pt::OpInfo& x) {
+      return op && op->IsString() && op->text == x.name;
+    });
+    if (entry == std::end(ops)) return fail(node, "unknown patch op");
+    auto& decoded = nodes[i];
+    decoded.op = static_cast<pt::PatchOp>(entry - ops);
+    if ((decoded.op == pt::PatchOp::Output) != (node.Find("id")->text == output->text))
+      return fail(node, "output must name the only output node");
+    const auto* inputs = node.Find("inputs");
+    const auto* args = node.Find("args");
+    auto matches = [](const Value* array, unsigned count) {
+      return array ? array->IsArray() && array->items.size() == count : !count;
+    };
+    if (!matches(inputs, entry->inputs) || !matches(args, entry->args))
+      return fail(node, "wrong number or type of patch inputs or args");
+    for (unsigned j = 0; j < entry->inputs; ++j) {
+      const auto& ref = inputs->items[j];
+      auto pred = ids.find(ref.text);
+      if (!ref.IsString() || pred == ids.end()) return fail(ref, "unknown patch input id");
+      preds[i].push_back(pred->second);
+    }
+    for (unsigned j = 0; j < entry->args; ++j) {
+      double x;
+      if (!args->items[j].AsDouble(&x) || !(x >= entry->bounds[j].lo && x <= entry->bounds[j].hi))
+        return fail(args->items[j], "patch argument is outside its numeric range");
+      decoded.arg[j] = static_cast<float>(x);
+    }
+    if (const auto* wave = node.Find("waveform")) {
+      const auto last = std::end(kWaveforms) - 1;
+      const auto w = std::find(std::begin(kWaveforms), last, wave->text);
+      if (decoded.op != pt::PatchOp::Oscillator || !wave->IsString() || w == last)
+        return fail(*wave, "invalid patch waveform");
+      decoded.waveform = static_cast<std::uint8_t>(w - kWaveforms);
+    }
+  }
+  const auto order = DependencyOrder(preds);
+  if (order.size() != n) return fail(*list, "cycle in patch graph");
+  std::vector<pt::PatchNode> sorted;
+  std::vector<std::uint8_t> indices(n);
+  for (auto i : order) {
+    auto node = nodes[i];
+    if (!preds[i].empty()) node.a = indices[preds[i][0]];
+    if (preds[i].size() == 2) node.b = indices[preds[i][1]];
+    indices[i] = static_cast<std::uint8_t>(sorted.size());
+    sorted.push_back(node);
+  }
+  if (!EncodeNodes(sorted, bytes)) return fail(*list, "disconnected patch graph or argument outside PTCH range");
+  return true;
+}
+
+// Lower the existing editor IR only where PTCH v1 expresses the same signal.
+// An unrepresentable graph must not turn into a successful but silent game asset.
+bool EncodeRuntime(const Program& program, std::vector<std::uint8_t>& bytes) {
+  using Op = pt::PatchOp;
+  std::vector<pt::PatchNode> nodes;
+  std::vector<std::uint8_t> index;
+  auto append = [&](pt::PatchNode node) {
+    nodes.push_back(node);
+    return static_cast<std::uint8_t>(nodes.size() - 1);
+  };
+  auto gain = [&](std::uint8_t input, float db) {
+    if (db == 0) return input;
+    pt::PatchNode constant{Op::Constant};
+    constant.arg[0] = std::pow(10.f, db / 20.f);
+    const auto scale = append(constant);
+    return append({Op::Multiply, input, scale});
+  };
+  for (const auto& ir : program.nodes) {
+    const auto& info = kKinds[ir.kind];
+    auto input = [&](unsigned pin) { return ir.inputs[pin] == kNoInput ? pt::kPatchNoInput : index[ir.inputs[pin]]; };
+    const std::string_view kind(info.name);
+    const auto* p = ir.params;
+    pt::PatchNode node;
+    if (kind == "oscillator" || kind == "noise") {
+      if (kind == "oscillator") {
+        if (input(0) != pt::kPatchNoInput) return false;
+        node = {Op::Oscillator};
+        node.waveform = static_cast<std::uint8_t>(p[0]);
+        node.arg[0] = p[1];
+        node.arg[1] = p[2];
+      } else {
+        if (p[0] != 0 || p[1] != 0) return false;
+        node = {Op::WhiteNoise};
+      }
+      auto signal = append(node);
+      const auto amp = input(kind == "oscillator" ? 1 : 0);
+      if (amp != pt::kPatchNoInput) signal = append({Op::Multiply, signal, amp});
+      index.push_back(signal);
+    } else if (kind == "amp") {
+      auto signal = gain(input(0), p[0]);
+      if (input(1) != pt::kPatchNoInput) signal = append({Op::Multiply, signal, input(1)});
+      index.push_back(signal);
+    } else if (kind == "mix") {
+      const auto a = gain(input(0), p[0]);
+      const auto b = gain(input(1), p[1]);
+      index.push_back(append({Op::Add, a, b}));
+    } else if (kind == "adsr") {
+      node = {Op::Adsr};
+      node.arg[0] = p[0] / 1000;
+      node.arg[1] = p[1] / 1000;
+      node.arg[2] = p[2];
+      node.arg[3] = p[3] / 1000;
+      index.push_back(append(node));
+    } else if (kind == "output") {
+      index.push_back(append({Op::Output, input(0)}));
+    } else {
+      return false;
+    }
+  }
+  return EncodeNodes(nodes, bytes);
 }
 
 std::vector<std::uint8_t> WritePatchChunk(const std::vector<Program>& programs, const std::vector<Link>& links) {

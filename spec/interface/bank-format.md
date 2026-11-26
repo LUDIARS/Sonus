@@ -411,6 +411,14 @@ fileBytes     終端
 | 6 | programOffset | U32 | 任意 | 0 | within PTCH |
 | 7 | programBytes | U32 | 任意 | 0 |  |
 | 8 | channels | U32 | 任意 | 1 |  |
+| 9 | density | F32 | 任意 | 20 | 粒/秒 |
+| 10 | lengthMs | F32 | 任意 | 100 | 粒の長さ (ms) |
+| 11 | position | F32 | 任意 | 0 | 素材内の位置 (0..1) |
+| 12 | pitchJitterCents | F32 | 任意 | 0 | 音程揺らぎの半幅 |
+| 13 | window | U32 | 任意 | 0 | 0 Hann、1 triangle、2 rectangle |
+| 14 | positionJitter | F32 | 任意 | 0 | 位置揺らぎの半幅 (0..1) |
+| 15 | pitchCents | F32 | 任意 | 0 | 粒の移調 |
+| 16 | gateFrames | U64 | 任意 | 0 | Patch のノート長。内部レートのフレーム数、0 で保持 |
 
 #### `MSEG`
 
@@ -580,7 +588,9 @@ fileBytes     終端
 - `SPTH`: ストリームファイルのパス（NUL 終端 UTF-8）。ランタイムで必要なので除去不可。`STRM.pathOffset` は SPTH 先頭から。
   ストリーム本体は別ファイルで、パケットは `STRM.sectorAlign` 境界から置く（10.2）。形式は下の「ストリームファイル」。
 - `EFBL`: エフェクト用データ（IR 等）。`EFFX.blobOffset` は EFBL 先頭から。
-- `PTCH`: パッチのプログラム（段階 6 で形式を定める。minor 版で追加）。
+- `PTCH` は [D-06](../handoff/parallel/requests/D-06-patch-format.md) の v1 プログラムを連結する。
+  SYNP の各スライスは 12 + 20N バイト。全整数・binary32 は LE。先頭のアラインメントを仮定しない。
+  読み込み時にスライスの範囲、版、予約領域、全ノードと入力、引数、出力への到達性を検証する。
 - `DSPN`: `DspPoolNeed { u64 instanceBytes; u32 instanceCount; u32 reserved; }`。`instanceBytes` は各 `EFFX.stateBytes` を
   64 に切り上げた和。DSP インスタンスプールの残りが足りなければ読み込み失敗（3.3）。
 - `PHYS`: 物理マテリアル表（9 章）。アプリケーションチャンク。
@@ -764,18 +774,16 @@ setup（`extra`）:
 
 ## 9. 仮の任意チャンク（未凍結。段階5 ツール、セッション C）
 
-形式の版は 2.0 のまま。ここのチャンクは凍結対象ではなく、ランタイムは読まない（未知のチャンクは無視、§5・§7、D-32）。
+形式の版は 2.0 のまま。ここのチャンクは凍結対象外。ランタイムは旧 XPCH のリンク表だけを互換判定に使う。その他の未知チャンクは §5・§7、D-32 に従い読み飛ばす。
 正式な定義が決まったら差し替える。
 
 ### `XPCH`（波形生成パッチのプログラム、仮）
 
-`PTCH`（§6.2、段階 6 で形式を定める）の形式がまだ無いため、ビルドツールはパッチ（project-format.md の `patch`）を
-この任意チャンクに出す。ランタイムの Patch ソースとバンクでの表現はセッション D が決める
-（`spec/handoff/parallel/requests/C-10.md`）。そのときに `PTCH` へ移し、このチャンクはやめる。
+名前付きパッチのエディタ用データ。ゲーム再生には同じバンクの `PTCH` を使う。
+旧ライターが作った XPCH のみのバンクはロードでき、対応する Patch の Start は従来どおり失敗する。
 
 - fourcc `'XPCH'`、ブロブ。ChunkEntry.flags 0、version 1。整数はリトルエンディアン、浮動小数は binary32。
-- `SYNP` の行は `kind` = Patch（3）、`programOffset` = `programBytes` = 0（`PTCH` は書かない）。どの `SYNP` 行がどのプログラムかは
-  このチャンクの対応表で引く。
+- 対応表は名前付きパッチの SYNP 行をエディタ用プログラムに結ぶ。旧バンクではその行の programOffset / programBytes はともに 0。
 
 | 部分 | 大きさ | 内容 |
 | --- | --- | --- |
